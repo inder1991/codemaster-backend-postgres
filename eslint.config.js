@@ -1,5 +1,6 @@
 import js from "@eslint/js";
 import security from "eslint-plugin-security";
+import unicorn from "eslint-plugin-unicorn";
 import tseslint from "typescript-eslint";
 
 // Flat config. typescript-eslint `recommended` (non-type-checked: fast, catches no-explicit-any,
@@ -11,6 +12,17 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   security.configs.recommended,
+  {
+    plugins: { unicorn },
+    rules: {
+      // Enforce consistent snake_case filenames (mirrors the frozen Python source names; eases the
+      // parity path-map). `.v1` / `.parity` / `.test` segments are allowed via additionalExtensions.
+      "unicorn/filename-case": [
+        "error",
+        { case: "snakeCase", multipleFileExtensions: true, ignore: ["^_"] },
+      ],
+    },
+  },
   {
     rules: {
       // mkosir TS style guide, enforced by tooling:

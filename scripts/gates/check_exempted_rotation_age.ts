@@ -130,7 +130,7 @@ function gateSourceFiles(project: Project): Array<SourceFile> {
     if (!p.includes(`${path.sep}scripts${path.sep}gates${path.sep}`)) return false;
     const base = path.basename(p);
     if (base.endsWith(".test.ts")) return false;
-    if (base === "run-all.ts") return false;
+    if (base === "run_all.ts") return false;
     return true;
   });
 }
