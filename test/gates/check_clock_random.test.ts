@@ -38,6 +38,15 @@ describe("clock/random seam gate", () => {
       expect(v[0]!.line).toBe(1);
     });
 
+    it("should flag Date.now() in an apps source file (apps/<app>/src/** is in scope)", () => {
+      const v = violationsFor({
+        "apps/backend/src/backend/redact/secret_detector.ts": "const t = Date.now();",
+      });
+      expect(v).toHaveLength(1);
+      expect(v[0]!.construct).toBe("Date.now()");
+      expect(v[0]!.file).toBe("apps/backend/src/backend/redact/secret_detector.ts");
+    });
+
     it("should flag new Date() with zero arguments", () => {
       expect(constructsFor({ "libs/foo/src/bar.ts": "const d = new Date();" })).toEqual([
         "new Date()",

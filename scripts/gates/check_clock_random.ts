@@ -10,9 +10,9 @@
 // inside a comment or string literal does NOT false-match — the structural improvement over the
 // Python regex gate this ports.
 //
-// Scope: PRODUCTION source only — `libs/*/src/**/*.ts` excluding `*.test.ts`. scripts/, test/,
-// tools/, migrations/, vendor/ are NOT scanned: those legitimately use Date.now/crypto (e.g.
-// check_exempted_rotation_age.ts uses Date.now for git-blame age computation).
+// Scope: PRODUCTION source only — `libs/*/src/**/*.ts` and `apps/*/src/**/*.ts` excluding
+// `*.test.ts`. scripts/, test/, tools/, migrations/, vendor/ are NOT scanned: those legitimately use
+// Date.now/crypto (e.g. check_exempted_rotation_age.ts uses Date.now for git-blame age computation).
 //
 // Mode: ERROR. Any banned construct outside the two sanctioned seam files returns 1.
 import * as path from "node:path";
@@ -60,29 +60,29 @@ export type Violation = {
   construct: string;
 };
 
-/** Production source files the gate walks: libs/&#42;/src/&#42;&#42;/&#42;.ts excluding *.test.ts. */
+/** Production source files the gate walks: {libs,apps}/&#42;/src/&#42;&#42;/&#42;.ts excluding *.test.ts. */
 export function productionSourceFiles(project: Project): Array<SourceFile> {
   return project.getSourceFiles().filter((sf) => isProductionSource(sf.getFilePath()));
 }
 
-/** True iff `absPath` is a production source file under some libs/&#42;/src/ tree (not a test). */
+/** True iff `absPath` is a production source file under a libs/ or apps/ src tree (not a test). */
 function isProductionSource(absPath: string): boolean {
   const rel = toRepoRelPosix(absPath);
   if (rel.endsWith(".test.ts")) return false;
   if (!rel.endsWith(".ts")) return false;
-  // libs/<lib>/src/... — at least one path segment between `libs/` and `/src/`.
-  return /^libs\/[^/]+\/src\//.test(rel);
+  // libs/<lib>/src/... or apps/<app>/src/... — at least one segment before `/src/`.
+  return /^(?:libs|apps)\/[^/]+\/src\//.test(rel);
 }
 
 /**
- * Repo-relative POSIX path. Anchored on the `libs/` segment so the predicate is identical for the
- * real tree (absolute `/Users/.../libs/foo/src/bar.ts`), the ts-morph in-memory FS (`/libs/foo/...`),
- * and already-relative inputs — `process.cwd()` differs across those, the `libs/` anchor doesn't.
- * Non-libs paths (no `libs/` segment) fall back to cwd-relative; those are filtered out anyway.
+ * Repo-relative POSIX path. Anchored on the `libs/` or `apps/` segment so the predicate is identical
+ * for the real tree (absolute `/Users/.../apps/backend/src/...`), the ts-morph in-memory FS
+ * (`/libs/foo/...`), and already-relative inputs — `process.cwd()` differs across those, the anchor
+ * doesn't. Paths with neither segment fall back to cwd-relative; those are filtered out anyway.
  */
 function toRepoRelPosix(absPath: string): string {
   const posix = absPath.split(path.sep).join("/");
-  const match = /(?:^|\/)(libs\/.*)$/.exec(posix);
+  const match = /(?:^|\/)((?:libs|apps)\/.*)$/.exec(posix);
   if (match) return match[1]!;
   const rel = path.isAbsolute(absPath) ? path.relative(process.cwd(), absPath) : absPath;
   return rel.split(path.sep).join("/").replace(/^\.\//, "");
