@@ -1,0 +1,94 @@
+{
+  "_doc": "Sprint 13 / S13.2.2 — recorded `semgrep --json` output for the canary fixture repo. Five real findings + 1 finding against a generated file (filtered by the adapter) + 1 finding with INFO severity (maps to `nit`).",
+  "_pinned_semgrep_version": "1.79.0",
+  "results": [
+    {
+      "check_id": "python.lang.security.audit.eval-detected",
+      "path": "src/handler.py",
+      "start": {"line": 17, "col": 5},
+      "end": {"line": 17, "col": 32},
+      "extra": {
+        "message": "Detected `eval()` call on user-controlled data; this is a remote code execution risk.",
+        "severity": "ERROR",
+        "lines": "    result = eval(user_input)"
+      }
+    },
+    {
+      "check_id": "generic.secrets.security.detected-aws-access-key-id",
+      "path": "config/staging.env",
+      "start": {"line": 4, "col": 13},
+      "end": {"line": 4, "col": 33},
+      "extra": {
+        "message": "AWS access key ID detected in committed config; rotate immediately and move to Vault.",
+        "severity": "ERROR",
+        "lines": "AWS_KEY_ID=AKIAIOSFODNN7EXAMPLE"
+      }
+    },
+    {
+      "check_id": "python.lang.security.audit.formatted-sql-query",
+      "path": "src/db/users.py",
+      "start": {"line": 42, "col": 9},
+      "end": {"line": 42, "col": 60},
+      "extra": {
+        "message": "SQL query built via f-string with tainted input — likely SQL injection.",
+        "severity": "ERROR",
+        "lines": "    cursor.execute(f\"SELECT * FROM users WHERE id={uid}\")"
+      }
+    },
+    {
+      "check_id": "python.lang.security.deserialization.pickle.avoid-pickle",
+      "path": "src/cache.py",
+      "start": {"line": 28, "col": 5},
+      "end": {"line": 28, "col": 38},
+      "extra": {
+        "message": "`pickle.loads` on tainted data is a remote code execution risk.",
+        "severity": "ERROR",
+        "lines": "    cached = pickle.loads(blob)"
+      }
+    },
+    {
+      "check_id": "python.requests.security.disabled-cert-validation",
+      "path": "src/integrations/billing.py",
+      "start": {"line": 11, "col": 5},
+      "end": {"line": 11, "col": 60},
+      "extra": {
+        "message": "TLS certificate validation disabled (`verify=False`); accepts MITM.",
+        "severity": "ERROR",
+        "lines": "    requests.get(url, verify=False)"
+      }
+    },
+    {
+      "check_id": "python.lang.performance.string-concat-in-loop",
+      "path": "src/util/format.py",
+      "start": {"line": 9, "col": 9},
+      "end": {"line": 9, "col": 30},
+      "extra": {
+        "message": "String concatenation in a loop creates O(n²) memory; use `\"\".join(...)`.",
+        "severity": "INFO",
+        "lines": "        out += \"\\n\" + line"
+      }
+    },
+    {
+      "check_id": "python.lang.security.audit.formatted-sql-query",
+      "path": "src/protos/user_pb2.py",
+      "start": {"line": 19, "col": 5},
+      "end": {"line": 19, "col": 60},
+      "extra": {
+        "message": "Generated file finding — adapter must filter this out.",
+        "severity": "ERROR",
+        "lines": "    cursor.execute(f\"INSERT ...\")"
+      }
+    }
+  ],
+  "errors": [],
+  "paths": {
+    "scanned": [
+      "src/handler.py",
+      "src/db/users.py",
+      "src/cache.py",
+      "src/integrations/billing.py",
+      "src/util/format.py"
+    ]
+  },
+  "version": "1.79.0"
+}

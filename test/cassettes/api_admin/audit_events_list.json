@@ -1,0 +1,141 @@
+{
+  "_doc": "Sprint 14 / S14.C — recorded happy-path GET /api/admin/audit-events?from_at=...&to_at=...&size=50. 12 rows covering the action types the audit-log page must render badges for (flag.put, integration.added/removed, knowledge.approve/reject, review.posted). The recorded response carries `X-Vault-Degraded: true` on the response headers so the UI's yellow-banner branch is exercised. Replayed by MSW + e2e Playwright stubs.",
+  "_recorded_at": "2026-05-06T08:00:00Z",
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/api/admin/audit-events",
+        "query": {
+          "from_at": "2026-04-29T08:00:00Z",
+          "to_at": "2026-05-06T08:00:00Z",
+          "size": "50"
+        },
+        "headers": {
+          "accept": "application/json",
+          "cookie": "session=<redacted>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-vault-degraded": "true"
+        },
+        "body": {
+          "rows": [
+            {
+              "audit_event_id": "aaaaaaaa-0001-0001-0001-000000000001",
+              "actor_user_id": "11111111-1111-1111-1111-aaaaaaaaaaaa",
+              "action": "flag.put",
+              "target_id": "bedrock_global_daily_cap_cents",
+              "occurred_at": "2026-05-06T07:55:00Z",
+              "before_excerpt": "{\"value\": 240000}",
+              "after_excerpt": "{\"value\": 120000}"
+            },
+            {
+              "audit_event_id": "aaaaaaaa-0001-0001-0001-000000000002",
+              "actor_user_id": "22222222-2222-2222-2222-bbbbbbbbbbbb",
+              "action": "integration.added",
+              "target_id": "55555555-5555-5555-5555-555555555555",
+              "occurred_at": "2026-05-06T07:42:00Z",
+              "before_excerpt": "",
+              "after_excerpt": "{\"kind\": \"confluence_space\", \"scope\": \"whole_space\", \"space_key\": \"ACME\"}"
+            },
+            {
+              "audit_event_id": "aaaaaaaa-0001-0001-0001-000000000003",
+              "actor_user_id": "11111111-1111-1111-1111-aaaaaaaaaaaa",
+              "action": "knowledge.approve",
+              "target_id": "prop-501",
+              "occurred_at": "2026-05-06T07:11:00Z",
+              "before_excerpt": "{\"state\": \"pending_approval\"}",
+              "after_excerpt": "{\"second_approver\": \"22222222-2222-2222-2222-bbbbbbbbbbbb\", \"state\": \"approved\"}"
+            },
+            {
+              "audit_event_id": "aaaaaaaa-0001-0001-0001-000000000004",
+              "actor_user_id": "22222222-2222-2222-2222-bbbbbbbbbbbb",
+              "action": "review.posted",
+              "target_id": "rev-9821",
+              "occurred_at": "2026-05-06T06:15:00Z",
+              "before_excerpt": "",
+              "after_excerpt": "{\"finding_count\": 4, \"pr_number\": 142, \"repo\": \"acme/web\"}"
+            },
+            {
+              "audit_event_id": "aaaaaaaa-0001-0001-0001-000000000005",
+              "actor_user_id": "11111111-1111-1111-1111-aaaaaaaaaaaa",
+              "action": "flag.put",
+              "target_id": "review_pipeline_paused",
+              "occurred_at": "2026-05-05T16:00:00Z",
+              "before_excerpt": "{\"paused\": true}",
+              "after_excerpt": "{\"paused\": false}"
+            },
+            {
+              "audit_event_id": "aaaaaaaa-0001-0001-0001-000000000006",
+              "actor_user_id": "11111111-1111-1111-1111-aaaaaaaaaaaa",
+              "action": "knowledge.reject",
+              "target_id": "prop-498",
+              "occurred_at": "2026-05-05T14:18:00Z",
+              "before_excerpt": "{\"state\": \"pending_approval\"}",
+              "after_excerpt": "{\"reason\": \"duplicate of L-203\", \"state\": \"rejected\"}"
+            },
+            {
+              "audit_event_id": "aaaaaaaa-0001-0001-0001-000000000007",
+              "actor_user_id": "22222222-2222-2222-2222-bbbbbbbbbbbb",
+              "action": "integration.removed",
+              "target_id": "77777777-7777-7777-7777-777777777777",
+              "occurred_at": "2026-05-05T11:30:00Z",
+              "before_excerpt": "{\"kind\": \"confluence_space\", \"space_key\": \"OLD\"}",
+              "after_excerpt": ""
+            },
+            {
+              "audit_event_id": "aaaaaaaa-0001-0001-0001-000000000008",
+              "actor_user_id": "22222222-2222-2222-2222-bbbbbbbbbbbb",
+              "action": "review.posted",
+              "target_id": "rev-9799",
+              "occurred_at": "2026-05-04T18:45:00Z",
+              "before_excerpt": "",
+              "after_excerpt": "{\"finding_count\": 1, \"pr_number\": 87, \"repo\": \"acme/api\"}"
+            },
+            {
+              "audit_event_id": "aaaaaaaa-0001-0001-0001-000000000009",
+              "actor_user_id": "11111111-1111-1111-1111-aaaaaaaaaaaa",
+              "action": "flag.put",
+              "target_id": "installation_acme_paused",
+              "occurred_at": "2026-05-04T09:30:00Z",
+              "before_excerpt": "{\"paused\": true}",
+              "after_excerpt": "{\"paused\": false}"
+            },
+            {
+              "audit_event_id": "aaaaaaaa-0001-0001-0001-000000000010",
+              "actor_user_id": "22222222-2222-2222-2222-bbbbbbbbbbbb",
+              "action": "knowledge.approve",
+              "target_id": "prop-487",
+              "occurred_at": "2026-05-03T15:20:00Z",
+              "before_excerpt": "{\"state\": \"pending_approval\"}",
+              "after_excerpt": "{\"second_approver\": \"11111111-1111-1111-1111-aaaaaaaaaaaa\", \"state\": \"approved\"}"
+            },
+            {
+              "audit_event_id": "aaaaaaaa-0001-0001-0001-000000000011",
+              "actor_user_id": "11111111-1111-1111-1111-aaaaaaaaaaaa",
+              "action": "integration.added",
+              "target_id": "66666666-6666-6666-6666-666666666666",
+              "occurred_at": "2026-05-02T10:00:00Z",
+              "before_excerpt": "",
+              "after_excerpt": "{\"kind\": \"confluence_space\", \"scope\": \"page_tree\", \"space_key\": \"PLAT\"}"
+            },
+            {
+              "audit_event_id": "aaaaaaaa-0001-0001-0001-000000000012",
+              "actor_user_id": "22222222-2222-2222-2222-bbbbbbbbbbbb",
+              "action": "review.posted",
+              "target_id": "rev-9750",
+              "occurred_at": "2026-04-30T13:00:00Z",
+              "before_excerpt": "",
+              "after_excerpt": "{\"finding_count\": 7, \"pr_number\": 56, \"repo\": \"acme/web\"}"
+            }
+          ],
+          "next_cursor": null
+        }
+      }
+    }
+  ]
+}

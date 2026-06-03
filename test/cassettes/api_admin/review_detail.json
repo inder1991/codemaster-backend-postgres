@@ -1,0 +1,75 @@
+{
+  "_doc": "Sprint 14 / S14.B — recorded happy-path GET /api/admin/reviews/rev-fixture-001. Three findings; one carries a suggestion. Used by frontend MSW handlers + e2e Playwright stubs against the locked ReviewDetailV1 envelope.",
+  "_recorded_at": "2026-05-06T08:00:00Z",
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/api/admin/reviews/rev-fixture-001",
+        "headers": {
+          "accept": "application/json",
+          "cookie": "session=<redacted>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "schema_version": 1,
+          "review_id": "22222222-2222-2222-2222-222222222222",
+          "repo": "acme/api",
+          "pr_number": 73,
+          "pr_title": "Tighten authz on /v2/users",
+          "state": "complete",
+          "findings": [
+            {
+              "finding_id": "44444444-0000-0000-0000-000000000001",
+              "file_path": "codemaster/api/v2/users.py",
+              "start_line": 88,
+              "end_line": 92,
+              "severity": "blocker",
+              "title": "Endpoint accepts cross-tenant installation_id without filter",
+              "body": "GET /v2/users/{user_id} resolves the user without joining on installation_id. A reader in tenant A can read tenant B's user record by guessing a UUID. Add the tenancy hook decorator and a join filter.",
+              "suggestion": "Wrap the resolver in @tenancy_required and filter the SELECT on installation_id from the session.",
+              "tool_source": null
+            },
+            {
+              "finding_id": "44444444-0000-0000-0000-000000000002",
+              "file_path": "codemaster/api/v2/users.py",
+              "start_line": 102,
+              "end_line": 115,
+              "severity": "issue",
+              "title": "Audit emit fires before write commits",
+              "body": "audit_emit() is called inside the request handler but BEFORE the SQLAlchemy session commits. If the commit fails the audit row already says 'updated' — drift between audit log and reality. Move the emit into an after-commit hook.",
+              "suggestion": null,
+              "tool_source": null
+            },
+            {
+              "finding_id": "44444444-0000-0000-0000-000000000003",
+              "file_path": "tests/integration/test_users_v2.py",
+              "start_line": 24,
+              "end_line": 28,
+              "severity": "suggestion",
+              "title": "Cross-tenant test uses the same installation_id for both tenants",
+              "body": "The fixture seeds installation_id=tenant_A in both setUp arms. The cross-tenant denial assertion therefore never exercises the production code path that compares the cookie installation_id to the row's. Seed two distinct UUIDs.",
+              "suggestion": null,
+              "tool_source": "semgrep"
+            }
+          ],
+          "activities": [
+            { "seq": 1, "activity_name": "clone_repo", "state": "completed", "started_at": "2026-05-06T07:50:00Z", "completed_at": "2026-05-06T07:50:08Z", "detail": "" },
+            { "seq": 2, "activity_name": "classify_files", "state": "completed", "started_at": "2026-05-06T07:50:08Z", "completed_at": "2026-05-06T07:50:14Z", "detail": "" },
+            { "seq": 3, "activity_name": "redact_secrets", "state": "completed", "started_at": "2026-05-06T07:50:14Z", "completed_at": "2026-05-06T07:50:18Z", "detail": "" },
+            { "seq": 4, "activity_name": "bedrock_review_chunk", "state": "completed", "started_at": "2026-05-06T07:50:18Z", "completed_at": "2026-05-06T07:51:25Z", "detail": "" },
+            { "seq": 5, "activity_name": "post_review", "state": "completed", "started_at": "2026-05-06T07:51:25Z", "completed_at": "2026-05-06T07:51:30Z", "detail": "" }
+          ],
+          "langfuse_url": "https://langfuse.internal/trace/trace-rev-fixture-001",
+          "temporal_url": "https://temporal.internal/namespaces/codemaster/workflows/wf-rev-fixture-001",
+          "posted_at": "2026-05-06T07:51:30Z"
+        }
+      }
+    }
+  ]
+}

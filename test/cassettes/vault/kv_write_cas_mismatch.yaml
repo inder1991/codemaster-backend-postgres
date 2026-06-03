@@ -1,0 +1,15 @@
+interactions:
+  - request:
+      method: POST
+      uri: http://vault.test:8200/v1/secret/data/codemaster/foo
+      headers:
+        X-Vault-Token: <redacted>
+        Content-Type: application/json
+      body: |-
+        {"data":{"k":"v"},"options":{"cas":5}}
+    response:
+      status_code: 400
+      headers:
+        Content-Type: application/json
+      body: |-
+        {"errors":["check-and-set parameter did not match the current version"]}

@@ -1,0 +1,72 @@
+{
+  "_doc": "Sprint 14 / S14.C — recorded happy-path GET /api/admin/flags. Four flags covering the four UX states the kill-switches page must render: 1 tenant-wide non-pending, 1 tenant-wide pending second approver, 1 per-installation non-pending, 1 per-repo non-pending. Replayed by MSW + e2e Playwright stubs.",
+  "_recorded_at": "2026-05-06T08:00:00Z",
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/api/admin/flags",
+        "headers": {
+          "accept": "application/json",
+          "cookie": "session=<redacted>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": [
+          {
+            "flag_name": "bedrock_global_daily_cap_cents",
+            "scope": "global",
+            "scope_id": null,
+            "value_json": "{\"value\": 240000}",
+            "last_changed_at": "2026-04-30T08:15:00Z",
+            "last_changed_by_user_id": "11111111-1111-1111-1111-aaaaaaaaaaaa",
+            "pending_second_approver": false,
+            "pending_first_approver_user_id": null,
+            "pending_value_json": null,
+            "pending_set_at": null
+          },
+          {
+            "flag_name": "review_pipeline_paused",
+            "scope": "global",
+            "scope_id": null,
+            "value_json": "{\"paused\": false}",
+            "last_changed_at": "2026-04-15T11:00:00Z",
+            "last_changed_by_user_id": "11111111-1111-1111-1111-aaaaaaaaaaaa",
+            "pending_second_approver": true,
+            "pending_first_approver_user_id": "22222222-2222-2222-2222-bbbbbbbbbbbb",
+            "pending_value_json": "{\"paused\": true}",
+            "pending_set_at": "2026-05-06T07:42:00Z"
+          },
+          {
+            "flag_name": "installation_acme_paused",
+            "scope": "installation",
+            "scope_id": "33333333-3333-3333-3333-333333333333",
+            "value_json": "{\"paused\": false}",
+            "last_changed_at": "2026-04-22T14:00:00Z",
+            "last_changed_by_user_id": "22222222-2222-2222-2222-bbbbbbbbbbbb",
+            "pending_second_approver": false,
+            "pending_first_approver_user_id": null,
+            "pending_value_json": null,
+            "pending_set_at": null
+          },
+          {
+            "flag_name": "repo_acme_web_paused",
+            "scope": "repository",
+            "scope_id": "44444444-4444-4444-4444-444444444444",
+            "value_json": "{\"paused\": true}",
+            "last_changed_at": "2026-05-01T09:30:00Z",
+            "last_changed_by_user_id": "22222222-2222-2222-2222-bbbbbbbbbbbb",
+            "pending_second_approver": false,
+            "pending_first_approver_user_id": null,
+            "pending_value_json": null,
+            "pending_set_at": null
+          }
+        ]
+      }
+    }
+  ]
+}

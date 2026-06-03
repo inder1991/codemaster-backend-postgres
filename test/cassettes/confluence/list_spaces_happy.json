@@ -1,0 +1,23 @@
+{
+  "_doc": "Sprint 13 / S13.3.1a — recorded GET /api/v2/spaces. Two spaces returned by the synthetic ACME-PILOT service-account credentials.",
+  "_pinned_api_version": "v2",
+  "results": [
+    {
+      "id": "98765",
+      "key": "ACME-PILOT",
+      "name": "Acme Pilot Space",
+      "type": "global",
+      "status": "current"
+    },
+    {
+      "id": "98766",
+      "key": "PLATFORM-DOCS",
+      "name": "Platform Engineering Docs",
+      "type": "global",
+      "status": "current"
+    }
+  ],
+  "_links": {
+    "base": "https://confluence.acme.com/wiki"
+  }
+}

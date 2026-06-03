@@ -1,0 +1,44 @@
+id: review-chunk-malformed-block
+description: |
+  The model emits 2 well-formed findings + 1 malformed (missing
+  required fields). The activity logs the bad block + skips it,
+  returning the 2 valid findings without raising.
+response:
+  content:
+    - type: tool_use
+      id: t1
+      name: report_finding
+      input:
+        file: "src/foo.py"
+        start_line: 10
+        end_line: 12
+        severity: "issue"
+        category: "bug"
+        title: "good-1"
+        body: "First valid finding."
+        confidence: 0.9
+    - type: tool_use
+      id: t2-bad
+      name: report_finding
+      input:
+        file: "src/foo.py"
+        # missing start_line / end_line / severity / category / title / body / confidence
+    - type: tool_use
+      id: t3
+      name: report_finding
+      input:
+        file: "src/bar.py"
+        start_line: 5
+        end_line: 8
+        severity: "blocker"
+        category: "security"
+        title: "good-2"
+        body: "Second valid finding."
+        confidence: 0.99
+  usage:
+    input_tokens: 200
+    output_tokens: 100
+  stop_reason: tool_use
+expected:
+  finding_count: 2
+  malformed_block_id: "t2-bad"

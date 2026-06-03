@@ -1,0 +1,24 @@
+id: e2e-clean-pr
+description: |
+  A small, well-formed PR with no linter findings and no LLM
+  findings. Walkthrough is the "no actionable findings" placeholder;
+  zero inline comments posted; check-run = neutral.
+pr:
+  repo: acme/widget
+  pr_number: 42
+  head_sha: cleanpush01
+  changed_paths: ["src/foo.ts", "README.md"]
+  changed_line_ranges:
+    "src/foo.ts": [[10, 15]]
+    "README.md": [[1, 3]]
+file_routing:
+  review_files: ["README.md"]
+  sandbox_files: ["src/foo.ts"]
+  skip_files: []
+linter_findings: []
+llm_findings_per_chunk: 0
+expected:
+  finding_count: 0
+  inline_comments: 0
+  walkthrough_tldr: "no actionable findings"
+  status: "accepted"

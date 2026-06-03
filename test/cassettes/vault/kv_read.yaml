@@ -1,0 +1,25 @@
+# Sprint 5 / S5.1.1 — recorded GET on a KV-v2 path.
+interactions:
+  - request:
+      method: GET
+      uri: http://vault.test:8200/v1/secret/data/codemaster/github/app/private_key
+      headers:
+        X-Vault-Token: <redacted>
+    response:
+      status_code: 200
+      headers:
+        Content-Type: application/json
+      body: |-
+        {
+          "data": {
+            "data": {
+              "pem": "-----BEGIN PRIVATE KEY-----\n<redacted>\n-----END PRIVATE KEY-----",
+              "app_id": "12345"
+            },
+            "metadata": {
+              "created_time": "2026-05-02T12:00:00Z",
+              "version": 1,
+              "destroyed": false
+            }
+          }
+        }

@@ -1,0 +1,34 @@
+{
+  "_doc": "Sprint 13 / S13.T6 — recorded happy-path Argo Rollouts CLI exchanges. Drill replays these offline; nightly run hits the live cluster.",
+  "_recorded_at": "2026-04-30T03:00:00Z",
+  "exchanges": [
+    {
+      "step": "get_initial_sha",
+      "argv": ["argo", "rollouts", "get", "rollout", "codemaster-api", "-n", "codemaster", "-o", "json"],
+      "stdout_json": {"status": {"currentImageSha": "sha256:0123abcd"}},
+      "exit_code": 0
+    },
+    {
+      "step": "deploy_broken",
+      "argv": ["argo", "rollouts", "set", "image", "codemaster-api", "api=nexus.acme.com/codemaster/broken-canary:0.0.1", "-n", "codemaster"],
+      "stdout": "rollout codemaster-api image updated\n",
+      "exit_code": 0
+    },
+    {
+      "step": "undo",
+      "argv": ["argo", "rollouts", "undo", "codemaster-api", "-n", "codemaster"],
+      "stdout": "rollout codemaster-api rollback initiated\n",
+      "exit_code": 0
+    },
+    {
+      "step": "get_final_sha",
+      "argv": ["argo", "rollouts", "get", "rollout", "codemaster-api", "-n", "codemaster", "-o", "json"],
+      "stdout_json": {"status": {"currentImageSha": "sha256:0123abcd"}},
+      "exit_code": 0
+    }
+  ],
+  "synthetic_health_probe": {
+    "during_broken": [{"status": 503, "delay_ms": 0}, {"status": 503, "delay_ms": 1000}],
+    "after_undo": [{"status": 200, "delay_ms": 25000}]
+  }
+}

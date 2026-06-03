@@ -1,0 +1,20 @@
+interactions:
+  - request:
+      method: POST
+      uri: https://codemaster-dev.acme.com/v1/github/webhook
+      headers:
+        X-GitHub-Event: pull_request
+        X-GitHub-Delivery: pr-closed-1
+        X-Hub-Signature-256: <hmac-redacted>
+        Content-Type: application/json
+      body: |-
+        {
+          "action": "closed",
+          "number": 42,
+          "repository": {"id": 1, "full_name": "acme/example", "default_branch": "main", "archived": false},
+          "installation": {"id": 999, "account": {"id": 1, "login": "acme", "type": "Organization"}},
+          "sender": {"id": 2, "login": "alice", "type": "User"}
+        }
+    response:
+      status_code: 204
+      headers: {}

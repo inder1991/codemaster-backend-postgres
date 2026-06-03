@@ -1,0 +1,36 @@
+{
+  "id": "anthropic-direct-walkthrough-ok",
+  "description": "Successful walkthrough response from Anthropic Direct (api.anthropic.com). The model emits a single emit_walkthrough tool call with a non-empty tldr. Shape matches AnthropicDirectSdkAdapter._invoke_inner return dict.",
+  "response": {
+    "content": [
+      {
+        "type": "text",
+        "text": "I'll emit the walkthrough summary now."
+      },
+      {
+        "type": "tool_use",
+        "id": "toolu_01ANTHROPIC",
+        "name": "emit_walkthrough",
+        "input": {
+          "tldr": "This PR looks well-structured. One potential null-dereference was flagged in the handler path; see inline comment.",
+          "file_rows": [
+            {
+              "path": "src/handler.py",
+              "change_summary": "Adds a new request handler with a null-guard gap.",
+              "severity_max": "issue",
+              "finding_count": 1
+            }
+          ],
+          "configuration_section_md": "",
+          "degradation_note": null,
+          "truncated": false
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 120,
+      "output_tokens": 80
+    },
+    "stop_reason": "tool_use"
+  }
+}

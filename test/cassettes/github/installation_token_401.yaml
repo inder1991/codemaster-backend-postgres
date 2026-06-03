@@ -1,0 +1,19 @@
+# Sprint 4 / S4.1.1 — recorded 401 (App suspended / clock skew / etc.).
+interactions:
+  - request:
+      method: POST
+      uri: https://api.github.com/app/installations/12345/access_tokens
+      headers:
+        Accept: application/vnd.github+json
+        Authorization: Bearer <jwt-redacted>
+        X-GitHub-Api-Version: "2022-11-28"
+      body: ""
+    response:
+      status_code: 401
+      headers:
+        Content-Type: application/json; charset=utf-8
+      body: |-
+        {
+          "message": "'Expiration time' claim ('exp') is too far in the future",
+          "documentation_url": "https://docs.github.com/rest/apps/apps#authenticating-as-an-installation"
+        }

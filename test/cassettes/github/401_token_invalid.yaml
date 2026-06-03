@@ -1,0 +1,28 @@
+interactions:
+  - request:
+      method: GET
+      uri: https://api.github.com/repos/acme/example/pulls/42
+      headers:
+        Accept: application/vnd.github+json
+        Authorization: Bearer <ghs-stale>
+    response:
+      status_code: 401
+      headers:
+        Content-Type: application/json
+      body: |-
+        {"message": "Bad credentials"}
+  - request:
+      method: GET
+      uri: https://api.github.com/repos/acme/example/pulls/42
+      headers:
+        Accept: application/vnd.github+json
+        Authorization: Bearer <ghs-fresh>
+    response:
+      status_code: 200
+      headers:
+        X-RateLimit-Limit: "5000"
+        X-RateLimit-Remaining: "4999"
+        X-RateLimit-Reset: "1799999999"
+        Content-Type: application/json
+      body: |-
+        {"number": 42, "state": "open", "title": "after refresh", "head": {"sha": "abc"}, "base": {"ref": "main"}}

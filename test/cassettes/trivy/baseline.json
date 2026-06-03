@@ -1,0 +1,57 @@
+{
+  "_doc": "Sprint 13 / S13.2.3 — recorded `trivy fs --format=json` output. Two Trivy `Results` blocks (one per target file): a Dockerfile referencing ubuntu:14.04 (CRITICAL EOL) and a requirements.txt pinning requests==2.6.0 (HIGH CVE-2018-18074). Plus an UNKNOWN-severity finding to exercise the default-fallback mapping path.",
+  "_pinned_trivy_version": "0.55.0",
+  "SchemaVersion": 2,
+  "ArtifactName": "/sandbox/canary-repo",
+  "ArtifactType": "filesystem",
+  "Metadata": {
+    "_db_stale": false,
+    "DataSource": {
+      "ID": "ghcr.io/aquasecurity/trivy-db",
+      "Name": "trivy-db",
+      "URL": "https://nexus.acme.com/v2/aquasec/trivy-db",
+      "UpdatedAt": "2026-04-30T03:00:00Z"
+    }
+  },
+  "Results": [
+    {
+      "Target": "Dockerfile",
+      "Class": "config",
+      "Type": "dockerfile",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "DLA-EOL-UBUNTU-1404",
+          "PkgName": "ubuntu",
+          "InstalledVersion": "14.04",
+          "Severity": "CRITICAL",
+          "Title": "Base image ubuntu:14.04 reached end-of-life in 2019",
+          "Description": "ubuntu:14.04 no longer receives security updates from Canonical; rebuild on a supported LTS (20.04, 22.04, or 24.04).",
+          "FixedVersion": "ubuntu:24.04"
+        }
+      ]
+    },
+    {
+      "Target": "requirements.txt",
+      "Class": "lang-pkgs",
+      "Type": "pip",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2018-18074",
+          "PkgName": "requests",
+          "InstalledVersion": "2.6.0",
+          "Severity": "HIGH",
+          "Title": "Authorization header leaked on cross-origin redirects in requests",
+          "Description": "The Requests package through 2.19.1 sends an HTTP Authorization header to an http URI upon receiving a same-hostname https-to-http redirect, which makes it easier for remote attackers to discover credentials by sniffing the network.",
+          "FixedVersion": "2.20.0"
+        },
+        {
+          "VulnerabilityID": "GHSA-FAKE-1234",
+          "PkgName": "leftpad",
+          "InstalledVersion": "0.0.1",
+          "Severity": "UNKNOWN",
+          "Description": "Synthetic UNKNOWN-severity entry to exercise the default-mapping path."
+        }
+      ]
+    }
+  ]
+}

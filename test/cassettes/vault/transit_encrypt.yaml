@@ -1,0 +1,19 @@
+interactions:
+  - request:
+      method: POST
+      uri: http://vault.test:8200/v1/transit/encrypt/codemaster-fields-v1
+      headers:
+        X-Vault-Token: <redacted>
+        Content-Type: application/json
+      body: |-
+        {"plaintext":"aGVsbG8="}
+    response:
+      status_code: 200
+      headers:
+        Content-Type: application/json
+      body: |-
+        {
+          "data": {
+            "ciphertext": "vault:v1:abcdEFghIJklMNop"
+          }
+        }

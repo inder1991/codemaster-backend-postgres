@@ -1,0 +1,140 @@
+{
+  "_doc": "Sprint 14 / S14.B — recorded happy-path GET /api/admin/reviews. 10 rows, mixed states, includes one 'failed' row to verify B4 contract-drift no longer leaks 'errored' anywhere.",
+  "_recorded_at": "2026-05-06T08:00:00Z",
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/api/admin/reviews",
+        "headers": {
+          "accept": "application/json",
+          "cookie": "session=<redacted>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "schema_version": 1,
+          "items": [
+            {
+              "review_id": "11111111-0000-0000-0000-000000000001",
+              "repo": "acme/api",
+              "pr_number": 73,
+              "pr_title": "Tighten authz on /v2/users",
+              "state": "complete",
+              "severity_max": "blocker",
+              "finding_count": 2,
+              "started_at": "2026-05-06T07:50:00Z",
+              "completed_at": "2026-05-06T07:51:30Z"
+            },
+            {
+              "review_id": "11111111-0000-0000-0000-000000000002",
+              "repo": "acme/web",
+              "pr_number": 142,
+              "pr_title": "Add formatCurrency helper",
+              "state": "complete",
+              "severity_max": "issue",
+              "finding_count": 4,
+              "started_at": "2026-05-06T07:45:00Z",
+              "completed_at": "2026-05-06T07:46:12Z"
+            },
+            {
+              "review_id": "11111111-0000-0000-0000-000000000003",
+              "repo": "acme/widget",
+              "pr_number": 88,
+              "pr_title": "Refactor cart state machine to xstate v5",
+              "state": "in_progress",
+              "severity_max": null,
+              "finding_count": 0,
+              "started_at": "2026-05-06T07:55:00Z",
+              "completed_at": null
+            },
+            {
+              "review_id": "11111111-0000-0000-0000-000000000004",
+              "repo": "acme/api",
+              "pr_number": 314,
+              "pr_title": "Add rate-limit middleware to /v1/feedback",
+              "state": "in_progress",
+              "severity_max": null,
+              "finding_count": 0,
+              "started_at": "2026-05-06T07:53:00Z",
+              "completed_at": null
+            },
+            {
+              "review_id": "11111111-0000-0000-0000-000000000005",
+              "repo": "acme/web",
+              "pr_number": 141,
+              "pr_title": "Reduce initial JS bundle by removing momentjs",
+              "state": "complete",
+              "severity_max": "suggestion",
+              "finding_count": 5,
+              "started_at": "2026-05-06T07:30:00Z",
+              "completed_at": "2026-05-06T07:31:08Z"
+            },
+            {
+              "review_id": "11111111-0000-0000-0000-000000000006",
+              "repo": "acme/web",
+              "pr_number": 140,
+              "pr_title": "broken pipeline — bedrock 5xx loop",
+              "state": "failed",
+              "severity_max": null,
+              "finding_count": 0,
+              "started_at": "2026-05-06T07:00:00Z",
+              "completed_at": null
+            },
+            {
+              "review_id": "11111111-0000-0000-0000-000000000007",
+              "repo": "acme/api",
+              "pr_number": 313,
+              "pr_title": "Migrate audit_events.before/after to encrypted columns",
+              "state": "complete",
+              "severity_max": "issue",
+              "finding_count": 3,
+              "started_at": "2026-05-06T06:45:00Z",
+              "completed_at": "2026-05-06T06:46:30Z"
+            },
+            {
+              "review_id": "11111111-0000-0000-0000-000000000008",
+              "repo": "acme/widget",
+              "pr_number": 87,
+              "pr_title": "Bump tailwindcss to v4.1",
+              "state": "complete",
+              "severity_max": "nit",
+              "finding_count": 1,
+              "started_at": "2026-05-06T06:30:00Z",
+              "completed_at": "2026-05-06T06:30:42Z"
+            },
+            {
+              "review_id": "11111111-0000-0000-0000-000000000009",
+              "repo": "acme/api",
+              "pr_number": 312,
+              "pr_title": "Drop unused FK on feedback_events.actor",
+              "state": "queued",
+              "severity_max": null,
+              "finding_count": 0,
+              "started_at": "2026-05-06T07:58:00Z",
+              "completed_at": null
+            },
+            {
+              "review_id": "11111111-0000-0000-0000-000000000010",
+              "repo": "acme/web",
+              "pr_number": 139,
+              "pr_title": "Wire dark-mode toggle to user-menu",
+              "state": "complete",
+              "severity_max": null,
+              "finding_count": 0,
+              "started_at": "2026-05-06T06:00:00Z",
+              "completed_at": "2026-05-06T06:00:55Z"
+            }
+          ],
+          "total": 10,
+          "page": 1,
+          "size": 50
+        }
+      }
+    }
+  ]
+}

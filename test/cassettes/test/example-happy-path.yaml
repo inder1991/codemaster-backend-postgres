@@ -1,0 +1,34 @@
+schema_version: 1
+service: test
+scenario: "example happy path — used by tests/unit/test_cassettes.py"
+recorded_at: "2026-05-01T12:00:00Z"
+recorded_by: "indersingh"
+interactions:
+  - request:
+      method: GET
+      url: "https://api.example.com/v1/widgets/42"
+      headers:
+        Accept: "application/json"
+      body_text: null
+      body_json: null
+    response:
+      status: 200
+      headers:
+        Content-Type: "application/json"
+      body_json:
+        id: 42
+        name: "test widget"
+        active: true
+  - request:
+      method: POST
+      url: "https://api.example.com/v1/widgets/42/actions"
+      headers:
+        Content-Type: "application/json"
+      body_json:
+        action: "rotate"
+    response:
+      status: 202
+      headers:
+        Content-Type: "application/json"
+      body_json:
+        accepted: true

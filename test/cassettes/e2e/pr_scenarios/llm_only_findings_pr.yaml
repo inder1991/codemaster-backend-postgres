@@ -1,0 +1,26 @@
+id: e2e-llm-only-findings-pr
+description: |
+  A PR with no linter findings but 2 LLM findings (an off-by-one
+  bug and a missing-error-handling suggestion). Files routed
+  primarily to "review" (markdown / yaml) so the LLM does the
+  work. Two inline comments posted.
+pr:
+  repo: acme/widget
+  pr_number: 200
+  head_sha: llmonlypush01
+  changed_paths: ["docs/architecture.md", "config/app.yaml"]
+  changed_line_ranges:
+    "docs/architecture.md": [[5, 30]]
+    "config/app.yaml": [[1, 10]]
+file_routing:
+  review_files: ["docs/architecture.md", "config/app.yaml"]
+  sandbox_files: []
+  skip_files: []
+linter_findings: []
+# 2 chunks → emit 1 LLM finding per chunk = 2 total
+llm_findings_per_chunk: 1
+expected:
+  finding_count: 2
+  inline_comments: 2
+  walkthrough_tldr: "2 findings"
+  status: "accepted"

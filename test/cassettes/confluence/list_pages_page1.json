@@ -1,0 +1,27 @@
+{
+  "_doc": "Sprint 13 / S13.3.1a — first page of GET /api/v2/pages?space-key=ACME-PILOT. Three of five total pages; the cassette's _links.next carries the cursor for page 2.",
+  "results": [
+    {
+      "id": "111111",
+      "spaceKey": "ACME-PILOT",
+      "title": "Pilot onboarding checklist",
+      "version": {"number": 3, "createdAt": "2026-04-15T10:30:00Z"}
+    },
+    {
+      "id": "111112",
+      "spaceKey": "ACME-PILOT",
+      "title": "Confluence sync runbook 🚦",
+      "version": {"number": 7, "createdAt": "2026-04-22T14:05:33Z"}
+    },
+    {
+      "id": "111113",
+      "spaceKey": "ACME-PILOT",
+      "title": "Architecture decision records (long form)",
+      "version": {"number": 12, "createdAt": "2026-04-29T09:15:00Z"}
+    }
+  ],
+  "_links": {
+    "next": "/api/v2/pages?space-key=ACME-PILOT&cursor=eyJsYXN0SWQiOiIxMTExMTMifQ%3D%3D",
+    "base": "https://confluence.acme.com/wiki"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "_doc": "Sub-spec A T4 (2026-05-27) — GET /api/v2/pages/12345?body-format=storage&include-labels=true. Page with non-empty labels to exercise label extraction. status=current maps to active in _parse_page().",
+  "id": "12345",
+  "spaceKey": "PYSEC",
+  "title": "Python Security Best Practices",
+  "status": "current",
+  "version": {"number": 7, "createdAt": "2026-05-20T10:00:00.000Z"},
+  "body": {
+    "storage": {
+      "value": "<p>Use prepared statements.</p>",
+      "representation": "storage"
+    }
+  },
+  "metadata": {
+    "labels": {
+      "results": [
+        {"name": "python"},
+        {"name": "security"},
+        {"name": "default"}
+      ]
+    }
+  }
+}

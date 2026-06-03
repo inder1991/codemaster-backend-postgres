@@ -1,0 +1,77 @@
+id: review-chunk-five-findings
+description: |
+  The model emits 5 well-formed report_finding tool blocks across
+  two files, mixing severities. The activity must parse all 5.
+response:
+  content:
+    - type: text
+      text: "I'll surface 5 findings."
+    - type: tool_use
+      id: t1
+      name: report_finding
+      input:
+        file: "src/foo.py"
+        start_line: 10
+        end_line: 12
+        severity: "issue"
+        category: "bug"
+        title: "off-by-one"
+        body: "The loop should iterate up to len(xs), not len(xs)-1."
+        confidence: 0.9
+    - type: tool_use
+      id: t2
+      name: report_finding
+      input:
+        file: "src/foo.py"
+        start_line: 25
+        end_line: 28
+        severity: "suggestion"
+        category: "style"
+        title: "extract helper"
+        body: "Consider extracting the parsing logic into a helper."
+        suggestion: "def _parse(...): ..."
+        confidence: 0.6
+    - type: tool_use
+      id: t3
+      name: report_finding
+      input:
+        file: "src/foo.py"
+        start_line: 40
+        end_line: 40
+        severity: "nit"
+        category: "docs"
+        title: "missing docstring"
+        body: "Public function lacks a docstring."
+        confidence: 0.5
+    - type: tool_use
+      id: t4
+      name: report_finding
+      input:
+        file: "src/bar.py"
+        start_line: 5
+        end_line: 8
+        severity: "blocker"
+        category: "security"
+        title: "SQL injection"
+        body: "User input flows into the SQL string without parameterization."
+        confidence: 0.99
+    - type: tool_use
+      id: t5
+      name: report_finding
+      input:
+        file: "src/bar.py"
+        start_line: 15
+        end_line: 18
+        severity: "issue"
+        category: "performance"
+        title: "N+1 query"
+        body: "Loop issues one DB query per row; batch instead."
+        confidence: 0.8
+  usage:
+    input_tokens: 220
+    output_tokens: 180
+  stop_reason: tool_use
+expected:
+  finding_count: 5
+  files: ["src/foo.py", "src/foo.py", "src/foo.py", "src/bar.py", "src/bar.py"]
+  severities: ["issue", "suggestion", "nit", "blocker", "issue"]

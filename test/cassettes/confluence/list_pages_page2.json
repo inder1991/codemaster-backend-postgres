@@ -1,0 +1,20 @@
+{
+  "_doc": "Sprint 13 / S13.3.1a — second + final page. `next_cursor` is absent → the client returns next_cursor=None.",
+  "results": [
+    {
+      "id": "111114",
+      "spaceKey": "ACME-PILOT",
+      "title": "RTL example صفحة (Arabic title)",
+      "version": {"number": 1, "createdAt": "2026-04-30T11:00:00Z"}
+    },
+    {
+      "id": "111115",
+      "spaceKey": "ACME-PILOT",
+      "title": "Code-block reference page",
+      "version": {"number": 5, "createdAt": "2026-05-01T08:42:11Z"}
+    }
+  ],
+  "_links": {
+    "base": "https://confluence.acme.com/wiki"
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "_doc": "Sprint 14 / S14.C — recorded happy-path GET /api/admin/integrations. Two Confluence-space integrations covering the two scope variants the integrations page must render: whole-space + page-tree. Replayed by MSW + e2e Playwright stubs.",
+  "_recorded_at": "2026-05-06T08:00:00Z",
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/api/admin/integrations",
+        "headers": {
+          "accept": "application/json",
+          "cookie": "session=<redacted>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": [
+          {
+            "integration_id": "55555555-5555-5555-5555-555555555555",
+            "kind": "confluence_space",
+            "config_json": "{\"page_tree_root_id\": null, \"scope\": \"whole_space\", \"space_key\": \"ACME\", \"space_name\": \"Acme Engineering Wiki\"}",
+            "enabled": true,
+            "last_validated_at": "2026-05-06T07:00:00Z",
+            "last_validation_error": null,
+            "created_at": "2026-04-20T10:00:00Z",
+            "updated_at": "2026-05-06T07:00:00Z"
+          },
+          {
+            "integration_id": "66666666-6666-6666-6666-666666666666",
+            "kind": "confluence_space",
+            "config_json": "{\"page_tree_root_id\": \"page-9911\", \"scope\": \"page_tree\", \"space_key\": \"PLAT\", \"space_name\": \"Platform team — runbooks\"}",
+            "enabled": true,
+            "last_validated_at": "2026-05-05T11:00:00Z",
+            "last_validation_error": null,
+            "created_at": "2026-04-25T10:00:00Z",
+            "updated_at": "2026-05-05T11:00:00Z"
+          }
+        ]
+      }
+    }
+  ]
+}

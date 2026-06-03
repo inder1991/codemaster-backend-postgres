@@ -1,0 +1,35 @@
+{
+  "_doc": "Sprint 14 / S14.B — recorded happy-path GET /api/admin/dashboard. Replayed by frontend MSW handlers + e2e Playwright stubs.",
+  "_recorded_at": "2026-05-06T08:00:00Z",
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/api/admin/dashboard",
+        "headers": {
+          "accept": "application/json",
+          "cookie": "session=<redacted>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "schema_version": 1,
+          "services": [
+            { "name": "api", "state": "healthy", "detail": "" },
+            { "name": "workers", "state": "healthy", "detail": "" },
+            { "name": "postgres", "state": "healthy", "detail": "lag 38ms" },
+            { "name": "bedrock", "state": "healthy", "detail": "" }
+          ],
+          "reviews_this_hour": 47,
+          "latency_p95_ms": 1738,
+          "in_flight_reviews": 3,
+          "last_updated_at": "2026-05-06T07:55:00Z"
+        }
+      }
+    }
+  ]
+}

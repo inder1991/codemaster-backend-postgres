@@ -1,0 +1,44 @@
+id: e2e-linter-findings-pr
+description: |
+  A PR with 3 ESLint findings on src/api/handler.ts (the linter
+  catches an unused var, prefer-const, and eqeqeq). LLM finds
+  nothing additional. Three inline comments posted.
+pr:
+  repo: acme/widget
+  pr_number: 100
+  head_sha: linterpush001
+  changed_paths: ["src/api/handler.ts"]
+  changed_line_ranges:
+    "src/api/handler.ts": [[10, 50]]
+file_routing:
+  review_files: []
+  sandbox_files: ["src/api/handler.ts"]
+  skip_files: []
+linter_findings:
+  - file: "src/api/handler.ts"
+    title: "no-unused-vars"
+    body: "'temp' is defined but never used."
+    severity: "suggestion"
+    category: "style"
+    start_line: 12
+    end_line: 12
+  - file: "src/api/handler.ts"
+    title: "prefer-const"
+    body: "'count' is never reassigned. Use 'const' instead."
+    severity: "suggestion"
+    category: "style"
+    start_line: 25
+    end_line: 25
+  - file: "src/api/handler.ts"
+    title: "eqeqeq"
+    body: "Expected '===' and instead saw '=='."
+    severity: "issue"
+    category: "bug"
+    start_line: 40
+    end_line: 40
+llm_findings_per_chunk: 0
+expected:
+  finding_count: 3
+  inline_comments: 3
+  walkthrough_tldr: "3 findings"
+  status: "accepted"

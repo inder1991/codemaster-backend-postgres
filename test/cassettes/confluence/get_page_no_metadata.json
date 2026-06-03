@@ -1,0 +1,14 @@
+{
+  "_doc": "Sub-spec A T4 (2026-05-27) — GET /api/v2/pages/99999?body-format=storage&include-labels=true. Page with no metadata block — exercises graceful fallback to empty labels. status=draft maps to draft.",
+  "id": "99999",
+  "spaceKey": "PLATFORM-DOCS",
+  "title": "Draft page without labels",
+  "status": "draft",
+  "version": {"number": 1, "createdAt": "2026-05-25T08:00:00.000Z"},
+  "body": {
+    "storage": {
+      "value": "<p>Work in progress.</p>",
+      "representation": "storage"
+    }
+  }
+}

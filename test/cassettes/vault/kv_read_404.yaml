@@ -1,0 +1,12 @@
+interactions:
+  - request:
+      method: GET
+      uri: http://vault.test:8200/v1/secret/data/codemaster/missing
+      headers:
+        X-Vault-Token: <redacted>
+    response:
+      status_code: 404
+      headers:
+        Content-Type: application/json
+      body: |-
+        {"errors":[]}

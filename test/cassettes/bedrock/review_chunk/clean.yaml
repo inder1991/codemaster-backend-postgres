@@ -1,0 +1,14 @@
+id: review-chunk-clean
+description: |
+  The model finds no issues and emits only a text block. The activity
+  must return zero findings without error.
+response:
+  content:
+    - type: text
+      text: "No issues identified."
+  usage:
+    input_tokens: 80
+    output_tokens: 12
+  stop_reason: end_turn
+expected:
+  finding_count: 0

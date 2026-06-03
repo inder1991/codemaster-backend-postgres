@@ -1,0 +1,10 @@
+# Node / TS
+node_modules/
+dist/
+*.tsbuildinfo
+# Python ref venv lives inside the submodule (untracked by parent), plus any stray
+.venv/
+__pycache__/
+# Env
+.env
+.env.local

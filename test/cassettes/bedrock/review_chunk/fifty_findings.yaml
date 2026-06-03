@@ -1,0 +1,611 @@
+id: review-chunk-fifty-findings
+description: 50 well-formed report_finding blocks; activity parses all 50; rank+cap
+  (S8.3.4a) applies in aggregator (not the activity).
+response:
+  content:
+  - type: tool_use
+    id: t0
+    name: report_finding
+    input:
+      file: src/file_0.py
+      start_line: 10
+      end_line: 13
+      severity: nit
+      category: bug
+      title: finding-0
+      body: body for finding 0
+      confidence: 0.5
+  - type: tool_use
+    id: t1
+    name: report_finding
+    input:
+      file: src/file_1.py
+      start_line: 15
+      end_line: 18
+      severity: suggestion
+      category: style
+      title: finding-1
+      body: body for finding 1
+      confidence: 0.55
+  - type: tool_use
+    id: t2
+    name: report_finding
+    input:
+      file: src/file_2.py
+      start_line: 20
+      end_line: 23
+      severity: issue
+      category: performance
+      title: finding-2
+      body: body for finding 2
+      confidence: 0.6
+  - type: tool_use
+    id: t3
+    name: report_finding
+    input:
+      file: src/file_3.py
+      start_line: 25
+      end_line: 28
+      severity: blocker
+      category: docs
+      title: finding-3
+      body: body for finding 3
+      confidence: 0.65
+  - type: tool_use
+    id: t4
+    name: report_finding
+    input:
+      file: src/file_4.py
+      start_line: 30
+      end_line: 33
+      severity: nit
+      category: bug
+      title: finding-4
+      body: body for finding 4
+      confidence: 0.7
+  - type: tool_use
+    id: t5
+    name: report_finding
+    input:
+      file: src/file_0.py
+      start_line: 35
+      end_line: 38
+      severity: suggestion
+      category: style
+      title: finding-5
+      body: body for finding 5
+      confidence: 0.75
+  - type: tool_use
+    id: t6
+    name: report_finding
+    input:
+      file: src/file_1.py
+      start_line: 40
+      end_line: 43
+      severity: issue
+      category: performance
+      title: finding-6
+      body: body for finding 6
+      confidence: 0.8
+  - type: tool_use
+    id: t7
+    name: report_finding
+    input:
+      file: src/file_2.py
+      start_line: 45
+      end_line: 48
+      severity: blocker
+      category: docs
+      title: finding-7
+      body: body for finding 7
+      confidence: 0.85
+  - type: tool_use
+    id: t8
+    name: report_finding
+    input:
+      file: src/file_3.py
+      start_line: 50
+      end_line: 53
+      severity: nit
+      category: bug
+      title: finding-8
+      body: body for finding 8
+      confidence: 0.9
+  - type: tool_use
+    id: t9
+    name: report_finding
+    input:
+      file: src/file_4.py
+      start_line: 55
+      end_line: 58
+      severity: suggestion
+      category: style
+      title: finding-9
+      body: body for finding 9
+      confidence: 0.95
+  - type: tool_use
+    id: t10
+    name: report_finding
+    input:
+      file: src/file_0.py
+      start_line: 60
+      end_line: 63
+      severity: issue
+      category: performance
+      title: finding-10
+      body: body for finding 10
+      confidence: 0.5
+  - type: tool_use
+    id: t11
+    name: report_finding
+    input:
+      file: src/file_1.py
+      start_line: 65
+      end_line: 68
+      severity: blocker
+      category: docs
+      title: finding-11
+      body: body for finding 11
+      confidence: 0.55
+  - type: tool_use
+    id: t12
+    name: report_finding
+    input:
+      file: src/file_2.py
+      start_line: 70
+      end_line: 73
+      severity: nit
+      category: bug
+      title: finding-12
+      body: body for finding 12
+      confidence: 0.6
+  - type: tool_use
+    id: t13
+    name: report_finding
+    input:
+      file: src/file_3.py
+      start_line: 75
+      end_line: 78
+      severity: suggestion
+      category: style
+      title: finding-13
+      body: body for finding 13
+      confidence: 0.65
+  - type: tool_use
+    id: t14
+    name: report_finding
+    input:
+      file: src/file_4.py
+      start_line: 80
+      end_line: 83
+      severity: issue
+      category: performance
+      title: finding-14
+      body: body for finding 14
+      confidence: 0.7
+  - type: tool_use
+    id: t15
+    name: report_finding
+    input:
+      file: src/file_0.py
+      start_line: 85
+      end_line: 88
+      severity: blocker
+      category: docs
+      title: finding-15
+      body: body for finding 15
+      confidence: 0.75
+  - type: tool_use
+    id: t16
+    name: report_finding
+    input:
+      file: src/file_1.py
+      start_line: 90
+      end_line: 93
+      severity: nit
+      category: bug
+      title: finding-16
+      body: body for finding 16
+      confidence: 0.8
+  - type: tool_use
+    id: t17
+    name: report_finding
+    input:
+      file: src/file_2.py
+      start_line: 95
+      end_line: 98
+      severity: suggestion
+      category: style
+      title: finding-17
+      body: body for finding 17
+      confidence: 0.85
+  - type: tool_use
+    id: t18
+    name: report_finding
+    input:
+      file: src/file_3.py
+      start_line: 100
+      end_line: 103
+      severity: issue
+      category: performance
+      title: finding-18
+      body: body for finding 18
+      confidence: 0.9
+  - type: tool_use
+    id: t19
+    name: report_finding
+    input:
+      file: src/file_4.py
+      start_line: 105
+      end_line: 108
+      severity: blocker
+      category: docs
+      title: finding-19
+      body: body for finding 19
+      confidence: 0.95
+  - type: tool_use
+    id: t20
+    name: report_finding
+    input:
+      file: src/file_0.py
+      start_line: 110
+      end_line: 113
+      severity: nit
+      category: bug
+      title: finding-20
+      body: body for finding 20
+      confidence: 0.5
+  - type: tool_use
+    id: t21
+    name: report_finding
+    input:
+      file: src/file_1.py
+      start_line: 115
+      end_line: 118
+      severity: suggestion
+      category: style
+      title: finding-21
+      body: body for finding 21
+      confidence: 0.55
+  - type: tool_use
+    id: t22
+    name: report_finding
+    input:
+      file: src/file_2.py
+      start_line: 120
+      end_line: 123
+      severity: issue
+      category: performance
+      title: finding-22
+      body: body for finding 22
+      confidence: 0.6
+  - type: tool_use
+    id: t23
+    name: report_finding
+    input:
+      file: src/file_3.py
+      start_line: 125
+      end_line: 128
+      severity: blocker
+      category: docs
+      title: finding-23
+      body: body for finding 23
+      confidence: 0.65
+  - type: tool_use
+    id: t24
+    name: report_finding
+    input:
+      file: src/file_4.py
+      start_line: 130
+      end_line: 133
+      severity: nit
+      category: bug
+      title: finding-24
+      body: body for finding 24
+      confidence: 0.7
+  - type: tool_use
+    id: t25
+    name: report_finding
+    input:
+      file: src/file_0.py
+      start_line: 135
+      end_line: 138
+      severity: suggestion
+      category: style
+      title: finding-25
+      body: body for finding 25
+      confidence: 0.75
+  - type: tool_use
+    id: t26
+    name: report_finding
+    input:
+      file: src/file_1.py
+      start_line: 140
+      end_line: 143
+      severity: issue
+      category: performance
+      title: finding-26
+      body: body for finding 26
+      confidence: 0.8
+  - type: tool_use
+    id: t27
+    name: report_finding
+    input:
+      file: src/file_2.py
+      start_line: 145
+      end_line: 148
+      severity: blocker
+      category: docs
+      title: finding-27
+      body: body for finding 27
+      confidence: 0.85
+  - type: tool_use
+    id: t28
+    name: report_finding
+    input:
+      file: src/file_3.py
+      start_line: 150
+      end_line: 153
+      severity: nit
+      category: bug
+      title: finding-28
+      body: body for finding 28
+      confidence: 0.9
+  - type: tool_use
+    id: t29
+    name: report_finding
+    input:
+      file: src/file_4.py
+      start_line: 155
+      end_line: 158
+      severity: suggestion
+      category: style
+      title: finding-29
+      body: body for finding 29
+      confidence: 0.95
+  - type: tool_use
+    id: t30
+    name: report_finding
+    input:
+      file: src/file_0.py
+      start_line: 160
+      end_line: 163
+      severity: issue
+      category: performance
+      title: finding-30
+      body: body for finding 30
+      confidence: 0.5
+  - type: tool_use
+    id: t31
+    name: report_finding
+    input:
+      file: src/file_1.py
+      start_line: 165
+      end_line: 168
+      severity: blocker
+      category: docs
+      title: finding-31
+      body: body for finding 31
+      confidence: 0.55
+  - type: tool_use
+    id: t32
+    name: report_finding
+    input:
+      file: src/file_2.py
+      start_line: 170
+      end_line: 173
+      severity: nit
+      category: bug
+      title: finding-32
+      body: body for finding 32
+      confidence: 0.6
+  - type: tool_use
+    id: t33
+    name: report_finding
+    input:
+      file: src/file_3.py
+      start_line: 175
+      end_line: 178
+      severity: suggestion
+      category: style
+      title: finding-33
+      body: body for finding 33
+      confidence: 0.65
+  - type: tool_use
+    id: t34
+    name: report_finding
+    input:
+      file: src/file_4.py
+      start_line: 180
+      end_line: 183
+      severity: issue
+      category: performance
+      title: finding-34
+      body: body for finding 34
+      confidence: 0.7
+  - type: tool_use
+    id: t35
+    name: report_finding
+    input:
+      file: src/file_0.py
+      start_line: 185
+      end_line: 188
+      severity: blocker
+      category: docs
+      title: finding-35
+      body: body for finding 35
+      confidence: 0.75
+  - type: tool_use
+    id: t36
+    name: report_finding
+    input:
+      file: src/file_1.py
+      start_line: 190
+      end_line: 193
+      severity: nit
+      category: bug
+      title: finding-36
+      body: body for finding 36
+      confidence: 0.8
+  - type: tool_use
+    id: t37
+    name: report_finding
+    input:
+      file: src/file_2.py
+      start_line: 195
+      end_line: 198
+      severity: suggestion
+      category: style
+      title: finding-37
+      body: body for finding 37
+      confidence: 0.85
+  - type: tool_use
+    id: t38
+    name: report_finding
+    input:
+      file: src/file_3.py
+      start_line: 200
+      end_line: 203
+      severity: issue
+      category: performance
+      title: finding-38
+      body: body for finding 38
+      confidence: 0.9
+  - type: tool_use
+    id: t39
+    name: report_finding
+    input:
+      file: src/file_4.py
+      start_line: 205
+      end_line: 208
+      severity: blocker
+      category: docs
+      title: finding-39
+      body: body for finding 39
+      confidence: 0.95
+  - type: tool_use
+    id: t40
+    name: report_finding
+    input:
+      file: src/file_0.py
+      start_line: 210
+      end_line: 213
+      severity: nit
+      category: bug
+      title: finding-40
+      body: body for finding 40
+      confidence: 0.5
+  - type: tool_use
+    id: t41
+    name: report_finding
+    input:
+      file: src/file_1.py
+      start_line: 215
+      end_line: 218
+      severity: suggestion
+      category: style
+      title: finding-41
+      body: body for finding 41
+      confidence: 0.55
+  - type: tool_use
+    id: t42
+    name: report_finding
+    input:
+      file: src/file_2.py
+      start_line: 220
+      end_line: 223
+      severity: issue
+      category: performance
+      title: finding-42
+      body: body for finding 42
+      confidence: 0.6
+  - type: tool_use
+    id: t43
+    name: report_finding
+    input:
+      file: src/file_3.py
+      start_line: 225
+      end_line: 228
+      severity: blocker
+      category: docs
+      title: finding-43
+      body: body for finding 43
+      confidence: 0.65
+  - type: tool_use
+    id: t44
+    name: report_finding
+    input:
+      file: src/file_4.py
+      start_line: 230
+      end_line: 233
+      severity: nit
+      category: bug
+      title: finding-44
+      body: body for finding 44
+      confidence: 0.7
+  - type: tool_use
+    id: t45
+    name: report_finding
+    input:
+      file: src/file_0.py
+      start_line: 235
+      end_line: 238
+      severity: suggestion
+      category: style
+      title: finding-45
+      body: body for finding 45
+      confidence: 0.75
+  - type: tool_use
+    id: t46
+    name: report_finding
+    input:
+      file: src/file_1.py
+      start_line: 240
+      end_line: 243
+      severity: issue
+      category: performance
+      title: finding-46
+      body: body for finding 46
+      confidence: 0.8
+  - type: tool_use
+    id: t47
+    name: report_finding
+    input:
+      file: src/file_2.py
+      start_line: 245
+      end_line: 248
+      severity: blocker
+      category: docs
+      title: finding-47
+      body: body for finding 47
+      confidence: 0.85
+  - type: tool_use
+    id: t48
+    name: report_finding
+    input:
+      file: src/file_3.py
+      start_line: 250
+      end_line: 253
+      severity: nit
+      category: bug
+      title: finding-48
+      body: body for finding 48
+      confidence: 0.9
+  - type: tool_use
+    id: t49
+    name: report_finding
+    input:
+      file: src/file_4.py
+      start_line: 255
+      end_line: 258
+      severity: suggestion
+      category: style
+      title: finding-49
+      body: body for finding 49
+      confidence: 0.95
+  usage:
+    input_tokens: 1000
+    output_tokens: 1500
+  stop_reason: tool_use
+expected:
+  finding_count: 50

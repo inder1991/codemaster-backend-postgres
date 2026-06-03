@@ -1,0 +1,28 @@
+# Sprint 4 / S4.1.1 — second exchange after the first token expired.
+# Used to confirm the cache refreshes correctly when the prior entry
+# is within the eviction margin.
+interactions:
+  - request:
+      method: POST
+      uri: https://api.github.com/app/installations/12345/access_tokens
+      headers:
+        Accept: application/vnd.github+json
+        Authorization: Bearer <jwt-redacted-second>
+        X-GitHub-Api-Version: "2022-11-28"
+      body: ""
+    response:
+      status_code: 201
+      headers:
+        Content-Type: application/json; charset=utf-8
+      body: |-
+        {
+          "token": "ghs_refreshedtokenvalue",
+          "expires_at": "2026-05-02T14:00:00Z",
+          "permissions": {
+            "contents": "read",
+            "pull_requests": "write",
+            "issues": "write",
+            "metadata": "read"
+          },
+          "repository_selection": "all"
+        }

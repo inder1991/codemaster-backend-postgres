@@ -1,0 +1,19 @@
+{
+  "_doc": "Sprint 13 / S13.3.1a — GET /api/v2/pages/111112?body-format=storage&include-labels=true. Long-form runbook page with unicode + a code block to exercise the body_html round-trip. Sub-spec A T4 (2026-05-27): added status + metadata.labels (empty, happy-path baseline).",
+  "id": "111112",
+  "spaceKey": "ACME-PILOT",
+  "title": "Confluence sync runbook 🚦",
+  "status": "current",
+  "version": {"number": 7, "createdAt": "2026-04-22T14:05:33Z"},
+  "body": {
+    "storage": {
+      "value": "<h1>Confluence sync runbook 🚦</h1><p>This page documents the daily sync. RTL test: العنوان مكتوب من اليمين إلى اليسار.</p><pre><code>oc get cronjob -n codemaster | grep confluence-sync</code></pre><p>End of body.</p>",
+      "representation": "storage"
+    }
+  },
+  "metadata": {
+    "labels": {
+      "results": []
+    }
+  }
+}

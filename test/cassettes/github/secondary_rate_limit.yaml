@@ -1,0 +1,13 @@
+interactions:
+  - request:
+      method: GET
+      uri: https://api.github.com/repos/acme/example/pulls/42
+      headers:
+        Accept: application/vnd.github+json
+        Authorization: Bearer <ghs-redacted>
+    response:
+      status_code: 403
+      headers:
+        Retry-After: "30"
+      body: |-
+        {"message": "You have exceeded a secondary rate limit. Please wait a few minutes."}
