@@ -19,7 +19,7 @@ import { Node, type ObjectLiteralElementLike, Project, type SourceFile } from "t
 // exemptions covered by sibling gates. Ported VERBATIM from the Python gate's _STORY_ID_RE.
 const STORY_ID_RE = /^(S\d+\.([A-Z]+\.\d+|X-[\w-]+|[A-Z]+)|PERMANENT-EXEMPTION-[\w-]+)$/;
 
-export interface Violation {
+export type Violation = {
   file: string;
   /** The EXEMPTED entry key whose value is malformed. */
   key: string;
@@ -34,8 +34,8 @@ export interface Violation {
  * locate the top-level `EXEMPTED` variable initialized with an object literal, then validate each
  * property's value object carries a well-formed `follow_up_story`.
  */
-export function findExemptedListsViolations(project: Project): Violation[] {
-  const out: Violation[] = [];
+export function findExemptedListsViolations(project: Project): Array<Violation> {
+  const out: Array<Violation> = [];
   for (const sf of project.getSourceFiles()) {
     const exempted = extractExemptedObject(sf);
     if (exempted === undefined) continue; // No EXEMPTED export — different exclusion mechanism. Skip.

@@ -13,8 +13,15 @@ export default tseslint.config(
   security.configs.recommended,
   {
     rules: {
-      "@typescript-eslint/no-explicit-any": "error",
-      "@typescript-eslint/consistent-type-imports": "error",
+      // mkosir TS style guide, enforced by tooling:
+      "@typescript-eslint/no-explicit-any": "error", //  prefer `unknown`
+      "@typescript-eslint/consistent-type-imports": "error", //  `import { type X }`
+      "@typescript-eslint/consistent-type-definitions": ["error", "type"], //  `type` over `interface`
+      "@typescript-eslint/array-type": ["error", { default: "generic", readonly: "generic" }], //  Array<T> / ReadonlyArray<T>
+      "no-restricted-syntax": [
+        "warn",
+        { selector: "TSEnumDeclaration", message: "Avoid TS enum (runtime cost); use a union or `as const` object." },
+      ],
     },
   },
   {

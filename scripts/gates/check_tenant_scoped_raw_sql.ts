@@ -18,14 +18,14 @@ const MARKER_RE = /tenant:exempt\s+reason=\S+\s+follow_up=\S+/;
 const INSTALLATION_ID_RE = /installation_id/i;
 const PRIVILEGED_PATH_RE = /(?:^|\.)privileged_?path/i;
 
-export interface Violation {
+export type Violation = {
   file: string;
   line: number;
   table: string;
 }
 
-export function findTenancyViolations(project: Project): Violation[] {
-  const out: Violation[] = [];
+export function findTenancyViolations(project: Project): Array<Violation> {
+  const out: Array<Violation> = [];
   for (const sf of project.getSourceFiles()) {
     const lines = sf.getFullText().split("\n");
     for (const tpl of sf.getDescendantsOfKind(SyntaxKind.TaggedTemplateExpression)) {
@@ -53,7 +53,7 @@ function hasPrivilegedPath(node: Node): boolean {
   return decorators.some((d) => PRIVILEGED_PATH_RE.test(d.getExpression().getText()));
 }
 
-function hasExemptMarker(node: Node, lines: string[]): boolean {
+function hasExemptMarker(node: Node, lines: Array<string>): boolean {
   const ln = node.getStartLineNumber(); // 1-based
   const sameLine = lines[ln - 1] ?? "";
   const prevLine = lines[ln - 2] ?? "";

@@ -51,7 +51,7 @@ export const TENANT_SCOPED_TABLES: ReadonlySet<string> = new Set([
   "telemetry.llm_calls_daily",
 ]);
 
-export interface ExemptedEntry {
+export type ExemptedEntry = {
   reason: string;
   /** Sprint-aligned story id (S\d+\.[A-Z]+\.\d+), hotfix (S\d+\.X-<slug>), or PERMANENT-EXEMPTION-*. */
   follow_up_story: string;

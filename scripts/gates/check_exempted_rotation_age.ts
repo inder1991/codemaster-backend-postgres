@@ -25,7 +25,7 @@ export const PERMANENT_PREFIX = "PERMANENT-EXEMPTION-";
 const SECONDS_PER_DAY = 86_400;
 
 /** One EXEMPTED dict-key entry located in a gate file's AST. */
-export interface ExemptedEntryLocation {
+export type ExemptedEntryLocation = {
   /** The EXEMPTED dict key (the exempted symbol / path). */
   key: string;
   /** The entry's `follow_up_story` value (empty string if absent). */
@@ -35,7 +35,7 @@ export interface ExemptedEntryLocation {
 }
 
 /** A stale-entry finding. */
-export interface Violation {
+export type Violation = {
   file: string;
   line: number;
   key: string;
@@ -56,8 +56,8 @@ export type BlameOracle = (file: string, line: number) => number | null;
  * whose initializer is an object literal, then read each property's key, its `follow_up_story`
  * value, and the property's source line number.
  */
-export function collectExemptedEntries(sf: SourceFile): ExemptedEntryLocation[] {
-  const entries: ExemptedEntryLocation[] = [];
+export function collectExemptedEntries(sf: SourceFile): Array<ExemptedEntryLocation> {
+  const entries: Array<ExemptedEntryLocation> = [];
   for (const decl of sf.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
     if (decl.getName() !== "EXEMPTED") continue;
     const init = decl.getInitializer();
@@ -103,8 +103,8 @@ function readFollowUpStory(obj: ObjectLiteralExpression): string {
  * snippets (no real git / wall-clock in unit tests) — mirroring how the Python test drove the
  * per-line-blame contract directly.
  */
-export function findRotationViolations(project: Project, blame: BlameOracle): Violation[] {
-  const out: Violation[] = [];
+export function findRotationViolations(project: Project, blame: BlameOracle): Array<Violation> {
+  const out: Array<Violation> = [];
   for (const sf of gateSourceFiles(project)) {
     const file = sf.getFilePath();
     for (const entry of collectExemptedEntries(sf)) {
@@ -124,7 +124,7 @@ export function findRotationViolations(project: Project, blame: BlameOracle): Vi
 }
 
 /** Gate source files: scripts/gates/*.ts, excluding *.test.ts and the run-all orchestrator. */
-function gateSourceFiles(project: Project): SourceFile[] {
+function gateSourceFiles(project: Project): Array<SourceFile> {
   return project.getSourceFiles().filter((sf) => {
     const p = sf.getFilePath();
     if (!p.includes(`${path.sep}scripts${path.sep}gates${path.sep}`)) return false;

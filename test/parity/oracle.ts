@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { canonicalize } from "./canonical.js";
 
-interface RefResult {
+type RefResult = {
   ok: boolean;
   out?: string;
   err?: string;

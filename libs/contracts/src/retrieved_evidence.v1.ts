@@ -21,7 +21,7 @@ export type EvidenceSourceType = z.infer<typeof EvidenceSourceType>;
 
 // EVIDENCE_PRIORITY (remediation R-24) — single source of truth for the evidence priority order.
 // Lower index = higher priority = kept longest under cap pressure.
-export const EVIDENCE_PRIORITY: readonly EvidenceSourceType[] = [
+export const EVIDENCE_PRIORITY: ReadonlyArray<EvidenceSourceType> = [
   "chunk_body",
   "retrieved_knowledge",
   "tier1_finding",
@@ -75,7 +75,7 @@ function uuid5Hex(namespaceHex: string, name: string): string {
 // manually against the frozen ref for the full-parts case).
 export function mintEvidenceId(
   source_type: EvidenceSourceType,
-  ...parts: (string | number)[]
+  ...parts: Array<string | number>
 ): string {
   const partsStr = parts.map((p) => String(p)).join("|");
   const name =

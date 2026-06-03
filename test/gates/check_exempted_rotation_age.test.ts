@@ -83,7 +83,7 @@ describe("EXEMPTED rotation-age gate", () => {
       '  "old_entry_key": { reason: "x", follow_up_story: "S99.X-old" },',
       "};",
     ].join("\n");
-    const asked: number[] = [];
+    const asked: Array<number> = [];
     const recordingBlame: BlameOracle = (_file, line) => {
       asked.push(line);
       return 30; // simulate the 30-day-old commit still owning that exact line
