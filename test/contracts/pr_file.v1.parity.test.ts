@@ -1,8 +1,8 @@
 import { afterAll, describe, expect, it } from "vitest";
 
-import { canonicalize } from "../../../test/parity/canonical.js";
-import { pyRef, shutdownRef } from "../../../test/parity/oracle.js";
-import { PrFileV1 } from "./pr_file.v1.js";
+import { canonicalize } from "../parity/canonical.js";
+import { pyRef, shutdownRef } from "../parity/oracle.js";
+import { PrFileV1 } from "../../libs/contracts/src/pr_file.v1.js";
 
 afterAll(() => shutdownRef());
 

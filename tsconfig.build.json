@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist"
+  },
+  "include": ["libs", "apps", "migrations"],
+  "exclude": ["**/*.test.ts", "test", "node_modules", "dist", "vendor", "tools", "scripts"]
+}

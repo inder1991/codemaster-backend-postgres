@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Project } from "ts-morph";
 
-import { findExemptedListsViolations } from "./check_exempted_lists_pointed.js";
+import { findExemptedListsViolations } from "../../scripts/gates/check_exempted_lists_pointed.js";
 
 // Build an in-memory TS project from a snippet and run the gate over it.
 // The frozen Python gate (scripts/check_exempted_lists_pointed.py) has no dedicated test in

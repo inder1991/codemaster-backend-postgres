@@ -9,7 +9,7 @@
     "noImplicitOverride": true,
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
-    "outDir": "dist",
+    "noEmit": true,
     "rootDir": "."
   },
   "include": ["libs", "apps", "migrations", "test", "scripts", "tools"]

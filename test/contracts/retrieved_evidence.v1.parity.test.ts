@@ -1,12 +1,12 @@
 import { afterAll, describe, expect, it } from "vitest";
 
-import { canonicalize } from "../../../test/parity/canonical.js";
-import { pyRef, shutdownRef } from "../../../test/parity/oracle.js";
+import { canonicalize } from "../parity/canonical.js";
+import { pyRef, shutdownRef } from "../parity/oracle.js";
 import {
   EVIDENCE_PRIORITY,
   RetrievedEvidenceV1,
   mintEvidenceId,
-} from "./retrieved_evidence.v1.js";
+} from "../../libs/contracts/src/retrieved_evidence.v1.js";
 
 afterAll(() => shutdownRef());
 

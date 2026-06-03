@@ -7,7 +7,7 @@ import {
   collectExemptedEntries,
   findRotationViolations,
   type BlameOracle,
-} from "./check_exempted_rotation_age.js";
+} from "../../scripts/gates/check_exempted_rotation_age.js";
 
 // Build an in-memory project under scripts/gates/ (the path the gate walks) from a snippet.
 // Mirrors the frozen Python gate's tests (test_check_exempted_rotation_age.py) using in-memory TS

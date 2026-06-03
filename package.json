@@ -4,11 +4,11 @@
   "type": "module",
   "engines": { "node": ">=22" },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "parity": "tsx test/parity/run.ts",
     "gates": "tsx scripts/gates/run-all.ts",
-    "validate-fast": "npm run gates && npm run build && vitest run --dir test/unit"
+    "validate-fast": "npm run gates && npm run typecheck && npm run test"
   },
   "dependencies": {
     "kysely": "^0.27.0",

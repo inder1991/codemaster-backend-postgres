@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Project } from "ts-morph";
 
-import { findTenancyViolations } from "./check_tenant_scoped_raw_sql.js";
+import { findTenancyViolations } from "../../scripts/gates/check_tenant_scoped_raw_sql.js";
 
 // Build an in-memory TS project from a snippet and run the gate over it.
 // Mirrors the frozen Python gate's tests (test_check_tenant_scoped_raw_sql.py) but for Kysely's
