@@ -7,8 +7,14 @@
 import { main as tenantScopedRawSql } from "./check_tenant_scoped_raw_sql.js";
 import { main as exemptedListsPointed } from "./check_exempted_lists_pointed.js";
 import { main as exemptedRotationAge } from "./check_exempted_rotation_age.js";
+import { main as clockRandom } from "./check_clock_random.js";
 
-const gates: Array<() => number> = [tenantScopedRawSql, exemptedListsPointed, exemptedRotationAge];
+const gates: Array<() => number> = [
+  tenantScopedRawSql,
+  exemptedListsPointed,
+  exemptedRotationAge,
+  clockRandom,
+];
 
 let rc = 0;
 for (const gate of gates) {

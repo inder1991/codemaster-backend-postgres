@@ -8,7 +8,10 @@ import tseslint from "typescript-eslint";
 // follows: prefer `unknown` over `any`, type-only imports, no implicit any (already via tsc strict).
 // We can ratchet to `recommendedTypeChecked` once the app code lands.
 export default tseslint.config(
-  { ignores: ["dist/**", "node_modules/**", "vendor/**", "coverage/**", "tools/parity/run_python_ref.py"] },
+  // tools/workflows/** are one-shot multi-agent orchestration scripts that run in the Workflow
+  // runtime against injected globals (agent/parallel/phase/log/args/budget) — not project code; an
+  // `eslint .` over them only yields false `no-undef` for those runtime globals.
+  { ignores: ["dist/**", "node_modules/**", "vendor/**", "coverage/**", "tools/parity/run_python_ref.py", "tools/workflows/**"] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   security.configs.recommended,
