@@ -12,7 +12,7 @@
 //
 // ERROR-mode (matches the frozen Python gate): any violation makes main() return 1. This is the
 // rare-but-real ERROR-mode gate — it is NOT the WARN-mode GF-3 tenancy gate. Do NOT soften to WARN.
-import { Node, Project, SyntaxKind } from "ts-morph";
+import { Node, type ObjectLiteralElementLike, Project, type SourceFile } from "ts-morph";
 
 // Sprint-aligned IDs accept a single-letter area (`S16.A.1`, `S15.H`) or a multi-letter area code
 // (`S23.AR.7`); hotfix IDs (`S15.X-token-provider`); or `PERMANENT-EXEMPTION-*` for by-design
@@ -51,7 +51,7 @@ export function findExemptedListsViolations(project: Project): Violation[] {
 }
 
 /** Locate the top-level `EXEMPTED = {...}` object-literal initializer in a source file. */
-function extractExemptedObject(sf: import("ts-morph").SourceFile) {
+function extractExemptedObject(sf: SourceFile) {
   const decl = sf.getVariableDeclaration("EXEMPTED");
   if (decl === undefined) return undefined;
   const init = decl.getInitializer();
@@ -61,7 +61,7 @@ function extractExemptedObject(sf: import("ts-morph").SourceFile) {
 
 /** Extract `{ key, value }` for a property assignment whose value is an expression node. */
 function readEntry(
-  prop: import("ts-morph").ObjectLiteralElementLike,
+  prop: ObjectLiteralElementLike,
 ): { key: string; value: Node | undefined } | undefined {
   if (!Node.isPropertyAssignment(prop)) return undefined;
   const nameNode = prop.getNameNode();

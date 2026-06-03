@@ -9,7 +9,7 @@
 //
 // WARN-mode in v1 (per CLAUDE.md GF-3): reports to stderr, always exits 0. ERROR-mode is the tracked
 // follow-up FOLLOW-UP-gf3-error-mode — do NOT silently promote it.
-import { Project, SyntaxKind } from "ts-morph";
+import { type Node, Project, SyntaxKind } from "ts-morph";
 
 import { TENANT_SCOPED_TABLES } from "./_registry.js";
 
@@ -46,14 +46,14 @@ export function findTenancyViolations(project: Project): Violation[] {
   return out;
 }
 
-function hasPrivilegedPath(node: import("ts-morph").Node): boolean {
+function hasPrivilegedPath(node: Node): boolean {
   const method = node.getFirstAncestorByKind(SyntaxKind.MethodDeclaration);
   const cls = node.getFirstAncestorByKind(SyntaxKind.ClassDeclaration);
   const decorators = [...(method?.getDecorators() ?? []), ...(cls?.getDecorators() ?? [])];
   return decorators.some((d) => PRIVILEGED_PATH_RE.test(d.getExpression().getText()));
 }
 
-function hasExemptMarker(node: import("ts-morph").Node, lines: string[]): boolean {
+function hasExemptMarker(node: Node, lines: string[]): boolean {
   const ln = node.getStartLineNumber(); // 1-based
   const sameLine = lines[ln - 1] ?? "";
   const prevLine = lines[ln - 2] ?? "";

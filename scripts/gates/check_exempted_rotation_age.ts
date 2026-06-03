@@ -17,7 +17,7 @@
 import { execFileSync } from "node:child_process";
 import * as path from "node:path";
 
-import { Node, Project, SyntaxKind } from "ts-morph";
+import { Node, type ObjectLiteralExpression, Project, type SourceFile, SyntaxKind } from "ts-morph";
 
 export const STALENESS_THRESHOLD_DAYS = 14;
 export const PERMANENT_PREFIX = "PERMANENT-EXEMPTION-";
@@ -56,7 +56,7 @@ export type BlameOracle = (file: string, line: number) => number | null;
  * whose initializer is an object literal, then read each property's key, its `follow_up_story`
  * value, and the property's source line number.
  */
-export function collectExemptedEntries(sf: import("ts-morph").SourceFile): ExemptedEntryLocation[] {
+export function collectExemptedEntries(sf: SourceFile): ExemptedEntryLocation[] {
   const entries: ExemptedEntryLocation[] = [];
   for (const decl of sf.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
     if (decl.getName() !== "EXEMPTED") continue;
@@ -76,14 +76,14 @@ export function collectExemptedEntries(sf: import("ts-morph").SourceFile): Exemp
 }
 
 /** Read a property name as a string: string-literal keys and bare identifiers both supported. */
-function readPropertyKey(nameNode: import("ts-morph").Node): string | null {
+function readPropertyKey(nameNode: Node): string | null {
   if (Node.isStringLiteral(nameNode)) return nameNode.getLiteralValue();
   if (Node.isIdentifier(nameNode)) return nameNode.getText();
   return null;
 }
 
 /** Pull the `follow_up_story` string value out of an entry's object literal (empty if absent). */
-function readFollowUpStory(obj: import("ts-morph").ObjectLiteralExpression): string {
+function readFollowUpStory(obj: ObjectLiteralExpression): string {
   for (const prop of obj.getProperties()) {
     if (!Node.isPropertyAssignment(prop)) continue;
     if (readPropertyKey(prop.getNameNode()) !== "follow_up_story") continue;
@@ -124,7 +124,7 @@ export function findRotationViolations(project: Project, blame: BlameOracle): Vi
 }
 
 /** Gate source files: scripts/gates/*.ts, excluding *.test.ts and the run-all orchestrator. */
-function gateSourceFiles(project: Project): import("ts-morph").SourceFile[] {
+function gateSourceFiles(project: Project): SourceFile[] {
   return project.getSourceFiles().filter((sf) => {
     const p = sf.getFilePath();
     if (!p.includes(`${path.sep}scripts${path.sep}gates${path.sep}`)) return false;

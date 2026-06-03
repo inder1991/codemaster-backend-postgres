@@ -1,0 +1,28 @@
+import js from "@eslint/js";
+import security from "eslint-plugin-security";
+import tseslint from "typescript-eslint";
+
+// Flat config. typescript-eslint `recommended` (non-type-checked: fast, catches no-explicit-any,
+// no-unused-vars, etc.) + eslint-plugin-security. Aligned to the TS best-practices the project
+// follows: prefer `unknown` over `any`, type-only imports, no implicit any (already via tsc strict).
+// We can ratchet to `recommendedTypeChecked` once the app code lands.
+export default tseslint.config(
+  { ignores: ["dist/**", "node_modules/**", "vendor/**", "coverage/**", "tools/parity/run_python_ref.py"] },
+  js.configs.recommended,
+  ...tseslint.configs.recommended,
+  security.configs.recommended,
+  {
+    rules: {
+      "@typescript-eslint/no-explicit-any": "error",
+      "@typescript-eslint/consistent-type-imports": "error",
+    },
+  },
+  {
+    // Tests + gate AST-walkers legitimately touch dynamic shapes / fs; relax the noisiest security rules.
+    files: ["test/**/*.ts", "scripts/gates/**/*.ts"],
+    rules: {
+      "security/detect-non-literal-fs-filename": "off",
+      "security/detect-object-injection": "off",
+    },
+  },
+);

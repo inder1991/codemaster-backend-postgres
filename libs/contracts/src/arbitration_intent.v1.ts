@@ -16,6 +16,7 @@ export const CONFIDENCE_DECIMAL_PLACES = 3;
 // (Restricting to the canonical Decimal form keeps the pass-through string identical to Pydantic's
 // model_dump output. Pydantic accepts looser forms like ".5"/"1e-1" but normalizes them on dump;
 // callers cite the contract with canonical strings.)
+// eslint-disable-next-line security/detect-unsafe-regex -- bounded + anchored, no nested/ambiguous quantifiers (no ReDoS); mirrors the frozen Pydantic contract pattern
 const CONFIDENCE_TEXT = /^(?:0|[1-9]\d*)(?:\.\d{1,3})?$/;
 
 export const ArbitrationIntentV1 = z
