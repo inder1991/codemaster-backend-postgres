@@ -1,0 +1,38 @@
+{
+  "name": "codemaster-backend",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "parity": "tsx test/parity/run.ts",
+    "gates": "tsx scripts/gates/run-all.ts",
+    "validate-fast": "npm run gates && npm run build && vitest run --dir test/unit"
+  },
+  "dependencies": {
+    "kysely": "^0.27.0",
+    "pg": "^8.13.0",
+    "pgvector": "^0.2.0",
+    "zod": "^3.23.0",
+    "fastify": "^5.0.0",
+    "@temporalio/client": "^1.11.0",
+    "@temporalio/worker": "^1.11.0",
+    "@temporalio/workflow": "^1.11.0",
+    "@temporalio/activity": "^1.11.0",
+    "@anthropic-ai/bedrock-sdk": "^0.12.0",
+    "node-pg-migrate": "^7.7.0",
+    "js-yaml": "^4.1.0",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/sdk-node": "^0.54.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "tsx": "^4.19.0",
+    "vitest": "^2.1.0",
+    "ts-morph": "^24.0.0",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.0",
+    "@types/js-yaml": "^4.0.0"
+  }
+}
