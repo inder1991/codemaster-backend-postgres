@@ -7,7 +7,7 @@ import {
   RunIdRetentionResultV1,
   RunsRetentionResultV1,
   StalePrCloserResultV1,
-} from "../../libs/contracts/src/retention.v1.js";
+} from "#contracts/retention.v1.js";
 
 afterAll(() => shutdownRef());
 

@@ -5,7 +5,7 @@ import { pyRef, shutdownRef } from "../parity/oracle.js";
 import {
   DedupedRuleV1,
   ResolvedGuidanceBundleV1,
-} from "../../libs/contracts/src/resolved_guidance.v1.js";
+} from "#contracts/resolved_guidance.v1.js";
 
 afterAll(() => shutdownRef());
 

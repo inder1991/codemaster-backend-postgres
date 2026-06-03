@@ -4,8 +4,8 @@
 // shows up immediately. uniform(-1, 1) is the embeddings_port-load-bearing path.
 import { afterAll, describe, expect, it } from "vitest";
 
-import { FakeClock } from "../../libs/platform/src/clock.js";
-import { SeededRandom, uuid7 } from "../../libs/platform/src/randomness.js";
+import { FakeClock } from "#platform/clock.js";
+import { SeededRandom, uuid7 } from "#platform/randomness.js";
 import {
   doubleToHex,
   seededRef,

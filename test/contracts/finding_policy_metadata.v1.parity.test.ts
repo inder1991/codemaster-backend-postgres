@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { canonicalize } from "../parity/canonical.js";
 import { pyRef, shutdownRef } from "../parity/oracle.js";
-import { FindingPolicyMetadataV1 } from "../../libs/contracts/src/finding_policy_metadata.v1.js";
+import { FindingPolicyMetadataV1 } from "#contracts/finding_policy_metadata.v1.js";
 
 afterAll(() => shutdownRef());
 

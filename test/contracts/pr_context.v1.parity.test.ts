@@ -8,7 +8,7 @@ import {
   ManifestSnapshot,
   ParsedDependencyV1,
   PRContext,
-} from "../../libs/contracts/src/pr_context.v1.js";
+} from "#contracts/pr_context.v1.js";
 
 afterAll(() => shutdownRef());
 

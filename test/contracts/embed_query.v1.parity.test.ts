@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { canonicalize } from "../parity/canonical.js";
 import { pyRef, shutdownRef } from "../parity/oracle.js";
-import { EmbedQueryInputV1, EmbedQueryResultV1 } from "../../libs/contracts/src/embed_query.v1.js";
+import { EmbedQueryInputV1, EmbedQueryResultV1 } from "#contracts/embed_query.v1.js";
 
 afterAll(() => shutdownRef());
 

@@ -6,7 +6,7 @@ import {
   EVIDENCE_PRIORITY,
   RetrievedEvidenceV1,
   mintEvidenceId,
-} from "../../libs/contracts/src/retrieved_evidence.v1.js";
+} from "#contracts/retrieved_evidence.v1.js";
 
 afterAll(() => shutdownRef());
 

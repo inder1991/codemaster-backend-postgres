@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { canonicalize } from "../parity/canonical.js";
 import { pyRef, shutdownRef } from "../parity/oracle.js";
-import { ReviewContextV1 } from "../../libs/contracts/src/review_context.v1.js";
+import { ReviewContextV1 } from "#contracts/review_context.v1.js";
 
 afterAll(() => shutdownRef());
 

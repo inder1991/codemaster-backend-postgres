@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { canonicalize } from "../parity/canonical.js";
 import { pyRef, shutdownRef } from "../parity/oracle.js";
-import { CarryForwardSelectionV1 } from "../../libs/contracts/src/carry_forward.v1.js";
+import { CarryForwardSelectionV1 } from "#contracts/carry_forward.v1.js";
 
 afterAll(() => shutdownRef());
 

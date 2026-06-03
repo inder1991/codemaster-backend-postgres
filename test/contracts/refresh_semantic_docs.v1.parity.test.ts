@@ -5,7 +5,7 @@ import { pyRef, shutdownRef } from "../parity/oracle.js";
 import {
   RefreshSemanticDocsInputV1,
   RefreshSemanticDocsResultV1,
-} from "../../libs/contracts/src/refresh_semantic_docs.v1.js";
+} from "#contracts/refresh_semantic_docs.v1.js";
 
 afterAll(() => shutdownRef());
 

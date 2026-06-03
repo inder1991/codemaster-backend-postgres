@@ -5,7 +5,7 @@ import { pyRef, shutdownRef } from "../parity/oracle.js";
 import {
   ParseManifestDependenciesInputV1,
   ParseManifestDependenciesOutputV1,
-} from "../../libs/contracts/src/parse_manifest_dependencies.v1.js";
+} from "#contracts/parse_manifest_dependencies.v1.js";
 
 afterAll(() => shutdownRef());
 

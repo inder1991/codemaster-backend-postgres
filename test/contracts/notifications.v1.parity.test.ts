@@ -12,7 +12,7 @@ import {
   NotificationRulesPageV1,
   SlackRecipientV1,
   WebhookRecipientV1,
-} from "../../libs/contracts/src/notifications.v1.js";
+} from "#contracts/notifications.v1.js";
 
 afterAll(() => shutdownRef());
 

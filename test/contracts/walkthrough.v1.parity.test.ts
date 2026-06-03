@@ -7,7 +7,7 @@ import {
   LinkedIssueV1,
   PrMetaV1,
   WalkthroughV1,
-} from "../../libs/contracts/src/walkthrough.v1.js";
+} from "#contracts/walkthrough.v1.js";
 
 afterAll(() => shutdownRef());
 

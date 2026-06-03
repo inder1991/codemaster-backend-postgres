@@ -5,7 +5,7 @@ import { pyRef, shutdownRef } from "../parity/oracle.js";
 import {
   FetchManifestSnapshotsInputV1,
   FetchManifestSnapshotsOutputV1,
-} from "../../libs/contracts/src/fetch_manifest_snapshots.v1.js";
+} from "#contracts/fetch_manifest_snapshots.v1.js";
 
 afterAll(() => shutdownRef());
 

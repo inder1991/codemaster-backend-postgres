@@ -5,7 +5,7 @@ import { pyRef, shutdownRef } from "../parity/oracle.js";
 import {
   DiscoveredGuidelineFilesV1,
   GuidelineFileV1,
-} from "../../libs/contracts/src/guideline_files.v1.js";
+} from "#contracts/guideline_files.v1.js";
 
 afterAll(() => shutdownRef());
 

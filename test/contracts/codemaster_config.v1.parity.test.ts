@@ -9,7 +9,7 @@ import {
   KnowledgeConfigV1,
   ModelOverridesV1,
   PathInstructionV1,
-} from "../../libs/contracts/src/codemaster_config.v1.js";
+} from "#contracts/codemaster_config.v1.js";
 
 afterAll(() => shutdownRef());
 

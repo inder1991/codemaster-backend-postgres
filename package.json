@@ -5,13 +5,20 @@
   "engines": {
     "node": ">=22"
   },
+  "imports": {
+    "#contracts/*": "./libs/contracts/src/*",
+    "#platform/*": "./libs/platform/src/*",
+    "#backend/*": "./apps/backend/src/backend/*"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint .",
     "test": "vitest run",
     "gates": "tsx scripts/gates/run_all.ts",
-    "validate-fast": "npm run gates && npm run lint && npm run typecheck && npm run test"
+    "validate-fast": "npm run gates && npm run lint && npm run typecheck && npm run test",
+    "migrate:up": "node-pg-migrate up -m migrations -d CODEMASTER_PG_CORE_DSN --no-check-order",
+    "migrate:down": "node-pg-migrate down -m migrations -d CODEMASTER_PG_CORE_DSN --no-check-order"
   },
   "dependencies": {
     "@anthropic-ai/bedrock-sdk": "^0.12.0",

@@ -6,7 +6,7 @@ import {
   IntegrationKindV1,
   IntegrationMetadataV1,
   IntegrationProbeResultV1,
-} from "../../libs/contracts/src/integrations.v1.js";
+} from "#contracts/integrations.v1.js";
 
 afterAll(() => shutdownRef());
 

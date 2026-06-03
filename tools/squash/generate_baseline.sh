@@ -21,19 +21,28 @@ psql "$DISPOSABLE_PG/postgres" -c "CREATE DATABASE cm_ref"
 ( cd "$SUBMODULE" && CODEMASTER_PG_CORE_DSN="${DISPOSABLE_PG/postgresql:/postgresql+psycopg:}/cm_ref" \
     .venv/bin/alembic upgrade head )
 
-# 0001 schema. pg_dump OMITS the extensions, so prepend them. Strip session-SET noise + CONCURRENTLY
-# (a fresh DB needs no concurrent index builds).
+# node-pg-migrate runs these via the `pg` driver, NOT psql — so the dumps MUST be free of psql-only
+# constructs or `npm run migrate:up` fails with `syntax error at or near "\"` (code 42601):
+#   * `\restrict` / `\unrestrict` — PG17+ pg_dump access-control meta-commands (psql-only). Stripped.
+#   * `COPY ... FROM stdin` — the inline-data COPY protocol is psql-only; we dump seeds as
+#     `--column-inserts` (portable INSERTs the pg driver can execute) instead. See README "Migrations".
+
+# 0001 schema. pg_dump OMITS the extensions, so prepend them. Strip session-SET noise, CONCURRENTLY
+# (a fresh DB needs no concurrent index builds), and the psql-only \restrict/\unrestrict wrapper.
 {
   printf 'CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;\n'
   printf 'CREATE SCHEMA IF NOT EXISTS partman;\n'
   printf 'CREATE EXTENSION IF NOT EXISTS pg_partman WITH SCHEMA partman;\n'
   pg_dump "$DISPOSABLE_PG/cm_ref" --schema-only --no-owner --no-privileges \
     --schema=core --schema=audit --schema=cache --schema=telemetry
-} | sed -e '/^SET /d' -e '/^SELECT pg_catalog.set_config/d' -e 's/ CONCURRENTLY//g' > "$OUT/0001_baseline.sql"
+} | sed -e '/^SET /d' -e '/^SELECT pg_catalog.set_config/d' -e 's/ CONCURRENTLY//g' \
+        -e '/^\\restrict/d' -e '/^\\unrestrict/d' > "$OUT/0001_baseline.sql"
 
-# 0002 seeds — data-only (a from-zero DB holds ONLY migration seeds).
-pg_dump "$DISPOSABLE_PG/cm_ref" --data-only --no-owner \
+# 0002 seeds — data-only (a from-zero DB holds ONLY migration seeds). --column-inserts (NOT the default
+# COPY) so node-pg-migrate's pg driver can run them; strip the same psql-only noise as 0001.
+pg_dump "$DISPOSABLE_PG/cm_ref" --data-only --column-inserts --no-owner \
   --schema=core --schema=audit --schema=cache --schema=telemetry \
-  | sed -e '/^SET /d' -e '/^SELECT pg_catalog.set_config/d' > "$OUT/0002_seed.sql"
+  | sed -e '/^SET /d' -e '/^SELECT pg_catalog.set_config/d' \
+        -e '/^\\restrict/d' -e '/^\\unrestrict/d' > "$OUT/0002_seed.sql"
 
 echo "wrote $OUT/0001_baseline.sql + $OUT/0002_seed.sql"

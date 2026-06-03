@@ -5,7 +5,7 @@ import { pyRef, shutdownRef } from "../parity/oracle.js";
 import {
   ComputePolicyRulesInputV1,
   ComputedPolicyRulesV1,
-} from "../../libs/contracts/src/policy_compute.v1.js";
+} from "#contracts/policy_compute.v1.js";
 
 afterAll(() => shutdownRef());
 

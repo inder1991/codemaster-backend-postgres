@@ -9,7 +9,7 @@ import {
   RepoSymbolV1,
   RetrievedConsumersV1,
   SymbolReferenceV1,
-} from "../../libs/contracts/src/symbol_graph.v1.js";
+} from "#contracts/symbol_graph.v1.js";
 
 afterAll(() => shutdownRef());
 

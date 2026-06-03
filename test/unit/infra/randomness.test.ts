@@ -3,8 +3,8 @@
 // Python lives in test/parity/randomness.parity.test.ts; this file asserts the local contract.
 import { describe, it, expect } from "vitest";
 
-import { FakeClock } from "../../../libs/platform/src/clock.js";
-import { SeededRandom, SystemRandom, uuid7 } from "../../../libs/platform/src/randomness.js";
+import { FakeClock } from "#platform/clock.js";
+import { SeededRandom, SystemRandom, uuid7 } from "#platform/randomness.js";
 
 describe("SeededRandom", () => {
   it("should produce identical sequences when seeded with the same value", () => {

@@ -5,7 +5,7 @@ import { pyRef, shutdownRef } from "../parity/oracle.js";
 import {
   HunkRange,
   PrFilesEnrichmentResultV1,
-} from "../../libs/contracts/src/pr_files_enrichment.v1.js";
+} from "#contracts/pr_files_enrichment.v1.js";
 
 afterAll(() => shutdownRef());
 

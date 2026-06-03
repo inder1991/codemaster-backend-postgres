@@ -10,7 +10,7 @@ import {
   Stage3Trace,
   Stage3TrackTrace,
   TokenAccounting,
-} from "../../libs/contracts/src/retrieval_trace.v1.js";
+} from "#contracts/retrieval_trace.v1.js";
 
 afterAll(() => shutdownRef());
 

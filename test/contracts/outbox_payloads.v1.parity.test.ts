@@ -6,7 +6,7 @@ import {
   BedrockPayloadArchivePayloadV1,
   TemporalWorkflowStartPayloadV1,
   VaultCredentialWritePayloadV1,
-} from "../../libs/contracts/src/outbox_payloads.v1.js";
+} from "#contracts/outbox_payloads.v1.js";
 
 afterAll(() => shutdownRef());
 

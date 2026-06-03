@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { canonicalize } from "../parity/canonical.js";
 import { pyRef, shutdownRef } from "../parity/oracle.js";
-import { CodeOwnerRuleV1 } from "../../libs/contracts/src/code_owner_rule.v1.js";
+import { CodeOwnerRuleV1 } from "#contracts/code_owner_rule.v1.js";
 
 afterAll(() => shutdownRef());
 

@@ -6,7 +6,7 @@ import {
   ConfluencePageApprovalV1,
   CreatePageApprovalRequestV1,
   DefaultApprovalV1,
-} from "../../libs/contracts/src/page_approval.v1.js";
+} from "#contracts/page_approval.v1.js";
 
 afterAll(() => shutdownRef());
 

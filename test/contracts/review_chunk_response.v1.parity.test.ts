@@ -6,7 +6,7 @@ import {
   ORIGINAL_TEXT_MAX_BYTES,
   OutputSafetySanitizationEventV1,
   ReviewChunkResponseV1,
-} from "../../libs/contracts/src/review_chunk_response.v1.js";
+} from "#contracts/review_chunk_response.v1.js";
 
 afterAll(() => shutdownRef());
 

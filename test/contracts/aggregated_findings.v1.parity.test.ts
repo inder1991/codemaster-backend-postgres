@@ -5,7 +5,7 @@ import { pyRef, shutdownRef } from "../parity/oracle.js";
 import {
   AggregatedFindingsV1,
   DedupeStatsV1,
-} from "../../libs/contracts/src/aggregated_findings.v1.js";
+} from "#contracts/aggregated_findings.v1.js";
 
 afterAll(() => shutdownRef());
 

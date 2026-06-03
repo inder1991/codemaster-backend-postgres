@@ -8,7 +8,7 @@ import {
   FinalizedInputV1,
   LIFECYCLE_RFIDS_MAX_LENGTH,
   SkippedInputV1,
-} from "../../libs/contracts/src/finding_lifecycle_inputs.v1.js";
+} from "#contracts/finding_lifecycle_inputs.v1.js";
 
 afterAll(() => shutdownRef());
 

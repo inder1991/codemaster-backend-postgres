@@ -6,7 +6,6 @@ CREATE EXTENSION IF NOT EXISTS pg_partman WITH SCHEMA partman;
 -- PostgreSQL database dump
 --
 
-\restrict 9RL9wsHgS6IRzN52NEdGcFCYhswDc5t8tunEGlhJ7y0qWiOdYFkaDFipdmWsmB9
 
 -- Dumped from database version 16.14 (Debian 16.14-1.pgdg12+1)
 -- Dumped by pg_dump version 18.3 (Homebrew)
@@ -7610,5 +7609,4 @@ ALTER TABLE telemetry.llm_calls
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 9RL9wsHgS6IRzN52NEdGcFCYhswDc5t8tunEGlhJ7y0qWiOdYFkaDFipdmWsmB9
 

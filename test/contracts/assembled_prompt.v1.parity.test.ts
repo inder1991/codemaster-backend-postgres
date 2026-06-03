@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { canonicalize } from "../parity/canonical.js";
 import { pyRef, shutdownRef } from "../parity/oracle.js";
-import { AssembledPromptV1 } from "../../libs/contracts/src/assembled_prompt.v1.js";
+import { AssembledPromptV1 } from "#contracts/assembled_prompt.v1.js";
 
 afterAll(() => shutdownRef());
 

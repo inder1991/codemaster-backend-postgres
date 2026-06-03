@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { canonicalize } from "../parity/canonical.js";
 import { pyRef, shutdownRef } from "../parity/oracle.js";
-import { PRTopologyEntryV1 } from "../../libs/contracts/src/pr_topology.v1.js";
+import { PRTopologyEntryV1 } from "#contracts/pr_topology.v1.js";
 
 afterAll(() => shutdownRef());
 

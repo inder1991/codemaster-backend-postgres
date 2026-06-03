@@ -13,7 +13,7 @@ import {
   Stage3TraceV2,
   Stage3TrackTraceV2,
   TokenAccounting,
-} from "../../libs/contracts/src/persist_retrieval_trace.v1.js";
+} from "#contracts/persist_retrieval_trace.v1.js";
 
 afterAll(() => shutdownRef());
 

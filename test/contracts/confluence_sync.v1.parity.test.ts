@@ -23,7 +23,7 @@ import {
   SanitizePageOutputV1,
   UpsertChunksInputV1,
   UpsertChunksOutputV1,
-} from "../../libs/contracts/src/confluence_sync.v1.js";
+} from "#contracts/confluence_sync.v1.js";
 
 afterAll(() => shutdownRef());
 

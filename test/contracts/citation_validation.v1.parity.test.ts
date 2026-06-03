@@ -5,7 +5,7 @@ import { pyRef, shutdownRef } from "../parity/oracle.js";
 import {
   CitationValidationResultV1,
   DroppedFindingV1,
-} from "../../libs/contracts/src/citation_validation.v1.js";
+} from "#contracts/citation_validation.v1.js";
 
 afterAll(() => shutdownRef());
 

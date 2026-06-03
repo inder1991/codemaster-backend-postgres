@@ -8,7 +8,7 @@ import {
   MAX_DOC_BYTES,
   RefreshRepoDocsResultV1,
   RepoDocV1,
-} from "../../libs/contracts/src/repo_docs.v1.js";
+} from "#contracts/repo_docs.v1.js";
 
 afterAll(() => shutdownRef());
 

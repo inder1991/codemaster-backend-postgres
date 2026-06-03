@@ -7,7 +7,7 @@ import {
   KnowledgeQueryV1,
   RetrievedKnowledgeV1,
   ScoredKnowledgeChunkV1,
-} from "../../libs/contracts/src/knowledge_chunks.v1.js";
+} from "#contracts/knowledge_chunks.v1.js";
 
 afterAll(() => shutdownRef());
 

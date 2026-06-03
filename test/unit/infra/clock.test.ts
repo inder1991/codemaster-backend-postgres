@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { WallClock, FakeClock } from "../../../libs/platform/src/clock.js";
+import { WallClock, FakeClock } from "#platform/clock.js";
 
 describe("WallClock", () => {
   it("should return a Date close to real now when now() is called", () => {

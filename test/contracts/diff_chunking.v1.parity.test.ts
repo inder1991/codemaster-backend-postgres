@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { canonicalize } from "../parity/canonical.js";
 import { pyRef, shutdownRef } from "../parity/oracle.js";
-import { computeChunkId, DiffChunkV1 } from "../../libs/contracts/src/diff_chunking.v1.js";
+import { computeChunkId, DiffChunkV1 } from "#contracts/diff_chunking.v1.js";
 
 afterAll(() => shutdownRef());
 

@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { canonicalize } from "../parity/canonical.js";
 import { pyRef, shutdownRef } from "../parity/oracle.js";
-import { ArbitrationIntentV1 } from "../../libs/contracts/src/arbitration_intent.v1.js";
+import { ArbitrationIntentV1 } from "#contracts/arbitration_intent.v1.js";
 
 afterAll(() => shutdownRef());
 

@@ -5,7 +5,7 @@ import { pyRef, shutdownRef } from "../parity/oracle.js";
 import {
   RetrieveKnowledgeInputV1,
   RetrieveKnowledgeResultV1,
-} from "../../libs/contracts/src/retrieve_knowledge.v1.js";
+} from "#contracts/retrieve_knowledge.v1.js";
 
 afterAll(() => shutdownRef());
 
