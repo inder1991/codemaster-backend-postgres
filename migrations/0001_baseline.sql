@@ -1,0 +1,7614 @@
+-- Extensions (pg_dump omitted; required by the schema). Prepended for the squash baseline.
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
+CREATE SCHEMA IF NOT EXISTS partman;
+CREATE EXTENSION IF NOT EXISTS pg_partman WITH SCHEMA partman;
+--
+-- PostgreSQL database dump
+--
+
+\restrict 9RL9wsHgS6IRzN52NEdGcFCYhswDc5t8tunEGlhJ7y0qWiOdYFkaDFipdmWsmB9
+
+-- Dumped from database version 16.14 (Debian 16.14-1.pgdg12+1)
+-- Dumped by pg_dump version 18.3 (Homebrew)
+
+
+--
+-- Name: audit; Type: SCHEMA; Schema: -; Owner: -
+--
+
+CREATE SCHEMA audit;
+
+
+--
+-- Name: cache; Type: SCHEMA; Schema: -; Owner: -
+--
+
+CREATE SCHEMA cache;
+
+
+--
+-- Name: core; Type: SCHEMA; Schema: -; Owner: -
+--
+
+CREATE SCHEMA core;
+
+
+--
+-- Name: telemetry; Type: SCHEMA; Schema: -; Owner: -
+--
+
+CREATE SCHEMA telemetry;
+
+
+--
+-- Name: delivery_eligibility; Type: TYPE; Schema: core; Owner: -
+--
+
+CREATE TYPE core.delivery_eligibility AS ENUM (
+    'eligible',
+    'skipped'
+);
+
+
+--
+-- Name: delivery_outcome; Type: TYPE; Schema: core; Owner: -
+--
+
+CREATE TYPE core.delivery_outcome AS ENUM (
+    'inline_delivered',
+    'body_only_fallback',
+    'failed',
+    'not_applicable'
+);
+
+
+--
+-- Name: finding_eligibility_reason; Type: TYPE; Schema: core; Owner: -
+--
+
+CREATE TYPE core.finding_eligibility_reason AS ENUM (
+    'file_not_in_diff',
+    'line_after_last_hunk',
+    'line_before_first_hunk',
+    'line_spans_hunks',
+    'line_in_unchanged_gap'
+);
+
+
+--
+-- Name: knowledge_doc_kind; Type: TYPE; Schema: core; Owner: -
+--
+
+CREATE TYPE core.knowledge_doc_kind AS ENUM (
+    'adr',
+    'rfc',
+    'architecture',
+    'runbook',
+    'other'
+);
+
+
+--
+-- Name: knowledge_doc_status; Type: TYPE; Schema: core; Owner: -
+--
+
+CREATE TYPE core.knowledge_doc_status AS ENUM (
+    'active',
+    'deprecated',
+    'superseded',
+    'draft'
+);
+
+
+--
+-- Name: suppression_state; Type: TYPE; Schema: core; Owner: -
+--
+
+CREATE TYPE core.suppression_state AS ENUM (
+    'NONE',
+    'SUPPRESSED_BY_LLM',
+    'SUPPRESSED_BY_POLICY',
+    'SUPPRESSED_BY_DUPLICATE_MERGE'
+);
+
+
+--
+-- Name: workspace_lease_state; Type: TYPE; Schema: core; Owner: -
+--
+
+CREATE TYPE core.workspace_lease_state AS ENUM (
+    'ALLOCATED',
+    'RELEASE_REQUESTED',
+    'RELEASED',
+    'ORPHANED',
+    'FAILED_CLEANUP'
+);
+
+
+--
+-- Name: _validate_canonical_labels(text[]); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core._validate_canonical_labels(labels text[]) RETURNS boolean
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $_$
+            SELECT NOT EXISTS (
+                SELECT 1 FROM unnest(labels) AS l
+                WHERE l !~ '^(default|(lang|framework|infra|topic|org|version|unrecognized):[a-z][a-z0-9_-]*)$'
+            );
+        $_$;
+
+
+--
+-- Name: notify_flags_updated(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.notify_flags_updated() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+        BEGIN
+            PERFORM pg_notify('codemaster_flags_updated', NEW.flag_name);
+            RETURN NEW;
+        END;
+        $$;
+
+
+
+--
+-- Name: audit_events; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.audit_events (
+    audit_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    actor_kind text NOT NULL,
+    actor_id uuid,
+    action text NOT NULL,
+    target_kind text NOT NULL,
+    target_id text,
+    before bytea,
+    after bytea,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT audit_events_actor_kind_valid CHECK ((actor_kind = ANY (ARRAY['user'::text, 'system'::text, 'bot'::text])))
+)
+PARTITION BY RANGE (created_at);
+
+
+
+--
+-- Name: audit_events_default; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.audit_events_default (
+    audit_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    actor_kind text NOT NULL,
+    actor_id uuid,
+    action text NOT NULL,
+    target_kind text NOT NULL,
+    target_id text,
+    before bytea,
+    after bytea,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT audit_events_actor_kind_valid CHECK ((actor_kind = ANY (ARRAY['user'::text, 'system'::text, 'bot'::text])))
+);
+
+
+--
+-- Name: audit_events_p20260201; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.audit_events_p20260201 (
+    audit_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    actor_kind text NOT NULL,
+    actor_id uuid,
+    action text NOT NULL,
+    target_kind text NOT NULL,
+    target_id text,
+    before bytea,
+    after bytea,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT audit_events_actor_kind_valid CHECK ((actor_kind = ANY (ARRAY['user'::text, 'system'::text, 'bot'::text])))
+);
+
+
+--
+-- Name: audit_events_p20260301; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.audit_events_p20260301 (
+    audit_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    actor_kind text NOT NULL,
+    actor_id uuid,
+    action text NOT NULL,
+    target_kind text NOT NULL,
+    target_id text,
+    before bytea,
+    after bytea,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT audit_events_actor_kind_valid CHECK ((actor_kind = ANY (ARRAY['user'::text, 'system'::text, 'bot'::text])))
+);
+
+
+--
+-- Name: audit_events_p20260401; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.audit_events_p20260401 (
+    audit_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    actor_kind text NOT NULL,
+    actor_id uuid,
+    action text NOT NULL,
+    target_kind text NOT NULL,
+    target_id text,
+    before bytea,
+    after bytea,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT audit_events_actor_kind_valid CHECK ((actor_kind = ANY (ARRAY['user'::text, 'system'::text, 'bot'::text])))
+);
+
+
+--
+-- Name: audit_events_p20260501; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.audit_events_p20260501 (
+    audit_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    actor_kind text NOT NULL,
+    actor_id uuid,
+    action text NOT NULL,
+    target_kind text NOT NULL,
+    target_id text,
+    before bytea,
+    after bytea,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT audit_events_actor_kind_valid CHECK ((actor_kind = ANY (ARRAY['user'::text, 'system'::text, 'bot'::text])))
+);
+
+
+--
+-- Name: audit_events_p20260601; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.audit_events_p20260601 (
+    audit_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    actor_kind text NOT NULL,
+    actor_id uuid,
+    action text NOT NULL,
+    target_kind text NOT NULL,
+    target_id text,
+    before bytea,
+    after bytea,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT audit_events_actor_kind_valid CHECK ((actor_kind = ANY (ARRAY['user'::text, 'system'::text, 'bot'::text])))
+);
+
+
+--
+-- Name: audit_events_p20260701; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.audit_events_p20260701 (
+    audit_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    actor_kind text NOT NULL,
+    actor_id uuid,
+    action text NOT NULL,
+    target_kind text NOT NULL,
+    target_id text,
+    before bytea,
+    after bytea,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT audit_events_actor_kind_valid CHECK ((actor_kind = ANY (ARRAY['user'::text, 'system'::text, 'bot'::text])))
+);
+
+
+--
+-- Name: audit_events_p20260801; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.audit_events_p20260801 (
+    audit_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    actor_kind text NOT NULL,
+    actor_id uuid,
+    action text NOT NULL,
+    target_kind text NOT NULL,
+    target_id text,
+    before bytea,
+    after bytea,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT audit_events_actor_kind_valid CHECK ((actor_kind = ANY (ARRAY['user'::text, 'system'::text, 'bot'::text])))
+);
+
+
+--
+-- Name: audit_events_p20260901; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.audit_events_p20260901 (
+    audit_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    actor_kind text NOT NULL,
+    actor_id uuid,
+    action text NOT NULL,
+    target_kind text NOT NULL,
+    target_id text,
+    before bytea,
+    after bytea,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT audit_events_actor_kind_valid CHECK ((actor_kind = ANY (ARRAY['user'::text, 'system'::text, 'bot'::text])))
+);
+
+
+--
+-- Name: audit_events_p20261001; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.audit_events_p20261001 (
+    audit_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    actor_kind text NOT NULL,
+    actor_id uuid,
+    action text NOT NULL,
+    target_kind text NOT NULL,
+    target_id text,
+    before bytea,
+    after bytea,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT audit_events_actor_kind_valid CHECK ((actor_kind = ANY (ARRAY['user'::text, 'system'::text, 'bot'::text])))
+);
+
+
+--
+-- Name: webhook_events; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.webhook_events (
+    webhook_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid,
+    delivery_id text NOT NULL,
+    event_type text NOT NULL,
+    received_at timestamp with time zone DEFAULT now() NOT NULL,
+    signature_valid boolean NOT NULL,
+    raw_body bytea NOT NULL,
+    run_id uuid
+)
+PARTITION BY RANGE (received_at);
+
+
+--
+-- Name: webhook_events_default; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.webhook_events_default (
+    webhook_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid,
+    delivery_id text NOT NULL,
+    event_type text NOT NULL,
+    received_at timestamp with time zone DEFAULT now() NOT NULL,
+    signature_valid boolean NOT NULL,
+    raw_body bytea NOT NULL,
+    run_id uuid
+);
+
+
+--
+-- Name: webhook_events_p20260520; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.webhook_events_p20260520 (
+    webhook_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid,
+    delivery_id text NOT NULL,
+    event_type text NOT NULL,
+    received_at timestamp with time zone DEFAULT now() NOT NULL,
+    signature_valid boolean NOT NULL,
+    raw_body bytea NOT NULL,
+    run_id uuid
+);
+
+
+--
+-- Name: webhook_events_p20260527; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.webhook_events_p20260527 (
+    webhook_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid,
+    delivery_id text NOT NULL,
+    event_type text NOT NULL,
+    received_at timestamp with time zone DEFAULT now() NOT NULL,
+    signature_valid boolean NOT NULL,
+    raw_body bytea NOT NULL,
+    run_id uuid
+);
+
+
+--
+-- Name: webhook_events_p20260603; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.webhook_events_p20260603 (
+    webhook_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid,
+    delivery_id text NOT NULL,
+    event_type text NOT NULL,
+    received_at timestamp with time zone DEFAULT now() NOT NULL,
+    signature_valid boolean NOT NULL,
+    raw_body bytea NOT NULL,
+    run_id uuid
+);
+
+
+--
+-- Name: webhook_events_p20260610; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.webhook_events_p20260610 (
+    webhook_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid,
+    delivery_id text NOT NULL,
+    event_type text NOT NULL,
+    received_at timestamp with time zone DEFAULT now() NOT NULL,
+    signature_valid boolean NOT NULL,
+    raw_body bytea NOT NULL,
+    run_id uuid
+);
+
+
+--
+-- Name: webhook_events_p20260617; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.webhook_events_p20260617 (
+    webhook_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid,
+    delivery_id text NOT NULL,
+    event_type text NOT NULL,
+    received_at timestamp with time zone DEFAULT now() NOT NULL,
+    signature_valid boolean NOT NULL,
+    raw_body bytea NOT NULL,
+    run_id uuid
+);
+
+
+--
+-- Name: workflow_events; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.workflow_events (
+    event_id uuid NOT NULL,
+    provider text NOT NULL,
+    delivery_id text,
+    run_id uuid NOT NULL,
+    review_id uuid NOT NULL,
+    sequence_no integer NOT NULL,
+    event_type text NOT NULL,
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    received_at timestamp with time zone DEFAULT now() NOT NULL,
+    installation_id uuid,
+    CONSTRAINT ck_workflow_events_event_type CHECK ((event_type = ANY (ARRAY['WEBHOOK_RECEIVED'::text, 'PR_OPENED'::text, 'PR_SYNCHRONIZE'::text, 'INGESTED'::text, 'ANALYSIS_STARTED'::text, 'ANALYZED'::text, 'FINDINGS_PERSISTED'::text, 'COMMENT_POSTED'::text, 'RETRY_STARTED'::text, 'lifecycle_transition'::text, 'RUN_SUPERSEDED'::text, 'RUN_CANCELLED'::text, 'RUN_DRAIN_COMPLETED'::text, 'STALE_WRITE_BLOCKED'::text, 'WORKSPACE_ALLOCATED'::text, 'WORKSPACE_RELEASE_REQUESTED'::text, 'WORKSPACE_RELEASED'::text, 'WORKSPACE_ORPHANED'::text, 'WORKSPACE_CLEANUP_FAILED'::text, 'REVIEW_PLACEHOLDER_POSTED'::text, 'REVIEW_PLACEHOLDER_DELETED'::text]))),
+    CONSTRAINT ck_workflow_events_sequence_no_positive CHECK ((sequence_no >= 1))
+)
+PARTITION BY RANGE (received_at);
+
+
+--
+-- Name: workflow_events_default; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.workflow_events_default (
+    event_id uuid NOT NULL,
+    provider text NOT NULL,
+    delivery_id text,
+    run_id uuid NOT NULL,
+    review_id uuid NOT NULL,
+    sequence_no integer NOT NULL,
+    event_type text NOT NULL,
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    received_at timestamp with time zone DEFAULT now() NOT NULL,
+    installation_id uuid,
+    CONSTRAINT ck_workflow_events_event_type CHECK ((event_type = ANY (ARRAY['WEBHOOK_RECEIVED'::text, 'PR_OPENED'::text, 'PR_SYNCHRONIZE'::text, 'INGESTED'::text, 'ANALYSIS_STARTED'::text, 'ANALYZED'::text, 'FINDINGS_PERSISTED'::text, 'COMMENT_POSTED'::text, 'RETRY_STARTED'::text, 'lifecycle_transition'::text, 'RUN_SUPERSEDED'::text, 'RUN_CANCELLED'::text, 'RUN_DRAIN_COMPLETED'::text, 'STALE_WRITE_BLOCKED'::text, 'WORKSPACE_ALLOCATED'::text, 'WORKSPACE_RELEASE_REQUESTED'::text, 'WORKSPACE_RELEASED'::text, 'WORKSPACE_ORPHANED'::text, 'WORKSPACE_CLEANUP_FAILED'::text, 'REVIEW_PLACEHOLDER_POSTED'::text, 'REVIEW_PLACEHOLDER_DELETED'::text]))),
+    CONSTRAINT ck_workflow_events_sequence_no_positive CHECK ((sequence_no >= 1))
+);
+
+
+--
+-- Name: workflow_events_p20260401; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.workflow_events_p20260401 (
+    event_id uuid NOT NULL,
+    provider text NOT NULL,
+    delivery_id text,
+    run_id uuid NOT NULL,
+    review_id uuid NOT NULL,
+    sequence_no integer NOT NULL,
+    event_type text NOT NULL,
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    received_at timestamp with time zone DEFAULT now() NOT NULL,
+    installation_id uuid,
+    CONSTRAINT ck_workflow_events_event_type CHECK ((event_type = ANY (ARRAY['WEBHOOK_RECEIVED'::text, 'PR_OPENED'::text, 'PR_SYNCHRONIZE'::text, 'INGESTED'::text, 'ANALYSIS_STARTED'::text, 'ANALYZED'::text, 'FINDINGS_PERSISTED'::text, 'COMMENT_POSTED'::text, 'RETRY_STARTED'::text, 'lifecycle_transition'::text, 'RUN_SUPERSEDED'::text, 'RUN_CANCELLED'::text, 'RUN_DRAIN_COMPLETED'::text, 'STALE_WRITE_BLOCKED'::text, 'WORKSPACE_ALLOCATED'::text, 'WORKSPACE_RELEASE_REQUESTED'::text, 'WORKSPACE_RELEASED'::text, 'WORKSPACE_ORPHANED'::text, 'WORKSPACE_CLEANUP_FAILED'::text, 'REVIEW_PLACEHOLDER_POSTED'::text, 'REVIEW_PLACEHOLDER_DELETED'::text]))),
+    CONSTRAINT ck_workflow_events_sequence_no_positive CHECK ((sequence_no >= 1))
+);
+
+
+--
+-- Name: workflow_events_p20260501; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.workflow_events_p20260501 (
+    event_id uuid NOT NULL,
+    provider text NOT NULL,
+    delivery_id text,
+    run_id uuid NOT NULL,
+    review_id uuid NOT NULL,
+    sequence_no integer NOT NULL,
+    event_type text NOT NULL,
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    received_at timestamp with time zone DEFAULT now() NOT NULL,
+    installation_id uuid,
+    CONSTRAINT ck_workflow_events_event_type CHECK ((event_type = ANY (ARRAY['WEBHOOK_RECEIVED'::text, 'PR_OPENED'::text, 'PR_SYNCHRONIZE'::text, 'INGESTED'::text, 'ANALYSIS_STARTED'::text, 'ANALYZED'::text, 'FINDINGS_PERSISTED'::text, 'COMMENT_POSTED'::text, 'RETRY_STARTED'::text, 'lifecycle_transition'::text, 'RUN_SUPERSEDED'::text, 'RUN_CANCELLED'::text, 'RUN_DRAIN_COMPLETED'::text, 'STALE_WRITE_BLOCKED'::text, 'WORKSPACE_ALLOCATED'::text, 'WORKSPACE_RELEASE_REQUESTED'::text, 'WORKSPACE_RELEASED'::text, 'WORKSPACE_ORPHANED'::text, 'WORKSPACE_CLEANUP_FAILED'::text, 'REVIEW_PLACEHOLDER_POSTED'::text, 'REVIEW_PLACEHOLDER_DELETED'::text]))),
+    CONSTRAINT ck_workflow_events_sequence_no_positive CHECK ((sequence_no >= 1))
+);
+
+
+--
+-- Name: workflow_events_p20260601; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.workflow_events_p20260601 (
+    event_id uuid NOT NULL,
+    provider text NOT NULL,
+    delivery_id text,
+    run_id uuid NOT NULL,
+    review_id uuid NOT NULL,
+    sequence_no integer NOT NULL,
+    event_type text NOT NULL,
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    received_at timestamp with time zone DEFAULT now() NOT NULL,
+    installation_id uuid,
+    CONSTRAINT ck_workflow_events_event_type CHECK ((event_type = ANY (ARRAY['WEBHOOK_RECEIVED'::text, 'PR_OPENED'::text, 'PR_SYNCHRONIZE'::text, 'INGESTED'::text, 'ANALYSIS_STARTED'::text, 'ANALYZED'::text, 'FINDINGS_PERSISTED'::text, 'COMMENT_POSTED'::text, 'RETRY_STARTED'::text, 'lifecycle_transition'::text, 'RUN_SUPERSEDED'::text, 'RUN_CANCELLED'::text, 'RUN_DRAIN_COMPLETED'::text, 'STALE_WRITE_BLOCKED'::text, 'WORKSPACE_ALLOCATED'::text, 'WORKSPACE_RELEASE_REQUESTED'::text, 'WORKSPACE_RELEASED'::text, 'WORKSPACE_ORPHANED'::text, 'WORKSPACE_CLEANUP_FAILED'::text, 'REVIEW_PLACEHOLDER_POSTED'::text, 'REVIEW_PLACEHOLDER_DELETED'::text]))),
+    CONSTRAINT ck_workflow_events_sequence_no_positive CHECK ((sequence_no >= 1))
+);
+
+
+--
+-- Name: workflow_events_p20260701; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.workflow_events_p20260701 (
+    event_id uuid NOT NULL,
+    provider text NOT NULL,
+    delivery_id text,
+    run_id uuid NOT NULL,
+    review_id uuid NOT NULL,
+    sequence_no integer NOT NULL,
+    event_type text NOT NULL,
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    received_at timestamp with time zone DEFAULT now() NOT NULL,
+    installation_id uuid,
+    CONSTRAINT ck_workflow_events_event_type CHECK ((event_type = ANY (ARRAY['WEBHOOK_RECEIVED'::text, 'PR_OPENED'::text, 'PR_SYNCHRONIZE'::text, 'INGESTED'::text, 'ANALYSIS_STARTED'::text, 'ANALYZED'::text, 'FINDINGS_PERSISTED'::text, 'COMMENT_POSTED'::text, 'RETRY_STARTED'::text, 'lifecycle_transition'::text, 'RUN_SUPERSEDED'::text, 'RUN_CANCELLED'::text, 'RUN_DRAIN_COMPLETED'::text, 'STALE_WRITE_BLOCKED'::text, 'WORKSPACE_ALLOCATED'::text, 'WORKSPACE_RELEASE_REQUESTED'::text, 'WORKSPACE_RELEASED'::text, 'WORKSPACE_ORPHANED'::text, 'WORKSPACE_CLEANUP_FAILED'::text, 'REVIEW_PLACEHOLDER_POSTED'::text, 'REVIEW_PLACEHOLDER_DELETED'::text]))),
+    CONSTRAINT ck_workflow_events_sequence_no_positive CHECK ((sequence_no >= 1))
+);
+
+
+--
+-- Name: workflow_events_p20260801; Type: TABLE; Schema: audit; Owner: -
+--
+
+CREATE TABLE audit.workflow_events_p20260801 (
+    event_id uuid NOT NULL,
+    provider text NOT NULL,
+    delivery_id text,
+    run_id uuid NOT NULL,
+    review_id uuid NOT NULL,
+    sequence_no integer NOT NULL,
+    event_type text NOT NULL,
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    received_at timestamp with time zone DEFAULT now() NOT NULL,
+    installation_id uuid,
+    CONSTRAINT ck_workflow_events_event_type CHECK ((event_type = ANY (ARRAY['WEBHOOK_RECEIVED'::text, 'PR_OPENED'::text, 'PR_SYNCHRONIZE'::text, 'INGESTED'::text, 'ANALYSIS_STARTED'::text, 'ANALYZED'::text, 'FINDINGS_PERSISTED'::text, 'COMMENT_POSTED'::text, 'RETRY_STARTED'::text, 'lifecycle_transition'::text, 'RUN_SUPERSEDED'::text, 'RUN_CANCELLED'::text, 'RUN_DRAIN_COMPLETED'::text, 'STALE_WRITE_BLOCKED'::text, 'WORKSPACE_ALLOCATED'::text, 'WORKSPACE_RELEASE_REQUESTED'::text, 'WORKSPACE_RELEASED'::text, 'WORKSPACE_ORPHANED'::text, 'WORKSPACE_CLEANUP_FAILED'::text, 'REVIEW_PLACEHOLDER_POSTED'::text, 'REVIEW_PLACEHOLDER_DELETED'::text]))),
+    CONSTRAINT ck_workflow_events_sequence_no_positive CHECK ((sequence_no >= 1))
+);
+
+
+--
+-- Name: cache_app_jwt; Type: TABLE; Schema: cache; Owner: -
+--
+
+CREATE TABLE cache.cache_app_jwt (
+    cache_app_jwt_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    app_id text NOT NULL,
+    jwt_ciphertext text NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: cache_embeddings; Type: TABLE; Schema: cache; Owner: -
+--
+
+CREATE TABLE cache.cache_embeddings (
+    cache_embedding_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    content_sha256 text NOT NULL,
+    embedding_version text NOT NULL,
+    embedding public.vector(1024) NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL
+);
+
+
+--
+-- Name: cache_idempotency; Type: TABLE; Schema: cache; Owner: -
+--
+
+CREATE TABLE cache.cache_idempotency (
+    cache_key text NOT NULL,
+    value bytea NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: cache_rate_limits; Type: TABLE; Schema: cache; Owner: -
+--
+
+CREATE TABLE cache.cache_rate_limits (
+    cache_rate_limit_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid,
+    resource text NOT NULL,
+    "limit" integer NOT NULL,
+    remaining integer NOT NULL,
+    reset_at timestamp with time zone NOT NULL,
+    recorded_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: cache_tokens; Type: TABLE; Schema: cache; Owner: -
+--
+
+CREATE TABLE cache.cache_tokens (
+    cache_token_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    token_ciphertext text NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: repository_repair_state; Type: TABLE; Schema: cache; Owner: -
+--
+
+CREATE TABLE cache.repository_repair_state (
+    github_installation_id bigint NOT NULL,
+    last_attempt_at timestamp with time zone NOT NULL,
+    blocked_reason text,
+    blocked_at timestamp with time zone,
+    CONSTRAINT blocked_reason_vocabulary CHECK (((blocked_reason IS NULL) OR (blocked_reason = ANY (ARRAY['installation_not_found'::text, 'installation_suspended'::text, 'app_unauthorized'::text, 'app_uninstalled'::text])))),
+    CONSTRAINT blocked_state_biconditional CHECK ((((blocked_reason IS NULL) AND (blocked_at IS NULL)) OR ((blocked_reason IS NOT NULL) AND (blocked_at IS NOT NULL))))
+);
+
+
+--
+-- Name: TABLE repository_repair_state; Type: COMMENT; Schema: cache; Owner: -
+--
+
+COMMENT ON TABLE cache.repository_repair_state IS 'F-5b (bootstrap-state-coverage plan v5): per-installation TTL + block state for RepairInstallationRepositoriesWorkflow. Producer skips enqueue if last_attempt_at within REPAIR_COOLDOWN_INTERVAL OR blocked_at IS NOT NULL. Activity DELETEs row on success.';
+
+
+--
+-- Name: ad_users; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.ad_users (
+    ad_user_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    principal_name text NOT NULL,
+    display_name text,
+    last_synced_at timestamp with time zone
+);
+
+
+--
+-- Name: api_tokens; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.api_tokens (
+    api_token_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    user_id uuid NOT NULL,
+    installation_id uuid NOT NULL,
+    token_hash text NOT NULL,
+    scopes jsonb DEFAULT '[]'::jsonb NOT NULL,
+    expires_at timestamp with time zone,
+    revoked_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: arbitration_rejections; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.arbitration_rejections (
+    rejection_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    run_id uuid NOT NULL,
+    review_id uuid NOT NULL,
+    target_finding_id uuid NOT NULL,
+    reason_rejected text NOT NULL,
+    intent_confidence numeric(4,3),
+    intent_reason text,
+    suppression_model text,
+    suppression_prompt_version text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_arbitration_rejections_confidence CHECK (((intent_confidence IS NULL) OR ((intent_confidence >= 0.0) AND (intent_confidence <= 1.0)))),
+    CONSTRAINT ck_arbitration_rejections_reason CHECK ((reason_rejected = ANY (ARRAY['policy_forbids'::text, 'below_min_confidence'::text, 'target_not_found'::text, 'duplicate_intent_loser'::text])))
+);
+
+
+--
+-- Name: bedrock_settings; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.bedrock_settings (
+    scope text NOT NULL,
+    model_id text NOT NULL,
+    region text NOT NULL,
+    api_key_ciphertext text NOT NULL,
+    api_key_fingerprint text NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    last_validated_at timestamp with time zone,
+    last_validation_status text,
+    last_rotated_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_rotated_by_user_id uuid NOT NULL,
+    CONSTRAINT bedrock_settings_fingerprint_4_chars CHECK ((length(api_key_fingerprint) = 4)),
+    CONSTRAINT bedrock_settings_model_id_shape CHECK ((model_id ~ '^(anthropic\.|claude-)'::text)),
+    CONSTRAINT bedrock_settings_scope_global CHECK ((scope = 'global'::text)),
+    CONSTRAINT bedrock_settings_validation_status CHECK (((last_validation_status IS NULL) OR (last_validation_status = ANY (ARRAY['ok'::text, 'failed'::text]))))
+);
+
+
+--
+-- Name: chunk_embeddings; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.chunk_embeddings (
+    chunk_table text NOT NULL,
+    chunk_id uuid NOT NULL,
+    generation_id bigint NOT NULL,
+    embedding_model_name text NOT NULL,
+    embedding public.vector(1024) NOT NULL,
+    content_sha256 text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT chunk_embeddings_chunk_table_valid CHECK ((chunk_table = ANY (ARRAY['confluence_chunks'::text, 'knowledge_chunks'::text])))
+);
+
+
+--
+-- Name: code_owners; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.code_owners (
+    code_owner_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    repository_id uuid NOT NULL,
+    path_pattern character varying(1024) NOT NULL,
+    owner_logins text[] NOT NULL,
+    source_file_sha character(40) NOT NULL,
+    synced_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_code_owners_owner_logins_non_empty CHECK ((cardinality(owner_logins) >= 1)),
+    CONSTRAINT ck_code_owners_path_pattern_non_empty CHECK ((length((path_pattern)::text) >= 1))
+);
+
+
+--
+-- Name: config_revisions; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.config_revisions (
+    config_revision_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    parent_kind text NOT NULL,
+    parent_id uuid NOT NULL,
+    revision_number integer NOT NULL,
+    content jsonb DEFAULT '{}'::jsonb NOT NULL,
+    author_user_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_config_revisions_config_revisions_parent_kind_valid CHECK ((parent_kind = ANY (ARRAY['global'::text, 'org'::text, 'repo'::text])))
+);
+
+
+--
+-- Name: confluence_chunks; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.confluence_chunks (
+    chunk_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    space_key text NOT NULL,
+    page_id text NOT NULL,
+    page_title text NOT NULL,
+    version integer NOT NULL,
+    chunk_index integer NOT NULL,
+    chunk_text text NOT NULL,
+    redaction_applied boolean DEFAULT false NOT NULL,
+    embedding public.vector(1024),
+    ingested_at timestamp with time zone DEFAULT now() NOT NULL,
+    superseded_at timestamp with time zone,
+    token_count integer DEFAULT 0 NOT NULL,
+    labels text[] DEFAULT '{}'::text[] NOT NULL,
+    quarantined boolean DEFAULT false NOT NULL,
+    quarantine_reasons text[] DEFAULT '{}'::text[] NOT NULL,
+    page_status text DEFAULT 'active'::text NOT NULL,
+    last_modified_at timestamp with time zone DEFAULT now() NOT NULL,
+    stale_at timestamp with time zone,
+    default_approval jsonb,
+    deleted_at timestamp with time zone,
+    content_sha256 text NOT NULL,
+    CONSTRAINT confluence_chunks_chunk_index_check CHECK ((chunk_index >= 0)),
+    CONSTRAINT confluence_chunks_version_check CHECK ((version >= 1))
+);
+
+
+--
+-- Name: confluence_page_approvals; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.confluence_page_approvals (
+    approval_id uuid NOT NULL,
+    space_key text NOT NULL,
+    page_id text NOT NULL,
+    approver_email text NOT NULL,
+    approved_at_utc timestamp with time zone NOT NULL,
+    approval_artifact_url text NOT NULL,
+    scope_justification text NOT NULL,
+    default_scope text NOT NULL,
+    revoked_at timestamp with time zone,
+    revoked_by text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: cost_cap_overrides; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.cost_cap_overrides (
+    installation_id uuid NOT NULL,
+    cap_cents bigint NOT NULL,
+    expires_at timestamp with time zone,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by_user_id uuid,
+    CONSTRAINT cost_cap_overrides_cap_within_ceiling CHECK (((cap_cents >= 0) AND (cap_cents <= 5000000)))
+);
+
+
+--
+-- Name: cost_cap_pending_changes; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.cost_cap_pending_changes (
+    pending_change_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    target_kind text NOT NULL,
+    target_id uuid,
+    new_cap_cents bigint NOT NULL,
+    expires_at timestamp with time zone,
+    requested_at timestamp with time zone DEFAULT now() NOT NULL,
+    requested_by_user_id uuid NOT NULL,
+    approved_at timestamp with time zone,
+    approved_by_user_id uuid,
+    applied_at timestamp with time zone,
+    state text DEFAULT 'pending'::text NOT NULL,
+    CONSTRAINT cost_cap_pending_changes_cap_within_ceiling CHECK (((new_cap_cents >= 0) AND (new_cap_cents <= 5000000))),
+    CONSTRAINT cost_cap_pending_changes_per_org_override_has_target CHECK (((target_kind <> 'per_org_override'::text) OR ((target_kind = 'per_org_override'::text) AND (target_id IS NOT NULL)))),
+    CONSTRAINT cost_cap_pending_changes_state_valid CHECK ((state = ANY (ARRAY['pending'::text, 'approved'::text, 'applied'::text, 'rejected'::text, 'expired'::text]))),
+    CONSTRAINT cost_cap_pending_changes_target_kind_valid CHECK ((target_kind = ANY (ARRAY['global'::text, 'per_org_default'::text, 'per_org_override'::text])))
+);
+
+
+--
+-- Name: cost_cap_settings; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.cost_cap_settings (
+    scope text NOT NULL,
+    cap_cents bigint NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by_user_id uuid,
+    CONSTRAINT cost_cap_settings_cap_within_ceiling CHECK (((cap_cents >= 0) AND (cap_cents <= 5000000))),
+    CONSTRAINT cost_cap_settings_scope_valid CHECK ((scope = ANY (ARRAY['global'::text, 'per_org_default'::text])))
+);
+
+
+--
+-- Name: diff_snapshots; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.diff_snapshots (
+    diff_snapshot_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    repository_id uuid NOT NULL,
+    base_sha text NOT NULL,
+    head_sha text NOT NULL,
+    diff_blob_id uuid NOT NULL,
+    byte_size bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+)
+PARTITION BY RANGE (created_at);
+
+
+--
+-- Name: diff_snapshots_default; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.diff_snapshots_default (
+    diff_snapshot_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    repository_id uuid NOT NULL,
+    base_sha text NOT NULL,
+    head_sha text NOT NULL,
+    diff_blob_id uuid NOT NULL,
+    byte_size bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: diff_snapshots_p20260401; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.diff_snapshots_p20260401 (
+    diff_snapshot_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    repository_id uuid NOT NULL,
+    base_sha text NOT NULL,
+    head_sha text NOT NULL,
+    diff_blob_id uuid NOT NULL,
+    byte_size bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: diff_snapshots_p20260501; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.diff_snapshots_p20260501 (
+    diff_snapshot_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    repository_id uuid NOT NULL,
+    base_sha text NOT NULL,
+    head_sha text NOT NULL,
+    diff_blob_id uuid NOT NULL,
+    byte_size bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: diff_snapshots_p20260601; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.diff_snapshots_p20260601 (
+    diff_snapshot_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    repository_id uuid NOT NULL,
+    base_sha text NOT NULL,
+    head_sha text NOT NULL,
+    diff_blob_id uuid NOT NULL,
+    byte_size bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: diff_snapshots_p20260701; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.diff_snapshots_p20260701 (
+    diff_snapshot_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    repository_id uuid NOT NULL,
+    base_sha text NOT NULL,
+    head_sha text NOT NULL,
+    diff_blob_id uuid NOT NULL,
+    byte_size bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: diff_snapshots_p20260801; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.diff_snapshots_p20260801 (
+    diff_snapshot_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    repository_id uuid NOT NULL,
+    base_sha text NOT NULL,
+    head_sha text NOT NULL,
+    diff_blob_id uuid NOT NULL,
+    byte_size bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: embedder_runtime_state; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.embedder_runtime_state (
+    singleton boolean DEFAULT true NOT NULL,
+    active_generation bigint NOT NULL,
+    active_model_name text NOT NULL,
+    pending_generation bigint,
+    pending_model_name text,
+    config_version bigint DEFAULT 1 NOT NULL,
+    retrieval_mode text DEFAULT 'fallback'::text NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by_email text,
+    CONSTRAINT embedder_runtime_state_only_one_row CHECK ((singleton = true)),
+    CONSTRAINT embedder_runtime_state_pending_pair_biconditional CHECK ((((pending_generation IS NULL) AND (pending_model_name IS NULL)) OR ((pending_generation IS NOT NULL) AND (pending_model_name IS NOT NULL)))),
+    CONSTRAINT embedder_runtime_state_retrieval_mode_valid CHECK ((retrieval_mode = ANY (ARRAY['fallback'::text, 'generation_only'::text])))
+);
+
+
+--
+-- Name: embedding_generations; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.embedding_generations (
+    generation_id bigint NOT NULL,
+    state text NOT NULL,
+    generation_label text,
+    generation_reason text,
+    provider_name text DEFAULT 'qwen'::text NOT NULL,
+    provider_version text,
+    model_name text NOT NULL,
+    embedding_dimension integer NOT NULL,
+    created_from_generation bigint,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by_email text,
+    chunker_version text NOT NULL,
+    preprocessing_version text NOT NULL,
+    normalization_version text NOT NULL,
+    backfill_started_at timestamp with time zone,
+    backfill_completed_at timestamp with time zone,
+    total_chunks integer DEFAULT 0 NOT NULL,
+    chunks_backfilled integer DEFAULT 0 NOT NULL,
+    chunks_failed integer DEFAULT 0 NOT NULL,
+    validation_started_at timestamp with time zone,
+    validation_completed_at timestamp with time zone,
+    validation_report_json jsonb,
+    validation_passed boolean,
+    activated_at timestamp with time zone,
+    retired_at timestamp with time zone,
+    retire_reason text,
+    gc_started_at timestamp with time zone,
+    gc_completed_at timestamp with time zone,
+    last_error text,
+    CONSTRAINT embedding_generations_retire_reason_retired_at_biconditional CHECK ((((retired_at IS NULL) AND (retire_reason IS NULL)) OR ((retired_at IS NOT NULL) AND (retire_reason IS NOT NULL)))),
+    CONSTRAINT embedding_generations_retire_reason_valid CHECK (((retire_reason IS NULL) OR (retire_reason = ANY (ARRAY['cancelled'::text, 'demoted'::text, 'manual_retire'::text])))),
+    CONSTRAINT embedding_generations_state_biconditional CHECK ((((state = 'backfilling'::text) AND (backfill_started_at IS NOT NULL) AND (backfill_completed_at IS NULL) AND (activated_at IS NULL) AND (retired_at IS NULL)) OR ((state = 'ready'::text) AND (backfill_completed_at IS NOT NULL) AND (activated_at IS NULL) AND (retired_at IS NULL)) OR ((state = 'active'::text) AND (activated_at IS NOT NULL) AND (retired_at IS NULL)) OR ((state = 'retired'::text) AND (retired_at IS NOT NULL))))
+);
+
+
+--
+-- Name: embedding_generations_id_seq; Type: SEQUENCE; Schema: core; Owner: -
+--
+
+CREATE SEQUENCE core.embedding_generations_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: embedding_generations_id_seq; Type: SEQUENCE OWNED BY; Schema: core; Owner: -
+--
+
+ALTER SEQUENCE core.embedding_generations_id_seq OWNED BY core.embedding_generations.generation_id;
+
+
+--
+-- Name: feedback_events; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.feedback_events (
+    feedback_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    review_finding_id uuid,
+    kind text NOT NULL,
+    raw_payload bytea,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT feedback_events_kind_valid CHECK ((kind = ANY (ARRAY['thumbs_up'::text, 'thumbs_down'::text, 'comment'::text, 'skip'::text])))
+)
+PARTITION BY RANGE (created_at);
+
+
+--
+-- Name: feedback_events_default; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.feedback_events_default (
+    feedback_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    review_finding_id uuid,
+    kind text NOT NULL,
+    raw_payload bytea,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT feedback_events_kind_valid CHECK ((kind = ANY (ARRAY['thumbs_up'::text, 'thumbs_down'::text, 'comment'::text, 'skip'::text])))
+);
+
+
+--
+-- Name: feedback_events_p20260401; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.feedback_events_p20260401 (
+    feedback_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    review_finding_id uuid,
+    kind text NOT NULL,
+    raw_payload bytea,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT feedback_events_kind_valid CHECK ((kind = ANY (ARRAY['thumbs_up'::text, 'thumbs_down'::text, 'comment'::text, 'skip'::text])))
+);
+
+
+--
+-- Name: feedback_events_p20260501; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.feedback_events_p20260501 (
+    feedback_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    review_finding_id uuid,
+    kind text NOT NULL,
+    raw_payload bytea,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT feedback_events_kind_valid CHECK ((kind = ANY (ARRAY['thumbs_up'::text, 'thumbs_down'::text, 'comment'::text, 'skip'::text])))
+);
+
+
+--
+-- Name: feedback_events_p20260601; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.feedback_events_p20260601 (
+    feedback_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    review_finding_id uuid,
+    kind text NOT NULL,
+    raw_payload bytea,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT feedback_events_kind_valid CHECK ((kind = ANY (ARRAY['thumbs_up'::text, 'thumbs_down'::text, 'comment'::text, 'skip'::text])))
+);
+
+
+--
+-- Name: feedback_events_p20260701; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.feedback_events_p20260701 (
+    feedback_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    review_finding_id uuid,
+    kind text NOT NULL,
+    raw_payload bytea,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT feedback_events_kind_valid CHECK ((kind = ANY (ARRAY['thumbs_up'::text, 'thumbs_down'::text, 'comment'::text, 'skip'::text])))
+);
+
+
+--
+-- Name: feedback_events_p20260801; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.feedback_events_p20260801 (
+    feedback_event_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    review_finding_id uuid,
+    kind text NOT NULL,
+    raw_payload bytea,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT feedback_events_kind_valid CHECK ((kind = ANY (ARRAY['thumbs_up'::text, 'thumbs_down'::text, 'comment'::text, 'skip'::text])))
+);
+
+
+--
+-- Name: fix_prompts; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.fix_prompts (
+    review_id uuid NOT NULL,
+    installation_id uuid NOT NULL,
+    prompt text NOT NULL,
+    generation_mode text NOT NULL,
+    finding_count integer NOT NULL,
+    truncated boolean NOT NULL,
+    generated_at timestamp with time zone NOT NULL,
+    CONSTRAINT ck_fix_prompts_count CHECK ((finding_count >= 0)),
+    CONSTRAINT ck_fix_prompts_mode CHECK ((generation_mode = ANY (ARRAY['llm'::text, 'deterministic_fallback'::text]))),
+    CONSTRAINT ck_fix_prompts_prompt_len CHECK ((length(prompt) <= 60000))
+);
+
+
+--
+-- Name: flag_revisions; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.flag_revisions (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    flag_name text NOT NULL,
+    before jsonb,
+    after jsonb,
+    changed_by_ad_user_id uuid,
+    changed_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: flags; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.flags (
+    flag_name text NOT NULL,
+    description text DEFAULT ''::text NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    rollout jsonb DEFAULT '{}'::jsonb NOT NULL,
+    variants jsonb,
+    scope text DEFAULT 'global'::text NOT NULL,
+    scope_id uuid,
+    expires_at timestamp with time zone,
+    created_by_ad_user_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    value_json text DEFAULT ''::text NOT NULL,
+    last_changed_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_changed_by_user_id uuid,
+    pending_second_approver boolean DEFAULT false NOT NULL,
+    pending_first_approver_user_id uuid,
+    pending_value_json text,
+    pending_set_at timestamp with time zone,
+    CONSTRAINT ck_flags_flags_scope_type_valid CHECK ((scope = ANY (ARRAY['global'::text, 'installation'::text, 'repository'::text]))),
+    CONSTRAINT flags_scope_valid CHECK ((scope = ANY (ARRAY['global'::text, 'installation'::text, 'repository'::text])))
+);
+
+
+--
+-- Name: flags_archive_0090; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.flags_archive_0090 (
+    flag_name text,
+    description text,
+    enabled boolean,
+    rollout jsonb,
+    variants jsonb,
+    scope text,
+    scope_id uuid,
+    expires_at timestamp with time zone,
+    created_by_ad_user_id uuid,
+    created_at timestamp with time zone,
+    updated_at timestamp with time zone,
+    value_json text,
+    last_changed_at timestamp with time zone,
+    last_changed_by_user_id uuid,
+    pending_second_approver boolean,
+    pending_first_approver_user_id uuid,
+    pending_value_json text,
+    pending_set_at timestamp with time zone
+);
+
+
+--
+-- Name: gh_users; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.gh_users (
+    gh_user_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    github_user_id bigint NOT NULL,
+    login character varying(100) NOT NULL,
+    user_type character varying(20) NOT NULL,
+    name text,
+    avatar_url character varying(500),
+    first_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_gh_users_github_user_id_positive CHECK ((github_user_id >= 1)),
+    CONSTRAINT ck_gh_users_user_type CHECK (((user_type)::text = ANY ((ARRAY['User'::character varying, 'Bot'::character varying, 'Organization'::character varying])::text[])))
+);
+
+
+--
+-- Name: github_issues_cache; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.github_issues_cache (
+    github_issue_cache_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    repository_id uuid NOT NULL,
+    github_issue_number bigint NOT NULL,
+    title character varying(500) NOT NULL,
+    body text,
+    state text NOT NULL,
+    assignees_json jsonb DEFAULT '[]'::jsonb NOT NULL,
+    labels_json jsonb DEFAULT '[]'::jsonb NOT NULL,
+    cached_at timestamp with time zone DEFAULT now() NOT NULL,
+    etag character varying(64),
+    CONSTRAINT ck_github_issues_cache_issue_number_positive CHECK ((github_issue_number >= 1)),
+    CONSTRAINT ck_github_issues_cache_state CHECK ((state = ANY (ARRAY['open'::text, 'closed'::text])))
+);
+
+
+--
+-- Name: global_config; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.global_config (
+    id integer NOT NULL,
+    current_revision_id uuid,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_global_config_global_config_singleton CHECK ((id = 1))
+);
+
+
+--
+-- Name: global_config_id_seq; Type: SEQUENCE; Schema: core; Owner: -
+--
+
+CREATE SEQUENCE core.global_config_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: global_config_id_seq; Type: SEQUENCE OWNED BY; Schema: core; Owner: -
+--
+
+ALTER SEQUENCE core.global_config_id_seq OWNED BY core.global_config.id;
+
+
+--
+-- Name: installations; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.installations (
+    installation_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    github_installation_id bigint NOT NULL,
+    account_login text NOT NULL,
+    account_type text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    suspended_at timestamp with time zone,
+    onboarded_at timestamp with time zone,
+    CONSTRAINT ck_installations_installations_account_type_valid CHECK ((account_type = ANY (ARRAY['User'::text, 'Organization'::text])))
+);
+
+
+--
+-- Name: integrations; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.integrations (
+    integration_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    kind text NOT NULL,
+    config_json jsonb NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    last_validated_at timestamp with time zone,
+    last_validation_error text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    trust_tier text,
+    default_governance_ack_at timestamp with time zone,
+    visibility text DEFAULT 'platform'::text NOT NULL,
+    strict_label_mode boolean DEFAULT false NOT NULL,
+    CONSTRAINT integrations_kind_chk CHECK ((kind = 'confluence_space'::text))
+);
+
+
+--
+-- Name: knowledge_chunks; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.knowledge_chunks (
+    chunk_id uuid NOT NULL,
+    installation_id uuid NOT NULL,
+    repository_id uuid NOT NULL,
+    relative_path text NOT NULL,
+    chunk_index integer NOT NULL,
+    content_sha256 character(64) NOT NULL,
+    heading_path text[] NOT NULL,
+    body text NOT NULL,
+    vector public.vector(1024) NOT NULL,
+    doc_kind core.knowledge_doc_kind NOT NULL,
+    doc_status core.knowledge_doc_status DEFAULT 'active'::core.knowledge_doc_status NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    body_tsv tsvector GENERATED ALWAYS AS (to_tsvector('english'::regconfig, body)) STORED,
+    CONSTRAINT knowledge_chunks_body_check CHECK (((length(body) >= 1) AND (length(body) <= 6000))),
+    CONSTRAINT knowledge_chunks_chunk_index_check CHECK ((chunk_index >= 0)),
+    CONSTRAINT knowledge_chunks_heading_path_check CHECK ((cardinality(heading_path) <= 3)),
+    CONSTRAINT knowledge_chunks_relative_path_check CHECK (((length(relative_path) >= 1) AND (length(relative_path) <= 500)))
+);
+
+
+--
+-- Name: learning_proposals; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.learning_proposals (
+    proposal_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    repo_id uuid,
+    title text NOT NULL,
+    body text NOT NULL,
+    proposed_by_user_id uuid NOT NULL,
+    state text NOT NULL,
+    fired_count bigint DEFAULT 0 NOT NULL,
+    accepted_count bigint DEFAULT 0 NOT NULL,
+    feedback_count bigint DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    state_changed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT learning_proposals_counts_chk CHECK (((fired_count >= 0) AND (accepted_count >= 0) AND (feedback_count >= 0) AND (accepted_count <= feedback_count))),
+    CONSTRAINT learning_proposals_state_chk CHECK ((state = ANY (ARRAY['pending_approval'::text, 'approved'::text, 'rejected'::text, 'expired'::text, 'superseded'::text])))
+);
+
+
+--
+-- Name: learnings; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.learnings (
+    learning_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    repo_id uuid,
+    title text NOT NULL,
+    body_markdown text NOT NULL,
+    state text DEFAULT 'active'::text NOT NULL,
+    version integer DEFAULT 1 NOT NULL,
+    fired_count bigint DEFAULT 0 NOT NULL,
+    accepted_count bigint DEFAULT 0 NOT NULL,
+    feedback_count bigint DEFAULT 0 NOT NULL,
+    origin_proposal_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_fired_at timestamp with time zone,
+    CONSTRAINT learnings_counts_chk CHECK (((fired_count >= 0) AND (accepted_count >= 0) AND (feedback_count >= 0) AND (accepted_count <= feedback_count))),
+    CONSTRAINT learnings_state_chk CHECK ((state = ANY (ARRAY['active'::text, 'deprecated'::text]))),
+    CONSTRAINT learnings_version_chk CHECK ((version >= 1))
+);
+
+
+--
+-- Name: learnings_revisions; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.learnings_revisions (
+    revision_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    learning_id uuid NOT NULL,
+    installation_id uuid NOT NULL,
+    body_markdown text NOT NULL,
+    version integer NOT NULL,
+    edited_by_user_id uuid NOT NULL,
+    edited_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT learnings_revisions_version_chk CHECK ((version >= 1))
+);
+
+
+--
+-- Name: llm_models; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.llm_models (
+    provider text NOT NULL,
+    model_id text NOT NULL,
+    display_name text,
+    enabled boolean DEFAULT true NOT NULL,
+    last_validation_status text DEFAULT 'untested'::text NOT NULL,
+    last_validation_error text,
+    last_validated_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by_user_id uuid,
+    CONSTRAINT ck_llm_models_provider_valid CHECK ((provider = ANY (ARRAY['anthropic_direct'::text, 'bedrock'::text]))),
+    CONSTRAINT ck_llm_models_validation_status_valid CHECK ((last_validation_status = ANY (ARRAY['untested'::text, 'ok'::text, 'failed'::text])))
+);
+
+
+--
+-- Name: llm_provider_settings; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.llm_provider_settings (
+    installation_id uuid,
+    role text NOT NULL,
+    provider text NOT NULL,
+    model_id text NOT NULL,
+    region text,
+    api_key_ciphertext text NOT NULL,
+    api_key_fingerprint text NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    last_validated_at timestamp with time zone,
+    last_validation_status text,
+    last_rotated_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_rotated_by_user_id uuid NOT NULL,
+    scope text NOT NULL,
+    CONSTRAINT ck_llm_provider_settings_scope_installation_consistency CHECK ((((scope = 'platform'::text) AND (installation_id IS NULL)) OR ((scope = 'installation'::text) AND (installation_id IS NOT NULL)))),
+    CONSTRAINT ck_llm_provider_settings_scope_valid CHECK ((scope = ANY (ARRAY['platform'::text, 'installation'::text]))),
+    CONSTRAINT llm_provider_settings_fingerprint_4_chars CHECK ((length(api_key_fingerprint) = 4)),
+    CONSTRAINT llm_provider_settings_role_check CHECK ((role = ANY (ARRAY['primary'::text, 'secondary'::text]))),
+    CONSTRAINT llm_provider_settings_validation_status CHECK (((last_validation_status IS NULL) OR (last_validation_status = ANY (ARRAY['ok'::text, 'failed'::text]))))
+);
+
+
+--
+-- Name: llm_purpose_model; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.llm_purpose_model (
+    purpose text NOT NULL,
+    model_id text NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by_user_id uuid,
+    CONSTRAINT ck_llm_purpose_model_purpose_valid CHECK ((purpose = ANY (ARRAY['review_summary'::text, 'review_finding'::text, 'chat_reply'::text, 'walkthrough'::text, 'redaction_check'::text, 'cost_estimate'::text, 'analysis_curator'::text, 'fix_prompt'::text])))
+);
+
+
+--
+-- Name: local_users; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.local_users (
+    user_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    username text NOT NULL,
+    email_ciphertext text NOT NULL,
+    email_fingerprint text NOT NULL,
+    full_name text NOT NULL,
+    password_hash text NOT NULL,
+    role text DEFAULT 'super_admin'::text NOT NULL,
+    state text DEFAULT 'active'::text NOT NULL,
+    last_password_change timestamp with time zone DEFAULT now() NOT NULL,
+    last_login_at timestamp with time zone,
+    failed_attempts integer DEFAULT 0 NOT NULL,
+    locked_until timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by_user_id uuid,
+    CONSTRAINT ck_local_users_failed_attempts_nonneg CHECK ((failed_attempts >= 0)),
+    CONSTRAINT ck_local_users_role_super_admin CHECK ((role = 'super_admin'::text)),
+    CONSTRAINT ck_local_users_state CHECK ((state = ANY (ARRAY['active'::text, 'disabled'::text]))),
+    CONSTRAINT ck_local_users_username_lower CHECK ((username = lower(username)))
+);
+
+
+--
+-- Name: notification_rules; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.notification_rules (
+    rule_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    name text NOT NULL,
+    trigger_event text NOT NULL,
+    filters jsonb DEFAULT '{}'::jsonb NOT NULL,
+    recipients jsonb DEFAULT '[]'::jsonb NOT NULL,
+    schedule_cron text,
+    state text DEFAULT 'active'::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT chk_notification_rules_no_installation_id_in_filters CHECK ((NOT (filters ? 'installation_id'::text))),
+    CONSTRAINT ck_notification_rules_state_valid CHECK ((state = ANY (ARRAY['active'::text, 'paused'::text])))
+);
+
+
+--
+-- Name: org_configs; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.org_configs (
+    org_config_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    current_revision_id uuid,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: outbox; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.outbox (
+    id uuid NOT NULL,
+    sink text NOT NULL,
+    payload jsonb NOT NULL,
+    schema_version integer NOT NULL,
+    attempts integer DEFAULT 0 NOT NULL,
+    state text DEFAULT 'pending'::text NOT NULL,
+    last_error text,
+    last_attempted_at timestamp with time zone,
+    dispatched_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    leased_until timestamp with time zone,
+    trace_context jsonb,
+    delivery_id text,
+    installation_id uuid,
+    run_id uuid,
+    CONSTRAINT ck_outbox_installation_id_required CHECK (((sink = 'installation_reconcile'::text) OR (installation_id IS NOT NULL))),
+    CONSTRAINT ck_outbox_outbox_state_valid CHECK ((state = ANY (ARRAY['pending'::text, 'dispatched'::text, 'dead'::text])))
+);
+
+
+--
+-- Name: platform_config; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.platform_config (
+    config_key text NOT NULL,
+    config_value jsonb NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by text
+);
+
+
+--
+-- Name: platform_credentials_meta; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.platform_credentials_meta (
+    credential_key text NOT NULL,
+    last_rotated_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_rotated_by text,
+    last_validated_at timestamp with time zone,
+    last_validation_error text,
+    CONSTRAINT platform_credentials_meta_credential_key_valid CHECK ((credential_key = ANY (ARRAY['confluence'::text, 'embedder.qwen'::text])))
+);
+
+
+--
+-- Name: posted_reviews; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.posted_reviews (
+    pr_id uuid NOT NULL,
+    github_review_id bigint,
+    marker text NOT NULL,
+    posted_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    publication_outcome text DEFAULT 'degraded_unposted'::text NOT NULL,
+    CONSTRAINT ck_posted_reviews_ck_posted_reviews_outcome_review_id_iff CHECK ((((publication_outcome = 'degraded_unposted'::text) AND (github_review_id IS NULL)) OR ((publication_outcome <> 'degraded_unposted'::text) AND (github_review_id IS NOT NULL)))),
+    CONSTRAINT ck_posted_reviews_ck_posted_reviews_publication_outcome_enum CHECK ((publication_outcome = ANY (ARRAY['inline_posted'::text, 'body_only_posted'::text, 'degraded_unposted'::text])))
+);
+
+
+--
+-- Name: posted_reviews_archive; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.posted_reviews_archive (
+    archive_id bigint NOT NULL,
+    pr_id uuid NOT NULL,
+    github_review_id bigint,
+    marker text NOT NULL,
+    posted_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    archived_at timestamp with time zone DEFAULT now() NOT NULL,
+    archived_reason text NOT NULL
+);
+
+
+--
+-- Name: posted_reviews_archive_archive_id_seq; Type: SEQUENCE; Schema: core; Owner: -
+--
+
+CREATE SEQUENCE core.posted_reviews_archive_archive_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: posted_reviews_archive_archive_id_seq; Type: SEQUENCE OWNED BY; Schema: core; Owner: -
+--
+
+ALTER SEQUENCE core.posted_reviews_archive_archive_id_seq OWNED BY core.posted_reviews_archive.archive_id;
+
+
+--
+-- Name: pr_files; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.pr_files (
+    pr_file_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    pr_id uuid NOT NULL,
+    repository_id uuid NOT NULL,
+    file_path character varying(2048) NOT NULL,
+    status text NOT NULL,
+    additions integer DEFAULT 0 NOT NULL,
+    deletions integer DEFAULT 0 NOT NULL,
+    previous_path character varying(2048),
+    language character varying(64),
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_pr_files_additions_non_negative CHECK ((additions >= 0)),
+    CONSTRAINT ck_pr_files_deletions_non_negative CHECK ((deletions >= 0)),
+    CONSTRAINT ck_pr_files_status CHECK ((status = ANY (ARRAY['added'::text, 'modified'::text, 'removed'::text, 'renamed'::text, 'copied'::text])))
+);
+
+
+--
+-- Name: pr_issue_links; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.pr_issue_links (
+    pr_issue_link_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    pr_id uuid NOT NULL,
+    github_issue_number bigint NOT NULL,
+    linkage_kind text NOT NULL,
+    source text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_pr_issue_links_issue_number_positive CHECK ((github_issue_number >= 1)),
+    CONSTRAINT ck_pr_issue_links_kind CHECK ((linkage_kind = ANY (ARRAY['closes'::text, 'fixes'::text, 'resolves'::text, 'mentioned'::text]))),
+    CONSTRAINT ck_pr_issue_links_source CHECK ((source = ANY (ARRAY['description'::text, 'title'::text, 'branch_name'::text, 'commit_message'::text])))
+);
+
+
+--
+-- Name: pr_review_mutex; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.pr_review_mutex (
+    mutex_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    repository_id uuid NOT NULL,
+    pr_number integer NOT NULL,
+    holder_workflow_id text NOT NULL,
+    acquired_at timestamp with time zone DEFAULT now() NOT NULL,
+    released_at timestamp with time zone,
+    lease_expires_at timestamp with time zone,
+    CONSTRAINT ck_pr_review_mutex_pr_review_mutex_pr_number_positive CHECK ((pr_number > 0)),
+    CONSTRAINT pr_review_mutex_live_has_lease CHECK (((released_at IS NOT NULL) OR (lease_expires_at IS NOT NULL)))
+);
+
+
+--
+-- Name: pr_state_transitions; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.pr_state_transitions (
+    pr_state_transition_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    pr_id uuid NOT NULL,
+    installation_id uuid NOT NULL,
+    from_state text,
+    to_state text NOT NULL,
+    event_action text NOT NULL,
+    head_sha character(40) NOT NULL,
+    delivery_id character varying(128),
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_pr_state_transitions_from_state CHECK (((from_state IS NULL) OR (from_state = ANY (ARRAY['open'::text, 'closed'::text, 'merged'::text])))),
+    CONSTRAINT ck_pr_state_transitions_to_state CHECK ((to_state = ANY (ARRAY['open'::text, 'closed'::text, 'merged'::text])))
+);
+
+
+--
+-- Name: pull_request_reviews; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.pull_request_reviews (
+    review_id uuid NOT NULL,
+    provider text NOT NULL,
+    repo_id bigint NOT NULL,
+    pr_number integer NOT NULL,
+    provider_pr_id text NOT NULL,
+    pr_node_id text,
+    branch text,
+    status text DEFAULT 'open'::text NOT NULL,
+    current_run_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_pull_request_reviews_status CHECK ((status = ANY (ARRAY['open'::text, 'closed'::text, 'merged'::text])))
+);
+
+
+--
+-- Name: pull_requests; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.pull_requests (
+    pr_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    repository_id uuid NOT NULL,
+    github_pull_request_id bigint NOT NULL,
+    pr_number integer NOT NULL,
+    author_gh_user_id uuid NOT NULL,
+    state text NOT NULL,
+    title character varying(500) NOT NULL,
+    body text,
+    base_ref character varying(255) NOT NULL,
+    base_sha character(40) NOT NULL,
+    head_ref character varying(255) NOT NULL,
+    head_sha character(40) NOT NULL,
+    draft boolean DEFAULT false NOT NULL,
+    cross_fork boolean DEFAULT false NOT NULL,
+    opened_at timestamp with time zone NOT NULL,
+    closed_at timestamp with time zone,
+    merged_at timestamp with time zone,
+    merge_commit_sha character(40),
+    correlation_id character varying(128),
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_pull_requests_pr_number_positive CHECK ((pr_number >= 1)),
+    CONSTRAINT ck_pull_requests_state CHECK ((state = ANY (ARRAY['open'::text, 'closed'::text, 'merged'::text])))
+);
+
+
+--
+-- Name: repo_configs; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.repo_configs (
+    repo_config_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    repository_id uuid NOT NULL,
+    current_revision_id uuid,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: repo_symbols; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.repo_symbols (
+    symbol_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    repo_id uuid NOT NULL,
+    language text NOT NULL,
+    kind text NOT NULL,
+    qualified_name text NOT NULL,
+    is_public boolean NOT NULL,
+    relative_path text NOT NULL,
+    start_line integer NOT NULL,
+    end_line integer NOT NULL,
+    signature text NOT NULL,
+    docstring text,
+    content_sha256 text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT repo_symbols_check CHECK ((end_line >= start_line)),
+    CONSTRAINT repo_symbols_start_line_check CHECK ((start_line >= 1))
+);
+
+
+--
+-- Name: repositories; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.repositories (
+    repository_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    github_repo_id bigint NOT NULL,
+    full_name text NOT NULL,
+    default_branch text NOT NULL,
+    archived boolean DEFAULT false NOT NULL,
+    enabled boolean DEFAULT false NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: retrieval_traces; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.retrieval_traces (
+    trace_id uuid NOT NULL,
+    review_id uuid NOT NULL,
+    pr_id uuid NOT NULL,
+    captured_at timestamp with time zone DEFAULT now() NOT NULL,
+    taxonomy_version integer NOT NULL,
+    pipeline_version integer NOT NULL,
+    trace jsonb NOT NULL
+);
+
+
+--
+-- Name: review_findings; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.review_findings (
+    review_finding_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    pr_id uuid NOT NULL,
+    posted_review_pr_id uuid,
+    file_path character varying(2048) NOT NULL,
+    start_line integer NOT NULL,
+    end_line integer NOT NULL,
+    severity text NOT NULL,
+    category text NOT NULL,
+    title text NOT NULL,
+    body text NOT NULL,
+    suggestion text,
+    confidence numeric(4,3) NOT NULL,
+    github_comment_id bigint,
+    citations jsonb DEFAULT '[]'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    suppression_state core.suppression_state DEFAULT 'NONE'::core.suppression_state NOT NULL,
+    suppression_reason text,
+    suppression_confidence numeric(4,3),
+    suppression_model text,
+    suppression_prompt_version text,
+    suppressed_at timestamp with time zone,
+    suppressed_by_finding_id uuid,
+    tier integer DEFAULT 2 NOT NULL,
+    source_tool text,
+    policy_metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
+    scope text DEFAULT 'chunk_observed'::text NOT NULL,
+    evidence_refs jsonb DEFAULT '[]'::jsonb NOT NULL,
+    delivery_eligibility core.delivery_eligibility,
+    eligibility_reason core.finding_eligibility_reason,
+    delivery_outcome core.delivery_outcome,
+    lifecycle_updated_at timestamp with time zone,
+    CONSTRAINT ck_lifecycle_inline_delivered_iff_comment CHECK (((NOT (delivery_outcome IS DISTINCT FROM 'inline_delivered'::core.delivery_outcome)) = (github_comment_id IS NOT NULL))),
+    CONSTRAINT ck_lifecycle_not_applicable_iff_skipped CHECK (((NOT (delivery_outcome IS DISTINCT FROM 'not_applicable'::core.delivery_outcome)) = ((delivery_eligibility = 'skipped'::core.delivery_eligibility) AND (delivery_outcome IS NOT NULL)))),
+    CONSTRAINT ck_lifecycle_outcome_after_eligibility CHECK (((delivery_outcome IS NULL) OR (delivery_eligibility IS NOT NULL))),
+    CONSTRAINT ck_lifecycle_skipped_has_reason CHECK (((delivery_eligibility = 'skipped'::core.delivery_eligibility) = (eligibility_reason IS NOT NULL))),
+    CONSTRAINT ck_lifecycle_suppressed_no_inline CHECK ((NOT ((suppression_state <> 'NONE'::core.suppression_state) AND (delivery_outcome = 'inline_delivered'::core.delivery_outcome)))),
+    CONSTRAINT ck_review_findings_category CHECK ((category = ANY (ARRAY['bug'::text, 'security'::text, 'performance'::text, 'style'::text, 'test'::text, 'docs'::text, 'config'::text, 'context_breaks_consumer'::text, 'other'::text]))),
+    CONSTRAINT ck_review_findings_ck_review_findings_scope_enum CHECK ((scope = ANY (ARRAY['chunk_observed'::text, 'cross_chunk'::text, 'pr_global'::text]))),
+    CONSTRAINT ck_review_findings_confidence_unit_interval CHECK (((confidence >= (0)::numeric) AND (confidence <= (1)::numeric))),
+    CONSTRAINT ck_review_findings_end_line_ge_start_line CHECK ((end_line >= start_line)),
+    CONSTRAINT ck_review_findings_github_comment_id_positive CHECK (((github_comment_id IS NULL) OR (github_comment_id >= 1))),
+    CONSTRAINT ck_review_findings_severity CHECK ((severity = ANY (ARRAY['nit'::text, 'suggestion'::text, 'issue'::text, 'blocker'::text]))),
+    CONSTRAINT ck_review_findings_start_line_positive CHECK ((start_line >= 1)),
+    CONSTRAINT ck_review_findings_suppression_metadata CHECK ((((suppression_state = 'NONE'::core.suppression_state) AND (suppression_reason IS NULL) AND (suppression_confidence IS NULL) AND (suppressed_at IS NULL) AND (suppressed_by_finding_id IS NULL)) OR ((suppression_state <> 'NONE'::core.suppression_state) AND (suppression_reason IS NOT NULL) AND (suppression_confidence IS NOT NULL) AND (suppressed_at IS NOT NULL))))
+);
+
+
+--
+-- Name: review_policy_bundles; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.review_policy_bundles (
+    review_id uuid NOT NULL,
+    installation_id uuid NOT NULL,
+    applied_bundle jsonb NOT NULL,
+    rule_count integer DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_review_policy_bundles_rule_count_nonneg CHECK ((rule_count >= 0))
+);
+
+
+--
+-- Name: review_runs; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.review_runs (
+    run_id uuid NOT NULL,
+    review_id uuid NOT NULL,
+    trigger_type text NOT NULL,
+    triggered_by text,
+    attempt_number integer DEFAULT 1 NOT NULL,
+    lifecycle_state text DEFAULT 'PENDING'::text NOT NULL,
+    parent_run_id uuid,
+    supersedes_run_id uuid,
+    superseded_by_run_id uuid,
+    is_ephemeral boolean DEFAULT false NOT NULL,
+    branch_name text,
+    cancel_reason text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    started_at timestamp with time zone DEFAULT now() NOT NULL,
+    completed_at timestamp with time zone,
+    failed_at timestamp with time zone,
+    cancelled_at timestamp with time zone,
+    retired_at timestamp with time zone,
+    retention_reason text,
+    CONSTRAINT ck_review_runs_attempt_number_positive CHECK ((attempt_number >= 1)),
+    CONSTRAINT ck_review_runs_cancel_reason CHECK (((cancel_reason IS NULL) OR (cancel_reason = ANY (ARRAY['superseded'::text, 'operator_cancelled'::text, 'timeout'::text, 'repository_disabled'::text, 'installation_suspended'::text, 'shutdown'::text])))),
+    CONSTRAINT ck_review_runs_cancelled_at_present CHECK (((lifecycle_state <> 'CANCELLED'::text) OR (cancelled_at IS NOT NULL))),
+    CONSTRAINT ck_review_runs_cancelled_at_state CHECK (((cancelled_at IS NULL) OR (lifecycle_state = 'CANCELLED'::text))),
+    CONSTRAINT ck_review_runs_completed_at_present CHECK (((lifecycle_state <> 'COMPLETED'::text) OR (completed_at IS NOT NULL))),
+    CONSTRAINT ck_review_runs_completed_at_state CHECK (((completed_at IS NULL) OR (lifecycle_state = 'COMPLETED'::text))),
+    CONSTRAINT ck_review_runs_failed_at_present CHECK (((lifecycle_state <> 'FAILED'::text) OR (failed_at IS NOT NULL))),
+    CONSTRAINT ck_review_runs_failed_at_state CHECK (((failed_at IS NULL) OR (lifecycle_state = 'FAILED'::text))),
+    CONSTRAINT ck_review_runs_lifecycle_state CHECK ((lifecycle_state = ANY (ARRAY['PENDING'::text, 'RUNNING'::text, 'WAITING_RETRY'::text, 'COMPLETED'::text, 'FAILED'::text, 'CANCELLED'::text, 'PARTIAL'::text]))),
+    CONSTRAINT ck_review_runs_no_self_supersede CHECK (((superseded_by_run_id IS NULL) OR (superseded_by_run_id <> run_id))),
+    CONSTRAINT ck_review_runs_parent_xor_supersedes CHECK ((NOT ((parent_run_id IS NOT NULL) AND (supersedes_run_id IS NOT NULL)))),
+    CONSTRAINT ck_review_runs_retention_reason CHECK (((retention_reason IS NULL) OR (retention_reason = ANY (ARRAY['ttl_expired'::text, 'manual_cleanup'::text, 'gdpr_erasure'::text, 'migration'::text, 'corruption_repair'::text])))),
+    CONSTRAINT ck_review_runs_supersede_reason CHECK (((cancel_reason <> 'superseded'::text) OR (superseded_by_run_id IS NOT NULL))),
+    CONSTRAINT ck_review_runs_supersede_terminal CHECK (((superseded_by_run_id IS NULL) OR (lifecycle_state = 'CANCELLED'::text))),
+    CONSTRAINT ck_review_runs_trigger_type CHECK ((trigger_type = ANY (ARRAY['pr_opened'::text, 'pr_synchronize'::text, 'manual_rerun'::text, 'comment_trigger'::text, 'retry'::text, 'scheduled'::text])))
+);
+
+
+--
+-- Name: review_tool_runs; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.review_tool_runs (
+    review_tool_run_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    run_id uuid NOT NULL,
+    review_id uuid NOT NULL,
+    tool_name text NOT NULL,
+    status text NOT NULL,
+    files_scanned integer DEFAULT 0 NOT NULL,
+    files_total integer DEFAULT 0 NOT NULL,
+    started_at timestamp with time zone NOT NULL,
+    finished_at timestamp with time zone,
+    duration_ms integer NOT NULL,
+    findings_produced integer DEFAULT 0 NOT NULL,
+    error_class text,
+    error_message text,
+    k8s_job_name text,
+    k8s_namespace text DEFAULT 'codemaster'::text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_review_tool_runs_coverage CHECK ((files_scanned <= files_total)),
+    CONSTRAINT ck_review_tool_runs_status CHECK ((status = ANY (ARRAY['completed'::text, 'timed_out'::text, 'failed_startup'::text, 'failed_runtime'::text, 'oom'::text, 'auth_failed'::text, 'skipped'::text])))
+);
+
+
+--
+-- Name: review_walkthroughs; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.review_walkthroughs (
+    review_id uuid NOT NULL,
+    installation_id uuid NOT NULL,
+    walkthrough jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: role_grant_pending; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.role_grant_pending (
+    pending_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid,
+    subject_kind text NOT NULL,
+    subject_id uuid NOT NULL,
+    role text NOT NULL,
+    action text NOT NULL,
+    requested_at timestamp with time zone DEFAULT now() NOT NULL,
+    requested_by_user_id uuid NOT NULL,
+    expires_at timestamp with time zone DEFAULT (now() + '7 days'::interval) NOT NULL,
+    approved_at timestamp with time zone,
+    approved_by_user_id uuid,
+    applied_at timestamp with time zone,
+    state text DEFAULT 'pending'::text NOT NULL,
+    scope text NOT NULL,
+    CONSTRAINT ck_role_grant_pending_action_valid CHECK ((action = ANY (ARRAY['grant'::text, 'revoke'::text]))),
+    CONSTRAINT ck_role_grant_pending_role_valid CHECK ((role = ANY (ARRAY['platform_owner'::text, 'platform_operator'::text, 'reader'::text]))),
+    CONSTRAINT ck_role_grant_pending_scope_installation_consistency CHECK ((((scope = 'platform'::text) AND (installation_id IS NULL)) OR ((scope = 'installation'::text) AND (installation_id IS NOT NULL)))),
+    CONSTRAINT ck_role_grant_pending_scope_valid CHECK ((scope = ANY (ARRAY['platform'::text, 'installation'::text]))),
+    CONSTRAINT ck_role_grant_pending_state_valid CHECK ((state = ANY (ARRAY['pending'::text, 'approved'::text, 'applied'::text, 'rejected'::text, 'expired'::text]))),
+    CONSTRAINT ck_role_grant_pending_subject_kind_valid CHECK ((subject_kind = ANY (ARRAY['user'::text, 'team'::text])))
+);
+
+
+--
+-- Name: role_grants; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.role_grants (
+    role_grant_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid,
+    subject_kind text NOT NULL,
+    subject_id uuid NOT NULL,
+    role text NOT NULL,
+    granted_at timestamp with time zone DEFAULT now() NOT NULL,
+    revoked_at timestamp with time zone,
+    scope text NOT NULL,
+    CONSTRAINT ck_role_grants_role_grants_role_valid CHECK ((role = ANY (ARRAY['platform_owner'::text, 'platform_operator'::text, 'reader'::text]))),
+    CONSTRAINT ck_role_grants_role_grants_subject_kind_valid CHECK ((subject_kind = ANY (ARRAY['user'::text, 'team'::text]))),
+    CONSTRAINT ck_role_grants_scope_installation_consistency CHECK ((((scope = 'platform'::text) AND (installation_id IS NULL)) OR ((scope = 'installation'::text) AND (installation_id IS NOT NULL)))),
+    CONSTRAINT ck_role_grants_scope_valid CHECK ((scope = ANY (ARRAY['platform'::text, 'installation'::text])))
+);
+
+
+--
+-- Name: symbol_references; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.symbol_references (
+    reference_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    target_symbol_id uuid NOT NULL,
+    consumer_repo_id uuid NOT NULL,
+    consumer_relative_path text NOT NULL,
+    consumer_line integer NOT NULL,
+    kind text NOT NULL,
+    confidence text NOT NULL,
+    excerpt text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT symbol_references_consumer_line_check CHECK ((consumer_line >= 1))
+);
+
+
+--
+-- Name: taxonomy_suggestions; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.taxonomy_suggestions (
+    suggestion_id uuid NOT NULL,
+    label text NOT NULL,
+    proposed_canonical_label text NOT NULL,
+    rationale text NOT NULL,
+    suggester_email text,
+    submitted_by_user_id uuid NOT NULL,
+    submitted_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: team_memberships; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.team_memberships (
+    team_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    installation_id uuid NOT NULL,
+    role text NOT NULL,
+    joined_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_team_memberships_team_memberships_role_valid CHECK ((role = ANY (ARRAY['member'::text, 'maintainer'::text])))
+);
+
+
+--
+-- Name: teams; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.teams (
+    team_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    name text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: users; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.users (
+    user_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    email text NOT NULL,
+    display_name text,
+    ad_user_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    suspended_at timestamp with time zone,
+    username text,
+    password_hash text,
+    password_changed_at timestamp with time zone,
+    failed_attempts integer DEFAULT 0 NOT NULL,
+    locked_until timestamp with time zone,
+    last_login_at timestamp with time zone,
+    CONSTRAINT ck_core_users_credential_consistency CHECK ((((password_hash IS NULL) AND (password_changed_at IS NULL)) OR ((password_hash IS NOT NULL) AND (password_changed_at IS NOT NULL) AND (username IS NOT NULL)))),
+    CONSTRAINT ck_core_users_failed_attempts_nonneg CHECK ((failed_attempts >= 0)),
+    CONSTRAINT ck_core_users_username_lower CHECK (((username IS NULL) OR (username = lower(username))))
+);
+
+
+--
+-- Name: v_retrieval_traces_recent; Type: MATERIALIZED VIEW; Schema: core; Owner: -
+--
+
+CREATE MATERIALIZED VIEW core.v_retrieval_traces_recent AS
+ SELECT trace_id,
+    review_id,
+    pr_id,
+    captured_at,
+    taxonomy_version,
+    pipeline_version,
+    ((trace ->> 'schema_version'::text))::integer AS trace_schema_version,
+    (trace -> 'effective_labels'::text) AS effective_labels,
+    jsonb_array_length((trace -> 'effective_labels'::text)) AS effective_labels_count,
+    jsonb_array_length(COALESCE((trace -> 'repo_include_attempts_filtered'::text), '[]'::jsonb)) AS repo_include_attempts_filtered_count,
+    (((trace -> 'stage3'::text) ->> 'starvation_observed'::text))::boolean AS starvation_observed,
+    ((trace -> 'stage3'::text) -> 'starvation_tiers'::text) AS starvation_tiers,
+    (jsonb_array_length(COALESCE((((trace -> 'stage3'::text) -> 'track_a_default'::text) -> 'selected_chunks_detail'::text), '[]'::jsonb)) + jsonb_array_length(COALESCE((((trace -> 'stage3'::text) -> 'track_b_non_default'::text) -> 'selected_chunks_detail'::text), '[]'::jsonb))) AS selected_chunks_count,
+    (jsonb_array_length(COALESCE((((trace -> 'stage3'::text) -> 'track_a_default'::text) -> 'dropped_chunks_detail'::text), '[]'::jsonb)) + jsonb_array_length(COALESCE((((trace -> 'stage3'::text) -> 'track_b_non_default'::text) -> 'dropped_chunks_detail'::text), '[]'::jsonb))) AS dropped_chunks_count,
+    (((trace -> 'token_accounting'::text) ->> 'budget_total'::text))::integer AS budget_total,
+    (((trace -> 'token_accounting'::text) ->> 'remaining'::text))::integer AS budget_remaining
+   FROM core.retrieval_traces
+  WHERE (captured_at > (now() - '30 days'::interval))
+  WITH NO DATA;
+
+
+--
+-- Name: v_review_findings_with_phase; Type: VIEW; Schema: core; Owner: -
+--
+
+CREATE VIEW core.v_review_findings_with_phase AS
+ SELECT review_finding_id,
+    installation_id,
+    pr_id,
+    posted_review_pr_id,
+    file_path,
+    start_line,
+    end_line,
+    severity,
+    category,
+    title,
+    body,
+    suggestion,
+    confidence,
+    github_comment_id,
+    citations,
+    created_at,
+    suppression_state,
+    suppression_reason,
+    suppression_confidence,
+    suppression_model,
+    suppression_prompt_version,
+    suppressed_at,
+    suppressed_by_finding_id,
+    tier,
+    source_tool,
+    policy_metadata,
+    scope,
+    evidence_refs,
+    delivery_eligibility,
+    eligibility_reason,
+    delivery_outcome,
+    lifecycle_updated_at,
+        CASE
+            WHEN (delivery_outcome IS NOT NULL) THEN 'delivery_finalized'::text
+            WHEN (delivery_eligibility IS NOT NULL) THEN 'delivery_evaluated'::text
+            WHEN (suppression_state <> 'NONE'::core.suppression_state) THEN 'policy_resolved'::text
+            ELSE 'persisted'::text
+        END AS lifecycle_phase
+   FROM core.review_findings rf;
+
+
+--
+-- Name: v_taxonomy_gaps; Type: VIEW; Schema: core; Owner: -
+--
+
+CREATE VIEW core.v_taxonomy_gaps AS
+ WITH per_chunk_labels AS (
+         SELECT confluence_chunks.chunk_id,
+            confluence_chunks.page_id,
+            confluence_chunks.space_key,
+            confluence_chunks.last_modified_at,
+            unnest(confluence_chunks.labels) AS label
+           FROM core.confluence_chunks
+          WHERE ((confluence_chunks.deleted_at IS NULL) AND (confluence_chunks.quarantined = false))
+        )
+ SELECT label,
+    count(*) AS chunks_carrying,
+    count(DISTINCT page_id) AS pages_carrying,
+    count(DISTINCT space_key) AS spaces_carrying,
+    max(last_modified_at) AS most_recent_use
+   FROM per_chunk_labels
+  WHERE (label ~~ 'unrecognized:%'::text)
+  GROUP BY label;
+
+
+--
+-- Name: worker_heartbeats; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.worker_heartbeats (
+    worker_id text NOT NULL,
+    pod_name text NOT NULL,
+    pod_namespace text NOT NULL,
+    pod_uid text NOT NULL,
+    node_name text,
+    process_uuid text NOT NULL,
+    started_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_seen_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: workspace_leases; Type: TABLE; Schema: core; Owner: -
+--
+
+CREATE TABLE core.workspace_leases (
+    workspace_id uuid NOT NULL,
+    run_id uuid NOT NULL,
+    review_id uuid NOT NULL,
+    installation_id uuid NOT NULL,
+    state core.workspace_lease_state DEFAULT 'ALLOCATED'::core.workspace_lease_state NOT NULL,
+    pod_name text NOT NULL,
+    pod_namespace text NOT NULL,
+    node_name text,
+    worker_id text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    heartbeat_at timestamp with time zone DEFAULT now() NOT NULL,
+    orphan_check_after timestamp with time zone NOT NULL,
+    release_requested_at timestamp with time zone,
+    release_requested_by text,
+    released_at timestamp with time zone,
+    cleanup_failed_at timestamp with time zone,
+    last_cleanup_attempt_at timestamp with time zone,
+    cleanup_attempts integer DEFAULT 0 NOT NULL,
+    last_cleanup_error text,
+    CONSTRAINT ck_workspace_leases_cleanup_attempts_positive CHECK ((cleanup_attempts >= 0)),
+    CONSTRAINT ck_workspace_leases_cleanup_failed_state CHECK (((state = 'FAILED_CLEANUP'::core.workspace_lease_state) = (cleanup_failed_at IS NOT NULL))),
+    CONSTRAINT ck_workspace_leases_release_requested CHECK (((state <> ALL (ARRAY['RELEASE_REQUESTED'::core.workspace_lease_state, 'RELEASED'::core.workspace_lease_state, 'FAILED_CLEANUP'::core.workspace_lease_state])) OR (release_requested_at IS NOT NULL))),
+    CONSTRAINT ck_workspace_leases_released_no_failed CHECK (((state <> 'RELEASED'::core.workspace_lease_state) OR (cleanup_failed_at IS NULL))),
+    CONSTRAINT ck_workspace_leases_released_state CHECK (((state = 'RELEASED'::core.workspace_lease_state) = (released_at IS NOT NULL)))
+);
+
+
+--
+-- Name: cost_daily; Type: TABLE; Schema: telemetry; Owner: -
+--
+
+CREATE TABLE telemetry.cost_daily (
+    today date NOT NULL,
+    scope text NOT NULL,
+    scope_id uuid DEFAULT '00000000-0000-0000-0000-000000000000'::uuid NOT NULL,
+    daily_total_cents bigint DEFAULT 0 NOT NULL,
+    cap_cents bigint NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT cost_daily_global_has_zero_scope_id CHECK ((((scope = 'global'::text) AND (scope_id = '00000000-0000-0000-0000-000000000000'::uuid)) OR ((scope = 'per_org'::text) AND (scope_id <> '00000000-0000-0000-0000-000000000000'::uuid)))),
+    CONSTRAINT cost_daily_scope_valid CHECK ((scope = ANY (ARRAY['global'::text, 'per_org'::text]))),
+    CONSTRAINT cost_daily_total_nonneg CHECK ((daily_total_cents >= 0))
+);
+
+
+--
+-- Name: llm_calls; Type: TABLE; Schema: telemetry; Owner: -
+--
+
+CREATE TABLE telemetry.llm_calls (
+    llm_call_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    request_id uuid NOT NULL,
+    model text NOT NULL,
+    prompt_tokens integer NOT NULL,
+    completion_tokens integer NOT NULL,
+    latency_ms integer NOT NULL,
+    cost_usd_cents integer,
+    payload_blob_id uuid,
+    status text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    author_gh_user_id uuid,
+    provider text,
+    role text,
+    CONSTRAINT llm_calls_status_valid CHECK ((status = ANY (ARRAY['ok'::text, 'refused_cost_cap'::text, 'failed'::text, 'timeout'::text])))
+)
+PARTITION BY RANGE (created_at);
+
+
+--
+-- Name: llm_calls_daily; Type: TABLE; Schema: telemetry; Owner: -
+--
+
+CREATE TABLE telemetry.llm_calls_daily (
+    day date NOT NULL,
+    installation_id uuid NOT NULL,
+    model text NOT NULL,
+    total_calls integer DEFAULT 0 NOT NULL,
+    total_prompt_tokens bigint DEFAULT 0 NOT NULL,
+    total_completion_tokens bigint DEFAULT 0 NOT NULL,
+    total_cost_usd_cents bigint DEFAULT 0 NOT NULL,
+    author_gh_user_id uuid NOT NULL
+);
+
+
+--
+-- Name: llm_calls_default; Type: TABLE; Schema: telemetry; Owner: -
+--
+
+CREATE TABLE telemetry.llm_calls_default (
+    llm_call_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    request_id uuid NOT NULL,
+    model text NOT NULL,
+    prompt_tokens integer NOT NULL,
+    completion_tokens integer NOT NULL,
+    latency_ms integer NOT NULL,
+    cost_usd_cents integer,
+    payload_blob_id uuid,
+    status text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    author_gh_user_id uuid,
+    provider text,
+    role text,
+    CONSTRAINT llm_calls_status_valid CHECK ((status = ANY (ARRAY['ok'::text, 'refused_cost_cap'::text, 'failed'::text, 'timeout'::text])))
+);
+
+
+--
+-- Name: llm_calls_p20260506; Type: TABLE; Schema: telemetry; Owner: -
+--
+
+CREATE TABLE telemetry.llm_calls_p20260506 (
+    llm_call_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    request_id uuid NOT NULL,
+    model text NOT NULL,
+    prompt_tokens integer NOT NULL,
+    completion_tokens integer NOT NULL,
+    latency_ms integer NOT NULL,
+    cost_usd_cents integer,
+    payload_blob_id uuid,
+    status text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    author_gh_user_id uuid,
+    provider text,
+    role text,
+    CONSTRAINT llm_calls_status_valid CHECK ((status = ANY (ARRAY['ok'::text, 'refused_cost_cap'::text, 'failed'::text, 'timeout'::text])))
+);
+
+
+--
+-- Name: llm_calls_p20260513; Type: TABLE; Schema: telemetry; Owner: -
+--
+
+CREATE TABLE telemetry.llm_calls_p20260513 (
+    llm_call_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    request_id uuid NOT NULL,
+    model text NOT NULL,
+    prompt_tokens integer NOT NULL,
+    completion_tokens integer NOT NULL,
+    latency_ms integer NOT NULL,
+    cost_usd_cents integer,
+    payload_blob_id uuid,
+    status text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    author_gh_user_id uuid,
+    provider text,
+    role text,
+    CONSTRAINT llm_calls_status_valid CHECK ((status = ANY (ARRAY['ok'::text, 'refused_cost_cap'::text, 'failed'::text, 'timeout'::text])))
+);
+
+
+--
+-- Name: llm_calls_p20260520; Type: TABLE; Schema: telemetry; Owner: -
+--
+
+CREATE TABLE telemetry.llm_calls_p20260520 (
+    llm_call_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    request_id uuid NOT NULL,
+    model text NOT NULL,
+    prompt_tokens integer NOT NULL,
+    completion_tokens integer NOT NULL,
+    latency_ms integer NOT NULL,
+    cost_usd_cents integer,
+    payload_blob_id uuid,
+    status text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    author_gh_user_id uuid,
+    provider text,
+    role text,
+    CONSTRAINT llm_calls_status_valid CHECK ((status = ANY (ARRAY['ok'::text, 'refused_cost_cap'::text, 'failed'::text, 'timeout'::text])))
+);
+
+
+--
+-- Name: llm_calls_p20260527; Type: TABLE; Schema: telemetry; Owner: -
+--
+
+CREATE TABLE telemetry.llm_calls_p20260527 (
+    llm_call_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    request_id uuid NOT NULL,
+    model text NOT NULL,
+    prompt_tokens integer NOT NULL,
+    completion_tokens integer NOT NULL,
+    latency_ms integer NOT NULL,
+    cost_usd_cents integer,
+    payload_blob_id uuid,
+    status text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    author_gh_user_id uuid,
+    provider text,
+    role text,
+    CONSTRAINT llm_calls_status_valid CHECK ((status = ANY (ARRAY['ok'::text, 'refused_cost_cap'::text, 'failed'::text, 'timeout'::text])))
+);
+
+
+--
+-- Name: llm_calls_p20260603; Type: TABLE; Schema: telemetry; Owner: -
+--
+
+CREATE TABLE telemetry.llm_calls_p20260603 (
+    llm_call_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    request_id uuid NOT NULL,
+    model text NOT NULL,
+    prompt_tokens integer NOT NULL,
+    completion_tokens integer NOT NULL,
+    latency_ms integer NOT NULL,
+    cost_usd_cents integer,
+    payload_blob_id uuid,
+    status text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    author_gh_user_id uuid,
+    provider text,
+    role text,
+    CONSTRAINT llm_calls_status_valid CHECK ((status = ANY (ARRAY['ok'::text, 'refused_cost_cap'::text, 'failed'::text, 'timeout'::text])))
+);
+
+
+--
+-- Name: llm_calls_p20260610; Type: TABLE; Schema: telemetry; Owner: -
+--
+
+CREATE TABLE telemetry.llm_calls_p20260610 (
+    llm_call_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    request_id uuid NOT NULL,
+    model text NOT NULL,
+    prompt_tokens integer NOT NULL,
+    completion_tokens integer NOT NULL,
+    latency_ms integer NOT NULL,
+    cost_usd_cents integer,
+    payload_blob_id uuid,
+    status text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    author_gh_user_id uuid,
+    provider text,
+    role text,
+    CONSTRAINT llm_calls_status_valid CHECK ((status = ANY (ARRAY['ok'::text, 'refused_cost_cap'::text, 'failed'::text, 'timeout'::text])))
+);
+
+
+--
+-- Name: llm_calls_p20260617; Type: TABLE; Schema: telemetry; Owner: -
+--
+
+CREATE TABLE telemetry.llm_calls_p20260617 (
+    llm_call_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    request_id uuid NOT NULL,
+    model text NOT NULL,
+    prompt_tokens integer NOT NULL,
+    completion_tokens integer NOT NULL,
+    latency_ms integer NOT NULL,
+    cost_usd_cents integer,
+    payload_blob_id uuid,
+    status text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    author_gh_user_id uuid,
+    provider text,
+    role text,
+    CONSTRAINT llm_calls_status_valid CHECK ((status = ANY (ARRAY['ok'::text, 'refused_cost_cap'::text, 'failed'::text, 'timeout'::text])))
+);
+
+
+--
+-- Name: llm_calls_p20260624; Type: TABLE; Schema: telemetry; Owner: -
+--
+
+CREATE TABLE telemetry.llm_calls_p20260624 (
+    llm_call_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    request_id uuid NOT NULL,
+    model text NOT NULL,
+    prompt_tokens integer NOT NULL,
+    completion_tokens integer NOT NULL,
+    latency_ms integer NOT NULL,
+    cost_usd_cents integer,
+    payload_blob_id uuid,
+    status text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    author_gh_user_id uuid,
+    provider text,
+    role text,
+    CONSTRAINT llm_calls_status_valid CHECK ((status = ANY (ARRAY['ok'::text, 'refused_cost_cap'::text, 'failed'::text, 'timeout'::text])))
+);
+
+
+--
+-- Name: llm_calls_p20260701; Type: TABLE; Schema: telemetry; Owner: -
+--
+
+CREATE TABLE telemetry.llm_calls_p20260701 (
+    llm_call_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    request_id uuid NOT NULL,
+    model text NOT NULL,
+    prompt_tokens integer NOT NULL,
+    completion_tokens integer NOT NULL,
+    latency_ms integer NOT NULL,
+    cost_usd_cents integer,
+    payload_blob_id uuid,
+    status text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    author_gh_user_id uuid,
+    provider text,
+    role text,
+    CONSTRAINT llm_calls_status_valid CHECK ((status = ANY (ARRAY['ok'::text, 'refused_cost_cap'::text, 'failed'::text, 'timeout'::text])))
+);
+
+
+--
+-- Name: llm_payloads; Type: TABLE; Schema: telemetry; Owner: -
+--
+
+CREATE TABLE telemetry.llm_payloads (
+    blob_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    key text NOT NULL,
+    content_type text NOT NULL,
+    byte_size_uncompressed bigint NOT NULL,
+    body_zstd bytea NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+)
+PARTITION BY RANGE (created_at);
+
+
+--
+-- Name: llm_payloads_default; Type: TABLE; Schema: telemetry; Owner: -
+--
+
+CREATE TABLE telemetry.llm_payloads_default (
+    blob_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    key text NOT NULL,
+    content_type text NOT NULL,
+    byte_size_uncompressed bigint NOT NULL,
+    body_zstd bytea NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: llm_payloads_p20260401; Type: TABLE; Schema: telemetry; Owner: -
+--
+
+CREATE TABLE telemetry.llm_payloads_p20260401 (
+    blob_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    key text NOT NULL,
+    content_type text NOT NULL,
+    byte_size_uncompressed bigint NOT NULL,
+    body_zstd bytea NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: llm_payloads_p20260501; Type: TABLE; Schema: telemetry; Owner: -
+--
+
+CREATE TABLE telemetry.llm_payloads_p20260501 (
+    blob_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    key text NOT NULL,
+    content_type text NOT NULL,
+    byte_size_uncompressed bigint NOT NULL,
+    body_zstd bytea NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: llm_payloads_p20260601; Type: TABLE; Schema: telemetry; Owner: -
+--
+
+CREATE TABLE telemetry.llm_payloads_p20260601 (
+    blob_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    key text NOT NULL,
+    content_type text NOT NULL,
+    byte_size_uncompressed bigint NOT NULL,
+    body_zstd bytea NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: llm_payloads_p20260701; Type: TABLE; Schema: telemetry; Owner: -
+--
+
+CREATE TABLE telemetry.llm_payloads_p20260701 (
+    blob_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    key text NOT NULL,
+    content_type text NOT NULL,
+    byte_size_uncompressed bigint NOT NULL,
+    body_zstd bytea NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: llm_payloads_p20260801; Type: TABLE; Schema: telemetry; Owner: -
+--
+
+CREATE TABLE telemetry.llm_payloads_p20260801 (
+    blob_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    installation_id uuid NOT NULL,
+    key text NOT NULL,
+    content_type text NOT NULL,
+    byte_size_uncompressed bigint NOT NULL,
+    body_zstd bytea NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: audit_events_default; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.audit_events ATTACH PARTITION audit.audit_events_default DEFAULT;
+
+
+--
+-- Name: audit_events_p20260201; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.audit_events ATTACH PARTITION audit.audit_events_p20260201 FOR VALUES FROM ('2026-02-01 00:00:00+00') TO ('2026-03-01 00:00:00+00');
+
+
+--
+-- Name: audit_events_p20260301; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.audit_events ATTACH PARTITION audit.audit_events_p20260301 FOR VALUES FROM ('2026-03-01 00:00:00+00') TO ('2026-04-01 00:00:00+00');
+
+
+--
+-- Name: audit_events_p20260401; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.audit_events ATTACH PARTITION audit.audit_events_p20260401 FOR VALUES FROM ('2026-04-01 00:00:00+00') TO ('2026-05-01 00:00:00+00');
+
+
+--
+-- Name: audit_events_p20260501; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.audit_events ATTACH PARTITION audit.audit_events_p20260501 FOR VALUES FROM ('2026-05-01 00:00:00+00') TO ('2026-06-01 00:00:00+00');
+
+
+--
+-- Name: audit_events_p20260601; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.audit_events ATTACH PARTITION audit.audit_events_p20260601 FOR VALUES FROM ('2026-06-01 00:00:00+00') TO ('2026-07-01 00:00:00+00');
+
+
+--
+-- Name: audit_events_p20260701; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.audit_events ATTACH PARTITION audit.audit_events_p20260701 FOR VALUES FROM ('2026-07-01 00:00:00+00') TO ('2026-08-01 00:00:00+00');
+
+
+--
+-- Name: audit_events_p20260801; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.audit_events ATTACH PARTITION audit.audit_events_p20260801 FOR VALUES FROM ('2026-08-01 00:00:00+00') TO ('2026-09-01 00:00:00+00');
+
+
+--
+-- Name: audit_events_p20260901; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.audit_events ATTACH PARTITION audit.audit_events_p20260901 FOR VALUES FROM ('2026-09-01 00:00:00+00') TO ('2026-10-01 00:00:00+00');
+
+
+--
+-- Name: audit_events_p20261001; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.audit_events ATTACH PARTITION audit.audit_events_p20261001 FOR VALUES FROM ('2026-10-01 00:00:00+00') TO ('2026-11-01 00:00:00+00');
+
+
+--
+-- Name: webhook_events_default; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.webhook_events ATTACH PARTITION audit.webhook_events_default DEFAULT;
+
+
+--
+-- Name: webhook_events_p20260520; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.webhook_events ATTACH PARTITION audit.webhook_events_p20260520 FOR VALUES FROM ('2026-05-20 00:00:00+00') TO ('2026-05-27 00:00:00+00');
+
+
+--
+-- Name: webhook_events_p20260527; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.webhook_events ATTACH PARTITION audit.webhook_events_p20260527 FOR VALUES FROM ('2026-05-27 00:00:00+00') TO ('2026-06-03 00:00:00+00');
+
+
+--
+-- Name: webhook_events_p20260603; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.webhook_events ATTACH PARTITION audit.webhook_events_p20260603 FOR VALUES FROM ('2026-06-03 00:00:00+00') TO ('2026-06-10 00:00:00+00');
+
+
+--
+-- Name: webhook_events_p20260610; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.webhook_events ATTACH PARTITION audit.webhook_events_p20260610 FOR VALUES FROM ('2026-06-10 00:00:00+00') TO ('2026-06-17 00:00:00+00');
+
+
+--
+-- Name: webhook_events_p20260617; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.webhook_events ATTACH PARTITION audit.webhook_events_p20260617 FOR VALUES FROM ('2026-06-17 00:00:00+00') TO ('2026-06-24 00:00:00+00');
+
+
+--
+-- Name: workflow_events_default; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.workflow_events ATTACH PARTITION audit.workflow_events_default DEFAULT;
+
+
+--
+-- Name: workflow_events_p20260401; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.workflow_events ATTACH PARTITION audit.workflow_events_p20260401 FOR VALUES FROM ('2026-04-01 00:00:00+00') TO ('2026-05-01 00:00:00+00');
+
+
+--
+-- Name: workflow_events_p20260501; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.workflow_events ATTACH PARTITION audit.workflow_events_p20260501 FOR VALUES FROM ('2026-05-01 00:00:00+00') TO ('2026-06-01 00:00:00+00');
+
+
+--
+-- Name: workflow_events_p20260601; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.workflow_events ATTACH PARTITION audit.workflow_events_p20260601 FOR VALUES FROM ('2026-06-01 00:00:00+00') TO ('2026-07-01 00:00:00+00');
+
+
+--
+-- Name: workflow_events_p20260701; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.workflow_events ATTACH PARTITION audit.workflow_events_p20260701 FOR VALUES FROM ('2026-07-01 00:00:00+00') TO ('2026-08-01 00:00:00+00');
+
+
+--
+-- Name: workflow_events_p20260801; Type: TABLE ATTACH; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.workflow_events ATTACH PARTITION audit.workflow_events_p20260801 FOR VALUES FROM ('2026-08-01 00:00:00+00') TO ('2026-09-01 00:00:00+00');
+
+
+--
+-- Name: diff_snapshots_default; Type: TABLE ATTACH; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.diff_snapshots ATTACH PARTITION core.diff_snapshots_default DEFAULT;
+
+
+--
+-- Name: diff_snapshots_p20260401; Type: TABLE ATTACH; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.diff_snapshots ATTACH PARTITION core.diff_snapshots_p20260401 FOR VALUES FROM ('2026-04-01 00:00:00+00') TO ('2026-05-01 00:00:00+00');
+
+
+--
+-- Name: diff_snapshots_p20260501; Type: TABLE ATTACH; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.diff_snapshots ATTACH PARTITION core.diff_snapshots_p20260501 FOR VALUES FROM ('2026-05-01 00:00:00+00') TO ('2026-06-01 00:00:00+00');
+
+
+--
+-- Name: diff_snapshots_p20260601; Type: TABLE ATTACH; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.diff_snapshots ATTACH PARTITION core.diff_snapshots_p20260601 FOR VALUES FROM ('2026-06-01 00:00:00+00') TO ('2026-07-01 00:00:00+00');
+
+
+--
+-- Name: diff_snapshots_p20260701; Type: TABLE ATTACH; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.diff_snapshots ATTACH PARTITION core.diff_snapshots_p20260701 FOR VALUES FROM ('2026-07-01 00:00:00+00') TO ('2026-08-01 00:00:00+00');
+
+
+--
+-- Name: diff_snapshots_p20260801; Type: TABLE ATTACH; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.diff_snapshots ATTACH PARTITION core.diff_snapshots_p20260801 FOR VALUES FROM ('2026-08-01 00:00:00+00') TO ('2026-09-01 00:00:00+00');
+
+
+--
+-- Name: feedback_events_default; Type: TABLE ATTACH; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.feedback_events ATTACH PARTITION core.feedback_events_default DEFAULT;
+
+
+--
+-- Name: feedback_events_p20260401; Type: TABLE ATTACH; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.feedback_events ATTACH PARTITION core.feedback_events_p20260401 FOR VALUES FROM ('2026-04-01 00:00:00+00') TO ('2026-05-01 00:00:00+00');
+
+
+--
+-- Name: feedback_events_p20260501; Type: TABLE ATTACH; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.feedback_events ATTACH PARTITION core.feedback_events_p20260501 FOR VALUES FROM ('2026-05-01 00:00:00+00') TO ('2026-06-01 00:00:00+00');
+
+
+--
+-- Name: feedback_events_p20260601; Type: TABLE ATTACH; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.feedback_events ATTACH PARTITION core.feedback_events_p20260601 FOR VALUES FROM ('2026-06-01 00:00:00+00') TO ('2026-07-01 00:00:00+00');
+
+
+--
+-- Name: feedback_events_p20260701; Type: TABLE ATTACH; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.feedback_events ATTACH PARTITION core.feedback_events_p20260701 FOR VALUES FROM ('2026-07-01 00:00:00+00') TO ('2026-08-01 00:00:00+00');
+
+
+--
+-- Name: feedback_events_p20260801; Type: TABLE ATTACH; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.feedback_events ATTACH PARTITION core.feedback_events_p20260801 FOR VALUES FROM ('2026-08-01 00:00:00+00') TO ('2026-09-01 00:00:00+00');
+
+
+--
+-- Name: llm_calls_default; Type: TABLE ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls ATTACH PARTITION telemetry.llm_calls_default DEFAULT;
+
+
+--
+-- Name: llm_calls_p20260506; Type: TABLE ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls ATTACH PARTITION telemetry.llm_calls_p20260506 FOR VALUES FROM ('2026-05-06 00:00:00+00') TO ('2026-05-13 00:00:00+00');
+
+
+--
+-- Name: llm_calls_p20260513; Type: TABLE ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls ATTACH PARTITION telemetry.llm_calls_p20260513 FOR VALUES FROM ('2026-05-13 00:00:00+00') TO ('2026-05-20 00:00:00+00');
+
+
+--
+-- Name: llm_calls_p20260520; Type: TABLE ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls ATTACH PARTITION telemetry.llm_calls_p20260520 FOR VALUES FROM ('2026-05-20 00:00:00+00') TO ('2026-05-27 00:00:00+00');
+
+
+--
+-- Name: llm_calls_p20260527; Type: TABLE ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls ATTACH PARTITION telemetry.llm_calls_p20260527 FOR VALUES FROM ('2026-05-27 00:00:00+00') TO ('2026-06-03 00:00:00+00');
+
+
+--
+-- Name: llm_calls_p20260603; Type: TABLE ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls ATTACH PARTITION telemetry.llm_calls_p20260603 FOR VALUES FROM ('2026-06-03 00:00:00+00') TO ('2026-06-10 00:00:00+00');
+
+
+--
+-- Name: llm_calls_p20260610; Type: TABLE ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls ATTACH PARTITION telemetry.llm_calls_p20260610 FOR VALUES FROM ('2026-06-10 00:00:00+00') TO ('2026-06-17 00:00:00+00');
+
+
+--
+-- Name: llm_calls_p20260617; Type: TABLE ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls ATTACH PARTITION telemetry.llm_calls_p20260617 FOR VALUES FROM ('2026-06-17 00:00:00+00') TO ('2026-06-24 00:00:00+00');
+
+
+--
+-- Name: llm_calls_p20260624; Type: TABLE ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls ATTACH PARTITION telemetry.llm_calls_p20260624 FOR VALUES FROM ('2026-06-24 00:00:00+00') TO ('2026-07-01 00:00:00+00');
+
+
+--
+-- Name: llm_calls_p20260701; Type: TABLE ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls ATTACH PARTITION telemetry.llm_calls_p20260701 FOR VALUES FROM ('2026-07-01 00:00:00+00') TO ('2026-07-08 00:00:00+00');
+
+
+--
+-- Name: llm_payloads_default; Type: TABLE ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_payloads ATTACH PARTITION telemetry.llm_payloads_default DEFAULT;
+
+
+--
+-- Name: llm_payloads_p20260401; Type: TABLE ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_payloads ATTACH PARTITION telemetry.llm_payloads_p20260401 FOR VALUES FROM ('2026-04-01 00:00:00+00') TO ('2026-05-01 00:00:00+00');
+
+
+--
+-- Name: llm_payloads_p20260501; Type: TABLE ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_payloads ATTACH PARTITION telemetry.llm_payloads_p20260501 FOR VALUES FROM ('2026-05-01 00:00:00+00') TO ('2026-06-01 00:00:00+00');
+
+
+--
+-- Name: llm_payloads_p20260601; Type: TABLE ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_payloads ATTACH PARTITION telemetry.llm_payloads_p20260601 FOR VALUES FROM ('2026-06-01 00:00:00+00') TO ('2026-07-01 00:00:00+00');
+
+
+--
+-- Name: llm_payloads_p20260701; Type: TABLE ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_payloads ATTACH PARTITION telemetry.llm_payloads_p20260701 FOR VALUES FROM ('2026-07-01 00:00:00+00') TO ('2026-08-01 00:00:00+00');
+
+
+--
+-- Name: llm_payloads_p20260801; Type: TABLE ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_payloads ATTACH PARTITION telemetry.llm_payloads_p20260801 FOR VALUES FROM ('2026-08-01 00:00:00+00') TO ('2026-09-01 00:00:00+00');
+
+
+--
+-- Name: embedding_generations generation_id; Type: DEFAULT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.embedding_generations ALTER COLUMN generation_id SET DEFAULT nextval('core.embedding_generations_id_seq'::regclass);
+
+
+--
+-- Name: global_config id; Type: DEFAULT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.global_config ALTER COLUMN id SET DEFAULT nextval('core.global_config_id_seq'::regclass);
+
+
+--
+-- Name: posted_reviews_archive archive_id; Type: DEFAULT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.posted_reviews_archive ALTER COLUMN archive_id SET DEFAULT nextval('core.posted_reviews_archive_archive_id_seq'::regclass);
+
+
+--
+-- Name: audit_events pk_audit_events; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.audit_events
+    ADD CONSTRAINT pk_audit_events PRIMARY KEY (audit_event_id, created_at);
+
+
+--
+-- Name: audit_events_default audit_events_default_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.audit_events_default
+    ADD CONSTRAINT audit_events_default_pkey PRIMARY KEY (audit_event_id, created_at);
+
+
+--
+-- Name: audit_events_p20260201 audit_events_p20260201_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.audit_events_p20260201
+    ADD CONSTRAINT audit_events_p20260201_pkey PRIMARY KEY (audit_event_id, created_at);
+
+
+--
+-- Name: audit_events_p20260301 audit_events_p20260301_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.audit_events_p20260301
+    ADD CONSTRAINT audit_events_p20260301_pkey PRIMARY KEY (audit_event_id, created_at);
+
+
+--
+-- Name: audit_events_p20260401 audit_events_p20260401_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.audit_events_p20260401
+    ADD CONSTRAINT audit_events_p20260401_pkey PRIMARY KEY (audit_event_id, created_at);
+
+
+--
+-- Name: audit_events_p20260501 audit_events_p20260501_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.audit_events_p20260501
+    ADD CONSTRAINT audit_events_p20260501_pkey PRIMARY KEY (audit_event_id, created_at);
+
+
+--
+-- Name: audit_events_p20260601 audit_events_p20260601_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.audit_events_p20260601
+    ADD CONSTRAINT audit_events_p20260601_pkey PRIMARY KEY (audit_event_id, created_at);
+
+
+--
+-- Name: audit_events_p20260701 audit_events_p20260701_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.audit_events_p20260701
+    ADD CONSTRAINT audit_events_p20260701_pkey PRIMARY KEY (audit_event_id, created_at);
+
+
+--
+-- Name: audit_events_p20260801 audit_events_p20260801_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.audit_events_p20260801
+    ADD CONSTRAINT audit_events_p20260801_pkey PRIMARY KEY (audit_event_id, created_at);
+
+
+--
+-- Name: audit_events_p20260901 audit_events_p20260901_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.audit_events_p20260901
+    ADD CONSTRAINT audit_events_p20260901_pkey PRIMARY KEY (audit_event_id, created_at);
+
+
+--
+-- Name: audit_events_p20261001 audit_events_p20261001_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.audit_events_p20261001
+    ADD CONSTRAINT audit_events_p20261001_pkey PRIMARY KEY (audit_event_id, created_at);
+
+
+--
+-- Name: webhook_events pk_webhook_events; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.webhook_events
+    ADD CONSTRAINT pk_webhook_events PRIMARY KEY (webhook_event_id, received_at);
+
+
+--
+-- Name: webhook_events_default webhook_events_default_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.webhook_events_default
+    ADD CONSTRAINT webhook_events_default_pkey PRIMARY KEY (webhook_event_id, received_at);
+
+
+--
+-- Name: webhook_events_p20260520 webhook_events_p20260520_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.webhook_events_p20260520
+    ADD CONSTRAINT webhook_events_p20260520_pkey PRIMARY KEY (webhook_event_id, received_at);
+
+
+--
+-- Name: webhook_events_p20260527 webhook_events_p20260527_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.webhook_events_p20260527
+    ADD CONSTRAINT webhook_events_p20260527_pkey PRIMARY KEY (webhook_event_id, received_at);
+
+
+--
+-- Name: webhook_events_p20260603 webhook_events_p20260603_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.webhook_events_p20260603
+    ADD CONSTRAINT webhook_events_p20260603_pkey PRIMARY KEY (webhook_event_id, received_at);
+
+
+--
+-- Name: webhook_events_p20260610 webhook_events_p20260610_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.webhook_events_p20260610
+    ADD CONSTRAINT webhook_events_p20260610_pkey PRIMARY KEY (webhook_event_id, received_at);
+
+
+--
+-- Name: webhook_events_p20260617 webhook_events_p20260617_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.webhook_events_p20260617
+    ADD CONSTRAINT webhook_events_p20260617_pkey PRIMARY KEY (webhook_event_id, received_at);
+
+
+--
+-- Name: workflow_events workflow_events_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.workflow_events
+    ADD CONSTRAINT workflow_events_pkey PRIMARY KEY (event_id, received_at);
+
+
+--
+-- Name: workflow_events_default workflow_events_default_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.workflow_events_default
+    ADD CONSTRAINT workflow_events_default_pkey PRIMARY KEY (event_id, received_at);
+
+
+--
+-- Name: workflow_events_p20260401 workflow_events_p20260401_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.workflow_events_p20260401
+    ADD CONSTRAINT workflow_events_p20260401_pkey PRIMARY KEY (event_id, received_at);
+
+
+--
+-- Name: workflow_events_p20260501 workflow_events_p20260501_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.workflow_events_p20260501
+    ADD CONSTRAINT workflow_events_p20260501_pkey PRIMARY KEY (event_id, received_at);
+
+
+--
+-- Name: workflow_events_p20260601 workflow_events_p20260601_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.workflow_events_p20260601
+    ADD CONSTRAINT workflow_events_p20260601_pkey PRIMARY KEY (event_id, received_at);
+
+
+--
+-- Name: workflow_events_p20260701 workflow_events_p20260701_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.workflow_events_p20260701
+    ADD CONSTRAINT workflow_events_p20260701_pkey PRIMARY KEY (event_id, received_at);
+
+
+--
+-- Name: workflow_events_p20260801 workflow_events_p20260801_pkey; Type: CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE ONLY audit.workflow_events_p20260801
+    ADD CONSTRAINT workflow_events_p20260801_pkey PRIMARY KEY (event_id, received_at);
+
+
+--
+-- Name: cache_app_jwt pk_cache_app_jwt; Type: CONSTRAINT; Schema: cache; Owner: -
+--
+
+ALTER TABLE ONLY cache.cache_app_jwt
+    ADD CONSTRAINT pk_cache_app_jwt PRIMARY KEY (cache_app_jwt_id);
+
+
+--
+-- Name: cache_embeddings pk_cache_embeddings; Type: CONSTRAINT; Schema: cache; Owner: -
+--
+
+ALTER TABLE ONLY cache.cache_embeddings
+    ADD CONSTRAINT pk_cache_embeddings PRIMARY KEY (cache_embedding_id);
+
+
+--
+-- Name: cache_idempotency pk_cache_idempotency; Type: CONSTRAINT; Schema: cache; Owner: -
+--
+
+ALTER TABLE ONLY cache.cache_idempotency
+    ADD CONSTRAINT pk_cache_idempotency PRIMARY KEY (cache_key);
+
+
+--
+-- Name: cache_rate_limits pk_cache_rate_limits; Type: CONSTRAINT; Schema: cache; Owner: -
+--
+
+ALTER TABLE ONLY cache.cache_rate_limits
+    ADD CONSTRAINT pk_cache_rate_limits PRIMARY KEY (cache_rate_limit_id);
+
+
+--
+-- Name: cache_tokens pk_cache_tokens; Type: CONSTRAINT; Schema: cache; Owner: -
+--
+
+ALTER TABLE ONLY cache.cache_tokens
+    ADD CONSTRAINT pk_cache_tokens PRIMARY KEY (cache_token_id);
+
+
+--
+-- Name: repository_repair_state repository_repair_state_pkey; Type: CONSTRAINT; Schema: cache; Owner: -
+--
+
+ALTER TABLE ONLY cache.repository_repair_state
+    ADD CONSTRAINT repository_repair_state_pkey PRIMARY KEY (github_installation_id);
+
+
+--
+-- Name: cache_app_jwt uq_cache_app_jwt_app_expires; Type: CONSTRAINT; Schema: cache; Owner: -
+--
+
+ALTER TABLE ONLY cache.cache_app_jwt
+    ADD CONSTRAINT uq_cache_app_jwt_app_expires UNIQUE (app_id, expires_at);
+
+
+--
+-- Name: cache_embeddings uq_cache_embeddings_content_version; Type: CONSTRAINT; Schema: cache; Owner: -
+--
+
+ALTER TABLE ONLY cache.cache_embeddings
+    ADD CONSTRAINT uq_cache_embeddings_content_version UNIQUE (content_sha256, embedding_version);
+
+
+--
+-- Name: cache_tokens uq_cache_tokens_installation; Type: CONSTRAINT; Schema: cache; Owner: -
+--
+
+ALTER TABLE ONLY cache.cache_tokens
+    ADD CONSTRAINT uq_cache_tokens_installation UNIQUE (installation_id);
+
+
+--
+-- Name: chunk_embeddings chunk_embeddings_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.chunk_embeddings
+    ADD CONSTRAINT chunk_embeddings_pkey PRIMARY KEY (chunk_table, chunk_id, generation_id);
+
+
+--
+-- Name: confluence_chunks confluence_chunks_default_approval_biconditional; Type: CHECK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE core.confluence_chunks
+    ADD CONSTRAINT confluence_chunks_default_approval_biconditional CHECK (((('default'::text = ANY (labels)) AND (default_approval IS NOT NULL)) OR ((NOT ('default'::text = ANY (labels))) AND (default_approval IS NULL)))) NOT VALID;
+
+
+--
+-- Name: confluence_chunks confluence_chunks_labels_canonical; Type: CHECK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE core.confluence_chunks
+    ADD CONSTRAINT confluence_chunks_labels_canonical CHECK (core._validate_canonical_labels(labels)) NOT VALID;
+
+
+--
+-- Name: confluence_chunks confluence_chunks_natural_key; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.confluence_chunks
+    ADD CONSTRAINT confluence_chunks_natural_key UNIQUE (page_id, version, chunk_index);
+
+
+--
+-- Name: confluence_chunks confluence_chunks_page_status_chk; Type: CHECK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE core.confluence_chunks
+    ADD CONSTRAINT confluence_chunks_page_status_chk CHECK ((page_status = ANY (ARRAY['active'::text, 'draft'::text, 'stale'::text, 'archived'::text, 'deprecated'::text, 'superseded'::text]))) NOT VALID;
+
+
+--
+-- Name: confluence_chunks confluence_chunks_quarantine_biconditional; Type: CHECK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE core.confluence_chunks
+    ADD CONSTRAINT confluence_chunks_quarantine_biconditional CHECK ((((quarantined = true) AND (cardinality(quarantine_reasons) > 0)) OR ((quarantined = false) AND (cardinality(quarantine_reasons) = 0)))) NOT VALID;
+
+
+--
+-- Name: confluence_chunks confluence_chunks_token_count_nonneg; Type: CHECK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE core.confluence_chunks
+    ADD CONSTRAINT confluence_chunks_token_count_nonneg CHECK ((token_count >= 0)) NOT VALID;
+
+
+--
+-- Name: confluence_page_approvals confluence_page_approvals_revocation_biconditional; Type: CHECK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE core.confluence_page_approvals
+    ADD CONSTRAINT confluence_page_approvals_revocation_biconditional CHECK ((((revoked_at IS NULL) AND (revoked_by IS NULL)) OR ((revoked_at IS NOT NULL) AND (revoked_by IS NOT NULL)))) NOT VALID;
+
+
+--
+-- Name: confluence_page_approvals confluence_page_approvals_scope_chk; Type: CHECK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE core.confluence_page_approvals
+    ADD CONSTRAINT confluence_page_approvals_scope_chk CHECK ((default_scope = ANY (ARRAY['universal'::text, 'security_only'::text, 'compliance_only'::text, 'framework_only'::text, 'language_only'::text]))) NOT VALID;
+
+
+--
+-- Name: diff_snapshots uq_diff_snapshots_triple; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.diff_snapshots
+    ADD CONSTRAINT uq_diff_snapshots_triple UNIQUE (installation_id, repository_id, base_sha, head_sha, created_at);
+
+
+--
+-- Name: diff_snapshots_default diff_snapshots_default_installation_id_repository_id_base_s_key; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.diff_snapshots_default
+    ADD CONSTRAINT diff_snapshots_default_installation_id_repository_id_base_s_key UNIQUE (installation_id, repository_id, base_sha, head_sha, created_at);
+
+
+--
+-- Name: diff_snapshots pk_diff_snapshots; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.diff_snapshots
+    ADD CONSTRAINT pk_diff_snapshots PRIMARY KEY (diff_snapshot_id, created_at);
+
+
+--
+-- Name: diff_snapshots_default diff_snapshots_default_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.diff_snapshots_default
+    ADD CONSTRAINT diff_snapshots_default_pkey PRIMARY KEY (diff_snapshot_id, created_at);
+
+
+--
+-- Name: diff_snapshots_p20260401 diff_snapshots_p20260401_installation_id_repository_id_base_key; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.diff_snapshots_p20260401
+    ADD CONSTRAINT diff_snapshots_p20260401_installation_id_repository_id_base_key UNIQUE (installation_id, repository_id, base_sha, head_sha, created_at);
+
+
+--
+-- Name: diff_snapshots_p20260401 diff_snapshots_p20260401_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.diff_snapshots_p20260401
+    ADD CONSTRAINT diff_snapshots_p20260401_pkey PRIMARY KEY (diff_snapshot_id, created_at);
+
+
+--
+-- Name: diff_snapshots_p20260501 diff_snapshots_p20260501_installation_id_repository_id_base_key; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.diff_snapshots_p20260501
+    ADD CONSTRAINT diff_snapshots_p20260501_installation_id_repository_id_base_key UNIQUE (installation_id, repository_id, base_sha, head_sha, created_at);
+
+
+--
+-- Name: diff_snapshots_p20260501 diff_snapshots_p20260501_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.diff_snapshots_p20260501
+    ADD CONSTRAINT diff_snapshots_p20260501_pkey PRIMARY KEY (diff_snapshot_id, created_at);
+
+
+--
+-- Name: diff_snapshots_p20260601 diff_snapshots_p20260601_installation_id_repository_id_base_key; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.diff_snapshots_p20260601
+    ADD CONSTRAINT diff_snapshots_p20260601_installation_id_repository_id_base_key UNIQUE (installation_id, repository_id, base_sha, head_sha, created_at);
+
+
+--
+-- Name: diff_snapshots_p20260601 diff_snapshots_p20260601_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.diff_snapshots_p20260601
+    ADD CONSTRAINT diff_snapshots_p20260601_pkey PRIMARY KEY (diff_snapshot_id, created_at);
+
+
+--
+-- Name: diff_snapshots_p20260701 diff_snapshots_p20260701_installation_id_repository_id_base_key; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.diff_snapshots_p20260701
+    ADD CONSTRAINT diff_snapshots_p20260701_installation_id_repository_id_base_key UNIQUE (installation_id, repository_id, base_sha, head_sha, created_at);
+
+
+--
+-- Name: diff_snapshots_p20260701 diff_snapshots_p20260701_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.diff_snapshots_p20260701
+    ADD CONSTRAINT diff_snapshots_p20260701_pkey PRIMARY KEY (diff_snapshot_id, created_at);
+
+
+--
+-- Name: diff_snapshots_p20260801 diff_snapshots_p20260801_installation_id_repository_id_base_key; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.diff_snapshots_p20260801
+    ADD CONSTRAINT diff_snapshots_p20260801_installation_id_repository_id_base_key UNIQUE (installation_id, repository_id, base_sha, head_sha, created_at);
+
+
+--
+-- Name: diff_snapshots_p20260801 diff_snapshots_p20260801_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.diff_snapshots_p20260801
+    ADD CONSTRAINT diff_snapshots_p20260801_pkey PRIMARY KEY (diff_snapshot_id, created_at);
+
+
+--
+-- Name: embedder_runtime_state embedder_runtime_state_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.embedder_runtime_state
+    ADD CONSTRAINT embedder_runtime_state_pkey PRIMARY KEY (singleton);
+
+
+--
+-- Name: embedding_generations embedding_generations_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.embedding_generations
+    ADD CONSTRAINT embedding_generations_pkey PRIMARY KEY (generation_id);
+
+
+--
+-- Name: feedback_events pk_feedback_events; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.feedback_events
+    ADD CONSTRAINT pk_feedback_events PRIMARY KEY (feedback_event_id, created_at);
+
+
+--
+-- Name: feedback_events_default feedback_events_default_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.feedback_events_default
+    ADD CONSTRAINT feedback_events_default_pkey PRIMARY KEY (feedback_event_id, created_at);
+
+
+--
+-- Name: feedback_events_p20260401 feedback_events_p20260401_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.feedback_events_p20260401
+    ADD CONSTRAINT feedback_events_p20260401_pkey PRIMARY KEY (feedback_event_id, created_at);
+
+
+--
+-- Name: feedback_events_p20260501 feedback_events_p20260501_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.feedback_events_p20260501
+    ADD CONSTRAINT feedback_events_p20260501_pkey PRIMARY KEY (feedback_event_id, created_at);
+
+
+--
+-- Name: feedback_events_p20260601 feedback_events_p20260601_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.feedback_events_p20260601
+    ADD CONSTRAINT feedback_events_p20260601_pkey PRIMARY KEY (feedback_event_id, created_at);
+
+
+--
+-- Name: feedback_events_p20260701 feedback_events_p20260701_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.feedback_events_p20260701
+    ADD CONSTRAINT feedback_events_p20260701_pkey PRIMARY KEY (feedback_event_id, created_at);
+
+
+--
+-- Name: feedback_events_p20260801 feedback_events_p20260801_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.feedback_events_p20260801
+    ADD CONSTRAINT feedback_events_p20260801_pkey PRIMARY KEY (feedback_event_id, created_at);
+
+
+--
+-- Name: fix_prompts fix_prompts_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.fix_prompts
+    ADD CONSTRAINT fix_prompts_pkey PRIMARY KEY (review_id);
+
+
+--
+-- Name: integrations integrations_trust_tier_kind_biconditional; Type: CHECK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE core.integrations
+    ADD CONSTRAINT integrations_trust_tier_kind_biconditional CHECK ((((kind = 'confluence_space'::text) AND (trust_tier = ANY (ARRAY['trusted'::text, 'semi'::text]))) OR ((kind <> 'confluence_space'::text) AND (trust_tier IS NULL)))) NOT VALID;
+
+
+--
+-- Name: integrations integrations_visibility_format_chk; Type: CHECK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE core.integrations
+    ADD CONSTRAINT integrations_visibility_format_chk CHECK (((visibility = 'platform'::text) OR (visibility ~ '^org:[a-z][a-z0-9_-]*$'::text))) NOT VALID;
+
+
+--
+-- Name: knowledge_chunks knowledge_chunks_installation_id_repository_id_relative_pat_key; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.knowledge_chunks
+    ADD CONSTRAINT knowledge_chunks_installation_id_repository_id_relative_pat_key UNIQUE (installation_id, repository_id, relative_path, chunk_index);
+
+
+--
+-- Name: knowledge_chunks knowledge_chunks_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.knowledge_chunks
+    ADD CONSTRAINT knowledge_chunks_pkey PRIMARY KEY (chunk_id);
+
+
+--
+-- Name: llm_models llm_models_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.llm_models
+    ADD CONSTRAINT llm_models_pkey PRIMARY KEY (provider, model_id);
+
+
+--
+-- Name: llm_purpose_model llm_purpose_model_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.llm_purpose_model
+    ADD CONSTRAINT llm_purpose_model_pkey PRIMARY KEY (purpose);
+
+
+--
+-- Name: ad_users pk_ad_users; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.ad_users
+    ADD CONSTRAINT pk_ad_users PRIMARY KEY (ad_user_id);
+
+
+--
+-- Name: api_tokens pk_api_tokens; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.api_tokens
+    ADD CONSTRAINT pk_api_tokens PRIMARY KEY (api_token_id);
+
+
+--
+-- Name: arbitration_rejections pk_arbitration_rejections; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.arbitration_rejections
+    ADD CONSTRAINT pk_arbitration_rejections PRIMARY KEY (rejection_id);
+
+
+--
+-- Name: bedrock_settings pk_bedrock_settings; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.bedrock_settings
+    ADD CONSTRAINT pk_bedrock_settings PRIMARY KEY (scope);
+
+
+--
+-- Name: code_owners pk_code_owners; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.code_owners
+    ADD CONSTRAINT pk_code_owners PRIMARY KEY (code_owner_id);
+
+
+--
+-- Name: config_revisions pk_config_revisions; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.config_revisions
+    ADD CONSTRAINT pk_config_revisions PRIMARY KEY (config_revision_id);
+
+
+--
+-- Name: confluence_chunks pk_confluence_chunks; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.confluence_chunks
+    ADD CONSTRAINT pk_confluence_chunks PRIMARY KEY (chunk_id);
+
+
+--
+-- Name: confluence_page_approvals pk_confluence_page_approvals; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.confluence_page_approvals
+    ADD CONSTRAINT pk_confluence_page_approvals PRIMARY KEY (approval_id);
+
+
+--
+-- Name: cost_cap_overrides pk_cost_cap_overrides; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.cost_cap_overrides
+    ADD CONSTRAINT pk_cost_cap_overrides PRIMARY KEY (installation_id);
+
+
+--
+-- Name: cost_cap_pending_changes pk_cost_cap_pending_changes; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.cost_cap_pending_changes
+    ADD CONSTRAINT pk_cost_cap_pending_changes PRIMARY KEY (pending_change_id);
+
+
+--
+-- Name: cost_cap_settings pk_cost_cap_settings; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.cost_cap_settings
+    ADD CONSTRAINT pk_cost_cap_settings PRIMARY KEY (scope);
+
+
+--
+-- Name: flag_revisions pk_flag_revisions; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.flag_revisions
+    ADD CONSTRAINT pk_flag_revisions PRIMARY KEY (id);
+
+
+--
+-- Name: flags pk_flags; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.flags
+    ADD CONSTRAINT pk_flags PRIMARY KEY (flag_name);
+
+
+--
+-- Name: gh_users pk_gh_users; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.gh_users
+    ADD CONSTRAINT pk_gh_users PRIMARY KEY (gh_user_id);
+
+
+--
+-- Name: github_issues_cache pk_github_issues_cache; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.github_issues_cache
+    ADD CONSTRAINT pk_github_issues_cache PRIMARY KEY (github_issue_cache_id);
+
+
+--
+-- Name: global_config pk_global_config; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.global_config
+    ADD CONSTRAINT pk_global_config PRIMARY KEY (id);
+
+
+--
+-- Name: installations pk_installations; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.installations
+    ADD CONSTRAINT pk_installations PRIMARY KEY (installation_id);
+
+
+--
+-- Name: integrations pk_integrations; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.integrations
+    ADD CONSTRAINT pk_integrations PRIMARY KEY (integration_id);
+
+
+--
+-- Name: learning_proposals pk_learning_proposals; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.learning_proposals
+    ADD CONSTRAINT pk_learning_proposals PRIMARY KEY (proposal_id);
+
+
+--
+-- Name: learnings pk_learnings; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.learnings
+    ADD CONSTRAINT pk_learnings PRIMARY KEY (learning_id);
+
+
+--
+-- Name: learnings_revisions pk_learnings_revisions; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.learnings_revisions
+    ADD CONSTRAINT pk_learnings_revisions PRIMARY KEY (revision_id);
+
+
+--
+-- Name: local_users pk_local_users; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.local_users
+    ADD CONSTRAINT pk_local_users PRIMARY KEY (user_id);
+
+
+--
+-- Name: notification_rules pk_notification_rules; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.notification_rules
+    ADD CONSTRAINT pk_notification_rules PRIMARY KEY (rule_id);
+
+
+--
+-- Name: org_configs pk_org_configs; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.org_configs
+    ADD CONSTRAINT pk_org_configs PRIMARY KEY (org_config_id);
+
+
+--
+-- Name: outbox pk_outbox; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.outbox
+    ADD CONSTRAINT pk_outbox PRIMARY KEY (id);
+
+
+--
+-- Name: platform_config pk_platform_config; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.platform_config
+    ADD CONSTRAINT pk_platform_config PRIMARY KEY (config_key);
+
+
+--
+-- Name: posted_reviews pk_posted_reviews; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.posted_reviews
+    ADD CONSTRAINT pk_posted_reviews PRIMARY KEY (pr_id);
+
+
+--
+-- Name: posted_reviews_archive pk_posted_reviews_archive; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.posted_reviews_archive
+    ADD CONSTRAINT pk_posted_reviews_archive PRIMARY KEY (archive_id);
+
+
+--
+-- Name: pr_files pk_pr_files; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.pr_files
+    ADD CONSTRAINT pk_pr_files PRIMARY KEY (pr_file_id);
+
+
+--
+-- Name: pr_issue_links pk_pr_issue_links; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.pr_issue_links
+    ADD CONSTRAINT pk_pr_issue_links PRIMARY KEY (pr_issue_link_id);
+
+
+--
+-- Name: pr_review_mutex pk_pr_review_mutex; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.pr_review_mutex
+    ADD CONSTRAINT pk_pr_review_mutex PRIMARY KEY (mutex_id);
+
+
+--
+-- Name: pr_state_transitions pk_pr_state_transitions; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.pr_state_transitions
+    ADD CONSTRAINT pk_pr_state_transitions PRIMARY KEY (pr_state_transition_id);
+
+
+--
+-- Name: pull_requests pk_pull_requests; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.pull_requests
+    ADD CONSTRAINT pk_pull_requests PRIMARY KEY (pr_id);
+
+
+--
+-- Name: repo_configs pk_repo_configs; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.repo_configs
+    ADD CONSTRAINT pk_repo_configs PRIMARY KEY (repo_config_id);
+
+
+--
+-- Name: repo_symbols pk_repo_symbols; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.repo_symbols
+    ADD CONSTRAINT pk_repo_symbols PRIMARY KEY (symbol_id);
+
+
+--
+-- Name: repositories pk_repositories; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.repositories
+    ADD CONSTRAINT pk_repositories PRIMARY KEY (repository_id);
+
+
+--
+-- Name: retrieval_traces pk_retrieval_traces; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.retrieval_traces
+    ADD CONSTRAINT pk_retrieval_traces PRIMARY KEY (trace_id);
+
+
+--
+-- Name: review_findings pk_review_findings; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.review_findings
+    ADD CONSTRAINT pk_review_findings PRIMARY KEY (review_finding_id);
+
+
+--
+-- Name: review_tool_runs pk_review_tool_runs; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.review_tool_runs
+    ADD CONSTRAINT pk_review_tool_runs PRIMARY KEY (review_tool_run_id);
+
+
+--
+-- Name: role_grant_pending pk_role_grant_pending; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.role_grant_pending
+    ADD CONSTRAINT pk_role_grant_pending PRIMARY KEY (pending_id);
+
+
+--
+-- Name: role_grants pk_role_grants; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.role_grants
+    ADD CONSTRAINT pk_role_grants PRIMARY KEY (role_grant_id);
+
+
+--
+-- Name: symbol_references pk_symbol_references; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.symbol_references
+    ADD CONSTRAINT pk_symbol_references PRIMARY KEY (reference_id);
+
+
+--
+-- Name: team_memberships pk_team_memberships; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.team_memberships
+    ADD CONSTRAINT pk_team_memberships PRIMARY KEY (team_id, user_id);
+
+
+--
+-- Name: teams pk_teams; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.teams
+    ADD CONSTRAINT pk_teams PRIMARY KEY (team_id);
+
+
+--
+-- Name: users pk_users; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.users
+    ADD CONSTRAINT pk_users PRIMARY KEY (user_id);
+
+
+--
+-- Name: platform_credentials_meta platform_credentials_meta_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.platform_credentials_meta
+    ADD CONSTRAINT platform_credentials_meta_pkey PRIMARY KEY (credential_key);
+
+
+--
+-- Name: pull_request_reviews pull_request_reviews_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.pull_request_reviews
+    ADD CONSTRAINT pull_request_reviews_pkey PRIMARY KEY (review_id);
+
+
+--
+-- Name: retrieval_traces retrieval_traces_pipeline_version_positive; Type: CHECK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE core.retrieval_traces
+    ADD CONSTRAINT retrieval_traces_pipeline_version_positive CHECK ((pipeline_version >= 1)) NOT VALID;
+
+
+--
+-- Name: retrieval_traces retrieval_traces_taxonomy_version_nonneg; Type: CHECK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE core.retrieval_traces
+    ADD CONSTRAINT retrieval_traces_taxonomy_version_nonneg CHECK ((taxonomy_version >= 0)) NOT VALID;
+
+
+--
+-- Name: review_policy_bundles review_policy_bundles_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.review_policy_bundles
+    ADD CONSTRAINT review_policy_bundles_pkey PRIMARY KEY (review_id);
+
+
+--
+-- Name: review_runs review_runs_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.review_runs
+    ADD CONSTRAINT review_runs_pkey PRIMARY KEY (run_id);
+
+
+--
+-- Name: review_walkthroughs review_walkthroughs_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.review_walkthroughs
+    ADD CONSTRAINT review_walkthroughs_pkey PRIMARY KEY (review_id);
+
+
+--
+-- Name: taxonomy_suggestions taxonomy_suggestions_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.taxonomy_suggestions
+    ADD CONSTRAINT taxonomy_suggestions_pkey PRIMARY KEY (suggestion_id);
+
+
+--
+-- Name: ad_users uq_ad_users_principal_name; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.ad_users
+    ADD CONSTRAINT uq_ad_users_principal_name UNIQUE (principal_name);
+
+
+--
+-- Name: api_tokens uq_api_tokens_token_hash; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.api_tokens
+    ADD CONSTRAINT uq_api_tokens_token_hash UNIQUE (token_hash);
+
+
+--
+-- Name: arbitration_rejections uq_arbitration_rejections_run_target_reason; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.arbitration_rejections
+    ADD CONSTRAINT uq_arbitration_rejections_run_target_reason UNIQUE (run_id, target_finding_id, reason_rejected);
+
+
+--
+-- Name: config_revisions uq_config_revisions_parent_revision; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.config_revisions
+    ADD CONSTRAINT uq_config_revisions_parent_revision UNIQUE (parent_kind, parent_id, revision_number);
+
+
+--
+-- Name: gh_users uq_gh_users_github_user_id; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.gh_users
+    ADD CONSTRAINT uq_gh_users_github_user_id UNIQUE (github_user_id);
+
+
+--
+-- Name: installations uq_installations_github_installation_id; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.installations
+    ADD CONSTRAINT uq_installations_github_installation_id UNIQUE (github_installation_id);
+
+
+--
+-- Name: llm_models uq_llm_models_model_id; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.llm_models
+    ADD CONSTRAINT uq_llm_models_model_id UNIQUE (model_id);
+
+
+--
+-- Name: org_configs uq_org_configs_installation_id; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.org_configs
+    ADD CONSTRAINT uq_org_configs_installation_id UNIQUE (installation_id);
+
+
+--
+-- Name: repo_configs uq_repo_configs_repository_id; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.repo_configs
+    ADD CONSTRAINT uq_repo_configs_repository_id UNIQUE (repository_id);
+
+
+--
+-- Name: repo_symbols uq_repo_symbols_natural_key; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.repo_symbols
+    ADD CONSTRAINT uq_repo_symbols_natural_key UNIQUE (repo_id, language, kind, qualified_name, relative_path);
+
+
+--
+-- Name: repositories uq_repositories_github_repo_id; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.repositories
+    ADD CONSTRAINT uq_repositories_github_repo_id UNIQUE (github_repo_id);
+
+
+--
+-- Name: review_tool_runs uq_review_tool_runs_run_tool; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.review_tool_runs
+    ADD CONSTRAINT uq_review_tool_runs_run_tool UNIQUE (run_id, tool_name);
+
+
+--
+-- Name: symbol_references uq_symbol_references_natural_key; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.symbol_references
+    ADD CONSTRAINT uq_symbol_references_natural_key UNIQUE (target_symbol_id, consumer_repo_id, consumer_relative_path, consumer_line, kind);
+
+
+--
+-- Name: teams uq_teams_installation_id_name; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.teams
+    ADD CONSTRAINT uq_teams_installation_id_name UNIQUE (installation_id, name);
+
+
+--
+-- Name: users uq_users_installation_id_email; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.users
+    ADD CONSTRAINT uq_users_installation_id_email UNIQUE (installation_id, email);
+
+
+--
+-- Name: worker_heartbeats worker_heartbeats_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.worker_heartbeats
+    ADD CONSTRAINT worker_heartbeats_pkey PRIMARY KEY (worker_id);
+
+
+--
+-- Name: workspace_leases workspace_leases_pkey; Type: CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.workspace_leases
+    ADD CONSTRAINT workspace_leases_pkey PRIMARY KEY (workspace_id);
+
+
+--
+-- Name: llm_calls pk_llm_calls; Type: CONSTRAINT; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls
+    ADD CONSTRAINT pk_llm_calls PRIMARY KEY (llm_call_id, created_at);
+
+
+--
+-- Name: llm_calls_default llm_calls_default_pkey; Type: CONSTRAINT; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls_default
+    ADD CONSTRAINT llm_calls_default_pkey PRIMARY KEY (llm_call_id, created_at);
+
+
+--
+-- Name: llm_calls_p20260506 llm_calls_p20260506_pkey; Type: CONSTRAINT; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls_p20260506
+    ADD CONSTRAINT llm_calls_p20260506_pkey PRIMARY KEY (llm_call_id, created_at);
+
+
+--
+-- Name: llm_calls_p20260513 llm_calls_p20260513_pkey; Type: CONSTRAINT; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls_p20260513
+    ADD CONSTRAINT llm_calls_p20260513_pkey PRIMARY KEY (llm_call_id, created_at);
+
+
+--
+-- Name: llm_calls_p20260520 llm_calls_p20260520_pkey; Type: CONSTRAINT; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls_p20260520
+    ADD CONSTRAINT llm_calls_p20260520_pkey PRIMARY KEY (llm_call_id, created_at);
+
+
+--
+-- Name: llm_calls_p20260527 llm_calls_p20260527_pkey; Type: CONSTRAINT; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls_p20260527
+    ADD CONSTRAINT llm_calls_p20260527_pkey PRIMARY KEY (llm_call_id, created_at);
+
+
+--
+-- Name: llm_calls_p20260603 llm_calls_p20260603_pkey; Type: CONSTRAINT; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls_p20260603
+    ADD CONSTRAINT llm_calls_p20260603_pkey PRIMARY KEY (llm_call_id, created_at);
+
+
+--
+-- Name: llm_calls_p20260610 llm_calls_p20260610_pkey; Type: CONSTRAINT; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls_p20260610
+    ADD CONSTRAINT llm_calls_p20260610_pkey PRIMARY KEY (llm_call_id, created_at);
+
+
+--
+-- Name: llm_calls_p20260617 llm_calls_p20260617_pkey; Type: CONSTRAINT; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls_p20260617
+    ADD CONSTRAINT llm_calls_p20260617_pkey PRIMARY KEY (llm_call_id, created_at);
+
+
+--
+-- Name: llm_calls_p20260624 llm_calls_p20260624_pkey; Type: CONSTRAINT; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls_p20260624
+    ADD CONSTRAINT llm_calls_p20260624_pkey PRIMARY KEY (llm_call_id, created_at);
+
+
+--
+-- Name: llm_calls_p20260701 llm_calls_p20260701_pkey; Type: CONSTRAINT; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls_p20260701
+    ADD CONSTRAINT llm_calls_p20260701_pkey PRIMARY KEY (llm_call_id, created_at);
+
+
+--
+-- Name: llm_payloads pk_llm_payloads; Type: CONSTRAINT; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_payloads
+    ADD CONSTRAINT pk_llm_payloads PRIMARY KEY (blob_id, created_at);
+
+
+--
+-- Name: llm_payloads_default llm_payloads_default_pkey; Type: CONSTRAINT; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_payloads_default
+    ADD CONSTRAINT llm_payloads_default_pkey PRIMARY KEY (blob_id, created_at);
+
+
+--
+-- Name: llm_payloads_p20260401 llm_payloads_p20260401_pkey; Type: CONSTRAINT; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_payloads_p20260401
+    ADD CONSTRAINT llm_payloads_p20260401_pkey PRIMARY KEY (blob_id, created_at);
+
+
+--
+-- Name: llm_payloads_p20260501 llm_payloads_p20260501_pkey; Type: CONSTRAINT; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_payloads_p20260501
+    ADD CONSTRAINT llm_payloads_p20260501_pkey PRIMARY KEY (blob_id, created_at);
+
+
+--
+-- Name: llm_payloads_p20260601 llm_payloads_p20260601_pkey; Type: CONSTRAINT; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_payloads_p20260601
+    ADD CONSTRAINT llm_payloads_p20260601_pkey PRIMARY KEY (blob_id, created_at);
+
+
+--
+-- Name: llm_payloads_p20260701 llm_payloads_p20260701_pkey; Type: CONSTRAINT; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_payloads_p20260701
+    ADD CONSTRAINT llm_payloads_p20260701_pkey PRIMARY KEY (blob_id, created_at);
+
+
+--
+-- Name: llm_payloads_p20260801 llm_payloads_p20260801_pkey; Type: CONSTRAINT; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_payloads_p20260801
+    ADD CONSTRAINT llm_payloads_p20260801_pkey PRIMARY KEY (blob_id, created_at);
+
+
+--
+-- Name: cost_daily pk_cost_daily; Type: CONSTRAINT; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.cost_daily
+    ADD CONSTRAINT pk_cost_daily PRIMARY KEY (today, scope, scope_id);
+
+
+--
+-- Name: llm_calls_daily pk_llm_calls_daily; Type: CONSTRAINT; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE ONLY telemetry.llm_calls_daily
+    ADD CONSTRAINT pk_llm_calls_daily PRIMARY KEY (day, installation_id, model);
+
+
+--
+-- Name: ix_audit_events_installation_id_created_at; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX ix_audit_events_installation_id_created_at ON ONLY audit.audit_events USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: audit_events_default_installation_id_created_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX audit_events_default_installation_id_created_at_idx ON audit.audit_events_default USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: audit_events_p20260201_installation_id_created_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX audit_events_p20260201_installation_id_created_at_idx ON audit.audit_events_p20260201 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: audit_events_p20260301_installation_id_created_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX audit_events_p20260301_installation_id_created_at_idx ON audit.audit_events_p20260301 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: audit_events_p20260401_installation_id_created_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX audit_events_p20260401_installation_id_created_at_idx ON audit.audit_events_p20260401 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: audit_events_p20260501_installation_id_created_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX audit_events_p20260501_installation_id_created_at_idx ON audit.audit_events_p20260501 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: audit_events_p20260601_installation_id_created_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX audit_events_p20260601_installation_id_created_at_idx ON audit.audit_events_p20260601 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: audit_events_p20260701_installation_id_created_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX audit_events_p20260701_installation_id_created_at_idx ON audit.audit_events_p20260701 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: audit_events_p20260801_installation_id_created_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX audit_events_p20260801_installation_id_created_at_idx ON audit.audit_events_p20260801 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: audit_events_p20260901_installation_id_created_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX audit_events_p20260901_installation_id_created_at_idx ON audit.audit_events_p20260901 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: audit_events_p20261001_installation_id_created_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX audit_events_p20261001_installation_id_created_at_idx ON audit.audit_events_p20261001 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: ix_webhook_events_delivery_id; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX ix_webhook_events_delivery_id ON ONLY audit.webhook_events USING btree (delivery_id);
+
+
+--
+-- Name: ix_webhook_events_installation_id_received_at; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX ix_webhook_events_installation_id_received_at ON ONLY audit.webhook_events USING btree (installation_id, received_at DESC);
+
+
+--
+-- Name: ix_webhook_events_run_id; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX ix_webhook_events_run_id ON ONLY audit.webhook_events USING btree (run_id) WHERE (run_id IS NOT NULL);
+
+
+--
+-- Name: ix_workflow_events_installation_id; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX ix_workflow_events_installation_id ON ONLY audit.workflow_events USING btree (installation_id) WHERE (installation_id IS NOT NULL);
+
+
+--
+-- Name: ix_workflow_events_review_received; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX ix_workflow_events_review_received ON ONLY audit.workflow_events USING btree (review_id, received_at);
+
+
+--
+-- Name: ix_workflow_events_run_received; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX ix_workflow_events_run_received ON ONLY audit.workflow_events USING btree (run_id, received_at);
+
+
+--
+-- Name: uq_workflow_events_provider_delivery; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_workflow_events_provider_delivery ON ONLY audit.workflow_events USING btree (provider, delivery_id, received_at) WHERE (delivery_id IS NOT NULL);
+
+
+--
+-- Name: uq_workflow_events_run_sequence; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_workflow_events_run_sequence ON ONLY audit.workflow_events USING btree (run_id, sequence_no, received_at);
+
+
+--
+-- Name: webhook_events_default_delivery_id_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX webhook_events_default_delivery_id_idx ON audit.webhook_events_default USING btree (delivery_id);
+
+
+--
+-- Name: webhook_events_default_installation_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX webhook_events_default_installation_id_received_at_idx ON audit.webhook_events_default USING btree (installation_id, received_at DESC);
+
+
+--
+-- Name: webhook_events_default_run_id_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX webhook_events_default_run_id_idx ON audit.webhook_events_default USING btree (run_id) WHERE (run_id IS NOT NULL);
+
+
+--
+-- Name: webhook_events_p20260520_delivery_id_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX webhook_events_p20260520_delivery_id_idx ON audit.webhook_events_p20260520 USING btree (delivery_id);
+
+
+--
+-- Name: webhook_events_p20260520_installation_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX webhook_events_p20260520_installation_id_received_at_idx ON audit.webhook_events_p20260520 USING btree (installation_id, received_at DESC);
+
+
+--
+-- Name: webhook_events_p20260520_run_id_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX webhook_events_p20260520_run_id_idx ON audit.webhook_events_p20260520 USING btree (run_id) WHERE (run_id IS NOT NULL);
+
+
+--
+-- Name: webhook_events_p20260527_delivery_id_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX webhook_events_p20260527_delivery_id_idx ON audit.webhook_events_p20260527 USING btree (delivery_id);
+
+
+--
+-- Name: webhook_events_p20260527_installation_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX webhook_events_p20260527_installation_id_received_at_idx ON audit.webhook_events_p20260527 USING btree (installation_id, received_at DESC);
+
+
+--
+-- Name: webhook_events_p20260527_run_id_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX webhook_events_p20260527_run_id_idx ON audit.webhook_events_p20260527 USING btree (run_id) WHERE (run_id IS NOT NULL);
+
+
+--
+-- Name: webhook_events_p20260603_delivery_id_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX webhook_events_p20260603_delivery_id_idx ON audit.webhook_events_p20260603 USING btree (delivery_id);
+
+
+--
+-- Name: webhook_events_p20260603_installation_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX webhook_events_p20260603_installation_id_received_at_idx ON audit.webhook_events_p20260603 USING btree (installation_id, received_at DESC);
+
+
+--
+-- Name: webhook_events_p20260603_run_id_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX webhook_events_p20260603_run_id_idx ON audit.webhook_events_p20260603 USING btree (run_id) WHERE (run_id IS NOT NULL);
+
+
+--
+-- Name: webhook_events_p20260610_delivery_id_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX webhook_events_p20260610_delivery_id_idx ON audit.webhook_events_p20260610 USING btree (delivery_id);
+
+
+--
+-- Name: webhook_events_p20260610_installation_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX webhook_events_p20260610_installation_id_received_at_idx ON audit.webhook_events_p20260610 USING btree (installation_id, received_at DESC);
+
+
+--
+-- Name: webhook_events_p20260610_run_id_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX webhook_events_p20260610_run_id_idx ON audit.webhook_events_p20260610 USING btree (run_id) WHERE (run_id IS NOT NULL);
+
+
+--
+-- Name: webhook_events_p20260617_delivery_id_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX webhook_events_p20260617_delivery_id_idx ON audit.webhook_events_p20260617 USING btree (delivery_id);
+
+
+--
+-- Name: webhook_events_p20260617_installation_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX webhook_events_p20260617_installation_id_received_at_idx ON audit.webhook_events_p20260617 USING btree (installation_id, received_at DESC);
+
+
+--
+-- Name: webhook_events_p20260617_run_id_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX webhook_events_p20260617_run_id_idx ON audit.webhook_events_p20260617 USING btree (run_id) WHERE (run_id IS NOT NULL);
+
+
+--
+-- Name: workflow_events_default_installation_id_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX workflow_events_default_installation_id_idx ON audit.workflow_events_default USING btree (installation_id) WHERE (installation_id IS NOT NULL);
+
+
+--
+-- Name: workflow_events_default_provider_delivery_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE UNIQUE INDEX workflow_events_default_provider_delivery_id_received_at_idx ON audit.workflow_events_default USING btree (provider, delivery_id, received_at) WHERE (delivery_id IS NOT NULL);
+
+
+--
+-- Name: workflow_events_default_review_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX workflow_events_default_review_id_received_at_idx ON audit.workflow_events_default USING btree (review_id, received_at);
+
+
+--
+-- Name: workflow_events_default_run_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX workflow_events_default_run_id_received_at_idx ON audit.workflow_events_default USING btree (run_id, received_at);
+
+
+--
+-- Name: workflow_events_default_run_id_sequence_no_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE UNIQUE INDEX workflow_events_default_run_id_sequence_no_received_at_idx ON audit.workflow_events_default USING btree (run_id, sequence_no, received_at);
+
+
+--
+-- Name: workflow_events_p20260401_installation_id_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX workflow_events_p20260401_installation_id_idx ON audit.workflow_events_p20260401 USING btree (installation_id) WHERE (installation_id IS NOT NULL);
+
+
+--
+-- Name: workflow_events_p20260401_provider_delivery_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE UNIQUE INDEX workflow_events_p20260401_provider_delivery_id_received_at_idx ON audit.workflow_events_p20260401 USING btree (provider, delivery_id, received_at) WHERE (delivery_id IS NOT NULL);
+
+
+--
+-- Name: workflow_events_p20260401_review_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX workflow_events_p20260401_review_id_received_at_idx ON audit.workflow_events_p20260401 USING btree (review_id, received_at);
+
+
+--
+-- Name: workflow_events_p20260401_run_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX workflow_events_p20260401_run_id_received_at_idx ON audit.workflow_events_p20260401 USING btree (run_id, received_at);
+
+
+--
+-- Name: workflow_events_p20260401_run_id_sequence_no_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE UNIQUE INDEX workflow_events_p20260401_run_id_sequence_no_received_at_idx ON audit.workflow_events_p20260401 USING btree (run_id, sequence_no, received_at);
+
+
+--
+-- Name: workflow_events_p20260501_installation_id_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX workflow_events_p20260501_installation_id_idx ON audit.workflow_events_p20260501 USING btree (installation_id) WHERE (installation_id IS NOT NULL);
+
+
+--
+-- Name: workflow_events_p20260501_provider_delivery_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE UNIQUE INDEX workflow_events_p20260501_provider_delivery_id_received_at_idx ON audit.workflow_events_p20260501 USING btree (provider, delivery_id, received_at) WHERE (delivery_id IS NOT NULL);
+
+
+--
+-- Name: workflow_events_p20260501_review_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX workflow_events_p20260501_review_id_received_at_idx ON audit.workflow_events_p20260501 USING btree (review_id, received_at);
+
+
+--
+-- Name: workflow_events_p20260501_run_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX workflow_events_p20260501_run_id_received_at_idx ON audit.workflow_events_p20260501 USING btree (run_id, received_at);
+
+
+--
+-- Name: workflow_events_p20260501_run_id_sequence_no_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE UNIQUE INDEX workflow_events_p20260501_run_id_sequence_no_received_at_idx ON audit.workflow_events_p20260501 USING btree (run_id, sequence_no, received_at);
+
+
+--
+-- Name: workflow_events_p20260601_installation_id_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX workflow_events_p20260601_installation_id_idx ON audit.workflow_events_p20260601 USING btree (installation_id) WHERE (installation_id IS NOT NULL);
+
+
+--
+-- Name: workflow_events_p20260601_provider_delivery_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE UNIQUE INDEX workflow_events_p20260601_provider_delivery_id_received_at_idx ON audit.workflow_events_p20260601 USING btree (provider, delivery_id, received_at) WHERE (delivery_id IS NOT NULL);
+
+
+--
+-- Name: workflow_events_p20260601_review_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX workflow_events_p20260601_review_id_received_at_idx ON audit.workflow_events_p20260601 USING btree (review_id, received_at);
+
+
+--
+-- Name: workflow_events_p20260601_run_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX workflow_events_p20260601_run_id_received_at_idx ON audit.workflow_events_p20260601 USING btree (run_id, received_at);
+
+
+--
+-- Name: workflow_events_p20260601_run_id_sequence_no_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE UNIQUE INDEX workflow_events_p20260601_run_id_sequence_no_received_at_idx ON audit.workflow_events_p20260601 USING btree (run_id, sequence_no, received_at);
+
+
+--
+-- Name: workflow_events_p20260701_installation_id_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX workflow_events_p20260701_installation_id_idx ON audit.workflow_events_p20260701 USING btree (installation_id) WHERE (installation_id IS NOT NULL);
+
+
+--
+-- Name: workflow_events_p20260701_provider_delivery_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE UNIQUE INDEX workflow_events_p20260701_provider_delivery_id_received_at_idx ON audit.workflow_events_p20260701 USING btree (provider, delivery_id, received_at) WHERE (delivery_id IS NOT NULL);
+
+
+--
+-- Name: workflow_events_p20260701_review_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX workflow_events_p20260701_review_id_received_at_idx ON audit.workflow_events_p20260701 USING btree (review_id, received_at);
+
+
+--
+-- Name: workflow_events_p20260701_run_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX workflow_events_p20260701_run_id_received_at_idx ON audit.workflow_events_p20260701 USING btree (run_id, received_at);
+
+
+--
+-- Name: workflow_events_p20260701_run_id_sequence_no_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE UNIQUE INDEX workflow_events_p20260701_run_id_sequence_no_received_at_idx ON audit.workflow_events_p20260701 USING btree (run_id, sequence_no, received_at);
+
+
+--
+-- Name: workflow_events_p20260801_installation_id_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX workflow_events_p20260801_installation_id_idx ON audit.workflow_events_p20260801 USING btree (installation_id) WHERE (installation_id IS NOT NULL);
+
+
+--
+-- Name: workflow_events_p20260801_provider_delivery_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE UNIQUE INDEX workflow_events_p20260801_provider_delivery_id_received_at_idx ON audit.workflow_events_p20260801 USING btree (provider, delivery_id, received_at) WHERE (delivery_id IS NOT NULL);
+
+
+--
+-- Name: workflow_events_p20260801_review_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX workflow_events_p20260801_review_id_received_at_idx ON audit.workflow_events_p20260801 USING btree (review_id, received_at);
+
+
+--
+-- Name: workflow_events_p20260801_run_id_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE INDEX workflow_events_p20260801_run_id_received_at_idx ON audit.workflow_events_p20260801 USING btree (run_id, received_at);
+
+
+--
+-- Name: workflow_events_p20260801_run_id_sequence_no_received_at_idx; Type: INDEX; Schema: audit; Owner: -
+--
+
+CREATE UNIQUE INDEX workflow_events_p20260801_run_id_sequence_no_received_at_idx ON audit.workflow_events_p20260801 USING btree (run_id, sequence_no, received_at);
+
+
+--
+-- Name: ix_cache_idempotency_expires_at; Type: INDEX; Schema: cache; Owner: -
+--
+
+CREATE INDEX ix_cache_idempotency_expires_at ON cache.cache_idempotency USING btree (expires_at);
+
+
+--
+-- Name: ix_cache_rate_limits_installation_id_resource; Type: INDEX; Schema: cache; Owner: -
+--
+
+CREATE INDEX ix_cache_rate_limits_installation_id_resource ON cache.cache_rate_limits USING btree (installation_id, resource);
+
+
+--
+-- Name: chunk_embeddings_gen_chunk_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX chunk_embeddings_gen_chunk_idx ON core.chunk_embeddings USING btree (generation_id, chunk_table, chunk_id);
+
+
+--
+-- Name: chunk_embeddings_hnsw_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX chunk_embeddings_hnsw_idx ON core.chunk_embeddings USING hnsw (embedding public.vector_cosine_ops) WITH (m='16', ef_construction='64');
+
+
+--
+-- Name: confluence_chunks_labels_gin; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX confluence_chunks_labels_gin ON core.confluence_chunks USING gin (labels);
+
+
+--
+-- Name: confluence_chunks_page_version; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX confluence_chunks_page_version ON core.confluence_chunks USING btree (page_id, version) WHERE (superseded_at IS NULL);
+
+
+--
+-- Name: confluence_page_approvals_active_uniq; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX confluence_page_approvals_active_uniq ON core.confluence_page_approvals USING btree (space_key, page_id) WHERE (revoked_at IS NULL);
+
+
+--
+-- Name: confluence_page_approvals_space_page_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX confluence_page_approvals_space_page_idx ON core.confluence_page_approvals USING btree (space_key, page_id);
+
+
+--
+-- Name: cost_cap_overrides_active_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX cost_cap_overrides_active_idx ON core.cost_cap_overrides USING btree (installation_id) WHERE (expires_at IS NULL);
+
+
+--
+-- Name: cost_cap_overrides_expires_at_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX cost_cap_overrides_expires_at_idx ON core.cost_cap_overrides USING btree (installation_id, expires_at);
+
+
+--
+-- Name: cost_cap_pending_changes_pending_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX cost_cap_pending_changes_pending_idx ON core.cost_cap_pending_changes USING btree (requested_at DESC) WHERE (state = 'pending'::text);
+
+
+--
+-- Name: cost_cap_pending_changes_unique_pending_scope_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX cost_cap_pending_changes_unique_pending_scope_idx ON core.cost_cap_pending_changes USING btree (target_kind, target_id) NULLS NOT DISTINCT WHERE (state = 'pending'::text);
+
+
+--
+-- Name: ix_diff_snapshots_install_repo_shas; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_diff_snapshots_install_repo_shas ON ONLY core.diff_snapshots USING btree (installation_id, repository_id, base_sha, head_sha);
+
+
+--
+-- Name: diff_snapshots_default_installation_id_repository_id_base_s_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX diff_snapshots_default_installation_id_repository_id_base_s_idx ON core.diff_snapshots_default USING btree (installation_id, repository_id, base_sha, head_sha);
+
+
+--
+-- Name: diff_snapshots_p20260401_installation_id_repository_id_base_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX diff_snapshots_p20260401_installation_id_repository_id_base_idx ON core.diff_snapshots_p20260401 USING btree (installation_id, repository_id, base_sha, head_sha);
+
+
+--
+-- Name: diff_snapshots_p20260501_installation_id_repository_id_base_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX diff_snapshots_p20260501_installation_id_repository_id_base_idx ON core.diff_snapshots_p20260501 USING btree (installation_id, repository_id, base_sha, head_sha);
+
+
+--
+-- Name: diff_snapshots_p20260601_installation_id_repository_id_base_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX diff_snapshots_p20260601_installation_id_repository_id_base_idx ON core.diff_snapshots_p20260601 USING btree (installation_id, repository_id, base_sha, head_sha);
+
+
+--
+-- Name: diff_snapshots_p20260701_installation_id_repository_id_base_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX diff_snapshots_p20260701_installation_id_repository_id_base_idx ON core.diff_snapshots_p20260701 USING btree (installation_id, repository_id, base_sha, head_sha);
+
+
+--
+-- Name: diff_snapshots_p20260801_installation_id_repository_id_base_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX diff_snapshots_p20260801_installation_id_repository_id_base_idx ON core.diff_snapshots_p20260801 USING btree (installation_id, repository_id, base_sha, head_sha);
+
+
+--
+-- Name: ix_feedback_events_installation_id_created_at; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_feedback_events_installation_id_created_at ON ONLY core.feedback_events USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: feedback_events_default_installation_id_created_at_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX feedback_events_default_installation_id_created_at_idx ON core.feedback_events_default USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: ix_feedback_events_review_finding_id; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_feedback_events_review_finding_id ON ONLY core.feedback_events USING btree (review_finding_id) WHERE (review_finding_id IS NOT NULL);
+
+
+--
+-- Name: feedback_events_default_review_finding_id_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX feedback_events_default_review_finding_id_idx ON core.feedback_events_default USING btree (review_finding_id) WHERE (review_finding_id IS NOT NULL);
+
+
+--
+-- Name: feedback_events_p20260401_installation_id_created_at_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX feedback_events_p20260401_installation_id_created_at_idx ON core.feedback_events_p20260401 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: feedback_events_p20260401_review_finding_id_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX feedback_events_p20260401_review_finding_id_idx ON core.feedback_events_p20260401 USING btree (review_finding_id) WHERE (review_finding_id IS NOT NULL);
+
+
+--
+-- Name: feedback_events_p20260501_installation_id_created_at_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX feedback_events_p20260501_installation_id_created_at_idx ON core.feedback_events_p20260501 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: feedback_events_p20260501_review_finding_id_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX feedback_events_p20260501_review_finding_id_idx ON core.feedback_events_p20260501 USING btree (review_finding_id) WHERE (review_finding_id IS NOT NULL);
+
+
+--
+-- Name: feedback_events_p20260601_installation_id_created_at_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX feedback_events_p20260601_installation_id_created_at_idx ON core.feedback_events_p20260601 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: feedback_events_p20260601_review_finding_id_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX feedback_events_p20260601_review_finding_id_idx ON core.feedback_events_p20260601 USING btree (review_finding_id) WHERE (review_finding_id IS NOT NULL);
+
+
+--
+-- Name: feedback_events_p20260701_installation_id_created_at_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX feedback_events_p20260701_installation_id_created_at_idx ON core.feedback_events_p20260701 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: feedback_events_p20260701_review_finding_id_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX feedback_events_p20260701_review_finding_id_idx ON core.feedback_events_p20260701 USING btree (review_finding_id) WHERE (review_finding_id IS NOT NULL);
+
+
+--
+-- Name: feedback_events_p20260801_installation_id_created_at_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX feedback_events_p20260801_installation_id_created_at_idx ON core.feedback_events_p20260801 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: feedback_events_p20260801_review_finding_id_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX feedback_events_p20260801_review_finding_id_idx ON core.feedback_events_p20260801 USING btree (review_finding_id) WHERE (review_finding_id IS NOT NULL);
+
+
+--
+-- Name: idx_knowledge_chunks_body_tsv; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX idx_knowledge_chunks_body_tsv ON core.knowledge_chunks USING gin (body_tsv);
+
+
+--
+-- Name: idx_knowledge_chunks_tenant_repo; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX idx_knowledge_chunks_tenant_repo ON core.knowledge_chunks USING btree (installation_id, repository_id);
+
+
+--
+-- Name: idx_knowledge_chunks_vector_hnsw; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX idx_knowledge_chunks_vector_hnsw ON core.knowledge_chunks USING hnsw (vector public.vector_cosine_ops) WITH (m='16', ef_construction='64');
+
+
+--
+-- Name: integrations_confluence_space_key_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX integrations_confluence_space_key_idx ON core.integrations USING btree (((config_json ->> 'space_key'::text))) WHERE (kind = 'confluence_space'::text);
+
+
+--
+-- Name: integrations_kind_space_key; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX integrations_kind_space_key ON core.integrations USING btree (kind, ((config_json ->> 'space_key'::text)));
+
+
+--
+-- Name: ix_api_tokens_installation_id_user_id; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_api_tokens_installation_id_user_id ON core.api_tokens USING btree (installation_id, user_id);
+
+
+--
+-- Name: ix_arbitration_rejections_installation_created; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_arbitration_rejections_installation_created ON core.arbitration_rejections USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: ix_arbitration_rejections_installation_review; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_arbitration_rejections_installation_review ON core.arbitration_rejections USING btree (installation_id, review_id);
+
+
+--
+-- Name: ix_arbitration_rejections_run_target; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_arbitration_rejections_run_target ON core.arbitration_rejections USING btree (run_id, target_finding_id);
+
+
+--
+-- Name: ix_code_owners_repo_synced; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_code_owners_repo_synced ON core.code_owners USING btree (repository_id, synced_at);
+
+
+--
+-- Name: ix_fix_prompts_installation_id; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_fix_prompts_installation_id ON core.fix_prompts USING btree (installation_id);
+
+
+--
+-- Name: ix_gh_users_login; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_gh_users_login ON core.gh_users USING btree (login);
+
+
+--
+-- Name: ix_local_users_active_state; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_local_users_active_state ON core.local_users USING btree (state) WHERE (state = 'active'::text);
+
+
+--
+-- Name: ix_notification_rules_trigger; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_notification_rules_trigger ON core.notification_rules USING btree (trigger_event) WHERE (state = 'active'::text);
+
+
+--
+-- Name: ix_outbox_installation_state_created; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_outbox_installation_state_created ON core.outbox USING btree (installation_id, state, created_at) WHERE (state = 'pending'::text);
+
+
+--
+-- Name: ix_outbox_run_id; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_outbox_run_id ON core.outbox USING btree (run_id);
+
+
+--
+-- Name: ix_pr_files_repo_path_created; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_pr_files_repo_path_created ON core.pr_files USING btree (repository_id, file_path, created_at DESC);
+
+
+--
+-- Name: ix_pr_issue_links_install_issue; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_pr_issue_links_install_issue ON core.pr_issue_links USING btree (installation_id, github_issue_number);
+
+
+--
+-- Name: ix_pr_review_mutex_live_lease; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_pr_review_mutex_live_lease ON core.pr_review_mutex USING btree (lease_expires_at) WHERE (released_at IS NULL);
+
+
+--
+-- Name: ix_pr_state_transitions_pr_created; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_pr_state_transitions_pr_created ON core.pr_state_transitions USING btree (pr_id, created_at DESC);
+
+
+--
+-- Name: ix_pull_request_reviews_current_run_id; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_pull_request_reviews_current_run_id ON core.pull_request_reviews USING btree (current_run_id) WHERE (current_run_id IS NOT NULL);
+
+
+--
+-- Name: ix_pull_requests_install_state_created; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_pull_requests_install_state_created ON core.pull_requests USING btree (installation_id, repository_id, state, created_at DESC);
+
+
+--
+-- Name: ix_repo_configs_installation_id; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_repo_configs_installation_id ON core.repo_configs USING btree (installation_id);
+
+
+--
+-- Name: ix_repositories_full_name; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_repositories_full_name ON core.repositories USING btree (full_name);
+
+
+--
+-- Name: ix_repositories_installation_id; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_repositories_installation_id ON core.repositories USING btree (installation_id);
+
+
+--
+-- Name: ix_review_findings_install_created; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_review_findings_install_created ON core.review_findings USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: ix_review_findings_pr_path_severity_created; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_review_findings_pr_path_severity_created ON core.review_findings USING btree (pr_id, file_path, severity, created_at DESC);
+
+
+--
+-- Name: ix_review_findings_pr_severity; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_review_findings_pr_severity ON core.review_findings USING btree (pr_id, severity);
+
+
+--
+-- Name: ix_review_findings_run_suppression; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_review_findings_run_suppression ON core.review_findings USING btree (pr_id, suppression_state) WHERE (suppression_state <> 'NONE'::core.suppression_state);
+
+
+--
+-- Name: ix_review_findings_run_tier; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_review_findings_run_tier ON core.review_findings USING btree (pr_id, tier);
+
+
+--
+-- Name: ix_review_findings_source_tool; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_review_findings_source_tool ON core.review_findings USING btree (source_tool) WHERE (source_tool IS NOT NULL);
+
+
+--
+-- Name: ix_review_policy_bundles_installation; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_review_policy_bundles_installation ON core.review_policy_bundles USING btree (installation_id);
+
+
+--
+-- Name: ix_review_runs_active; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_review_runs_active ON core.review_runs USING btree (review_id, started_at DESC) WHERE (lifecycle_state = ANY (ARRAY['PENDING'::text, 'RUNNING'::text, 'WAITING_RETRY'::text]));
+
+
+--
+-- Name: ix_review_runs_parent_run_id; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_review_runs_parent_run_id ON core.review_runs USING btree (parent_run_id) WHERE (parent_run_id IS NOT NULL);
+
+
+--
+-- Name: ix_review_runs_retention_close_prs; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_review_runs_retention_close_prs ON core.review_runs USING btree (started_at) WHERE ((retired_at IS NULL) AND (is_ephemeral = true) AND (branch_name IS NOT NULL));
+
+
+--
+-- Name: ix_review_runs_retention_retire; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_review_runs_retention_retire ON core.review_runs USING btree (started_at) WHERE ((retired_at IS NULL) AND (lifecycle_state = ANY (ARRAY['COMPLETED'::text, 'FAILED'::text])));
+
+
+--
+-- Name: ix_review_runs_review_id_started; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_review_runs_review_id_started ON core.review_runs USING btree (review_id, started_at DESC);
+
+
+--
+-- Name: ix_review_runs_superseded_by_run_id; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_review_runs_superseded_by_run_id ON core.review_runs USING btree (superseded_by_run_id) WHERE (superseded_by_run_id IS NOT NULL);
+
+
+--
+-- Name: ix_review_runs_supersedes_run_id; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_review_runs_supersedes_run_id ON core.review_runs USING btree (supersedes_run_id) WHERE (supersedes_run_id IS NOT NULL);
+
+
+--
+-- Name: ix_review_tool_runs_installation_started; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_review_tool_runs_installation_started ON core.review_tool_runs USING btree (installation_id, started_at DESC);
+
+
+--
+-- Name: ix_review_tool_runs_run_id_tool; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_review_tool_runs_run_id_tool ON core.review_tool_runs USING btree (run_id, tool_name);
+
+
+--
+-- Name: ix_review_tool_runs_status_started; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_review_tool_runs_status_started ON core.review_tool_runs USING btree (status, started_at DESC) WHERE (status <> 'completed'::text);
+
+
+--
+-- Name: ix_review_walkthroughs_installation; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_review_walkthroughs_installation ON core.review_walkthroughs USING btree (installation_id);
+
+
+--
+-- Name: ix_role_grants_install_lookup; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_role_grants_install_lookup ON core.role_grants USING btree (subject_kind, subject_id, installation_id) WHERE (scope = 'installation'::text);
+
+
+--
+-- Name: ix_role_grants_installation_id_subject; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_role_grants_installation_id_subject ON core.role_grants USING btree (installation_id, subject_kind, subject_id);
+
+
+--
+-- Name: ix_worker_heartbeats_last_seen; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_worker_heartbeats_last_seen ON core.worker_heartbeats USING btree (last_seen_at);
+
+
+--
+-- Name: ix_workspace_leases_active; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_workspace_leases_active ON core.workspace_leases USING btree (heartbeat_at) WHERE (state = 'ALLOCATED'::core.workspace_lease_state);
+
+
+--
+-- Name: ix_workspace_leases_janitor_eligible; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_workspace_leases_janitor_eligible ON core.workspace_leases USING btree (state, orphan_check_after) WHERE (state = ANY (ARRAY['RELEASE_REQUESTED'::core.workspace_lease_state, 'FAILED_CLEANUP'::core.workspace_lease_state, 'ORPHANED'::core.workspace_lease_state]));
+
+
+--
+-- Name: ix_workspace_leases_pod; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_workspace_leases_pod ON core.workspace_leases USING btree (pod_name, state) WHERE (state <> ALL (ARRAY['RELEASED'::core.workspace_lease_state, 'FAILED_CLEANUP'::core.workspace_lease_state]));
+
+
+--
+-- Name: ix_workspace_leases_run; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_workspace_leases_run ON core.workspace_leases USING btree (run_id);
+
+
+--
+-- Name: ix_workspace_leases_worker; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX ix_workspace_leases_worker ON core.workspace_leases USING btree (worker_id) WHERE (state = ANY (ARRAY['ALLOCATED'::core.workspace_lease_state, 'RELEASE_REQUESTED'::core.workspace_lease_state]));
+
+
+--
+-- Name: learning_proposals_installation_state; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX learning_proposals_installation_state ON core.learning_proposals USING btree (installation_id, state);
+
+
+--
+-- Name: learning_proposals_proposed_by; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX learning_proposals_proposed_by ON core.learning_proposals USING btree (proposed_by_user_id);
+
+
+--
+-- Name: learnings_installation_state; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX learnings_installation_state ON core.learnings USING btree (installation_id, state);
+
+
+--
+-- Name: learnings_revisions_learning; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX learnings_revisions_learning ON core.learnings_revisions USING btree (learning_id, edited_at DESC);
+
+
+--
+-- Name: outbox_delivery_id_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX outbox_delivery_id_idx ON core.outbox USING btree (delivery_id);
+
+
+--
+-- Name: outbox_pending_by_sink; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX outbox_pending_by_sink ON core.outbox USING btree (sink, created_at) WHERE (state = 'pending'::text);
+
+
+--
+-- Name: repo_symbols_public_partial; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX repo_symbols_public_partial ON core.repo_symbols USING btree (repo_id, is_public) WHERE (is_public = true);
+
+
+--
+-- Name: repo_symbols_repo_id; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX repo_symbols_repo_id ON core.repo_symbols USING btree (repo_id);
+
+
+--
+-- Name: retrieval_traces_captured_at_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX retrieval_traces_captured_at_idx ON core.retrieval_traces USING btree (captured_at);
+
+
+--
+-- Name: retrieval_traces_review_id_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX retrieval_traces_review_id_idx ON core.retrieval_traces USING btree (review_id);
+
+
+--
+-- Name: symbol_references_consumer; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX symbol_references_consumer ON core.symbol_references USING btree (consumer_repo_id);
+
+
+--
+-- Name: symbol_references_target; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX symbol_references_target ON core.symbol_references USING btree (target_symbol_id);
+
+
+--
+-- Name: taxonomy_suggestions_submitted_at_desc_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX taxonomy_suggestions_submitted_at_desc_idx ON core.taxonomy_suggestions USING btree (submitted_at DESC);
+
+
+--
+-- Name: uq_code_owners_repo_pattern_sha; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_code_owners_repo_pattern_sha ON core.code_owners USING btree (repository_id, path_pattern, source_file_sha);
+
+
+--
+-- Name: uq_core_users_username_local; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_core_users_username_local ON core.users USING btree (username) WHERE (password_hash IS NOT NULL);
+
+
+--
+-- Name: uq_github_issues_cache_install_issue; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_github_issues_cache_install_issue ON core.github_issues_cache USING btree (installation_id, github_issue_number);
+
+
+--
+-- Name: uq_local_users_email_fingerprint; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_local_users_email_fingerprint ON core.local_users USING btree (email_fingerprint);
+
+
+--
+-- Name: uq_local_users_username; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_local_users_username ON core.local_users USING btree (username);
+
+
+--
+-- Name: uq_pr_files_pr_path; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_pr_files_pr_path ON core.pr_files USING btree (pr_id, file_path);
+
+
+--
+-- Name: uq_pr_issue_links_pr_issue_kind_src; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_pr_issue_links_pr_issue_kind_src ON core.pr_issue_links USING btree (pr_id, github_issue_number, linkage_kind, source);
+
+
+--
+-- Name: uq_pr_review_mutex_live_pr; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_pr_review_mutex_live_pr ON core.pr_review_mutex USING btree (installation_id, repository_id, pr_number) WHERE (released_at IS NULL);
+
+
+--
+-- Name: uq_pr_state_transitions_delivery_id; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_pr_state_transitions_delivery_id ON core.pr_state_transitions USING btree (delivery_id) WHERE (delivery_id IS NOT NULL);
+
+
+--
+-- Name: uq_pull_request_reviews_provider_provider_pr_id; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_pull_request_reviews_provider_provider_pr_id ON core.pull_request_reviews USING btree (provider, provider_pr_id);
+
+
+--
+-- Name: uq_pull_request_reviews_provider_repo_pr; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_pull_request_reviews_provider_repo_pr ON core.pull_request_reviews USING btree (provider, repo_id, pr_number);
+
+
+--
+-- Name: uq_pull_requests_github_id; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_pull_requests_github_id ON core.pull_requests USING btree (github_pull_request_id);
+
+
+--
+-- Name: uq_pull_requests_install_repo_number; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_pull_requests_install_repo_number ON core.pull_requests USING btree (installation_id, repository_id, pr_number);
+
+
+--
+-- Name: uq_role_grant_pending_one_in_flight_installation; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_role_grant_pending_one_in_flight_installation ON core.role_grant_pending USING btree (installation_id, subject_kind, subject_id) WHERE ((state = 'pending'::text) AND (scope = 'installation'::text));
+
+
+--
+-- Name: uq_role_grant_pending_one_in_flight_platform; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_role_grant_pending_one_in_flight_platform ON core.role_grant_pending USING btree (subject_kind, subject_id) WHERE ((state = 'pending'::text) AND (scope = 'platform'::text));
+
+
+--
+-- Name: uq_role_grants_install_subject_role; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_role_grants_install_subject_role ON core.role_grants USING btree (installation_id, subject_kind, subject_id, role) WHERE (scope = 'installation'::text);
+
+
+--
+-- Name: uq_role_grants_platform_subject_role; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_role_grants_platform_subject_role ON core.role_grants USING btree (subject_kind, subject_id, role) WHERE (scope = 'platform'::text);
+
+
+--
+-- Name: ux_llm_provider_settings_scope_role_install; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX ux_llm_provider_settings_scope_role_install ON core.llm_provider_settings USING btree (scope, role, COALESCE(installation_id, '00000000-0000-0000-0000-000000000000'::uuid));
+
+
+--
+-- Name: ux_workspace_active_run; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX ux_workspace_active_run ON core.workspace_leases USING btree (run_id) WHERE (state = ANY (ARRAY['ALLOCATED'::core.workspace_lease_state, 'RELEASE_REQUESTED'::core.workspace_lease_state]));
+
+
+--
+-- Name: v_retrieval_traces_recent_captured_at_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX v_retrieval_traces_recent_captured_at_idx ON core.v_retrieval_traces_recent USING btree (captured_at DESC);
+
+
+--
+-- Name: v_retrieval_traces_recent_starvation_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX v_retrieval_traces_recent_starvation_idx ON core.v_retrieval_traces_recent USING btree (starvation_observed) WHERE (starvation_observed = true);
+
+
+--
+-- Name: v_retrieval_traces_recent_trace_id_uniq; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX v_retrieval_traces_recent_trace_id_uniq ON core.v_retrieval_traces_recent USING btree (trace_id);
+
+
+--
+-- Name: cost_daily_today_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX cost_daily_today_idx ON telemetry.cost_daily USING btree (today);
+
+
+--
+-- Name: ix_llm_calls_install_author_created; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX ix_llm_calls_install_author_created ON ONLY telemetry.llm_calls USING btree (installation_id, author_gh_user_id, created_at DESC) WHERE (author_gh_user_id IS NOT NULL);
+
+
+--
+-- Name: ix_llm_calls_installation_id_created_at; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX ix_llm_calls_installation_id_created_at ON ONLY telemetry.llm_calls USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: ix_llm_payloads_installation_id_key; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX ix_llm_payloads_installation_id_key ON ONLY telemetry.llm_payloads USING btree (installation_id, key);
+
+
+--
+-- Name: llm_calls_default_installation_id_author_gh_user_id_created_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_calls_default_installation_id_author_gh_user_id_created_idx ON telemetry.llm_calls_default USING btree (installation_id, author_gh_user_id, created_at DESC) WHERE (author_gh_user_id IS NOT NULL);
+
+
+--
+-- Name: llm_calls_default_installation_id_created_at_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_calls_default_installation_id_created_at_idx ON telemetry.llm_calls_default USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: llm_calls_p20260506_installation_id_author_gh_user_id_creat_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_calls_p20260506_installation_id_author_gh_user_id_creat_idx ON telemetry.llm_calls_p20260506 USING btree (installation_id, author_gh_user_id, created_at DESC) WHERE (author_gh_user_id IS NOT NULL);
+
+
+--
+-- Name: llm_calls_p20260506_installation_id_created_at_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_calls_p20260506_installation_id_created_at_idx ON telemetry.llm_calls_p20260506 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: llm_calls_p20260513_installation_id_author_gh_user_id_creat_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_calls_p20260513_installation_id_author_gh_user_id_creat_idx ON telemetry.llm_calls_p20260513 USING btree (installation_id, author_gh_user_id, created_at DESC) WHERE (author_gh_user_id IS NOT NULL);
+
+
+--
+-- Name: llm_calls_p20260513_installation_id_created_at_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_calls_p20260513_installation_id_created_at_idx ON telemetry.llm_calls_p20260513 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: llm_calls_p20260520_installation_id_author_gh_user_id_creat_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_calls_p20260520_installation_id_author_gh_user_id_creat_idx ON telemetry.llm_calls_p20260520 USING btree (installation_id, author_gh_user_id, created_at DESC) WHERE (author_gh_user_id IS NOT NULL);
+
+
+--
+-- Name: llm_calls_p20260520_installation_id_created_at_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_calls_p20260520_installation_id_created_at_idx ON telemetry.llm_calls_p20260520 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: llm_calls_p20260527_installation_id_author_gh_user_id_creat_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_calls_p20260527_installation_id_author_gh_user_id_creat_idx ON telemetry.llm_calls_p20260527 USING btree (installation_id, author_gh_user_id, created_at DESC) WHERE (author_gh_user_id IS NOT NULL);
+
+
+--
+-- Name: llm_calls_p20260527_installation_id_created_at_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_calls_p20260527_installation_id_created_at_idx ON telemetry.llm_calls_p20260527 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: llm_calls_p20260603_installation_id_author_gh_user_id_creat_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_calls_p20260603_installation_id_author_gh_user_id_creat_idx ON telemetry.llm_calls_p20260603 USING btree (installation_id, author_gh_user_id, created_at DESC) WHERE (author_gh_user_id IS NOT NULL);
+
+
+--
+-- Name: llm_calls_p20260603_installation_id_created_at_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_calls_p20260603_installation_id_created_at_idx ON telemetry.llm_calls_p20260603 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: llm_calls_p20260610_installation_id_author_gh_user_id_creat_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_calls_p20260610_installation_id_author_gh_user_id_creat_idx ON telemetry.llm_calls_p20260610 USING btree (installation_id, author_gh_user_id, created_at DESC) WHERE (author_gh_user_id IS NOT NULL);
+
+
+--
+-- Name: llm_calls_p20260610_installation_id_created_at_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_calls_p20260610_installation_id_created_at_idx ON telemetry.llm_calls_p20260610 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: llm_calls_p20260617_installation_id_author_gh_user_id_creat_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_calls_p20260617_installation_id_author_gh_user_id_creat_idx ON telemetry.llm_calls_p20260617 USING btree (installation_id, author_gh_user_id, created_at DESC) WHERE (author_gh_user_id IS NOT NULL);
+
+
+--
+-- Name: llm_calls_p20260617_installation_id_created_at_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_calls_p20260617_installation_id_created_at_idx ON telemetry.llm_calls_p20260617 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: llm_calls_p20260624_installation_id_author_gh_user_id_creat_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_calls_p20260624_installation_id_author_gh_user_id_creat_idx ON telemetry.llm_calls_p20260624 USING btree (installation_id, author_gh_user_id, created_at DESC) WHERE (author_gh_user_id IS NOT NULL);
+
+
+--
+-- Name: llm_calls_p20260624_installation_id_created_at_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_calls_p20260624_installation_id_created_at_idx ON telemetry.llm_calls_p20260624 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: llm_calls_p20260701_installation_id_author_gh_user_id_creat_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_calls_p20260701_installation_id_author_gh_user_id_creat_idx ON telemetry.llm_calls_p20260701 USING btree (installation_id, author_gh_user_id, created_at DESC) WHERE (author_gh_user_id IS NOT NULL);
+
+
+--
+-- Name: llm_calls_p20260701_installation_id_created_at_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_calls_p20260701_installation_id_created_at_idx ON telemetry.llm_calls_p20260701 USING btree (installation_id, created_at DESC);
+
+
+--
+-- Name: llm_payloads_default_installation_id_key_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_payloads_default_installation_id_key_idx ON telemetry.llm_payloads_default USING btree (installation_id, key);
+
+
+--
+-- Name: llm_payloads_p20260401_installation_id_key_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_payloads_p20260401_installation_id_key_idx ON telemetry.llm_payloads_p20260401 USING btree (installation_id, key);
+
+
+--
+-- Name: llm_payloads_p20260501_installation_id_key_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_payloads_p20260501_installation_id_key_idx ON telemetry.llm_payloads_p20260501 USING btree (installation_id, key);
+
+
+--
+-- Name: llm_payloads_p20260601_installation_id_key_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_payloads_p20260601_installation_id_key_idx ON telemetry.llm_payloads_p20260601 USING btree (installation_id, key);
+
+
+--
+-- Name: llm_payloads_p20260701_installation_id_key_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_payloads_p20260701_installation_id_key_idx ON telemetry.llm_payloads_p20260701 USING btree (installation_id, key);
+
+
+--
+-- Name: llm_payloads_p20260801_installation_id_key_idx; Type: INDEX; Schema: telemetry; Owner: -
+--
+
+CREATE INDEX llm_payloads_p20260801_installation_id_key_idx ON telemetry.llm_payloads_p20260801 USING btree (installation_id, key);
+
+
+--
+-- Name: audit_events_default_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_audit_events_installation_id_created_at ATTACH PARTITION audit.audit_events_default_installation_id_created_at_idx;
+
+
+--
+-- Name: audit_events_default_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.pk_audit_events ATTACH PARTITION audit.audit_events_default_pkey;
+
+
+--
+-- Name: audit_events_p20260201_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_audit_events_installation_id_created_at ATTACH PARTITION audit.audit_events_p20260201_installation_id_created_at_idx;
+
+
+--
+-- Name: audit_events_p20260201_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.pk_audit_events ATTACH PARTITION audit.audit_events_p20260201_pkey;
+
+
+--
+-- Name: audit_events_p20260301_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_audit_events_installation_id_created_at ATTACH PARTITION audit.audit_events_p20260301_installation_id_created_at_idx;
+
+
+--
+-- Name: audit_events_p20260301_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.pk_audit_events ATTACH PARTITION audit.audit_events_p20260301_pkey;
+
+
+--
+-- Name: audit_events_p20260401_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_audit_events_installation_id_created_at ATTACH PARTITION audit.audit_events_p20260401_installation_id_created_at_idx;
+
+
+--
+-- Name: audit_events_p20260401_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.pk_audit_events ATTACH PARTITION audit.audit_events_p20260401_pkey;
+
+
+--
+-- Name: audit_events_p20260501_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_audit_events_installation_id_created_at ATTACH PARTITION audit.audit_events_p20260501_installation_id_created_at_idx;
+
+
+--
+-- Name: audit_events_p20260501_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.pk_audit_events ATTACH PARTITION audit.audit_events_p20260501_pkey;
+
+
+--
+-- Name: audit_events_p20260601_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_audit_events_installation_id_created_at ATTACH PARTITION audit.audit_events_p20260601_installation_id_created_at_idx;
+
+
+--
+-- Name: audit_events_p20260601_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.pk_audit_events ATTACH PARTITION audit.audit_events_p20260601_pkey;
+
+
+--
+-- Name: audit_events_p20260701_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_audit_events_installation_id_created_at ATTACH PARTITION audit.audit_events_p20260701_installation_id_created_at_idx;
+
+
+--
+-- Name: audit_events_p20260701_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.pk_audit_events ATTACH PARTITION audit.audit_events_p20260701_pkey;
+
+
+--
+-- Name: audit_events_p20260801_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_audit_events_installation_id_created_at ATTACH PARTITION audit.audit_events_p20260801_installation_id_created_at_idx;
+
+
+--
+-- Name: audit_events_p20260801_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.pk_audit_events ATTACH PARTITION audit.audit_events_p20260801_pkey;
+
+
+--
+-- Name: audit_events_p20260901_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_audit_events_installation_id_created_at ATTACH PARTITION audit.audit_events_p20260901_installation_id_created_at_idx;
+
+
+--
+-- Name: audit_events_p20260901_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.pk_audit_events ATTACH PARTITION audit.audit_events_p20260901_pkey;
+
+
+--
+-- Name: audit_events_p20261001_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_audit_events_installation_id_created_at ATTACH PARTITION audit.audit_events_p20261001_installation_id_created_at_idx;
+
+
+--
+-- Name: audit_events_p20261001_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.pk_audit_events ATTACH PARTITION audit.audit_events_p20261001_pkey;
+
+
+--
+-- Name: webhook_events_default_delivery_id_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_webhook_events_delivery_id ATTACH PARTITION audit.webhook_events_default_delivery_id_idx;
+
+
+--
+-- Name: webhook_events_default_installation_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_webhook_events_installation_id_received_at ATTACH PARTITION audit.webhook_events_default_installation_id_received_at_idx;
+
+
+--
+-- Name: webhook_events_default_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.pk_webhook_events ATTACH PARTITION audit.webhook_events_default_pkey;
+
+
+--
+-- Name: webhook_events_default_run_id_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_webhook_events_run_id ATTACH PARTITION audit.webhook_events_default_run_id_idx;
+
+
+--
+-- Name: webhook_events_p20260520_delivery_id_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_webhook_events_delivery_id ATTACH PARTITION audit.webhook_events_p20260520_delivery_id_idx;
+
+
+--
+-- Name: webhook_events_p20260520_installation_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_webhook_events_installation_id_received_at ATTACH PARTITION audit.webhook_events_p20260520_installation_id_received_at_idx;
+
+
+--
+-- Name: webhook_events_p20260520_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.pk_webhook_events ATTACH PARTITION audit.webhook_events_p20260520_pkey;
+
+
+--
+-- Name: webhook_events_p20260520_run_id_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_webhook_events_run_id ATTACH PARTITION audit.webhook_events_p20260520_run_id_idx;
+
+
+--
+-- Name: webhook_events_p20260527_delivery_id_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_webhook_events_delivery_id ATTACH PARTITION audit.webhook_events_p20260527_delivery_id_idx;
+
+
+--
+-- Name: webhook_events_p20260527_installation_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_webhook_events_installation_id_received_at ATTACH PARTITION audit.webhook_events_p20260527_installation_id_received_at_idx;
+
+
+--
+-- Name: webhook_events_p20260527_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.pk_webhook_events ATTACH PARTITION audit.webhook_events_p20260527_pkey;
+
+
+--
+-- Name: webhook_events_p20260527_run_id_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_webhook_events_run_id ATTACH PARTITION audit.webhook_events_p20260527_run_id_idx;
+
+
+--
+-- Name: webhook_events_p20260603_delivery_id_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_webhook_events_delivery_id ATTACH PARTITION audit.webhook_events_p20260603_delivery_id_idx;
+
+
+--
+-- Name: webhook_events_p20260603_installation_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_webhook_events_installation_id_received_at ATTACH PARTITION audit.webhook_events_p20260603_installation_id_received_at_idx;
+
+
+--
+-- Name: webhook_events_p20260603_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.pk_webhook_events ATTACH PARTITION audit.webhook_events_p20260603_pkey;
+
+
+--
+-- Name: webhook_events_p20260603_run_id_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_webhook_events_run_id ATTACH PARTITION audit.webhook_events_p20260603_run_id_idx;
+
+
+--
+-- Name: webhook_events_p20260610_delivery_id_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_webhook_events_delivery_id ATTACH PARTITION audit.webhook_events_p20260610_delivery_id_idx;
+
+
+--
+-- Name: webhook_events_p20260610_installation_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_webhook_events_installation_id_received_at ATTACH PARTITION audit.webhook_events_p20260610_installation_id_received_at_idx;
+
+
+--
+-- Name: webhook_events_p20260610_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.pk_webhook_events ATTACH PARTITION audit.webhook_events_p20260610_pkey;
+
+
+--
+-- Name: webhook_events_p20260610_run_id_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_webhook_events_run_id ATTACH PARTITION audit.webhook_events_p20260610_run_id_idx;
+
+
+--
+-- Name: webhook_events_p20260617_delivery_id_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_webhook_events_delivery_id ATTACH PARTITION audit.webhook_events_p20260617_delivery_id_idx;
+
+
+--
+-- Name: webhook_events_p20260617_installation_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_webhook_events_installation_id_received_at ATTACH PARTITION audit.webhook_events_p20260617_installation_id_received_at_idx;
+
+
+--
+-- Name: webhook_events_p20260617_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.pk_webhook_events ATTACH PARTITION audit.webhook_events_p20260617_pkey;
+
+
+--
+-- Name: webhook_events_p20260617_run_id_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_webhook_events_run_id ATTACH PARTITION audit.webhook_events_p20260617_run_id_idx;
+
+
+--
+-- Name: workflow_events_default_installation_id_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_workflow_events_installation_id ATTACH PARTITION audit.workflow_events_default_installation_id_idx;
+
+
+--
+-- Name: workflow_events_default_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.workflow_events_pkey ATTACH PARTITION audit.workflow_events_default_pkey;
+
+
+--
+-- Name: workflow_events_default_provider_delivery_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.uq_workflow_events_provider_delivery ATTACH PARTITION audit.workflow_events_default_provider_delivery_id_received_at_idx;
+
+
+--
+-- Name: workflow_events_default_review_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_workflow_events_review_received ATTACH PARTITION audit.workflow_events_default_review_id_received_at_idx;
+
+
+--
+-- Name: workflow_events_default_run_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_workflow_events_run_received ATTACH PARTITION audit.workflow_events_default_run_id_received_at_idx;
+
+
+--
+-- Name: workflow_events_default_run_id_sequence_no_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.uq_workflow_events_run_sequence ATTACH PARTITION audit.workflow_events_default_run_id_sequence_no_received_at_idx;
+
+
+--
+-- Name: workflow_events_p20260401_installation_id_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_workflow_events_installation_id ATTACH PARTITION audit.workflow_events_p20260401_installation_id_idx;
+
+
+--
+-- Name: workflow_events_p20260401_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.workflow_events_pkey ATTACH PARTITION audit.workflow_events_p20260401_pkey;
+
+
+--
+-- Name: workflow_events_p20260401_provider_delivery_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.uq_workflow_events_provider_delivery ATTACH PARTITION audit.workflow_events_p20260401_provider_delivery_id_received_at_idx;
+
+
+--
+-- Name: workflow_events_p20260401_review_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_workflow_events_review_received ATTACH PARTITION audit.workflow_events_p20260401_review_id_received_at_idx;
+
+
+--
+-- Name: workflow_events_p20260401_run_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_workflow_events_run_received ATTACH PARTITION audit.workflow_events_p20260401_run_id_received_at_idx;
+
+
+--
+-- Name: workflow_events_p20260401_run_id_sequence_no_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.uq_workflow_events_run_sequence ATTACH PARTITION audit.workflow_events_p20260401_run_id_sequence_no_received_at_idx;
+
+
+--
+-- Name: workflow_events_p20260501_installation_id_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_workflow_events_installation_id ATTACH PARTITION audit.workflow_events_p20260501_installation_id_idx;
+
+
+--
+-- Name: workflow_events_p20260501_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.workflow_events_pkey ATTACH PARTITION audit.workflow_events_p20260501_pkey;
+
+
+--
+-- Name: workflow_events_p20260501_provider_delivery_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.uq_workflow_events_provider_delivery ATTACH PARTITION audit.workflow_events_p20260501_provider_delivery_id_received_at_idx;
+
+
+--
+-- Name: workflow_events_p20260501_review_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_workflow_events_review_received ATTACH PARTITION audit.workflow_events_p20260501_review_id_received_at_idx;
+
+
+--
+-- Name: workflow_events_p20260501_run_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_workflow_events_run_received ATTACH PARTITION audit.workflow_events_p20260501_run_id_received_at_idx;
+
+
+--
+-- Name: workflow_events_p20260501_run_id_sequence_no_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.uq_workflow_events_run_sequence ATTACH PARTITION audit.workflow_events_p20260501_run_id_sequence_no_received_at_idx;
+
+
+--
+-- Name: workflow_events_p20260601_installation_id_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_workflow_events_installation_id ATTACH PARTITION audit.workflow_events_p20260601_installation_id_idx;
+
+
+--
+-- Name: workflow_events_p20260601_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.workflow_events_pkey ATTACH PARTITION audit.workflow_events_p20260601_pkey;
+
+
+--
+-- Name: workflow_events_p20260601_provider_delivery_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.uq_workflow_events_provider_delivery ATTACH PARTITION audit.workflow_events_p20260601_provider_delivery_id_received_at_idx;
+
+
+--
+-- Name: workflow_events_p20260601_review_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_workflow_events_review_received ATTACH PARTITION audit.workflow_events_p20260601_review_id_received_at_idx;
+
+
+--
+-- Name: workflow_events_p20260601_run_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_workflow_events_run_received ATTACH PARTITION audit.workflow_events_p20260601_run_id_received_at_idx;
+
+
+--
+-- Name: workflow_events_p20260601_run_id_sequence_no_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.uq_workflow_events_run_sequence ATTACH PARTITION audit.workflow_events_p20260601_run_id_sequence_no_received_at_idx;
+
+
+--
+-- Name: workflow_events_p20260701_installation_id_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_workflow_events_installation_id ATTACH PARTITION audit.workflow_events_p20260701_installation_id_idx;
+
+
+--
+-- Name: workflow_events_p20260701_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.workflow_events_pkey ATTACH PARTITION audit.workflow_events_p20260701_pkey;
+
+
+--
+-- Name: workflow_events_p20260701_provider_delivery_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.uq_workflow_events_provider_delivery ATTACH PARTITION audit.workflow_events_p20260701_provider_delivery_id_received_at_idx;
+
+
+--
+-- Name: workflow_events_p20260701_review_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_workflow_events_review_received ATTACH PARTITION audit.workflow_events_p20260701_review_id_received_at_idx;
+
+
+--
+-- Name: workflow_events_p20260701_run_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_workflow_events_run_received ATTACH PARTITION audit.workflow_events_p20260701_run_id_received_at_idx;
+
+
+--
+-- Name: workflow_events_p20260701_run_id_sequence_no_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.uq_workflow_events_run_sequence ATTACH PARTITION audit.workflow_events_p20260701_run_id_sequence_no_received_at_idx;
+
+
+--
+-- Name: workflow_events_p20260801_installation_id_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_workflow_events_installation_id ATTACH PARTITION audit.workflow_events_p20260801_installation_id_idx;
+
+
+--
+-- Name: workflow_events_p20260801_pkey; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.workflow_events_pkey ATTACH PARTITION audit.workflow_events_p20260801_pkey;
+
+
+--
+-- Name: workflow_events_p20260801_provider_delivery_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.uq_workflow_events_provider_delivery ATTACH PARTITION audit.workflow_events_p20260801_provider_delivery_id_received_at_idx;
+
+
+--
+-- Name: workflow_events_p20260801_review_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_workflow_events_review_received ATTACH PARTITION audit.workflow_events_p20260801_review_id_received_at_idx;
+
+
+--
+-- Name: workflow_events_p20260801_run_id_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.ix_workflow_events_run_received ATTACH PARTITION audit.workflow_events_p20260801_run_id_received_at_idx;
+
+
+--
+-- Name: workflow_events_p20260801_run_id_sequence_no_received_at_idx; Type: INDEX ATTACH; Schema: audit; Owner: -
+--
+
+ALTER INDEX audit.uq_workflow_events_run_sequence ATTACH PARTITION audit.workflow_events_p20260801_run_id_sequence_no_received_at_idx;
+
+
+--
+-- Name: diff_snapshots_default_installation_id_repository_id_base_s_idx; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.ix_diff_snapshots_install_repo_shas ATTACH PARTITION core.diff_snapshots_default_installation_id_repository_id_base_s_idx;
+
+
+--
+-- Name: diff_snapshots_default_installation_id_repository_id_base_s_key; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.uq_diff_snapshots_triple ATTACH PARTITION core.diff_snapshots_default_installation_id_repository_id_base_s_key;
+
+
+--
+-- Name: diff_snapshots_default_pkey; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.pk_diff_snapshots ATTACH PARTITION core.diff_snapshots_default_pkey;
+
+
+--
+-- Name: diff_snapshots_p20260401_installation_id_repository_id_base_idx; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.ix_diff_snapshots_install_repo_shas ATTACH PARTITION core.diff_snapshots_p20260401_installation_id_repository_id_base_idx;
+
+
+--
+-- Name: diff_snapshots_p20260401_installation_id_repository_id_base_key; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.uq_diff_snapshots_triple ATTACH PARTITION core.diff_snapshots_p20260401_installation_id_repository_id_base_key;
+
+
+--
+-- Name: diff_snapshots_p20260401_pkey; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.pk_diff_snapshots ATTACH PARTITION core.diff_snapshots_p20260401_pkey;
+
+
+--
+-- Name: diff_snapshots_p20260501_installation_id_repository_id_base_idx; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.ix_diff_snapshots_install_repo_shas ATTACH PARTITION core.diff_snapshots_p20260501_installation_id_repository_id_base_idx;
+
+
+--
+-- Name: diff_snapshots_p20260501_installation_id_repository_id_base_key; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.uq_diff_snapshots_triple ATTACH PARTITION core.diff_snapshots_p20260501_installation_id_repository_id_base_key;
+
+
+--
+-- Name: diff_snapshots_p20260501_pkey; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.pk_diff_snapshots ATTACH PARTITION core.diff_snapshots_p20260501_pkey;
+
+
+--
+-- Name: diff_snapshots_p20260601_installation_id_repository_id_base_idx; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.ix_diff_snapshots_install_repo_shas ATTACH PARTITION core.diff_snapshots_p20260601_installation_id_repository_id_base_idx;
+
+
+--
+-- Name: diff_snapshots_p20260601_installation_id_repository_id_base_key; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.uq_diff_snapshots_triple ATTACH PARTITION core.diff_snapshots_p20260601_installation_id_repository_id_base_key;
+
+
+--
+-- Name: diff_snapshots_p20260601_pkey; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.pk_diff_snapshots ATTACH PARTITION core.diff_snapshots_p20260601_pkey;
+
+
+--
+-- Name: diff_snapshots_p20260701_installation_id_repository_id_base_idx; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.ix_diff_snapshots_install_repo_shas ATTACH PARTITION core.diff_snapshots_p20260701_installation_id_repository_id_base_idx;
+
+
+--
+-- Name: diff_snapshots_p20260701_installation_id_repository_id_base_key; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.uq_diff_snapshots_triple ATTACH PARTITION core.diff_snapshots_p20260701_installation_id_repository_id_base_key;
+
+
+--
+-- Name: diff_snapshots_p20260701_pkey; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.pk_diff_snapshots ATTACH PARTITION core.diff_snapshots_p20260701_pkey;
+
+
+--
+-- Name: diff_snapshots_p20260801_installation_id_repository_id_base_idx; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.ix_diff_snapshots_install_repo_shas ATTACH PARTITION core.diff_snapshots_p20260801_installation_id_repository_id_base_idx;
+
+
+--
+-- Name: diff_snapshots_p20260801_installation_id_repository_id_base_key; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.uq_diff_snapshots_triple ATTACH PARTITION core.diff_snapshots_p20260801_installation_id_repository_id_base_key;
+
+
+--
+-- Name: diff_snapshots_p20260801_pkey; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.pk_diff_snapshots ATTACH PARTITION core.diff_snapshots_p20260801_pkey;
+
+
+--
+-- Name: feedback_events_default_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.ix_feedback_events_installation_id_created_at ATTACH PARTITION core.feedback_events_default_installation_id_created_at_idx;
+
+
+--
+-- Name: feedback_events_default_pkey; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.pk_feedback_events ATTACH PARTITION core.feedback_events_default_pkey;
+
+
+--
+-- Name: feedback_events_default_review_finding_id_idx; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.ix_feedback_events_review_finding_id ATTACH PARTITION core.feedback_events_default_review_finding_id_idx;
+
+
+--
+-- Name: feedback_events_p20260401_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.ix_feedback_events_installation_id_created_at ATTACH PARTITION core.feedback_events_p20260401_installation_id_created_at_idx;
+
+
+--
+-- Name: feedback_events_p20260401_pkey; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.pk_feedback_events ATTACH PARTITION core.feedback_events_p20260401_pkey;
+
+
+--
+-- Name: feedback_events_p20260401_review_finding_id_idx; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.ix_feedback_events_review_finding_id ATTACH PARTITION core.feedback_events_p20260401_review_finding_id_idx;
+
+
+--
+-- Name: feedback_events_p20260501_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.ix_feedback_events_installation_id_created_at ATTACH PARTITION core.feedback_events_p20260501_installation_id_created_at_idx;
+
+
+--
+-- Name: feedback_events_p20260501_pkey; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.pk_feedback_events ATTACH PARTITION core.feedback_events_p20260501_pkey;
+
+
+--
+-- Name: feedback_events_p20260501_review_finding_id_idx; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.ix_feedback_events_review_finding_id ATTACH PARTITION core.feedback_events_p20260501_review_finding_id_idx;
+
+
+--
+-- Name: feedback_events_p20260601_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.ix_feedback_events_installation_id_created_at ATTACH PARTITION core.feedback_events_p20260601_installation_id_created_at_idx;
+
+
+--
+-- Name: feedback_events_p20260601_pkey; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.pk_feedback_events ATTACH PARTITION core.feedback_events_p20260601_pkey;
+
+
+--
+-- Name: feedback_events_p20260601_review_finding_id_idx; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.ix_feedback_events_review_finding_id ATTACH PARTITION core.feedback_events_p20260601_review_finding_id_idx;
+
+
+--
+-- Name: feedback_events_p20260701_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.ix_feedback_events_installation_id_created_at ATTACH PARTITION core.feedback_events_p20260701_installation_id_created_at_idx;
+
+
+--
+-- Name: feedback_events_p20260701_pkey; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.pk_feedback_events ATTACH PARTITION core.feedback_events_p20260701_pkey;
+
+
+--
+-- Name: feedback_events_p20260701_review_finding_id_idx; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.ix_feedback_events_review_finding_id ATTACH PARTITION core.feedback_events_p20260701_review_finding_id_idx;
+
+
+--
+-- Name: feedback_events_p20260801_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.ix_feedback_events_installation_id_created_at ATTACH PARTITION core.feedback_events_p20260801_installation_id_created_at_idx;
+
+
+--
+-- Name: feedback_events_p20260801_pkey; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.pk_feedback_events ATTACH PARTITION core.feedback_events_p20260801_pkey;
+
+
+--
+-- Name: feedback_events_p20260801_review_finding_id_idx; Type: INDEX ATTACH; Schema: core; Owner: -
+--
+
+ALTER INDEX core.ix_feedback_events_review_finding_id ATTACH PARTITION core.feedback_events_p20260801_review_finding_id_idx;
+
+
+--
+-- Name: llm_calls_default_installation_id_author_gh_user_id_created_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_calls_install_author_created ATTACH PARTITION telemetry.llm_calls_default_installation_id_author_gh_user_id_created_idx;
+
+
+--
+-- Name: llm_calls_default_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_calls_installation_id_created_at ATTACH PARTITION telemetry.llm_calls_default_installation_id_created_at_idx;
+
+
+--
+-- Name: llm_calls_default_pkey; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.pk_llm_calls ATTACH PARTITION telemetry.llm_calls_default_pkey;
+
+
+--
+-- Name: llm_calls_p20260506_installation_id_author_gh_user_id_creat_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_calls_install_author_created ATTACH PARTITION telemetry.llm_calls_p20260506_installation_id_author_gh_user_id_creat_idx;
+
+
+--
+-- Name: llm_calls_p20260506_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_calls_installation_id_created_at ATTACH PARTITION telemetry.llm_calls_p20260506_installation_id_created_at_idx;
+
+
+--
+-- Name: llm_calls_p20260506_pkey; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.pk_llm_calls ATTACH PARTITION telemetry.llm_calls_p20260506_pkey;
+
+
+--
+-- Name: llm_calls_p20260513_installation_id_author_gh_user_id_creat_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_calls_install_author_created ATTACH PARTITION telemetry.llm_calls_p20260513_installation_id_author_gh_user_id_creat_idx;
+
+
+--
+-- Name: llm_calls_p20260513_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_calls_installation_id_created_at ATTACH PARTITION telemetry.llm_calls_p20260513_installation_id_created_at_idx;
+
+
+--
+-- Name: llm_calls_p20260513_pkey; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.pk_llm_calls ATTACH PARTITION telemetry.llm_calls_p20260513_pkey;
+
+
+--
+-- Name: llm_calls_p20260520_installation_id_author_gh_user_id_creat_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_calls_install_author_created ATTACH PARTITION telemetry.llm_calls_p20260520_installation_id_author_gh_user_id_creat_idx;
+
+
+--
+-- Name: llm_calls_p20260520_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_calls_installation_id_created_at ATTACH PARTITION telemetry.llm_calls_p20260520_installation_id_created_at_idx;
+
+
+--
+-- Name: llm_calls_p20260520_pkey; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.pk_llm_calls ATTACH PARTITION telemetry.llm_calls_p20260520_pkey;
+
+
+--
+-- Name: llm_calls_p20260527_installation_id_author_gh_user_id_creat_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_calls_install_author_created ATTACH PARTITION telemetry.llm_calls_p20260527_installation_id_author_gh_user_id_creat_idx;
+
+
+--
+-- Name: llm_calls_p20260527_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_calls_installation_id_created_at ATTACH PARTITION telemetry.llm_calls_p20260527_installation_id_created_at_idx;
+
+
+--
+-- Name: llm_calls_p20260527_pkey; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.pk_llm_calls ATTACH PARTITION telemetry.llm_calls_p20260527_pkey;
+
+
+--
+-- Name: llm_calls_p20260603_installation_id_author_gh_user_id_creat_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_calls_install_author_created ATTACH PARTITION telemetry.llm_calls_p20260603_installation_id_author_gh_user_id_creat_idx;
+
+
+--
+-- Name: llm_calls_p20260603_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_calls_installation_id_created_at ATTACH PARTITION telemetry.llm_calls_p20260603_installation_id_created_at_idx;
+
+
+--
+-- Name: llm_calls_p20260603_pkey; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.pk_llm_calls ATTACH PARTITION telemetry.llm_calls_p20260603_pkey;
+
+
+--
+-- Name: llm_calls_p20260610_installation_id_author_gh_user_id_creat_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_calls_install_author_created ATTACH PARTITION telemetry.llm_calls_p20260610_installation_id_author_gh_user_id_creat_idx;
+
+
+--
+-- Name: llm_calls_p20260610_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_calls_installation_id_created_at ATTACH PARTITION telemetry.llm_calls_p20260610_installation_id_created_at_idx;
+
+
+--
+-- Name: llm_calls_p20260610_pkey; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.pk_llm_calls ATTACH PARTITION telemetry.llm_calls_p20260610_pkey;
+
+
+--
+-- Name: llm_calls_p20260617_installation_id_author_gh_user_id_creat_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_calls_install_author_created ATTACH PARTITION telemetry.llm_calls_p20260617_installation_id_author_gh_user_id_creat_idx;
+
+
+--
+-- Name: llm_calls_p20260617_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_calls_installation_id_created_at ATTACH PARTITION telemetry.llm_calls_p20260617_installation_id_created_at_idx;
+
+
+--
+-- Name: llm_calls_p20260617_pkey; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.pk_llm_calls ATTACH PARTITION telemetry.llm_calls_p20260617_pkey;
+
+
+--
+-- Name: llm_calls_p20260624_installation_id_author_gh_user_id_creat_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_calls_install_author_created ATTACH PARTITION telemetry.llm_calls_p20260624_installation_id_author_gh_user_id_creat_idx;
+
+
+--
+-- Name: llm_calls_p20260624_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_calls_installation_id_created_at ATTACH PARTITION telemetry.llm_calls_p20260624_installation_id_created_at_idx;
+
+
+--
+-- Name: llm_calls_p20260624_pkey; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.pk_llm_calls ATTACH PARTITION telemetry.llm_calls_p20260624_pkey;
+
+
+--
+-- Name: llm_calls_p20260701_installation_id_author_gh_user_id_creat_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_calls_install_author_created ATTACH PARTITION telemetry.llm_calls_p20260701_installation_id_author_gh_user_id_creat_idx;
+
+
+--
+-- Name: llm_calls_p20260701_installation_id_created_at_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_calls_installation_id_created_at ATTACH PARTITION telemetry.llm_calls_p20260701_installation_id_created_at_idx;
+
+
+--
+-- Name: llm_calls_p20260701_pkey; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.pk_llm_calls ATTACH PARTITION telemetry.llm_calls_p20260701_pkey;
+
+
+--
+-- Name: llm_payloads_default_installation_id_key_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_payloads_installation_id_key ATTACH PARTITION telemetry.llm_payloads_default_installation_id_key_idx;
+
+
+--
+-- Name: llm_payloads_default_pkey; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.pk_llm_payloads ATTACH PARTITION telemetry.llm_payloads_default_pkey;
+
+
+--
+-- Name: llm_payloads_p20260401_installation_id_key_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_payloads_installation_id_key ATTACH PARTITION telemetry.llm_payloads_p20260401_installation_id_key_idx;
+
+
+--
+-- Name: llm_payloads_p20260401_pkey; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.pk_llm_payloads ATTACH PARTITION telemetry.llm_payloads_p20260401_pkey;
+
+
+--
+-- Name: llm_payloads_p20260501_installation_id_key_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_payloads_installation_id_key ATTACH PARTITION telemetry.llm_payloads_p20260501_installation_id_key_idx;
+
+
+--
+-- Name: llm_payloads_p20260501_pkey; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.pk_llm_payloads ATTACH PARTITION telemetry.llm_payloads_p20260501_pkey;
+
+
+--
+-- Name: llm_payloads_p20260601_installation_id_key_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_payloads_installation_id_key ATTACH PARTITION telemetry.llm_payloads_p20260601_installation_id_key_idx;
+
+
+--
+-- Name: llm_payloads_p20260601_pkey; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.pk_llm_payloads ATTACH PARTITION telemetry.llm_payloads_p20260601_pkey;
+
+
+--
+-- Name: llm_payloads_p20260701_installation_id_key_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_payloads_installation_id_key ATTACH PARTITION telemetry.llm_payloads_p20260701_installation_id_key_idx;
+
+
+--
+-- Name: llm_payloads_p20260701_pkey; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.pk_llm_payloads ATTACH PARTITION telemetry.llm_payloads_p20260701_pkey;
+
+
+--
+-- Name: llm_payloads_p20260801_installation_id_key_idx; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.ix_llm_payloads_installation_id_key ATTACH PARTITION telemetry.llm_payloads_p20260801_installation_id_key_idx;
+
+
+--
+-- Name: llm_payloads_p20260801_pkey; Type: INDEX ATTACH; Schema: telemetry; Owner: -
+--
+
+ALTER INDEX telemetry.pk_llm_payloads ATTACH PARTITION telemetry.llm_payloads_p20260801_pkey;
+
+
+--
+-- Name: flags flags_notify_updated; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER flags_notify_updated AFTER INSERT OR UPDATE ON core.flags FOR EACH ROW EXECUTE FUNCTION core.notify_flags_updated();
+
+
+--
+-- Name: workflow_events fk_workflow_events_review; Type: FK CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE audit.workflow_events
+    ADD CONSTRAINT fk_workflow_events_review FOREIGN KEY (review_id) REFERENCES core.pull_request_reviews(review_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: workflow_events fk_workflow_events_run; Type: FK CONSTRAINT; Schema: audit; Owner: -
+--
+
+ALTER TABLE audit.workflow_events
+    ADD CONSTRAINT fk_workflow_events_run FOREIGN KEY (run_id) REFERENCES core.review_runs(run_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: cache_tokens fk_cache_tokens_installation_id_installations; Type: FK CONSTRAINT; Schema: cache; Owner: -
+--
+
+ALTER TABLE ONLY cache.cache_tokens
+    ADD CONSTRAINT fk_cache_tokens_installation_id_installations FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE CASCADE;
+
+
+--
+-- Name: chunk_embeddings chunk_embeddings_generation_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.chunk_embeddings
+    ADD CONSTRAINT chunk_embeddings_generation_id_fkey FOREIGN KEY (generation_id) REFERENCES core.embedding_generations(generation_id);
+
+
+--
+-- Name: embedder_runtime_state embedder_runtime_state_active_generation_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.embedder_runtime_state
+    ADD CONSTRAINT embedder_runtime_state_active_generation_fkey FOREIGN KEY (active_generation) REFERENCES core.embedding_generations(generation_id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: embedder_runtime_state embedder_runtime_state_pending_generation_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.embedder_runtime_state
+    ADD CONSTRAINT embedder_runtime_state_pending_generation_fkey FOREIGN KEY (pending_generation) REFERENCES core.embedding_generations(generation_id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: embedding_generations embedding_generations_created_from_generation_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.embedding_generations
+    ADD CONSTRAINT embedding_generations_created_from_generation_fkey FOREIGN KEY (created_from_generation) REFERENCES core.embedding_generations(generation_id);
+
+
+--
+-- Name: api_tokens fk_api_tokens_installation_id_installations; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.api_tokens
+    ADD CONSTRAINT fk_api_tokens_installation_id_installations FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE CASCADE;
+
+
+--
+-- Name: api_tokens fk_api_tokens_user_id_users; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.api_tokens
+    ADD CONSTRAINT fk_api_tokens_user_id_users FOREIGN KEY (user_id) REFERENCES core.users(user_id) ON DELETE CASCADE;
+
+
+--
+-- Name: arbitration_rejections fk_arbitration_rejections_installation_id_installations; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.arbitration_rejections
+    ADD CONSTRAINT fk_arbitration_rejections_installation_id_installations FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: code_owners fk_code_owners_installation_id_installations; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.code_owners
+    ADD CONSTRAINT fk_code_owners_installation_id_installations FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: code_owners fk_code_owners_repository_id_repositories; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.code_owners
+    ADD CONSTRAINT fk_code_owners_repository_id_repositories FOREIGN KEY (repository_id) REFERENCES core.repositories(repository_id) ON DELETE CASCADE;
+
+
+--
+-- Name: feedback_events fk_feedback_events_review_finding; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE core.feedback_events
+    ADD CONSTRAINT fk_feedback_events_review_finding FOREIGN KEY (review_finding_id) REFERENCES core.review_findings(review_finding_id);
+
+
+--
+-- Name: github_issues_cache fk_github_issues_cache_installation_id_installations; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.github_issues_cache
+    ADD CONSTRAINT fk_github_issues_cache_installation_id_installations FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: github_issues_cache fk_github_issues_cache_repository_id_repositories; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.github_issues_cache
+    ADD CONSTRAINT fk_github_issues_cache_repository_id_repositories FOREIGN KEY (repository_id) REFERENCES core.repositories(repository_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: global_config fk_global_config_current_revision_id_config_revisions; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.global_config
+    ADD CONSTRAINT fk_global_config_current_revision_id_config_revisions FOREIGN KEY (current_revision_id) REFERENCES core.config_revisions(config_revision_id) ON DELETE SET NULL;
+
+
+--
+-- Name: llm_purpose_model fk_llm_purpose_model_model_id; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.llm_purpose_model
+    ADD CONSTRAINT fk_llm_purpose_model_model_id FOREIGN KEY (model_id) REFERENCES core.llm_models(model_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: local_users fk_local_users_created_by_user_id_local_users; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.local_users
+    ADD CONSTRAINT fk_local_users_created_by_user_id_local_users FOREIGN KEY (created_by_user_id) REFERENCES core.local_users(user_id) ON DELETE SET NULL;
+
+
+--
+-- Name: org_configs fk_org_configs_current_revision_id_config_revisions; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.org_configs
+    ADD CONSTRAINT fk_org_configs_current_revision_id_config_revisions FOREIGN KEY (current_revision_id) REFERENCES core.config_revisions(config_revision_id) ON DELETE SET NULL;
+
+
+--
+-- Name: org_configs fk_org_configs_installation_id_installations; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.org_configs
+    ADD CONSTRAINT fk_org_configs_installation_id_installations FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE CASCADE;
+
+
+--
+-- Name: outbox fk_outbox_installation_id_installations; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.outbox
+    ADD CONSTRAINT fk_outbox_installation_id_installations FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE CASCADE;
+
+
+--
+-- Name: outbox fk_outbox_run_id; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.outbox
+    ADD CONSTRAINT fk_outbox_run_id FOREIGN KEY (run_id) REFERENCES core.review_runs(run_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: pr_files fk_pr_files_installation_id_installations; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.pr_files
+    ADD CONSTRAINT fk_pr_files_installation_id_installations FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: pr_files fk_pr_files_pr_id_pull_requests; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.pr_files
+    ADD CONSTRAINT fk_pr_files_pr_id_pull_requests FOREIGN KEY (pr_id) REFERENCES core.pull_requests(pr_id) ON DELETE CASCADE;
+
+
+--
+-- Name: pr_files fk_pr_files_repository_id_repositories; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.pr_files
+    ADD CONSTRAINT fk_pr_files_repository_id_repositories FOREIGN KEY (repository_id) REFERENCES core.repositories(repository_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: pr_issue_links fk_pr_issue_links_installation_id_installations; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.pr_issue_links
+    ADD CONSTRAINT fk_pr_issue_links_installation_id_installations FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: pr_issue_links fk_pr_issue_links_pr_id_pull_requests; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.pr_issue_links
+    ADD CONSTRAINT fk_pr_issue_links_pr_id_pull_requests FOREIGN KEY (pr_id) REFERENCES core.pull_requests(pr_id) ON DELETE CASCADE;
+
+
+--
+-- Name: pr_review_mutex fk_pr_review_mutex_installation_id_installations; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.pr_review_mutex
+    ADD CONSTRAINT fk_pr_review_mutex_installation_id_installations FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE CASCADE;
+
+
+--
+-- Name: pr_review_mutex fk_pr_review_mutex_repository_id_repositories; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.pr_review_mutex
+    ADD CONSTRAINT fk_pr_review_mutex_repository_id_repositories FOREIGN KEY (repository_id) REFERENCES core.repositories(repository_id) ON DELETE CASCADE;
+
+
+--
+-- Name: pr_state_transitions fk_pr_state_transitions_pr_id_pull_requests; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.pr_state_transitions
+    ADD CONSTRAINT fk_pr_state_transitions_pr_id_pull_requests FOREIGN KEY (pr_id) REFERENCES core.pull_requests(pr_id) ON DELETE CASCADE;
+
+
+--
+-- Name: pull_request_reviews fk_pull_request_reviews_current_run; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.pull_request_reviews
+    ADD CONSTRAINT fk_pull_request_reviews_current_run FOREIGN KEY (current_run_id) REFERENCES core.review_runs(run_id) ON DELETE SET NULL;
+
+
+--
+-- Name: pull_requests fk_pull_requests_author_gh_user_id_gh_users; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.pull_requests
+    ADD CONSTRAINT fk_pull_requests_author_gh_user_id_gh_users FOREIGN KEY (author_gh_user_id) REFERENCES core.gh_users(gh_user_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: pull_requests fk_pull_requests_installation_id_installations; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.pull_requests
+    ADD CONSTRAINT fk_pull_requests_installation_id_installations FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: pull_requests fk_pull_requests_repository_id_repositories; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.pull_requests
+    ADD CONSTRAINT fk_pull_requests_repository_id_repositories FOREIGN KEY (repository_id) REFERENCES core.repositories(repository_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: repo_configs fk_repo_configs_current_revision_id_config_revisions; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.repo_configs
+    ADD CONSTRAINT fk_repo_configs_current_revision_id_config_revisions FOREIGN KEY (current_revision_id) REFERENCES core.config_revisions(config_revision_id) ON DELETE SET NULL;
+
+
+--
+-- Name: repo_configs fk_repo_configs_installation_id_installations; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.repo_configs
+    ADD CONSTRAINT fk_repo_configs_installation_id_installations FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE CASCADE;
+
+
+--
+-- Name: repo_configs fk_repo_configs_repository_id_repositories; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.repo_configs
+    ADD CONSTRAINT fk_repo_configs_repository_id_repositories FOREIGN KEY (repository_id) REFERENCES core.repositories(repository_id) ON DELETE CASCADE;
+
+
+--
+-- Name: repositories fk_repositories_installation_id_installations; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.repositories
+    ADD CONSTRAINT fk_repositories_installation_id_installations FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE CASCADE;
+
+
+--
+-- Name: review_findings fk_review_findings_installation_id_installations; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.review_findings
+    ADD CONSTRAINT fk_review_findings_installation_id_installations FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: review_findings fk_review_findings_posted_review_pr_id_posted_reviews; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.review_findings
+    ADD CONSTRAINT fk_review_findings_posted_review_pr_id_posted_reviews FOREIGN KEY (posted_review_pr_id) REFERENCES core.posted_reviews(pr_id) ON DELETE SET NULL;
+
+
+--
+-- Name: review_findings fk_review_findings_pr_id_pull_requests; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.review_findings
+    ADD CONSTRAINT fk_review_findings_pr_id_pull_requests FOREIGN KEY (pr_id) REFERENCES core.pull_requests(pr_id) ON DELETE CASCADE;
+
+
+--
+-- Name: review_findings fk_review_findings_suppressed_by_finding_id; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.review_findings
+    ADD CONSTRAINT fk_review_findings_suppressed_by_finding_id FOREIGN KEY (suppressed_by_finding_id) REFERENCES core.review_findings(review_finding_id) ON DELETE SET NULL;
+
+
+--
+-- Name: review_runs fk_review_runs_review; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.review_runs
+    ADD CONSTRAINT fk_review_runs_review FOREIGN KEY (review_id) REFERENCES core.pull_request_reviews(review_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: review_tool_runs fk_review_tool_runs_installation_id_installations; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.review_tool_runs
+    ADD CONSTRAINT fk_review_tool_runs_installation_id_installations FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: role_grant_pending fk_role_grant_pending_approved_by_user_id_users; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.role_grant_pending
+    ADD CONSTRAINT fk_role_grant_pending_approved_by_user_id_users FOREIGN KEY (approved_by_user_id) REFERENCES core.users(user_id);
+
+
+--
+-- Name: role_grant_pending fk_role_grant_pending_installation_id_installations; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.role_grant_pending
+    ADD CONSTRAINT fk_role_grant_pending_installation_id_installations FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE CASCADE;
+
+
+--
+-- Name: role_grant_pending fk_role_grant_pending_requested_by_user_id_users; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.role_grant_pending
+    ADD CONSTRAINT fk_role_grant_pending_requested_by_user_id_users FOREIGN KEY (requested_by_user_id) REFERENCES core.users(user_id);
+
+
+--
+-- Name: role_grants fk_role_grants_installation_id_installations; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.role_grants
+    ADD CONSTRAINT fk_role_grants_installation_id_installations FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE CASCADE;
+
+
+--
+-- Name: team_memberships fk_team_memberships_installation_id_installations; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.team_memberships
+    ADD CONSTRAINT fk_team_memberships_installation_id_installations FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE CASCADE;
+
+
+--
+-- Name: team_memberships fk_team_memberships_team_id_teams; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.team_memberships
+    ADD CONSTRAINT fk_team_memberships_team_id_teams FOREIGN KEY (team_id) REFERENCES core.teams(team_id) ON DELETE CASCADE;
+
+
+--
+-- Name: team_memberships fk_team_memberships_user_id_users; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.team_memberships
+    ADD CONSTRAINT fk_team_memberships_user_id_users FOREIGN KEY (user_id) REFERENCES core.users(user_id) ON DELETE CASCADE;
+
+
+--
+-- Name: teams fk_teams_installation_id_installations; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.teams
+    ADD CONSTRAINT fk_teams_installation_id_installations FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE CASCADE;
+
+
+--
+-- Name: users fk_users_ad_user_id_ad_users; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.users
+    ADD CONSTRAINT fk_users_ad_user_id_ad_users FOREIGN KEY (ad_user_id) REFERENCES core.ad_users(ad_user_id) ON DELETE SET NULL;
+
+
+--
+-- Name: users fk_users_installation_id_installations; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.users
+    ADD CONSTRAINT fk_users_installation_id_installations FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE CASCADE;
+
+
+--
+-- Name: knowledge_chunks knowledge_chunks_repository_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.knowledge_chunks
+    ADD CONSTRAINT knowledge_chunks_repository_id_fkey FOREIGN KEY (repository_id) REFERENCES core.repositories(repository_id) ON DELETE CASCADE;
+
+
+--
+-- Name: learning_proposals learning_proposals_installation_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.learning_proposals
+    ADD CONSTRAINT learning_proposals_installation_id_fkey FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE CASCADE;
+
+
+--
+-- Name: learning_proposals learning_proposals_repo_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.learning_proposals
+    ADD CONSTRAINT learning_proposals_repo_id_fkey FOREIGN KEY (repo_id) REFERENCES core.repositories(repository_id) ON DELETE CASCADE;
+
+
+--
+-- Name: learnings learnings_installation_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.learnings
+    ADD CONSTRAINT learnings_installation_id_fkey FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE CASCADE;
+
+
+--
+-- Name: learnings learnings_repo_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.learnings
+    ADD CONSTRAINT learnings_repo_id_fkey FOREIGN KEY (repo_id) REFERENCES core.repositories(repository_id) ON DELETE CASCADE;
+
+
+--
+-- Name: learnings_revisions learnings_revisions_installation_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.learnings_revisions
+    ADD CONSTRAINT learnings_revisions_installation_id_fkey FOREIGN KEY (installation_id) REFERENCES core.installations(installation_id) ON DELETE CASCADE;
+
+
+--
+-- Name: learnings_revisions learnings_revisions_learning_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.learnings_revisions
+    ADD CONSTRAINT learnings_revisions_learning_id_fkey FOREIGN KEY (learning_id) REFERENCES core.learnings(learning_id) ON DELETE CASCADE;
+
+
+--
+-- Name: repo_symbols repo_symbols_repo_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.repo_symbols
+    ADD CONSTRAINT repo_symbols_repo_id_fkey FOREIGN KEY (repo_id) REFERENCES core.repositories(repository_id) ON DELETE CASCADE;
+
+
+--
+-- Name: review_runs review_runs_parent_run_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.review_runs
+    ADD CONSTRAINT review_runs_parent_run_id_fkey FOREIGN KEY (parent_run_id) REFERENCES core.review_runs(run_id);
+
+
+--
+-- Name: review_runs review_runs_superseded_by_run_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.review_runs
+    ADD CONSTRAINT review_runs_superseded_by_run_id_fkey FOREIGN KEY (superseded_by_run_id) REFERENCES core.review_runs(run_id);
+
+
+--
+-- Name: review_runs review_runs_supersedes_run_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.review_runs
+    ADD CONSTRAINT review_runs_supersedes_run_id_fkey FOREIGN KEY (supersedes_run_id) REFERENCES core.review_runs(run_id);
+
+
+--
+-- Name: symbol_references symbol_references_consumer_repo_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.symbol_references
+    ADD CONSTRAINT symbol_references_consumer_repo_id_fkey FOREIGN KEY (consumer_repo_id) REFERENCES core.repositories(repository_id) ON DELETE CASCADE;
+
+
+--
+-- Name: symbol_references symbol_references_target_symbol_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.symbol_references
+    ADD CONSTRAINT symbol_references_target_symbol_id_fkey FOREIGN KEY (target_symbol_id) REFERENCES core.repo_symbols(symbol_id) ON DELETE CASCADE;
+
+
+--
+-- Name: workspace_leases workspace_leases_review_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.workspace_leases
+    ADD CONSTRAINT workspace_leases_review_id_fkey FOREIGN KEY (review_id) REFERENCES core.pull_request_reviews(review_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: workspace_leases workspace_leases_run_id_fkey; Type: FK CONSTRAINT; Schema: core; Owner: -
+--
+
+ALTER TABLE ONLY core.workspace_leases
+    ADD CONSTRAINT workspace_leases_run_id_fkey FOREIGN KEY (run_id) REFERENCES core.review_runs(run_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: llm_calls fk_llm_calls_author_gh_user_id_gh_users; Type: FK CONSTRAINT; Schema: telemetry; Owner: -
+--
+
+ALTER TABLE telemetry.llm_calls
+    ADD CONSTRAINT fk_llm_calls_author_gh_user_id_gh_users FOREIGN KEY (author_gh_user_id) REFERENCES core.gh_users(gh_user_id) ON DELETE RESTRICT;
+
+
+--
+-- PostgreSQL database dump complete
+--
+
+\unrestrict 9RL9wsHgS6IRzN52NEdGcFCYhswDc5t8tunEGlhJ7y0qWiOdYFkaDFipdmWsmB9
+
