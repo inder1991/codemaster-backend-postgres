@@ -19,6 +19,7 @@ import { computePolicyRules } from "../activities/compute_policy_rules.activity.
 import { loadRepoConfigActivity } from "../activities/load_repo_config.activity.js";
 import { persistReviewFindings } from "../activities/persist_review_findings.activity.js";
 import { postCheckRun } from "../activities/post_check_run.activity.js";
+import { postReviewResults } from "../activities/post_review_results.activity.js";
 
 /** The activities map the worker registers. Grown additively in Phase 2.1. */
 export const activities = {
@@ -28,4 +29,5 @@ export const activities = {
   loadRepoConfigActivity,
   computePolicyRules,
   postCheckRun,
+  postReviewResults,
 };
