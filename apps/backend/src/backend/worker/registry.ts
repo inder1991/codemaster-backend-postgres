@@ -13,7 +13,8 @@
  */
 
 import { aggregateFindings } from "../activities/aggregate_findings.activity.js";
+import { classifyFiles } from "../activities/classify_files.activity.js";
 import { persistReviewFindings } from "../activities/persist_review_findings.activity.js";
 
 /** The activities map the worker registers. Grown additively in Phase 2.1. */
-export const activities = { persistReviewFindings, aggregateFindings };
+export const activities = { persistReviewFindings, aggregateFindings, classifyFiles };
