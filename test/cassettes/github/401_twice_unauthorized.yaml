@@ -1,0 +1,30 @@
+schema_version: 1
+service: github
+scenario: "GET /pulls/42 — 401 then 401 again (refresh once, second 401 raises GitHubAppUnauthorized)"
+recorded_at: "2026-06-03T00:00:00Z"
+recorded_by: "task-2.9-apiclient"
+interactions:
+  - request:
+      method: GET
+      uri: https://api.github.com/repos/acme/example/pulls/42
+      headers:
+        Accept: application/vnd.github+json
+        Authorization: Bearer <ghs-stale>
+    response:
+      status_code: 401
+      headers:
+        Content-Type: application/json
+      body: |-
+        {"message": "Bad credentials"}
+  - request:
+      method: GET
+      uri: https://api.github.com/repos/acme/example/pulls/42
+      headers:
+        Accept: application/vnd.github+json
+        Authorization: Bearer <ghs-also-stale>
+    response:
+      status_code: 401
+      headers:
+        Content-Type: application/json
+      body: |-
+        {"message": "Bad credentials"}

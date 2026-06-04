@@ -1,0 +1,24 @@
+schema_version: 1
+service: github
+scenario: "GET /pulls/42/files?per_page=100&page=1 — single page, no rel=next (paginated client path)"
+recorded_at: "2026-06-03T00:00:00Z"
+recorded_by: "task-2.9-apiclient"
+interactions:
+  - request:
+      method: GET
+      uri: https://api.github.com/repos/acme/example/pulls/42/files?per_page=100&page=1
+      headers:
+        Accept: application/vnd.github+json
+        X-GitHub-Api-Version: "2022-11-28"
+    response:
+      status_code: 200
+      headers:
+        X-RateLimit-Limit: "5000"
+        X-RateLimit-Remaining: "4997"
+        X-RateLimit-Reset: "1799999999"
+        Content-Type: application/json
+      body: |-
+        [
+          {"filename":"src/foo.py","status":"modified","additions":2,"deletions":1,"changes":3,"patch":"@@ ..."},
+          {"filename":"tests/test_foo.py","status":"added","additions":50,"deletions":0,"changes":50,"patch":"@@ ..."}
+        ]

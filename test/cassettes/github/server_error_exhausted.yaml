@@ -1,0 +1,42 @@
+schema_version: 1
+service: github
+scenario: "GET /pulls/42 — 503 x3 (MAX_5XX_RETRIES exhausted, two backoff sleeps 0.5+1.0)"
+recorded_at: "2026-06-03T00:00:00Z"
+recorded_by: "task-2.9-apiclient"
+interactions:
+  - request:
+      method: GET
+      uri: https://api.github.com/repos/acme/example/pulls/42
+      headers:
+        Accept: application/vnd.github+json
+        X-GitHub-Api-Version: "2022-11-28"
+    response:
+      status_code: 503
+      headers:
+        Content-Type: application/json
+      body: |-
+        {"message": "Server Error"}
+  - request:
+      method: GET
+      uri: https://api.github.com/repos/acme/example/pulls/42
+      headers:
+        Accept: application/vnd.github+json
+        X-GitHub-Api-Version: "2022-11-28"
+    response:
+      status_code: 503
+      headers:
+        Content-Type: application/json
+      body: |-
+        {"message": "Server Error"}
+  - request:
+      method: GET
+      uri: https://api.github.com/repos/acme/example/pulls/42
+      headers:
+        Accept: application/vnd.github+json
+        X-GitHub-Api-Version: "2022-11-28"
+    response:
+      status_code: 503
+      headers:
+        Content-Type: application/json
+      body: |-
+        {"message": "Server Error"}
