@@ -1,0 +1,9 @@
+incident_critical:
+  - InvestigationView
+  - WarRoomDashboard
+  - IncidentList
+
+axe_rules_disabled: []  # do not silently disable rules; require ADR
+
+soft_warn:
+  - color-contrast  # gradual rollout

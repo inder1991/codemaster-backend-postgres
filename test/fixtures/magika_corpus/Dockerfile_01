@@ -1,0 +1,105 @@
+# codemaster — kind-local Dockerfile.
+#
+# Identical to the production Dockerfile except the base image is
+# pulled from Docker Hub (public) instead of the internal Nexus
+# registry. Use this for local kind testing only — production uses
+# `Dockerfile` which pins to `nexus.acme.com/codemaster/python:3.13-slim`.
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Stage 1 — uv-builder
+# ──────────────────────────────────────────────────────────────────────────────
+FROM python:3.13-slim AS uv-builder
+
+# Install uv from its official image.
+COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /usr/local/bin/uv
+
+# Default uv HTTP timeout (30s) is too aggressive for laptop builds on a
+# loaded uplink — pluggy/hatchling downloads occasionally exceed it. 180s
+# is enough for any single PyPI artefact while still surfacing real hangs.
+ENV UV_HTTP_TIMEOUT=600
+
+WORKDIR /app
+
+# Cache layer: copy lockfiles + README first. README.md is
+# referenced by pyproject.toml's `readme = "README.md"`, and
+# hatchling's build_editable validates that the file exists when
+# uv resolves the project itself. Without this, `uv sync` fails
+# with `OSError: Readme file does not exist: README.md`.
+COPY pyproject.toml uv.lock README.md ./
+
+RUN uv sync --frozen --no-dev --no-install-project
+
+# Now copy the project source and install it editable into the venv.
+COPY codemaster/ ./codemaster/
+COPY contracts/ ./contracts/
+# alembic.ini lives at repo root; migration jobs need it (see
+# `helm/local-kind/helm-install.sh`'s post-install migrate step).
+COPY alembic.ini ./
+RUN uv sync --frozen --no-dev
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Stage 2 — runtime
+# ──────────────────────────────────────────────────────────────────────────────
+FROM python:3.13-slim AS runtime
+
+# Static-analysis binaries (Phase A 2026-05-16): pinned versions for
+# reproducibility. Mirrors the production Dockerfile.
+ARG RUFF_VERSION=0.6.9
+ARG GITLEAKS_VERSION=8.18.4
+ARG ESLINT_VERSION=9.10.0
+
+# S19.SMOKE.7 — `git` is required at runtime by the review-pipeline
+# clone activities (GitSubprocessCloner shells out to `git clone`).
+# Without it the activity fails with [Errno 2]. python:3.13-slim
+# omits git by default; install minimally and clean apt lists in
+# the same RUN to keep the layer small.
+#
+# Phase A (2026-05-16): also install curl + ca-certificates + gnupg
+# (gitleaks tarball download) and Node.js (eslint via npm).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        git \
+        curl \
+        ca-certificates \
+        gnupg \
+ && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
+ && rm -rf /var/lib/apt/lists/*
+
+# Install ruff via pip into a system location (kind runtime stage does
+# NOT inherit the uv-builder venv at this point; we copy the venv in
+# a later step). For the static-analysis tooling we need ruff on PATH
+# regardless of the venv, so install it system-wide via pip.
+RUN pip install --no-cache-dir "ruff==${RUFF_VERSION}" \
+ && ruff --version
+
+# Install gitleaks via release tarball — pinned version.
+RUN curl -fsSL \
+        "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+        -o /tmp/gitleaks.tar.gz \
+ && tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks \
+ && rm /tmp/gitleaks.tar.gz \
+ && chmod +x /usr/local/bin/gitleaks \
+ && gitleaks version
+
+# Install eslint globally via npm.
+RUN npm install -g "eslint@${ESLINT_VERSION}" \
+ && eslint --version
+
+# Non-root uid 1001 matches the Helm container.securityContext.
+RUN groupadd --gid 1001 codemaster \
+ && useradd --uid 1001 --gid 1001 --shell /sbin/nologin --create-home codemaster
+
+WORKDIR /app
+
+COPY --from=uv-builder --chown=codemaster:codemaster /app /app
+
+ENV PATH="/app/.venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONHASHSEED=random
+
+USER 1001
+
+ENTRYPOINT ["python", "-m", "codemaster.cli.main"]
+CMD ["--mode", "api"]

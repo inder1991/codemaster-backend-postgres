@@ -1,0 +1,85 @@
+{
+    "name": "magika",
+    "version": "1.0.0",
+    "description": "A tool to detect content types with deep learning.",
+    "type": "module",
+    "main": "./dist/cjs/magika.js",
+    "types": "./dist/cjs/magika.d.ts",
+    "module": "./dist/mjs/magika.js",
+    "exports": {
+        "./node": {
+            "import": "./dist/mjs/magika-node.js",
+            "require": "./dist/cjs/magika-node.js",
+            "default": "./dist/cjs/magika-node.js"
+        },
+        ".": {
+            "import": "./dist/mjs/magika.js",
+            "require": "./dist/cjs/magika.js",
+            "default": "./dist/cjs/magika.js"
+        }
+    },
+    "repository": "https://github.com/google/magika",
+    "author": "Luca Invernizzi <invernizzi@google.com>, Yanick Fratantonio <yanickf@google.com>",
+    "license": "Apache-2.0",
+    "keywords": [
+        "content type",
+        "file type",
+        "magic"
+    ],
+    "scripts": {
+        "bin": "TF_CPP_MIN_LOG_LEVEL=1 node ./dist/mjs/magika-cli.js",
+        "make-docs": "documentation build *.ts --parse-extension ts   -f md --github -o ../docs/js.md",
+        "test": "TF_CPP_MIN_LOG_LEVEL=1 yarn build && node node_modules/jest/bin/jest.js",
+        "build": "rm -fr dist/* && tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json && node postBuild.js",
+        "format": "prettier --write *.ts src/*.ts"
+    },
+    "bin": {
+        "magika-js": "./dist/cjs/magika-cli.js"
+    },
+    "dependencies": {
+        "@tensorflow/tfjs": "^4.22.0"
+    },
+    "optionalDependencies": {
+        "@tensorflow/tfjs-node": "^4.22.0",
+        "chalk": "^5.3.0",
+        "commander": "^13.1.0"
+    },
+    "jest": {
+        "moduleFileExtensions": [
+            "js",
+            "json",
+            "ts"
+        ],
+        "transformIgnorePatterns": [
+            "/node_modules/"
+        ],
+        "testPathIgnorePatterns": [
+            "/node_modules/"
+        ],
+        "rootDir": "./",
+        "testRegex": ".test.ts$",
+        "transform": {
+            "^.+\\.ts$": [
+                "ts-jest",
+                {
+                    "tsconfig": "./tsconfig.cjs.json"
+                }
+            ]
+        },
+        "moduleNameMapper": {
+            "(.+)\\.js": "$1"
+        },
+        "testEnvironment": "node",
+        "collectCoverage": false
+    },
+    "devDependencies": {
+        "@types/jest": "^29.5.12",
+        "@types/node": "^24.3.1",
+        "documentation": "^14.0.3",
+        "fast-check": "^4.1.0",
+        "jest": "^29.5.0",
+        "prettier": "^3.5.3",
+        "ts-jest": "^29.0.5",
+        "typescript": "^5.0.2"
+    }
+}

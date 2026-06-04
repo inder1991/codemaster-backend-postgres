@@ -11,7 +11,9 @@ export default tseslint.config(
   // tools/workflows/** are one-shot multi-agent orchestration scripts that run in the Workflow
   // runtime against injected globals (agent/parallel/phase/log/args/budget) — not project code; an
   // `eslint .` over them only yields false `no-undef` for those runtime globals.
-  { ignores: ["dist/**", "node_modules/**", "vendor/**", "coverage/**", "tools/parity/run_python_ref.py", "tools/workflows/**"] },
+  // test/fixtures/magika_corpus/** are opaque SAMPLE files (real .js/.ts/etc. copied in) that the magika
+  // classifier identifies — they are inputs to a test, not project code, so they are never linted/typed.
+  { ignores: ["dist/**", "node_modules/**", "vendor/**", "coverage/**", "tools/parity/run_python_ref.py", "tools/workflows/**", "test/fixtures/magika_corpus/**"] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   security.configs.recommended,

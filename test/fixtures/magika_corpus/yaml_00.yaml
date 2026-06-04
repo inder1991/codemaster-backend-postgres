@@ -1,0 +1,85 @@
+# Pre-commit hooks — Sprint 0 / Story S0.5 (developer-side enforcement).
+#
+# Install once on a fresh checkout:
+#   uv run pre-commit install
+#
+# Hooks run locally on `git commit`; CI runs the same checks for every PR.
+# `--no-verify` is the rare exception per CLAUDE.md, not the rule.
+
+repos:
+  # Built-in basics
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        exclude: ^(\.harness/|vendor/|helm/.*/templates/)
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=2000"]
+      - id: detect-private-key
+
+  # ruff: lint + format in one hook
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.7.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  # mypy: strict typing on production code
+  - repo: local
+    hooks:
+      - id: mypy-strict
+        name: mypy --strict (codemaster, contracts, scripts)
+        entry: uv run mypy
+        language: system
+        pass_filenames: false
+        always_run: true
+        args: [codemaster, contracts, scripts]
+
+  # contract lint: every Pydantic model in contracts/ has schema_version
+  - repo: local
+    hooks:
+      - id: contract-lint
+        name: contract lint (schema_version + naming)
+        entry: uv run python scripts/contract_lint.py
+        language: system
+        pass_filenames: false
+        files: ^contracts/
+
+  # no-wall-clock lint: production code uses Clock/Random Protocol
+  - repo: local
+    hooks:
+      - id: no-wall-clock
+        name: no direct datetime/time/random/asyncio.sleep usage
+        entry: uv run python scripts/no_wall_clock.py
+        language: system
+        pass_filenames: false
+        files: ^codemaster/
+
+  # flaky-quarantine size limit
+  - repo: local
+    hooks:
+      - id: flaky-quarantine
+        name: flaky-test quarantine size limit
+        entry: uv run python scripts/check_flaky_quarantine.py
+        language: system
+        pass_filenames: false
+        files: ^tests/flaky_quarantine\.txt$
+
+  # gitleaks: catch accidentally-committed secrets
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  # bandit: Python security lint
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.10
+    hooks:
+      - id: bandit
+        args: ["-c", "pyproject.toml", "-r", "codemaster"]
+        additional_dependencies: ["bandit[toml]"]

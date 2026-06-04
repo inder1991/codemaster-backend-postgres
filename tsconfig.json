@@ -12,5 +12,8 @@
     "noEmit": true,
     "rootDir": "."
   },
-  "include": ["libs", "apps", "migrations", "test", "scripts", "tools"]
+  "include": ["libs", "apps", "migrations", "test", "scripts", "tools"],
+  // node_modules/dist/vendor keep the default exclusions; the magika corpus is opaque sample input
+  // (real .ts/.js files the classifier identifies), never part of the typecheck.
+  "exclude": ["node_modules", "dist", "vendor", "coverage", "test/fixtures/magika_corpus"]
 }

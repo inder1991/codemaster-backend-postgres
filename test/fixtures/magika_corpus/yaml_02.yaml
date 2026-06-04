@@ -1,0 +1,12 @@
+apiVersion: v2
+name: codemaster-admin-api
+description: codemaster admin-pod FastAPI backend (Sprint 16 / S16.A.1; ADR-0004 admin/api pod split).
+type: application
+version: 0.1.0
+appVersion: "0.0.1"
+maintainers:
+  - name: codemaster platform team
+dependencies:
+  - name: codemaster-common
+    version: 0.1.0
+    repository: file://../codemaster-common
