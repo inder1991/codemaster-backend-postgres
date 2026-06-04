@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
   pyBuildUserMessage,
@@ -56,6 +56,13 @@ function chunk(overrides: Record<string, unknown> = {}): Record<string, unknown>
 }
 
 // ── Static constants ────────────────────────────────────────────────────────────────────────────
+
+// Warm up the long-lived Python ref process ONCE before any assertion: the cold venv import + first
+// request can exceed the default 5s test timeout, and that spawn latency would otherwise land on
+// whichever test runs first (a cold-cache flake). Absorbing it here keeps each per-test assertion fast.
+beforeAll(async () => {
+  await pyConstants();
+}, 30_000);
 
 describe("review prompt constants — byte-exact vs frozen Python", () => {
   it("REVIEW_SYSTEM_PROMPT matches char-for-char", async () => {

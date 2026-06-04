@@ -853,7 +853,7 @@ function roundHalfEven2(x: number): number {
   const d0 = frac.charCodeAt(0) - 48;
   const d1 = frac.charCodeAt(1) - 48; // the kept (2nd) decimal
   const d2 = frac.charCodeAt(2) - 48; // the rounding (3rd) decimal
-  let hundredths = Number(s.slice(0, dot)) * 100 + d0 * 10 + d1;
+  const hundredths = Number(s.slice(0, dot)) * 100 + d0 * 10 + d1;
   let roundUp: boolean;
   if (d2 < 5) {
     roundUp = false;
