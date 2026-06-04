@@ -6,6 +6,12 @@
 // equivalents. A raw `Date.now()` / `Math.random()` defeats deterministic replay (workflow sandbox)
 // and seeded test reproducibility — the very property the seam exists to guarantee.
 //
+// Banned families + their sanctioned seams: clock reads (Date.now/new Date()/performance.now/
+// process.hrtime) -> clock.ts; randomness (Math.random banned everywhere; node:crypto random) ->
+// randomness.ts; wall-clock TIMERS (setTimeout/setInterval/AbortSignal.timeout) -> clock.ts (sleep)
+// or transport_timeout.ts (HTTP abort). Timers were previously un-scanned despite the docstring
+// claiming enforcement — that policy-vs-gate gap is now closed.
+//
 // AST-based (not regex): we walk CallExpression / NewExpression nodes, so a banned token appearing
 // inside a comment or string literal does NOT false-match — the structural improvement over the
 // Python regex gate this ports.
@@ -43,12 +49,23 @@ const CRYPTO_RANDOM_METHODS: ReadonlySet<string> = new Set([
 /** Bare-identifier random calls (`randomBytes(16)` after a named import from node:crypto). */
 const CRYPTO_RANDOM_IDENTIFIERS: ReadonlySet<string> = CRYPTO_RANDOM_METHODS;
 
-/** The two seam files, by repo-relative POSIX path. */
+/** Timer primitives (`setTimeout`/`setInterval`/`AbortSignal.timeout`) defeat deterministic replay
+ *  the same way a raw clock read does — banned outside the sanctioned timer seams. They are legitimate
+ *  in the clock seam (`WallClock.sleep`) and the transport-timeout seam (HTTP abort timers). */
+const TIMER_IDENTIFIERS: ReadonlySet<string> = new Set(["setTimeout", "setInterval"]);
+
+/** The sanctioned seam files, by repo-relative POSIX path. */
 const CLOCK_SEAM = "libs/platform/src/clock.ts";
 const RANDOMNESS_SEAM = "libs/platform/src/randomness.ts";
+const TRANSPORT_TIMEOUT_SEAM = "libs/platform/src/transport_timeout.ts";
 
 /** Which family of constructs a file is allowed to use raw. */
-type SeamKind = "clock" | "randomness" | "none";
+type SeamKind = "clock" | "randomness" | "transport" | "none";
+
+/** Timer primitives are allowed in the clock seam (sleep) and the transport-timeout seam (abort). */
+function timersAllowed(seam: SeamKind): boolean {
+  return seam === "clock" || seam === "transport";
+}
 
 /** A single banned-construct finding. */
 export type Violation = {
@@ -92,6 +109,7 @@ function toRepoRelPosix(absPath: string): string {
 function seamKindFor(relPosix: string): SeamKind {
   if (relPosix === CLOCK_SEAM) return "clock";
   if (relPosix === RANDOMNESS_SEAM) return "randomness";
+  if (relPosix === TRANSPORT_TIMEOUT_SEAM) return "transport";
   return "none";
 }
 
@@ -164,14 +182,23 @@ function bannedCallConstruct(call: CallExpression, seam: SeamKind): string | nul
     if (receiver === "crypto" && CRYPTO_RANDOM_METHODS.has(method)) {
       return seam === "randomness" ? null : `crypto.${method}()`;
     }
+
+    // AbortSignal.timeout(ms) — a wall-clock timer, allowed only in the timer seams.
+    if (receiver === "AbortSignal" && method === "timeout") {
+      return timersAllowed(seam) ? null : "AbortSignal.timeout()";
+    }
     return null;
   }
 
-  // Bare-identifier calls: randomBytes(...) etc. after a named import from node:crypto.
+  // Bare-identifier calls: randomBytes(...) / setTimeout(...) etc.
   if (Node.isIdentifier(expr)) {
     const name = expr.getText();
     if (CRYPTO_RANDOM_IDENTIFIERS.has(name)) {
       return seam === "randomness" ? null : `${name}()`;
+    }
+    // setTimeout / setInterval — raw timer scheduling, allowed only in the timer seams.
+    if (TIMER_IDENTIFIERS.has(name)) {
+      return timersAllowed(seam) ? null : `${name}()`;
     }
   }
   return null;

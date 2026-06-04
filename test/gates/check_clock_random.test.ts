@@ -124,6 +124,46 @@ describe("clock/random seam gate", () => {
         "Date.now()",
       ]);
     });
+  });
+
+  describe("transport-timeout timers (setTimeout / setInterval / AbortSignal.timeout)", () => {
+    it("should flag a raw setTimeout() outside the transport-timeout seam", () => {
+      expect(
+        constructsFor({ "apps/backend/src/backend/integrations/github/api_client.ts": "setTimeout(() => {}, 5);" }),
+      ).toEqual(["setTimeout()"]);
+    });
+
+    it("should flag setInterval()", () => {
+      expect(constructsFor({ "libs/foo/src/bar.ts": "setInterval(() => {}, 5);" })).toEqual([
+        "setInterval()",
+      ]);
+    });
+
+    it("should flag AbortSignal.timeout()", () => {
+      expect(
+        constructsFor({ "apps/backend/src/backend/adapters/vault_http.ts": "const s = AbortSignal.timeout(5000);" }),
+      ).toEqual(["AbortSignal.timeout()"]);
+    });
+
+    it("should allow setTimeout + AbortSignal.timeout inside the transport-timeout seam", () => {
+      const code = [
+        "export function t(ms: number): AbortSignal { return AbortSignal.timeout(ms); }",
+        "const x = setTimeout(() => {}, 5);",
+      ].join("\n");
+      expect(violationsFor({ "libs/platform/src/transport_timeout.ts": code })).toHaveLength(0);
+    });
+
+    it("should allow setTimeout inside the clock seam (the WallClock.sleep primitive)", () => {
+      expect(violationsFor({ "libs/platform/src/clock.ts": "setTimeout(() => {}, 5);" })).toHaveLength(
+        0,
+      );
+    });
+
+    it("should ban setTimeout inside the randomness seam (wrong seam for the timer family)", () => {
+      expect(constructsFor({ "libs/platform/src/randomness.ts": "setTimeout(() => {}, 5);" })).toEqual([
+        "setTimeout()",
+      ]);
+    });
 
     it("should not flag banned tokens that appear only in comments or strings", () => {
       const code = [

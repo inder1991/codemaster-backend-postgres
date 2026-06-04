@@ -196,10 +196,24 @@ describe("GitHubAppTokenProvider constructor validation", () => {
   it("rejects appId <= 0", () => {
     expect(
       () => new GitHubAppTokenProvider({ appId: 0, privateKeyPem: TEST_PEM, http, clock }),
-    ).toThrow(/app_id must be >= 1, got 0/);
+    ).toThrow(/app_id must be a safe-integer >= 1, got 0/);
     expect(
       () => new GitHubAppTokenProvider({ appId: -5, privateKeyPem: TEST_PEM, http, clock }),
-    ).toThrow(/app_id must be >= 1, got -5/);
+    ).toThrow(/app_id must be a safe-integer >= 1, got -5/);
+  });
+
+  it("rejects an appId beyond JS safe-integer range (precision-loss guard)", () => {
+    // Python ints are arbitrary precision; a JS number above 2^53 silently loses precision and would
+    // address the wrong App. Fail closed.
+    expect(
+      () =>
+        new GitHubAppTokenProvider({
+          appId: Number.MAX_SAFE_INTEGER + 1,
+          privateKeyPem: TEST_PEM,
+          http,
+          clock,
+        }),
+    ).toThrow(/app_id must be a safe-integer >= 1/);
   });
 
   it("rejects refreshAtFraction outside [0.1, 0.95]", () => {
@@ -263,8 +277,19 @@ describe("GitHubAppTokenProvider constructor validation", () => {
 
   it("rejects installationId <= 0 on getToken", async () => {
     const { provider } = makeProvider(http);
-    await expect(provider.getToken(0)).rejects.toThrow(/installation_id must be >= 1, got 0/);
-    await expect(provider.getToken(-1)).rejects.toThrow(/installation_id must be >= 1, got -1/);
+    await expect(provider.getToken(0)).rejects.toThrow(
+      /installation_id must be a safe-integer >= 1, got 0/,
+    );
+    await expect(provider.getToken(-1)).rejects.toThrow(
+      /installation_id must be a safe-integer >= 1, got -1/,
+    );
+  });
+
+  it("rejects an installationId beyond JS safe-integer range on getToken", async () => {
+    const { provider } = makeProvider(http);
+    await expect(provider.getToken(Number.MAX_SAFE_INTEGER + 1)).rejects.toThrow(
+      /installation_id must be a safe-integer >= 1/,
+    );
   });
 });
 

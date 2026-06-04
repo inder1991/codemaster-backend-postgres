@@ -44,6 +44,7 @@
 import { z } from "zod";
 
 import { type Clock, WallClock } from "#platform/clock.js";
+import { transportAbortSignal } from "#platform/transport_timeout.js";
 
 // ─── Constants (1:1 with the frozen Python module constants) ──────────────────────────────────
 
@@ -194,33 +195,27 @@ export class FetchGitHubHttpClient implements GitHubHttpClient {
   }
 
   public async request(args: GitHubHttpRequestArgs): Promise<GitHubHttpResponse> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => {
-      controller.abort();
-    }, this.timeoutMs);
-    try {
-      const body: string | undefined =
-        args.json_body !== undefined && args.json_body !== null
-          ? JSON.stringify(args.json_body)
-          : (args.text_body ?? undefined);
-      const init: RequestInit = {
-        method: args.method,
-        headers: args.headers ?? {},
-        signal: controller.signal,
-      };
-      // Omit `body` entirely (rather than set it to undefined) so it satisfies
-      // exactOptionalPropertyTypes — a GET/DELETE must carry no request body.
-      if (body !== undefined) init.body = body;
-      const resp = await fetch(args.url, init);
-      const headers: Record<string, string> = {};
-      resp.headers.forEach((value, key) => {
-        headers[key] = value;
-      });
-      const text = await resp.text();
-      return { status: resp.status, headers, body_text: text === "" ? null : text };
-    } finally {
-      clearTimeout(timer);
-    }
+    const body: string | undefined =
+      args.json_body !== undefined && args.json_body !== null
+        ? JSON.stringify(args.json_body)
+        : (args.text_body ?? undefined);
+    const init: RequestInit = {
+      method: args.method,
+      headers: args.headers ?? {},
+      // Transport timeout via the sanctioned seam — the timer is owned by the signal (no manual
+      // AbortController / clearTimeout bookkeeping). A fired timeout rejects fetch with an AbortError.
+      signal: transportAbortSignal(this.timeoutMs),
+    };
+    // Omit `body` entirely (rather than set it to undefined) so it satisfies
+    // exactOptionalPropertyTypes — a GET/DELETE must carry no request body.
+    if (body !== undefined) init.body = body;
+    const resp = await fetch(args.url, init);
+    const headers: Record<string, string> = {};
+    resp.headers.forEach((value, key) => {
+      headers[key] = value;
+    });
+    const text = await resp.text();
+    return { status: resp.status, headers, body_text: text === "" ? null : text };
   }
 }
 

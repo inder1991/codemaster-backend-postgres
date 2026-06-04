@@ -33,6 +33,7 @@
 import { readFileSync } from "node:fs";
 
 import { type Clock, WallClock } from "#platform/clock.js";
+import { transportAbortSignal } from "#platform/transport_timeout.js";
 
 import {
   type VaultPort,
@@ -121,7 +122,8 @@ export class FetchVaultHttpClient implements VaultHttpClient {
     const init: RequestInit = {
       method: args.method,
       headers,
-      signal: AbortSignal.timeout(this.timeoutMs),
+      // Transport timeout via the sanctioned seam (gate-clean; a fired timeout rejects fetch).
+      signal: transportAbortSignal(this.timeoutMs),
     };
     if (args.jsonBody !== undefined) {
       headers["Content-Type"] = "application/json";

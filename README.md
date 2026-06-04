@@ -49,7 +49,7 @@ Same-directory imports stay relative (`./clock.js`). When the production build (
 | `npm run gates` | ts-morph CI gates only |
 | `npm run lint` / `npm run typecheck` / `npm run test` | individually |
 | `npm run build` | emit `dist/` (production code only; tests excluded) |
-| `npm run migrate:up` / `migrate:down` | apply / revert DB migrations (needs `CODEMASTER_PG_CORE_DSN`) |
+| `npm run migrate:up` | apply DB migrations (needs `CODEMASTER_PG_CORE_DSN`). Migrations are **up-only** — `migrate:down` is disabled and fails loudly (recreate a throwaway DB instead) |
 | `npm run test:integration` | real-DB integration tests (needs `CODEMASTER_PG_CORE_DSN`; else they skip) |
 | `npm run test:magika` | opt-in cross-impl magika label-agreement (~150s, loads an ONNX model) |
 

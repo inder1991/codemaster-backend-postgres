@@ -102,7 +102,15 @@ function parseGithubAppId(raw: string): number {
       `app_id in the Vault secret at ${VAULT_KV_PATH} is not a base-10 integer: ${JSON.stringify(raw)}`,
     );
   }
-  return Number.parseInt(trimmed, 10);
+  const parsed = Number.parseInt(trimmed, 10);
+  // Python ints are arbitrary precision; a JS `number` loses integer precision above 2^53. A GitHub
+  // App id beyond the safe range would silently corrupt the App identity — fail closed instead.
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(
+      `app_id in the Vault secret at ${VAULT_KV_PATH} exceeds JS safe-integer range: ${JSON.stringify(raw)}`,
+    );
+  }
+  return parsed;
 }
 
 const MS_PER_SECOND = 1000;
@@ -209,8 +217,8 @@ export class GitHubAppTokenProvider {
     maxCacheEntries = DEFAULT_MAX_CACHE_ENTRIES,
     baseUrl = GITHUB_BASE_URL,
   }: GitHubAppTokenProviderOptions) {
-    if (appId <= 0) {
-      throw new Error(`app_id must be >= 1, got ${appId}`);
+    if (appId <= 0 || !Number.isSafeInteger(appId)) {
+      throw new Error(`app_id must be a safe-integer >= 1, got ${appId}`);
     }
     if (!(refreshAtFraction >= REFRESH_FRACTION_MIN && refreshAtFraction <= REFRESH_FRACTION_MAX)) {
       throw new Error(
@@ -271,8 +279,12 @@ export class GitHubAppTokenProvider {
    * THROWN without an HTTP round trip.
    */
   public async getToken(installationId: number): Promise<string> {
-    if (installationId <= 0) {
-      throw new Error(`installation_id must be >= 1, got ${installationId}`);
+    // Safe-integer bound: GitHub installation ids are int64 server-side; a value beyond JS's 2^53
+    // safe range would address the wrong installation. Fail closed rather than mint under a corrupted
+    // id. (The durable fix is to parse ids safe-checked / as strings at the webhook-ingest boundary
+    // when the 2.4 Fastify surface lands — see FOLLOW-UP-github-id-safe-integer-at-ingest.)
+    if (installationId <= 0 || !Number.isSafeInteger(installationId)) {
+      throw new Error(`installation_id must be a safe-integer >= 1, got ${installationId}`);
     }
 
     // Negative-cache fast-path: a recent permanent failure suppresses repeat HTTP for 60 seconds.

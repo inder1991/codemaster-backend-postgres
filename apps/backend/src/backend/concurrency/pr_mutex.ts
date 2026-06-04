@@ -271,6 +271,20 @@ export async function renewPrReviewMutexLease(args: {
  * the client. The caller passes the shared `pool` from `getPool(dsn)` — this helper never builds
  * its own pool, honoring the ADR-0062 pool-memoization invariant.
  */
+/**
+ * Roll back the transaction WITHOUT masking the error that triggered it. A failing `ROLLBACK` (e.g. a
+ * dead connection) must not replace the original application error on the throw path — that would
+ * hide the real cause. The rollback failure is logged separately (`console.error`, the no-dep logging
+ * analogue used across this codebase) and swallowed; the caller re-throws the original error.
+ */
+async function safeRollback(client: PoolClient): Promise<void> {
+  try {
+    await client.query("ROLLBACK");
+  } catch (rollbackError) {
+    console.error("pr_mutex: ROLLBACK failed; preserving the original transaction error", rollbackError);
+  }
+}
+
 export async function withMutexTransaction<T>(
   pool: Pool,
   fn: (client: PoolClient) => Promise<T>,
@@ -282,7 +296,7 @@ export async function withMutexTransaction<T>(
     await client.query("COMMIT");
     return result;
   } catch (err) {
-    await client.query("ROLLBACK");
+    await safeRollback(client);
     throw err;
   } finally {
     client.release();
