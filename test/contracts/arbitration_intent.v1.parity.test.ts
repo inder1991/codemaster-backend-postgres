@@ -83,4 +83,43 @@ describe("ArbitrationIntentV1 parity (Pydantic ↔ Zod)", () => {
     expect(r.ok).toBe(false);
     expect(() => ArbitrationIntentV1.parse(bad)).toThrow();
   }, 30_000);
+
+  // The LLM tool schema declares `confidence: {"type": "number"}` (tool_schema.py), so the
+  // realistic wire form is a JSON NUMBER — NOT a string. Frozen Python's lax Pydantic `Decimal`
+  // field COERCES the number (0.9 → Decimal('0.9'), KEPT) and model_dump serializes it as the
+  // canonical decimal string. The Zod contract must coerce identically or it silently drops an
+  // arbitration intent Python keeps. These pin the number → canonical-string coercion to Python.
+  describe("numeric confidence (the realistic LLM wire form) matches Pydantic Decimal coercion", () => {
+    for (const confidence of [0.9, 0, 1, 0.875, 0.5, 0.25, 0.1]) {
+      it(`coerces ${JSON.stringify(confidence)} to the same canonical decimal string as Pydantic`, async () => {
+        const payload = { target_finding_id: UUID, confidence, reason: "numeric wire confidence" };
+        const r = await pyRef({ pyModule: PY, pyCallable: "ArbitrationIntentV1", kwargs: payload });
+        expect(r.ok, r.err).toBe(true);
+        expect(canonicalize(ArbitrationIntentV1.parse(payload))).toBe(r.out);
+      }, 30_000);
+    }
+
+    it("both REJECT a numeric confidence out of [0, 1] (1.5)", async () => {
+      const bad = { target_finding_id: UUID, confidence: 1.5, reason: "x" };
+      const r = await pyRef({ pyModule: PY, pyCallable: "ArbitrationIntentV1", kwargs: bad });
+      expect(r.ok).toBe(false);
+      expect(() => ArbitrationIntentV1.parse(bad)).toThrow();
+    }, 30_000);
+
+    it("both REJECT a numeric confidence with >3 decimal places (0.1234)", async () => {
+      const bad = { target_finding_id: UUID, confidence: 0.1234, reason: "x" };
+      const r = await pyRef({ pyModule: PY, pyCallable: "ArbitrationIntentV1", kwargs: bad });
+      expect(r.ok).toBe(false);
+      expect(() => ArbitrationIntentV1.parse(bad)).toThrow();
+    }, 30_000);
+  });
+
 });
+
+// KNOWN, DOCUMENTED RESIDUAL (non-realistic; UNREACHABLE via this oracle so it cannot be a parity
+// test): a wire float written WITH an explicit decimal point on a whole number — `1.0` / `0.0`.
+// Python's JSON/YAML reader preserves float-ness (str(1.0) → "1.0"); JS collapses `1.0` → the number
+// 1 → we render "1". This can ONLY surface from raw cassette JSON/YAML text read directly on each
+// side (JS `JSON.stringify(1.0)` is already "1", so the oracle round-trip can never transmit it).
+// The LLM emits fractional confidence (or the integer 1/0), never `1.0`-with-decimal, so it never
+// fires on real cassettes. Documented in libs/contracts/src/arbitration_intent.v1.ts.
