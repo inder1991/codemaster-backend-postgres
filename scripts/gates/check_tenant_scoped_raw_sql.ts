@@ -7,6 +7,11 @@
 //   (b) the enclosing method/class carries an `@privileged_path` decorator, OR
 //   (c) a same-line or preceding-line `// tenant:exempt reason=<...> follow_up=<...>` marker.
 //
+// Scope: PRODUCTION source only — `{libs,apps}/<pkg>/src/**` excluding `*.test.ts` — matching the
+// frozen Python gate's `codemaster/` (production-only) scope and the sibling check_clock_random gate.
+// Integration-test teardown legitimately deletes across tenants (it owns its fixture rows), so test/
+// (and tools/, scripts/, migrations/) are NOT scanned.
+//
 // WARN-mode in v1 (per CLAUDE.md GF-3): reports to stderr, always exits 0. ERROR-mode is the tracked
 // follow-up FOLLOW-UP-gf3-error-mode — do NOT silently promote it.
 import { type Node, Project, SyntaxKind } from "ts-morph";
@@ -24,9 +29,18 @@ export type Violation = {
   table: string;
 }
 
+/** Production source only: `{libs,apps}/<pkg>/src/**`, excluding tests. Mirrors the frozen Python
+ *  gate's production-only (`codemaster/`) scope — test/tooling teardown legitimately crosses tenants. */
+export function isProductionSource(absPath: string): boolean {
+  const posix = absPath.split("\\").join("/");
+  if (posix.endsWith(".test.ts")) return false;
+  return /(?:^|\/)(?:libs|apps)\/[^/]+\/src\//.test(posix);
+}
+
 export function findTenancyViolations(project: Project): Array<Violation> {
   const out: Array<Violation> = [];
   for (const sf of project.getSourceFiles()) {
+    if (!isProductionSource(sf.getFilePath())) continue;
     const lines = sf.getFullText().split("\n");
     for (const tpl of sf.getDescendantsOfKind(SyntaxKind.TaggedTemplateExpression)) {
       if (!/^sql\b|^sql$/.test(tpl.getTag().getText())) continue;

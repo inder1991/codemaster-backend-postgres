@@ -50,6 +50,23 @@ Same-directory imports stay relative (`./clock.js`). When the production build (
 | `npm run lint` / `npm run typecheck` / `npm run test` | individually |
 | `npm run build` | emit `dist/` (production code only; tests excluded) |
 | `npm run migrate:up` / `migrate:down` | apply / revert DB migrations (needs `CODEMASTER_PG_CORE_DSN`) |
+| `npm run test:integration` | real-DB integration tests (needs `CODEMASTER_PG_CORE_DSN`; else they skip) |
+| `npm run test:magika` | opt-in cross-impl magika label-agreement (~150s, loads an ONNX model) |
+
+DB-integration tests (`test/integration/**`) **skip** in `npm run test` / `validate-fast` unless
+`CODEMASTER_PG_CORE_DSN` is set, so the default gate stays green and fast without a database. To run
+them against a throwaway Postgres (never a shared/cluster DB):
+
+```bash
+docker run -d --name cm-pg -e POSTGRES_PASSWORD=postgres -e POSTGRES_USER=postgres -p 5434:5432 codemaster-postgres:dev
+docker exec cm-pg psql -U postgres -c 'CREATE DATABASE codemaster'
+export CODEMASTER_PG_CORE_DSN=postgresql://postgres:postgres@localhost:5434/codemaster
+npm run migrate:up && npm run test:integration
+```
+
+CI runs `test:integration` (and `test:magika`) in a dedicated job that provisions the Postgres + the
+frozen submodule venv. The raw-SQL tenancy gate scans **production source only** (`{libs,apps}/*/src`),
+matching the frozen Python gate — test teardown legitimately crosses tenants and is out of scope.
 
 ## Parity model (how 1:1 is proven)
 

@@ -1,17 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { Project } from "ts-morph";
 
-import { findTenancyViolations } from "../../scripts/gates/check_tenant_scoped_raw_sql.js";
+import { findTenancyViolations, isProductionSource } from "../../scripts/gates/check_tenant_scoped_raw_sql.js";
 
 // Build an in-memory TS project from a snippet and run the gate over it.
 // Mirrors the frozen Python gate's tests (test_check_tenant_scoped_raw_sql.py) but for Kysely's
 // raw `sql\`...\`` tagged templates (the TS equivalent of SQLAlchemy `session.execute(text(...))`).
-function violations(code: string) {
+// The file lives under a production `apps/<app>/src/` path so the gate's production-only scope sees it.
+function violations(code: string, path = "apps/backend/src/backend/domain/repos/x.ts") {
   const p = new Project({
     useInMemoryFileSystem: true,
     compilerOptions: { experimentalDecorators: true },
   });
-  p.createSourceFile("x.ts", code);
+  p.createSourceFile(path, code);
   return findTenancyViolations(p);
 }
 
@@ -70,5 +71,27 @@ describe("tenant-scoped raw-SQL gate", () => {
 
   it("ignores non-sql tagged templates (only raw SQL is gated)", () => {
     expect(violations("const t = html`<div>FROM core.repositories</div>`;")).toHaveLength(0);
+  });
+
+  describe("production-only scope (matches the frozen Python gate; test/tooling teardown excepted)", () => {
+    const unfiltered = "await db.executeQuery(sql`DELETE FROM core.repositories WHERE repository_id = ${rid}`);";
+    it("does NOT scan integration-test teardown SQL (legitimately cross-tenant)", () => {
+      expect(violations(unfiltered, "test/integration/domain/repos/x.integration.test.ts")).toHaveLength(0);
+    });
+    it("does NOT scan tools/ or scripts/", () => {
+      expect(violations(unfiltered, "tools/parity/x.ts")).toHaveLength(0);
+      expect(violations(unfiltered, "scripts/gates/x.ts")).toHaveLength(0);
+    });
+    it("DOES scan production repo source under apps/<app>/src and libs/<pkg>/src", () => {
+      expect(violations(unfiltered, "apps/backend/src/backend/domain/repos/x.ts")).toHaveLength(1);
+      expect(violations(unfiltered, "libs/platform/src/db/x.ts")).toHaveLength(1);
+    });
+    it("isProductionSource: {libs,apps}/<pkg>/src non-test → true; test/tools/*.test.ts → false", () => {
+      expect(isProductionSource("/r/apps/backend/src/backend/x.ts")).toBe(true);
+      expect(isProductionSource("/r/libs/platform/src/db/x.ts")).toBe(true);
+      expect(isProductionSource("/r/apps/backend/src/x.test.ts")).toBe(false);
+      expect(isProductionSource("/r/test/integration/x.ts")).toBe(false);
+      expect(isProductionSource("/r/tools/parity/x.ts")).toBe(false);
+    });
   });
 });

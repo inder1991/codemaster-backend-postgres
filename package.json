@@ -15,6 +15,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint .",
     "test": "vitest run",
+    "test:integration": "vitest run test/integration",
+    "test:magika": "CODEMASTER_TEST_MAGIKA=1 vitest run test/parity/magika_agreement.parity.test.ts",
     "gates": "tsx scripts/gates/run_all.ts",
     "validate-fast": "npm run gates && npm run lint && npm run typecheck && npm run test",
     "migrate:up": "node-pg-migrate up -m migrations -d CODEMASTER_PG_CORE_DSN --no-check-order",
