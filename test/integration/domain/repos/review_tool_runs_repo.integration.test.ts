@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
 
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { afterAll, afterEach, beforeAll, expect, it } from "vitest";
 
 import {
   type InsertToolRunInput,
   ReviewToolRunsRepo,
 } from "#backend/domain/repos/review_tool_runs_repo.js";
+
+import { disposeAllPools, getPool } from "#platform/db/database.js";
 
 import { describeDb, INTEGRATION_DSN } from "../../_db.js";
 
@@ -21,15 +23,19 @@ import { describeDb, INTEGRATION_DSN } from "../../_db.js";
 // to exist, so we seed/clean it per test.
 
 let pool: Pool;
+let repo: ReviewToolRunsRepo;
 
 beforeAll(() => {
   if (!INTEGRATION_DSN) return; // block skips; don't open a pool against an undefined DSN
-  // ADR-0062: ONE memoized pool for the whole file — never a pool per call.
-  pool = new Pool({ connectionString: INTEGRATION_DSN, max: 8 });
+  // ADR-0062: the repo + the raw seed/assert reads share the ONE process-wide pool from the central
+  // factory (getPool / tenantKysely) — never a private per-file pool.
+  pool = getPool(INTEGRATION_DSN);
+  repo = ReviewToolRunsRepo.fromDsn(INTEGRATION_DSN);
 });
 
 afterAll(async () => {
-  await pool?.end();
+  // ADR-0062 teardown: end the shared pool(s) via the central seam — NOT a private pool.end().
+  await disposeAllPools();
 });
 
 // Track installations created so cleanup removes their child rows then the parent.
@@ -148,7 +154,6 @@ describeDb("ReviewToolRunsRepo (integration, disposable PG)", () => {
   it("insertToolRun persists a row that reads back field-for-field equal", async () => {
     const installationId = randomUUID();
     await seedInstallation(installationId);
-    const repo = new ReviewToolRunsRepo({ pool });
     const input = makeInput({ installationId });
 
     await repo.insertToolRun(input);
@@ -174,7 +179,6 @@ describeDb("ReviewToolRunsRepo (integration, disposable PG)", () => {
   it("persists the nullable/error path: finished_at NULL + populated error_class/error_message", async () => {
     const installationId = randomUUID();
     await seedInstallation(installationId);
-    const repo = new ReviewToolRunsRepo({ pool });
     const input = makeInput({
       installationId,
       toolName: "eslint",
@@ -202,7 +206,6 @@ describeDb("ReviewToolRunsRepo (integration, disposable PG)", () => {
   it("ON CONFLICT (run_id, tool_name) DO NOTHING is idempotent — second insert is a no-op", async () => {
     const installationId = randomUUID();
     await seedInstallation(installationId);
-    const repo = new ReviewToolRunsRepo({ pool });
     const first = makeInput({ installationId, filesScanned: 7, filesTotal: 10, findingsProduced: 3 });
     // Same (run_id, tool_name) but DIFFERENT downstream values — the conflict must keep the FIRST row.
     // The CHECK (files_scanned <= files_total) is validated BEFORE conflict resolution, so the second
@@ -235,7 +238,6 @@ describeDb("ReviewToolRunsRepo (integration, disposable PG)", () => {
   it("same run_id with a DIFFERENT tool_name inserts a distinct row (composite key)", async () => {
     const installationId = randomUUID();
     await seedInstallation(installationId);
-    const repo = new ReviewToolRunsRepo({ pool });
     const runId = randomUUID();
     const ruff = makeInput({ installationId, runId, toolName: "ruff" });
     const eslint = makeInput({ installationId, runId, toolName: "eslint", findingsProduced: 5 });
@@ -257,7 +259,6 @@ describeDb("ReviewToolRunsRepo (integration, disposable PG)", () => {
     const installationB = randomUUID();
     await seedInstallation(installationA);
     await seedInstallation(installationB);
-    const repo = new ReviewToolRunsRepo({ pool });
 
     const aInput = makeInput({ installationId: installationA, toolName: "ruff" });
     const bInput = makeInput({ installationId: installationB, toolName: "ruff" });
@@ -284,7 +285,6 @@ describeDb("ReviewToolRunsRepo (integration, disposable PG)", () => {
   it("rows order by started_at DESC (the ix_review_tool_runs_installation_started ordering)", async () => {
     const installationId = randomUUID();
     await seedInstallation(installationId);
-    const repo = new ReviewToolRunsRepo({ pool });
 
     const early = makeInput({
       installationId,
@@ -317,7 +317,6 @@ describeDb("ReviewToolRunsRepo (integration, disposable PG)", () => {
   it("respects the coverage CHECK (files_scanned <= files_total): a boundary-equal row persists", async () => {
     const installationId = randomUUID();
     await seedInstallation(installationId);
-    const repo = new ReviewToolRunsRepo({ pool });
     const input = makeInput({ installationId, filesScanned: 10, filesTotal: 10 });
 
     await repo.insertToolRun(input); // files_scanned == files_total satisfies ck_review_tool_runs_coverage

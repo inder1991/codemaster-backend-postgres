@@ -12,13 +12,22 @@
  *   - {@link PostgresPrFilesRepo.listFilePathsForPr} — (S23.AR.3 / S23.AR.6) returns the file paths
  *     for one PR, ordered by `file_path ASC`. Tenancy-isolated by `installation_id`.
  *
- * Tenancy: every tenant-scoped query carries `installation_id`. The Kysely instance this repo builds
- * installs the {@link TenancyPlugin} (`#platform/db/tenancy_plugin.js`), so a SELECT/UPDATE/DELETE on
- * `core.pr_files` without an `installation_id` equality predicate is refused at query-build time
- * (invariant #10, "default deny everywhere"). The `upsertFiles` INSERT is out of the plugin's scope
- * (it has no WHERE), so it carries `installation_id` as an explicit per-row column value instead.
+ * Tenancy: every tenant-scoped query carries `installation_id`. The shared-pool Kysely this repo is
+ * handed has the {@link TenancyPlugin} (`#platform/db/tenancy_plugin.js`) installed centrally by
+ * {@link tenantKysely}, so a SELECT/UPDATE/DELETE on `core.pr_files` without an `installation_id`
+ * equality predicate is refused at query-build time (invariant #10, "default deny everywhere"). The
+ * `upsertFiles` INSERT is out of the plugin's scope (it has no WHERE), so it carries `installation_id`
+ * as an explicit per-row column value instead.
  *
- * ADR-0062: the `pg.Pool` and the `Kysely` instance are memoized — ONE per DSN, never per call.
+ * ADR-0062 (Postgres connection-pool lifecycle): this repo NO LONGER owns a `pg.Pool` or constructs a
+ * `new Kysely(...)`. It is handed a `Kysely<PrFilesDb>` over the process-wide single pool from
+ * {@link tenantKysely} (`#platform/db/database.js`) — the structural fix that replaces the old
+ * per-DSN pool+Kysely cache so a worker no longer fans out to `N × max` connections.
+ * {@link PostgresPrFilesRepo.fromDsn} is the default entry point; it routes through
+ * {@link tenantKysely} so every repo over the same DSN shares ONE pool. Pool teardown is the shared
+ * `disposeAllPools` / `disposePool` seam, NOT a per-repo `close()` — a Kysely from {@link tenantKysely}
+ * must NOT be `destroy()`-ed by a repo, because doing so would end the shared pool out from under every
+ * other repo bound to the same DSN.
  *
  * Port fidelity notes:
  *   - `pr_file_id` is a stable UUIDv5 of `(pr_id, file_path)` under a fixed namespace, mirroring the
@@ -31,10 +40,9 @@
 
 import { createHash } from "node:crypto";
 
-import { Kysely, PostgresDialect } from "kysely";
-import { Pool } from "pg";
+import { type Kysely } from "kysely";
 
-import { TenancyPlugin } from "#platform/db/tenancy_plugin.js";
+import { tenantKysely } from "#platform/db/database.js";
 
 import type { Clock } from "#platform/clock.js";
 
@@ -101,37 +109,6 @@ export function derivePrFileId(args: { prId: string; filePath: string }): string
   return uuid5(PR_FILE_UUID5_NAMESPACE, `${args.prId}|${args.filePath}`);
 }
 
-// ─── Memoized pool + Kysely instance (ADR-0062) ──────────────────────────────
-
-const POOL_BY_DSN = new Map<string, Pool>();
-const DB_BY_DSN = new Map<string, Kysely<PrFilesDb>>();
-
-/** Memoized pg Pool for a DSN (ADR-0062 — pool caching, never per-call). */
-export function getPrFilesPool(dsn: string): Pool {
-  let pool = POOL_BY_DSN.get(dsn);
-  if (pool === undefined) {
-    pool = new Pool({ connectionString: dsn });
-    POOL_BY_DSN.set(dsn, pool);
-  }
-  return pool;
-}
-
-/**
- * Memoized {@link Kysely} instance for a DSN, with {@link TenancyPlugin} installed so
- * installation_id scoping is enforced on builder-shaped tenant-scoped queries (invariant #10).
- */
-export function getPrFilesDb(dsn: string): Kysely<PrFilesDb> {
-  let db = DB_BY_DSN.get(dsn);
-  if (db === undefined) {
-    db = new Kysely<PrFilesDb>({
-      dialect: new PostgresDialect({ pool: getPrFilesPool(dsn) }),
-      plugins: [new TenancyPlugin()],
-    });
-    DB_BY_DSN.set(dsn, db);
-  }
-  return db;
-}
-
 // ─── Repo Port + Postgres impl ───────────────────────────────────────────────
 
 /** Repo Protocol consumed by `enrich_pr_files_activity` (1:1 with the Python `PrFilesRepoPort`). */
@@ -151,21 +128,26 @@ export type PrFilesRepoPort = {
 
 /** Implements {@link PrFilesRepoPort} against `core.pr_files`. */
 export class PostgresPrFilesRepo implements PrFilesRepoPort {
+  // The injected, shared-pool Kysely (ADR-0062). NOT owned by this repo — never `destroy()`-ed here.
   readonly #db: Kysely<PrFilesDb>;
   readonly #clock: Clock;
 
-  /** Construct from an already-built (memoized) Kysely instance + injected clock. */
+  /**
+   * Construct from an injected `Kysely<PrFilesDb>` — the tenant-scoped, shared-pool instance from
+   * {@link tenantKysely} — plus the injected clock. The {@link TenancyPlugin} is already installed by
+   * {@link tenantKysely}; do NOT re-install it here.
+   */
   public constructor(args: { db: Kysely<PrFilesDb>; clock: Clock }) {
     this.#db = args.db;
     this.#clock = args.clock;
   }
 
   /**
-   * Build a repo from a DSN, reusing the memoized pool + Kysely instance for that DSN (ADR-0062).
-   * This is the production / test entry point — never opens a fresh pool per call.
+   * Default entry point (ADR-0062): build a repo over the process-wide single pool for `dsn` via
+   * {@link tenantKysely}. Every repo over the same DSN shares ONE pool — no per-repo pool cache.
    */
   public static fromDsn(args: { dsn: string; clock: Clock }): PostgresPrFilesRepo {
-    return new PostgresPrFilesRepo({ db: getPrFilesDb(args.dsn), clock: args.clock });
+    return new PostgresPrFilesRepo({ db: tenantKysely<PrFilesDb>(args.dsn), clock: args.clock });
   }
 
   /**

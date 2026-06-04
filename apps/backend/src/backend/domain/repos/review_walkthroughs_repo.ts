@@ -28,21 +28,27 @@
  * TENANCY NOTE (parity-faithful): `core.review_walkthroughs` is NOT in the frozen Python tenant-scoped
  * registry (`scripts/check_tenant_scoped_raw_sql.py`) and is NOT a `TenantScoped` ORM model, so it is
  * absent from the ported {@link TENANT_SCOPED_TABLES} registry — which is why the runtime
- * {@link TenancyPlugin} does not hard-refuse a query that omits `installation_id` on THIS table. We
- * still (a) install the plugin on this repo's Kysely instance, and (b) pass the `installation_id`
+ * `TenancyPlugin` does not hard-refuse a query that omits `installation_id` on THIS table. We still
+ * (a) get a plugin-installed Kysely from {@link tenantKysely}, and (b) pass the `installation_id`
  * equality predicate on the `get` read, exactly as the Python repo does — so the moment the table is
  * added to the registry, enforcement is already in place. We deliberately do NOT mutate the
  * verbatim-ported registry here (that is a cross-cutting change outside this repo's scope).
  *
- * ADR-0062: the `pg.Pool` and the `Kysely` instance are MEMOIZED at module scope — one per process,
- * never one per call. Call {@link closeReviewWalkthroughsDb} on shutdown (and from integration-test
- * `afterAll`) to drain the pool.
+ * ADR-0062: this repo NO LONGER owns a `pg.Pool`, constructs a `new Kysely(...)`, or memoizes either.
+ * It is handed a `Kysely<ReviewWalkthroughsDB>` over the process-wide single pool from
+ * {@link tenantKysely} (`#platform/db/database.js`) — the structural fix that replaces the old
+ * per-DSN `MEMOIZED` Pool+Kysely cache so a worker no longer fans out to `N × max` connections.
+ * {@link ReviewWalkthroughsRepo.fromDsn} is the default entry point; it routes through
+ * {@link tenantKysely} so every repo over the same DSN shares ONE pool. Tests / composition roots
+ * that already hold a `Kysely` inject it directly via the constructor. Pool teardown is the shared
+ * `disposeAllPools` / `disposePool` seam, NOT a per-repo close — a Kysely from {@link tenantKysely}
+ * must NOT be `destroy()`-ed by a repo, because that would end the shared pool out from under every
+ * other repo bound to the same DSN.
  */
 
-import { Kysely, PostgresDialect, sql } from "kysely";
-import { Pool } from "pg";
+import { type Kysely, sql } from "kysely";
 
-import { TenancyPlugin } from "#platform/db/tenancy_plugin.js";
+import { tenantKysely } from "#platform/db/database.js";
 
 import { WalkthroughV1 } from "#contracts/walkthrough.v1.js";
 
@@ -55,7 +61,7 @@ export type ReviewWalkthroughRow = {
   readonly walkthrough: WalkthroughV1;
 };
 
-// ─── Memoized Pool + Kysely (ADR-0062 — one per process, never per call) ─────────────────────────
+// ─── Kysely table typing for core.review_walkthroughs ────────────────────────────────────────────
 
 /**
  * The raw shape of the one row the `get` SELECT returns. `walkthrough` is `::text`-cast in SQL, so it
@@ -67,48 +73,48 @@ type RawWalkthroughRow = {
   readonly walkthrough: string;
 };
 
-/** Memoized `{ pool, db }` keyed by DSN. One Kysely (with TenancyPlugin) + one Pool per DSN. */
-const MEMOIZED = new Map<string, { pool: Pool; db: Kysely<unknown> }>();
+/** Minimal Kysely table typing for `core.review_walkthroughs` (the only table this repo touches). */
+type ReviewWalkthroughsTable = {
+  review_id: string;
+  installation_id: string;
+  walkthrough: string;
+  created_at: Date;
+  updated_at: Date;
+};
 
-function getDb(dsn: string): { pool: Pool; db: Kysely<unknown> } {
-  const existing = MEMOIZED.get(dsn);
-  if (existing !== undefined) {
-    return existing;
-  }
-  const pool = new Pool({ connectionString: dsn, max: 8 });
-  const db = new Kysely<unknown>({
-    dialect: new PostgresDialect({ pool }),
-    // Install the tenancy plugin so installation_id scoping is enforced on any registered scoped table
-    // this repo's Kysely instance touches (defense-in-depth; see the TENANCY NOTE in the module header).
-    plugins: [new TenancyPlugin()],
-  });
-  const entry = { pool, db };
-  MEMOIZED.set(dsn, entry);
-  return entry;
-}
-
-/**
- * Drains every memoized pool and forgets the memoized Kysely instances. Call on process shutdown and
- * from integration-test `afterAll`. Idempotent.
- */
-export async function closeReviewWalkthroughsDb(): Promise<void> {
-  const entries = [...MEMOIZED.values()];
-  MEMOIZED.clear();
-  await Promise.all(entries.map(async (e) => e.db.destroy()));
-}
+/** The Kysely schema for this repo — schema-qualified table key so the TenancyPlugin can resolve it. */
+type ReviewWalkthroughsDB = {
+  "core.review_walkthroughs": ReviewWalkthroughsTable;
+};
 
 // ─── Repo ────────────────────────────────────────────────────────────────────────────────────────
 
-/** Upsert + read the per-review structured walkthrough. */
+/**
+ * Upsert + read the per-review structured walkthrough.
+ *
+ * ADR-0062: the injected `Kysely<ReviewWalkthroughsDB>` is the tenant-scoped, shared-pool instance
+ * from {@link tenantKysely}. This repo owns NO pool and NO Kysely cache — many instances over the same
+ * DSN share the ONE process-wide pool. The `TenancyPlugin` is already installed by {@link tenantKysely};
+ * do NOT re-install it here.
+ */
 export class ReviewWalkthroughsRepo {
-  readonly #db: Kysely<unknown>;
+  // The injected, shared-pool Kysely (ADR-0062). NOT owned by this repo — never `destroy()`-ed here.
+  readonly #db: Kysely<ReviewWalkthroughsDB>;
 
   /**
-   * @param args.dsn  Postgres DSN for the memoized Pool + Kysely (ADR-0062). The Pool/Kysely are
-   *   shared across every `ReviewWalkthroughsRepo` constructed with the same DSN.
+   * Construct from an injected `Kysely<ReviewWalkthroughsDB>` — the tenant-scoped, shared-pool instance
+   * from {@link tenantKysely}. Tests / composition roots that already hold a `Kysely` inject it here.
    */
-  public constructor(args: { dsn: string }) {
-    this.#db = getDb(args.dsn).db;
+  public constructor(args: { db: Kysely<ReviewWalkthroughsDB> }) {
+    this.#db = args.db;
+  }
+
+  /**
+   * Default entry point (ADR-0062): build a repo over the process-wide single pool for `dsn` via
+   * {@link tenantKysely}. Every repo over the same DSN shares ONE pool — no per-repo pool cache.
+   */
+  public static fromDsn(dsn: string): ReviewWalkthroughsRepo {
+    return new ReviewWalkthroughsRepo({ db: tenantKysely<ReviewWalkthroughsDB>(dsn) });
   }
 
   /**

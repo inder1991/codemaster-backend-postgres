@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { afterAll, beforeAll, expect, it } from "vitest";
 
 import {
@@ -9,6 +9,7 @@ import {
 } from "#backend/domain/repos/pr_files_repo.js";
 
 import { FakeClock } from "#platform/clock.js";
+import { disposeAllPools, getPool } from "#platform/db/database.js";
 import { TenancyViolation } from "#platform/db/tenancy_plugin.js";
 
 import { type PrFileV1 } from "#contracts/pr_file.v1.js";
@@ -26,12 +27,14 @@ let pool: Pool;
 
 beforeAll(() => {
   if (!INTEGRATION_DSN) return; // block skips; don't open a pool against an undefined DSN
-  // ADR-0062: ONE memoized pool for raw seeding/asserts; the repo memoizes its OWN pool+Kysely by DSN.
-  pool = new Pool({ connectionString: INTEGRATION_DSN, max: 8 });
+  // ADR-0062: raw seeding/asserts share the ONE process-wide pool from the central factory (getPool);
+  // the repo (fromDsn → tenantKysely) shares that SAME pool — no separate per-repo pool.
+  pool = getPool(INTEGRATION_DSN);
 });
 
 afterAll(async () => {
-  await pool?.end();
+  // ADR-0062 teardown: end the shared pool(s) via the central seam — NOT a private pool.end().
+  await disposeAllPools();
 });
 
 /** A positive bigint that fits Postgres `bigint` and is unique per call (github_* id columns). */
@@ -122,7 +125,8 @@ async function cleanup(fx: Fixture): Promise<void> {
 }
 
 function repoFor(): PostgresPrFilesRepo {
-  // The repo memoizes its own pool+Kysely by DSN (ADR-0062), separate from the test's seed pool.
+  // ADR-0062: fromDsn routes through tenantKysely → the shared process-wide pool (the SAME pool the
+  // test's raw seed/assert reads use via getPool). No separate per-repo pool.
   return PostgresPrFilesRepo.fromDsn({ dsn: INTEGRATION_DSN as string, clock: FIXED_CLOCK });
 }
 

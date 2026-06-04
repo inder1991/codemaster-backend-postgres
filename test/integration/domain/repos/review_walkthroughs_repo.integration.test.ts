@@ -2,10 +2,9 @@ import { randomUUID } from "node:crypto";
 
 import { afterAll, beforeAll, expect, it } from "vitest";
 
-import {
-  ReviewWalkthroughsRepo,
-  closeReviewWalkthroughsDb,
-} from "#backend/domain/repos/review_walkthroughs_repo.js";
+import { ReviewWalkthroughsRepo } from "#backend/domain/repos/review_walkthroughs_repo.js";
+
+import { disposeAllPools } from "#platform/db/database.js";
 
 import type { WalkthroughV1 } from "#contracts/walkthrough.v1.js";
 
@@ -20,12 +19,14 @@ let repo: ReviewWalkthroughsRepo;
 
 beforeAll(() => {
   if (!INTEGRATION_DSN) return; // block skips; don't open a pool against an undefined DSN
-  // ADR-0062: the repo memoizes ONE Pool + ONE Kysely for the whole process (TenancyPlugin installed).
-  repo = new ReviewWalkthroughsRepo({ dsn: INTEGRATION_DSN });
+  // ADR-0062: the repo runs over the ONE process-wide pool from the central factory
+  // (tenantKysely / getPool) — never a private per-file pool.
+  repo = ReviewWalkthroughsRepo.fromDsn(INTEGRATION_DSN);
 });
 
 afterAll(async () => {
-  await closeReviewWalkthroughsDb();
+  // ADR-0062 teardown: end the shared pool(s) via the central seam — NOT a private close.
+  await disposeAllPools();
 });
 
 /** A minimal-but-complete WalkthroughV1 with every optional left to its default. */

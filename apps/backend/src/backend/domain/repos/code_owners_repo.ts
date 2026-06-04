@@ -17,9 +17,10 @@
  *
  * Tenancy (CLAUDE.md invariant #10 / "default deny everywhere"): every INSERT carries an
  * explicit `installation_id`; the single read filters `WHERE installation_id = :iid`. The
- * repo's {@link Kysely} instance installs {@link TenancyPlugin} for defense-in-depth on any
- * future builder-shaped query (raw `sql\`\`` templates bypass the AST walk by design — the
- * tenancy is carried explicitly in the WHERE here, mirroring the frozen Python `text()` SQL).
+ * repo's {@link Kysely} instance installs the `TenancyPlugin` (centrally, via {@link tenantKysely})
+ * for defense-in-depth on any future builder-shaped query (raw `sql\`\`` templates bypass the AST
+ * walk by design — the tenancy is carried explicitly in the WHERE here, mirroring the frozen Python
+ * `text()` SQL).
  *
  * Schema (confirmed live against the disposable PG, `\d core.code_owners`):
  *   code_owner_id   uuid        PK, default gen_random_uuid()
@@ -31,15 +32,21 @@
  *   synced_at       timestamptz NOT NULL, default now()
  *   UNIQUE (repository_id, path_pattern, source_file_sha)
  *
- * ADR-0062: the pg Pool + Kysely instance are MEMOIZED (one per DSN), never built per call.
+ * ADR-0062: this repo NO LONGER owns a `pg.Pool`, constructs a `new Kysely(...)`, or memoizes either.
+ * It is handed a `Kysely<CodeOwnersDb>` over the process-wide single pool from {@link tenantKysely}
+ * (`#platform/db/database.js`) — the structural fix that replaces the old per-DSN `POOL_BY_DSN` +
+ * `DB_BY_DSN` Maps so a worker no longer fans out to `N × max` connections.
+ * {@link PostgresCodeOwnersRepo.fromDsn} is the default entry point; it routes through
+ * {@link tenantKysely} so every repo over the same DSN shares ONE pool. Tests / composition roots that
+ * already hold a `Kysely` inject it directly via the constructor. Pool teardown is the shared
+ * `disposeAllPools` / `disposePool` seam, NOT a per-repo close.
  */
 
-import { Kysely, PostgresDialect, sql } from "kysely";
-import { Pool } from "pg";
+import { type Kysely, sql } from "kysely";
 
 import type { CodeOwnerRuleV1 } from "#contracts/code_owner_rule.v1.js";
 
-import { TenancyPlugin } from "#platform/db/tenancy_plugin.js";
+import { tenantKysely } from "#platform/db/database.js";
 
 /**
  * The parser's rule shape — TS port of
@@ -71,43 +78,32 @@ type CodeOwnersDb = {
   "core.code_owners": CodeOwnersTable;
 };
 
-// ── ADR-0062 memoization: one Pool + one Kysely per DSN, never per call ──
-
-const POOL_BY_DSN = new Map<string, Pool>();
-const DB_BY_DSN = new Map<string, Kysely<CodeOwnersDb>>();
-
-/** Memoized pg Pool for a DSN (ADR-0062 — engine/pool caching, never per-call). */
-export function getCodeOwnersPool(dsn: string): Pool {
-  let pool = POOL_BY_DSN.get(dsn);
-  if (pool === undefined) {
-    pool = new Pool({ connectionString: dsn });
-    POOL_BY_DSN.set(dsn, pool);
-  }
-  return pool;
-}
-
 /**
- * Memoized {@link Kysely} instance for a DSN, with {@link TenancyPlugin} installed so
- * installation_id scoping is enforced on builder-shaped tenant-scoped queries.
+ * Implements the `CodeOwnersRepoPort` against `core.code_owners`.
+ *
+ * ADR-0062: the injected `Kysely<CodeOwnersDb>` is the tenant-scoped, shared-pool instance from
+ * {@link tenantKysely}. This repo owns NO pool and NO Kysely cache — many instances over the same DSN
+ * share the ONE process-wide pool. The `TenancyPlugin` is already installed by {@link tenantKysely};
+ * do NOT re-install it here.
  */
-export function getCodeOwnersDb(dsn: string): Kysely<CodeOwnersDb> {
-  let db = DB_BY_DSN.get(dsn);
-  if (db === undefined) {
-    db = new Kysely<CodeOwnersDb>({
-      dialect: new PostgresDialect({ pool: getCodeOwnersPool(dsn) }),
-      plugins: [new TenancyPlugin()],
-    });
-    DB_BY_DSN.set(dsn, db);
-  }
-  return db;
-}
-
-/** Implements the `CodeOwnersRepoPort` against `core.code_owners`. */
 export class PostgresCodeOwnersRepo {
+  // The injected, shared-pool Kysely (ADR-0062). NOT owned by this repo — never `destroy()`-ed here.
   readonly #db: Kysely<CodeOwnersDb>;
 
+  /**
+   * Construct from an injected `Kysely<CodeOwnersDb>` — the tenant-scoped, shared-pool instance from
+   * {@link tenantKysely}. Tests / composition roots that already hold a `Kysely` inject it here.
+   */
   constructor(args: { db: Kysely<CodeOwnersDb> }) {
     this.#db = args.db;
+  }
+
+  /**
+   * Default entry point (ADR-0062): build a repo over the process-wide single pool for `dsn` via
+   * {@link tenantKysely}. Every repo over the same DSN shares ONE pool — no per-repo pool cache.
+   */
+  static fromDsn(dsn: string): PostgresCodeOwnersRepo {
+    return new PostgresCodeOwnersRepo({ db: tenantKysely<CodeOwnersDb>(dsn) });
   }
 
   /**

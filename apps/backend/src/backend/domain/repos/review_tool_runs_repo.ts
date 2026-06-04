@@ -22,19 +22,25 @@
  *  - **Tenancy.** `installation_id` is in the INSERT column/VALUES list directly, exactly as the
  *    Python SQL. INSERT carries no WHERE clause, so the {@link TenancyPlugin} (which gates only
  *    SELECT/UPDATE/DELETE — INSERT is out of scope, mirroring the Python `do_orm_execute` hook) does
- *    not fire on the write; the plugin is nonetheless installed on this repo's Kysely instance per
- *    the data-layer convention, so any future SELECT/UPDATE/DELETE added here is gated automatically.
+ *    not fire on the write; the plugin is nonetheless installed centrally by {@link tenantKysely} on
+ *    the shared-pool Kysely this repo is handed per the data-layer convention, so any future
+ *    SELECT/UPDATE/DELETE added here is gated automatically.
  *
- * Per ADR-0062, the `pg.Pool` and the `Kysely` instance are MEMOIZED — created once and reused — so a
- * worker does not leak a connection pool per call. The pool is injected by the caller (the production
- * composition root memoizes it); the `Kysely` wrapper around it is memoized inside this module keyed
- * by pool identity.
+ * ADR-0062 (Postgres connection-pool lifecycle): this repo NO LONGER owns a `pg.Pool`, constructs a
+ * `new Kysely(...)`, or memoizes either. It is handed a `Kysely<ReviewToolRunsDB>` over the
+ * process-wide single pool from {@link tenantKysely} (`#platform/db/database.js`) — the structural fix
+ * that replaces the old per-repo WeakMap-keyed Kysely cache so a worker no longer fans out to
+ * `N × max` connections. {@link ReviewToolRunsRepo.fromDsn} is the default entry point; it routes
+ * through {@link tenantKysely} so every repo over the same DSN shares ONE pool. Tests / composition
+ * roots that already hold a `Kysely` inject it directly via the constructor. Pool teardown is the
+ * shared `disposeAllPools` / `disposePool` seam, NOT a per-repo `close()` — a Kysely from
+ * {@link tenantKysely} must NOT be `destroy()`-ed by a repo, because doing so would end the shared
+ * pool out from under every other repo bound to the same DSN.
  */
 
-import { type Generated, Kysely, PostgresDialect } from "kysely";
-import type { Pool } from "pg";
+import { type Generated, type Kysely } from "kysely";
 
-import { TenancyPlugin } from "#platform/db/tenancy_plugin.js";
+import { tenantKysely } from "#platform/db/database.js";
 
 // ── Kysely table typing for core.review_tool_runs (confirmed against the live disposable DB) ──
 
@@ -69,29 +75,6 @@ type ReviewToolRunsTable = {
 type ReviewToolRunsDB = {
   "core.review_tool_runs": ReviewToolRunsTable;
 };
-
-// ── Memoized Kysely instance (ADR-0062: never per-call) ──
-
-const KYSELY_BY_POOL = new WeakMap<Pool, Kysely<ReviewToolRunsDB>>();
-
-/**
- * Return the memoized {@link Kysely} instance wrapping `pool`, creating it once on first use. Keyed by
- * pool identity via a {@link WeakMap} so distinct pools (tests, multiple environments) get distinct
- * instances without leaking. The {@link TenancyPlugin} is installed so any future tenant-scoped
- * SELECT/UPDATE/DELETE on this schema is gated.
- */
-function kyselyFor(pool: Pool): Kysely<ReviewToolRunsDB> {
-  const existing = KYSELY_BY_POOL.get(pool);
-  if (existing !== undefined) {
-    return existing;
-  }
-  const db = new Kysely<ReviewToolRunsDB>({
-    dialect: new PostgresDialect({ pool }),
-    plugins: [new TenancyPlugin()],
-  });
-  KYSELY_BY_POOL.set(pool, db);
-  return db;
-}
 
 // ── Public input shape (mirrors the Python keyword-only signature) ──
 
@@ -131,15 +114,29 @@ export type ReviewToolRunsRepoPort = {
 /**
  * Implements {@link ReviewToolRunsRepoPort} against `core.review_tool_runs` via Kysely.
  *
- * The injected `pool` is memoized by the caller (ADR-0062); the `Kysely` wrapper is memoized inside
- * this module keyed by pool identity, so constructing many `ReviewToolRunsRepo` instances over the
- * same pool does NOT create many Kysely instances.
+ * ADR-0062: the injected `Kysely<ReviewToolRunsDB>` is the tenant-scoped, shared-pool instance from
+ * {@link tenantKysely}. This repo owns NO pool and NO Kysely cache — many `ReviewToolRunsRepo`
+ * instances over the same DSN share the ONE process-wide pool. The {@link TenancyPlugin} is already
+ * installed by {@link tenantKysely}; do NOT re-install it here.
  */
 export class ReviewToolRunsRepo implements ReviewToolRunsRepoPort {
+  // The injected, shared-pool Kysely (ADR-0062). NOT owned by this repo — never `destroy()`-ed here.
   readonly #db: Kysely<ReviewToolRunsDB>;
 
-  constructor(args: { pool: Pool }) {
-    this.#db = kyselyFor(args.pool);
+  /**
+   * Construct from an injected `Kysely<ReviewToolRunsDB>` — the tenant-scoped, shared-pool instance
+   * from {@link tenantKysely}. Tests / composition roots that already hold a `Kysely` inject it here.
+   */
+  constructor(args: { db: Kysely<ReviewToolRunsDB> }) {
+    this.#db = args.db;
+  }
+
+  /**
+   * Default entry point (ADR-0062): build a repo over the process-wide single pool for `dsn` via
+   * {@link tenantKysely}. Every repo over the same DSN shares ONE pool — no per-repo pool cache.
+   */
+  static fromDsn(dsn: string): ReviewToolRunsRepo {
+    return new ReviewToolRunsRepo({ db: tenantKysely<ReviewToolRunsDB>(dsn) });
   }
 
   async insertToolRun(input: InsertToolRunInput): Promise<void> {

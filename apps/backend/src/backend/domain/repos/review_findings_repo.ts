@@ -31,9 +31,11 @@
  * the UPDATE WHERE clause) — exactly as the Python source does, so cross-tenant mutation is
  * structurally impossible.
  *
- * ADR-0062 (Postgres connection-pool lifecycle): the `pg.Pool` and the `Kysely` instance are MEMOIZED
- * per DSN by {@link tenantKyselyForDsn} — NEVER created per call. The repo accepts a `Kysely` (and a
- * `Clock` seam) by injection so callers share one engine across all repos.
+ * ADR-0062 (Postgres connection-pool lifecycle): this repo NO LONGER owns a per-repo pool/engine
+ * cache. The "get a Kysely for this DSN" path routes through the shared {@link tenantKysely} seam
+ * (`#platform/db/database.js`), which memoizes ONE `pg.Pool` per DSN process-wide (via the shared
+ * {@link getPool}) and installs the {@link TenancyPlugin} centrally. The repo accepts a `Kysely`
+ * (and a `Clock` seam) by injection so callers share one engine across all repos.
  *
  * DEFERRED cross-subsystem wiring (documented, signatures kept 1:1 so it is purely additive later):
  *   - The Python `persistAggregated` + the three lifecycle setters wire the AD-4 stale-write guard
@@ -47,11 +49,10 @@
  *     best-effort side-effects outside the data layer and are not part of this port.
  */
 
-import { Kysely, PostgresDialect, sql } from "kysely";
+import { type Kysely, sql } from "kysely";
 import { createHash } from "node:crypto";
-import { Pool } from "pg";
 
-import { TenancyPlugin } from "#platform/db/tenancy_plugin.js";
+import { tenantKysely } from "#platform/db/database.js";
 
 import type { Clock } from "#platform/clock.js";
 
@@ -154,42 +155,19 @@ type ReviewFindingsDb = {
   "core.review_findings": ReviewFindingsTable;
 };
 
-// ─── Memoized engine (ADR-0062) ─────────────────────────────────────────────────────────────────
-
-type Engine = { pool: Pool; db: Kysely<ReviewFindingsDb> };
-
-/** DSN -> memoized { pool, db } so we NEVER build a pool/engine per call (ADR-0062). */
-const ENGINES = new Map<string, Engine>();
+// ─── Shared engine seam (ADR-0062) ──────────────────────────────────────────────────────────────
 
 /**
- * Return a process-memoized tenant-scoped Kysely (TenancyPlugin installed) + its backing `pg.Pool`,
- * keyed by DSN. Subsequent calls with the same DSN return the SAME instances — the ADR-0062
- * "no engine memoization → ~28 pools/worker → TooManyConnectionsError" defect is closed by
- * construction.
+ * Return the process-shared tenant-scoped `Kysely<ReviewFindingsDb>` for `dsn` — the ADR-0062 single
+ * pool per DSN (via {@link tenantKysely} / the shared {@link getPool}), with the {@link TenancyPlugin}
+ * installed centrally. This repo NO LONGER memoizes its own `pg.Pool`/engine: every repo type now
+ * shares ONE pool per DSN, closing the "~28 pools/worker → TooManyConnectionsError" defect.
+ *
+ * Lifecycle (pool teardown) is owned by the shared seam's `disposePool` / `disposeAllPools` — there
+ * is no per-repo `dispose` here anymore.
  */
-export function tenantKyselyForDsn(dsn: string, opts: { maxConnections?: number } = {}): Engine {
-  const existing = ENGINES.get(dsn);
-  if (existing !== undefined) {
-    return existing;
-  }
-  const pool = new Pool({ connectionString: dsn, max: opts.maxConnections ?? 8 });
-  const db = new Kysely<ReviewFindingsDb>({
-    dialect: new PostgresDialect({ pool }),
-    plugins: [new TenancyPlugin()],
-  });
-  const engine: Engine = { pool, db };
-  ENGINES.set(dsn, engine);
-  return engine;
-}
-
-/** Tear down a memoized engine (tests / shutdown). No-op when the DSN was never opened. */
-export async function disposeTenantKysely(dsn: string): Promise<void> {
-  const engine = ENGINES.get(dsn);
-  if (engine === undefined) {
-    return;
-  }
-  ENGINES.delete(dsn);
-  await engine.db.destroy();
+export function tenantKyselyForDsn(dsn: string): Kysely<ReviewFindingsDb> {
+  return tenantKysely<ReviewFindingsDb>(dsn);
 }
 
 // ─── The repo ───────────────────────────────────────────────────────────────────────────────────

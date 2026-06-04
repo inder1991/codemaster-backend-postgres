@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
 
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { afterAll, beforeAll, expect, it } from "vitest";
 
 import {
   ReviewPolicyBundlesRepo,
   type ReviewPolicyBundleRow,
 } from "#backend/domain/repos/review_policy_bundles_repo.js";
+
+import { disposeAllPools, getPool } from "#platform/db/database.js";
 
 import { type ResolvedGuidanceBundleV1 } from "#contracts/resolved_guidance.v1.js";
 
@@ -23,14 +25,15 @@ let repo: ReviewPolicyBundlesRepo;
 
 beforeAll(() => {
   if (!INTEGRATION_DSN) return; // block skips; don't open a pool against an undefined DSN
-  // ADR-0062: ONE memoized pool for the whole file — never a pool per call. The repo wraps a Kysely
-  // (TenancyPlugin installed) over this exact pool.
-  pool = new Pool({ connectionString: INTEGRATION_DSN, max: 8 });
-  repo = new ReviewPolicyBundlesRepo({ pool });
+  // ADR-0062: the repo + the raw seed/assert reads share the ONE process-wide pool from the central
+  // factory (getPool / tenantKysely) — never a private per-file pool.
+  pool = getPool(INTEGRATION_DSN);
+  repo = ReviewPolicyBundlesRepo.fromDsn(INTEGRATION_DSN);
 });
 
 afterAll(async () => {
-  await pool?.end();
+  // ADR-0062 teardown: end the shared pool(s) via the central seam — NOT a private pool.end().
+  await disposeAllPools();
 });
 
 /** Delete every row this test family created for a given installation_id. */

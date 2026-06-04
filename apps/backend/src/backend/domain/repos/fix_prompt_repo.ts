@@ -9,16 +9,20 @@
  *
  * Tenancy: every statement carries `installation_id`. The read goes through the Kysely query builder
  * with an explicit `.where("installation_id", "=", …)` predicate, so the {@link TenancyPlugin}
- * (installed on this repo's Kysely instance) enforces the GF-3 invariant at query-build time — the
- * structural analogue of the Python GF-3 raw-SQL tenancy AST gate. The upsert is an INSERT (out of
- * the plugin's SELECT/UPDATE/DELETE scope, exactly as in the Python hook) but still binds
- * `installation_id` as a column value.
+ * (installed centrally by {@link tenantKysely} on the shared-pool Kysely this repo is handed) enforces
+ * the GF-3 invariant at query-build time — the structural analogue of the Python GF-3 raw-SQL tenancy
+ * AST gate. The upsert is an INSERT (out of the plugin's SELECT/UPDATE/DELETE scope, exactly as in the
+ * Python hook) but still binds `installation_id` as a column value.
  *
- * ADR-0062 (Postgres connection-pool lifecycle): the pg Pool and the Kysely instance are memoized —
- * created ONCE per repo instance, never per call. The pool is injected (constructor injection) so a
- * single pool can back many repos. {@link FixPromptRepo.close} disposes the Kysely wrapper via
- * `destroy()`, which ends the injected pool (Kysely owns the pool handed to its dialect) — call it
- * exactly once at shutdown, never per request.
+ * ADR-0062 (Postgres connection-pool lifecycle): this repo NO LONGER owns a `pg.Pool` or constructs a
+ * `new Kysely(...)`. It is handed a `Kysely<FixPromptDb>` over the process-wide single pool from
+ * {@link tenantKysely} (`#platform/db/database.js`) — the structural fix that replaces the old
+ * per-repo pool cache so a worker no longer fans out to `N × max` connections. {@link FixPromptRepo.fromDsn}
+ * is the default entry point; it routes through {@link tenantKysely} so every repo over the same DSN
+ * shares ONE pool. Tests / composition roots that already hold a `Kysely` inject it directly via the
+ * constructor. Pool teardown is the shared {@link disposeAllPools} / {@link disposePool} seam, NOT a
+ * per-repo `close()` — a Kysely from {@link tenantKysely} must NOT be `destroy()`-ed by a repo, because
+ * doing so would end the shared pool out from under every other repo bound to the same DSN.
  *
  * Datetime fidelity: `generated_at` is read back via `to_char(… AT TIME ZONE 'UTC', …)` so the
  * `timestamptz` round-trips as a canonical microsecond-precision `Z`-suffixed RFC3339 string
@@ -26,10 +30,9 @@
  * microsecond instant — the [[empirical_verification_before_architectural_claims]] trap).
  */
 
-import { Kysely, PostgresDialect, sql } from "kysely";
-import type { Pool } from "pg";
+import { type Kysely, sql } from "kysely";
 
-import { TenancyPlugin } from "#platform/db/tenancy_plugin.js";
+import { tenantKysely } from "#platform/db/database.js";
 
 import { FixPromptV1 } from "#contracts/fix_prompt.v1.js";
 
@@ -57,15 +60,24 @@ export type TenantScope = {
 };
 
 export class FixPromptRepo {
-  // Memoized per ADR-0062 — one Kysely instance (wrapping the injected, caller-owned pool) for the
-  // repo's lifetime; never re-created per call.
+  // The injected, shared-pool Kysely (ADR-0062). NOT owned by this repo — never `destroy()`-ed here.
   private readonly db: Kysely<FixPromptDb>;
 
-  constructor(args: { pool: Pool }) {
-    this.db = new Kysely<FixPromptDb>({
-      dialect: new PostgresDialect({ pool: args.pool }),
-      plugins: [new TenancyPlugin()],
-    });
+  /**
+   * Construct from an injected `Kysely<FixPromptDb>` — the tenant-scoped, shared-pool instance from
+   * {@link tenantKysely}. The {@link TenancyPlugin} is already installed by {@link tenantKysely}; do
+   * NOT re-install it here.
+   */
+  constructor(args: { db: Kysely<FixPromptDb> }) {
+    this.db = args.db;
+  }
+
+  /**
+   * Default entry point (ADR-0062): build a repo over the process-wide single pool for `dsn` via
+   * {@link tenantKysely}. Every repo over the same DSN shares ONE pool — no per-repo pool cache.
+   */
+  static fromDsn(dsn: string): FixPromptRepo {
+    return new FixPromptRepo({ db: tenantKysely<FixPromptDb>(dsn) });
   }
 
   /**
@@ -127,13 +139,5 @@ export class FixPromptRepo {
       truncated: row.truncated,
       generated_at: row.generated_at,
     });
-  }
-
-  /**
-   * Dispose the Kysely wrapper (and, transitively, the injected pool Kysely owns). Call once at
-   * shutdown — never per request (ADR-0062).
-   */
-  async close(): Promise<void> {
-    await this.db.destroy();
   }
 }

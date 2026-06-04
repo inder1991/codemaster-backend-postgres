@@ -17,10 +17,12 @@
 //    timestamptz generated_at all round-trip faithfully.
 import { randomUUID } from "node:crypto";
 
-import { Pool } from "pg";
 import { afterAll, beforeAll, expect, it } from "vitest";
 
 import { FixPromptRepo } from "#backend/domain/repos/fix_prompt_repo.js";
+
+import { disposeAllPools, getPool } from "#platform/db/database.js";
+
 import { FixPromptV1 } from "#contracts/fix_prompt.v1.js";
 
 import { describeDb, INTEGRATION_DSN } from "../../_db.js";
@@ -51,9 +53,11 @@ const asStored = (record: FixPromptV1): FixPromptV1 => ({
 });
 
 describeDb("FixPromptRepo (integration)", () => {
-  // Guard pool creation on the DSN so the module never attempts a live connection when SKIPPED.
-  const pool = new Pool({ connectionString: INTEGRATION_DSN });
-  const repo = new FixPromptRepo({ pool });
+  // ADR-0062: the repo routes through the shared single-pool factory (tenantKysely → getPool). The
+  // raw seed/assert reads share THAT pool via getPool(dsn) — no private per-test pool. Guarded on the
+  // DSN so the module never opens a live connection when SKIPPED.
+  const repo = FixPromptRepo.fromDsn(INTEGRATION_DSN as string);
+  const pool = getPool(INTEGRATION_DSN as string);
 
   beforeAll(async () => {
     // Sanity: confirm the disposable DB is reachable + the target table exists before asserting.
@@ -64,9 +68,9 @@ describeDb("FixPromptRepo (integration)", () => {
     await pool.query("DELETE FROM core.fix_prompts WHERE installation_id = ANY($1::uuid[])", [
       [INSTALLATION_A, INSTALLATION_B],
     ]);
-    // repo.close() disposes the Kysely wrapper, which ends the injected pool (Kysely owns the pool
-    // it was given). No separate pool.end() — that would double-end (the sibling repos' convention).
-    await repo.close();
+    // ADR-0062 teardown: end the shared pool(s) via the central seam — NOT a per-repo close(). The
+    // repo does NOT own the pool (it shares the process-wide singleton from getPool/tenantKysely).
+    await disposeAllPools();
   });
 
   const makeRecord = (overrides: Partial<FixPromptV1> = {}): FixPromptV1 =>

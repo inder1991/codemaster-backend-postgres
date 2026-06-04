@@ -1,15 +1,12 @@
 import { randomUUID } from "node:crypto";
 
-import { Kysely, PostgresDialect, sql } from "kysely";
-import { Pool } from "pg";
+import { type Kysely, sql } from "kysely";
 import { afterAll, beforeAll, expect, it } from "vitest";
 
-import {
-  getCodeOwnersDb,
-  PostgresCodeOwnersRepo,
-} from "#backend/domain/repos/code_owners_repo.js";
+import { PostgresCodeOwnersRepo } from "#backend/domain/repos/code_owners_repo.js";
 
-import { TenancyPlugin, TenancyViolation } from "#platform/db/tenancy_plugin.js";
+import { disposeAllPools, tenantKysely } from "#platform/db/database.js";
+import { TenancyViolation } from "#platform/db/tenancy_plugin.js";
 
 import type { CodeOwnerRuleV1 } from "#contracts/code_owner_rule.v1.js";
 
@@ -33,22 +30,20 @@ type SeedDb = {
   };
 };
 
-let pool: Pool;
 let db: Kysely<SeedDb>;
 
 beforeAll(() => {
   if (!INTEGRATION_DSN) return; // block skips; don't open a pool against an undefined DSN
-  // ADR-0062: ONE memoized pool + Kysely for the whole file — never per call. TenancyPlugin
-  // installed so installation_id scoping is enforced on builder-shaped tenant-scoped queries.
-  pool = new Pool({ connectionString: INTEGRATION_DSN, max: 8 });
-  db = new Kysely<SeedDb>({
-    dialect: new PostgresDialect({ pool }),
-    plugins: [new TenancyPlugin()],
-  });
+  // ADR-0062: the repo + the seed/assert Kysely share the ONE process-wide pool from the central
+  // factory (tenantKysely routes through getPool) — never a private per-file pool. tenantKysely
+  // installs the TenancyPlugin centrally, so installation_id scoping is enforced on builder-shaped
+  // queries; the raw seed/cleanup statements use sql`` over this same shared-pool Kysely.
+  db = tenantKysely<SeedDb>(INTEGRATION_DSN);
 });
 
 afterAll(async () => {
-  await db?.destroy();
+  // ADR-0062 teardown: end the shared pool(s) via the central seam — NOT a private destroy.
+  await disposeAllPools();
 });
 
 /** A unique positive int64-safe bigint for github_* UNIQUE columns. */
@@ -120,9 +115,9 @@ function rule(args: {
 }
 
 function repo(): PostgresCodeOwnersRepo {
-  // Exercise the repo's OWN ADR-0062-memoized, TenancyPlugin-installed Kysely instance
-  // (getCodeOwnersDb returns the same instance per DSN — never one per call).
-  return new PostgresCodeOwnersRepo({ db: getCodeOwnersDb(INTEGRATION_DSN ?? "") });
+  // Exercise the repo's default ADR-0062 entry point: fromDsn routes through tenantKysely over the
+  // ONE process-wide pool (TenancyPlugin installed centrally) — never one pool/Kysely per call.
+  return PostgresCodeOwnersRepo.fromDsn(INTEGRATION_DSN ?? "");
 }
 
 describeDb("PostgresCodeOwnersRepo (integration, disposable PG)", () => {

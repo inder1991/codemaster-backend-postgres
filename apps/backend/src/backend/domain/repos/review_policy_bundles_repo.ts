@@ -18,20 +18,24 @@
  *
  * Tenancy: every read statement carries the `installation_id` token in the SQL and is keyed by it,
  * matching the frozen Python repo (GF-3 raw-SQL tenancy discipline). The Kysely instance installs
- * {@link TenancyPlugin} (defense-in-depth, invariant #10) — a no-op AST pass for raw `sql` templates,
- * but it guards any future ORM-builder query this repo grows.
+ * `TenancyPlugin` (defense-in-depth, invariant #10) — a no-op AST pass for raw `sql` templates, but it
+ * guards any future ORM-builder query this repo grows; it is installed centrally by {@link tenantKysely}.
  *
- * Lifecycle (ADR-0062): the pg {@link Pool} and {@link Kysely} instance are memoized per DSN — NEVER
- * constructed per call. Construct the repo with an explicit `pool` (tests, DI) or let it lazily
- * memoize one from `CODEMASTER_PG_CORE_DSN`.
+ * ADR-0062: this repo NO LONGER owns a `pg.Pool`, constructs a `new Kysely(...)`, or memoizes either.
+ * It is handed a `Kysely<DB>` over the process-wide single pool from {@link tenantKysely}
+ * (`#platform/db/database.js`) — the structural fix that replaces the old per-DSN `POOL_CACHE` +
+ * `KYSELY_CACHE` Maps so a worker no longer fans out to `N × max` connections.
+ * {@link ReviewPolicyBundlesRepo.fromDsn} is the default entry point; it routes through
+ * {@link tenantKysely} so every repo over the same DSN shares ONE pool. Tests / composition roots that
+ * already hold a `Kysely` inject it directly via the constructor. Pool teardown is the shared
+ * `disposeAllPools` / `disposePool` seam, NOT a per-repo close.
  */
 
-import { Kysely, PostgresDialect, sql } from "kysely";
-import { Pool } from "pg";
+import { type Kysely, sql } from "kysely";
 
 import { ResolvedGuidanceBundleV1 } from "#contracts/resolved_guidance.v1.js";
 
-import { TenancyPlugin } from "#platform/db/tenancy_plugin.js";
+import { tenantKysely } from "#platform/db/database.js";
 
 /** Minimal Kysely database schema for this repo's single table. */
 type ReviewPolicyBundlesTable = {
@@ -63,73 +67,32 @@ type AppliedBundleReadRow = {
   rule_count: number;
 };
 
-// ── Memoized pool + Kysely instance (ADR-0062) ──────────────────────────────────────────────────
-//
-// One Pool + one Kysely per process per DSN — building a Pool per call exhausts Postgres connections
-// (the TooManyConnectionsError class the ADR exists to prevent). The cache is keyed by DSN so a test
-// pointing at the disposable PG and production pointing at the cluster never share an instance.
-
-const POOL_CACHE = new Map<string, Pool>();
-const KYSELY_CACHE = new Map<string, Kysely<DB>>();
-
-/** Memoized {@link Pool} for `dsn`. */
-function poolFor(dsn: string): Pool {
-  const existing = POOL_CACHE.get(dsn);
-  if (existing !== undefined) {
-    return existing;
-  }
-  const pool = new Pool({ connectionString: dsn });
-  POOL_CACHE.set(dsn, pool);
-  return pool;
-}
-
-/** Memoized {@link Kysely} instance (TenancyPlugin installed) over the memoized pool for `dsn`. */
-function kyselyForDsn(dsn: string): Kysely<DB> {
-  const existing = KYSELY_CACHE.get(dsn);
-  if (existing !== undefined) {
-    return existing;
-  }
-  const db = kyselyOver(poolFor(dsn));
-  KYSELY_CACHE.set(dsn, db);
-  return db;
-}
-
-/** Build a {@link Kysely} over an existing {@link Pool} with the tenancy plugin installed. */
-function kyselyOver(pool: Pool): Kysely<DB> {
-  return new Kysely<DB>({
-    dialect: new PostgresDialect({ pool }),
-    plugins: [new TenancyPlugin()],
-  });
-}
-
+/**
+ * Implements the per-review applied-policy-bundle persistence against `core.review_policy_bundles`.
+ *
+ * ADR-0062: the injected `Kysely<DB>` is the tenant-scoped, shared-pool instance from
+ * {@link tenantKysely}. This repo owns NO pool and NO Kysely cache — many instances over the same DSN
+ * share the ONE process-wide pool. The `TenancyPlugin` is already installed by {@link tenantKysely};
+ * do NOT re-install it here.
+ */
 export class ReviewPolicyBundlesRepo {
+  // The injected, shared-pool Kysely (ADR-0062). NOT owned by this repo — never `destroy()`-ed here.
   readonly #db: Kysely<DB>;
 
   /**
-   * Construct the repo.
-   *
-   * @param args.db   An explicit (memoized) Kysely instance — preferred for DI / tests.
-   * @param args.pool An explicit (memoized) pg Pool — a Kysely is wrapped over it with the tenancy
-   *                  plugin installed. Use this when the caller owns the pool lifecycle (tests).
-   *
-   * With neither, the repo lazily memoizes a pool + Kysely from `CODEMASTER_PG_CORE_DSN`.
+   * Construct from an injected `Kysely<DB>` — the tenant-scoped, shared-pool instance from
+   * {@link tenantKysely}. Tests / composition roots that already hold a `Kysely` inject it here.
    */
-  constructor(args: { db?: Kysely<DB>; pool?: Pool } = {}) {
-    if (args.db !== undefined) {
-      this.#db = args.db;
-      return;
-    }
-    if (args.pool !== undefined) {
-      this.#db = kyselyOver(args.pool);
-      return;
-    }
-    const dsn = process.env["CODEMASTER_PG_CORE_DSN"];
-    if (dsn === undefined || dsn.length === 0) {
-      throw new Error(
-        "ReviewPolicyBundlesRepo: no Kysely/pool supplied and CODEMASTER_PG_CORE_DSN is unset",
-      );
-    }
-    this.#db = kyselyForDsn(dsn);
+  constructor(args: { db: Kysely<DB> }) {
+    this.#db = args.db;
+  }
+
+  /**
+   * Default entry point (ADR-0062): build a repo over the process-wide single pool for `dsn` via
+   * {@link tenantKysely}. Every repo over the same DSN shares ONE pool — no per-repo pool cache.
+   */
+  static fromDsn(dsn: string): ReviewPolicyBundlesRepo {
+    return new ReviewPolicyBundlesRepo({ db: tenantKysely<DB>(dsn) });
   }
 
   /**
