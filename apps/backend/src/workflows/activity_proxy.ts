@@ -71,6 +71,9 @@ import type { CitationValidateInputV1 } from "#contracts/citation_validate_input
 import type { CitationValidationResultV1 } from "#contracts/citation_validation.v1.js";
 import type { EmitOutputSafetyAuditEventInput } from "#contracts/emit_output_safety_audit.v1.js";
 import type { SkippedInputV1 } from "#contracts/finding_lifecycle_inputs.v1.js";
+import type { BuildRetrievedEvidenceInputV1 } from "#contracts/build_retrieved_evidence_input.v1.js";
+import type { RetrievedEvidenceV1 } from "#contracts/retrieved_evidence.v1.js";
+import type { UpdatePrDescriptionInputV1 } from "#contracts/update_pr_description.v1.js";
 import type {
   ClassifyInput,
   ChunkAndRedactInput,
@@ -230,6 +233,21 @@ export function makeActivityPorts(): ReviewActivityPorts {
     recordDeliverySkipped(input: SkippedInputV1): Promise<number>;
   }>(toActivityOptions(RETRY_POLICIES.recordDeliverySkipped));
 
+  // ── Stage-4 ports ──
+  // build_retrieved_evidence — the per-chunk provenance-backed evidence-manifest producer (mints ev_ ids via
+  // node:crypto, so it runs in the Node activity runtime; the workflow body only dispatches the typed input
+  // + receives the RetrievedEvidenceV1 tuple back across the wire). Registered name `buildRetrievedEvidence`.
+  const { buildRetrievedEvidence } = proxyActivities<{
+    buildRetrievedEvidence(
+      input: BuildRetrievedEvidenceInputV1,
+    ): Promise<ReadonlyArray<RetrievedEvidenceV1>>;
+  }>(toActivityOptions(RETRY_POLICIES.buildRetrievedEvidence));
+  // update_pr_description_summary — the S19.NOW8.B PR-description appendage, dispatched by posting.ts after
+  // the review lands (fail-open). Registered name `updatePrDescriptionSummary`.
+  const { updatePrDescriptionSummary } = proxyActivities<{
+    updatePrDescriptionSummary(input: UpdatePrDescriptionInputV1): Promise<void>;
+  }>(toActivityOptions(RETRY_POLICIES.updatePrDescriptionSummary));
+
   return {
     clone: cloneRepoIntoWorkspace,
     loadRepoConfig: loadRepoConfigActivity,
@@ -253,5 +271,8 @@ export function makeActivityPorts(): ReviewActivityPorts {
     citationValidate,
     emitOutputSafetyAudit: emitOutputSafetyAuditEvent,
     recordDeliverySkipped,
+    // Stage-4 ports — per-chunk evidence manifest (buildChunkContext) + PR-description summary (posting.ts).
+    buildRetrievedEvidence,
+    updatePrDescriptionSummary,
   };
 }

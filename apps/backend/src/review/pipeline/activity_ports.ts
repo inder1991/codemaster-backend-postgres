@@ -56,6 +56,9 @@ import type { CitationValidateInputV1 } from "#contracts/citation_validate_input
 import type { CitationValidationResultV1 } from "#contracts/citation_validation.v1.js";
 import type { EmitOutputSafetyAuditEventInput } from "#contracts/emit_output_safety_audit.v1.js";
 import type { SkippedInputV1 } from "#contracts/finding_lifecycle_inputs.v1.js";
+import type { BuildRetrievedEvidenceInputV1 } from "#contracts/build_retrieved_evidence_input.v1.js";
+import type { RetrievedEvidenceV1 } from "#contracts/retrieved_evidence.v1.js";
+import type { UpdatePrDescriptionInputV1 } from "#contracts/update_pr_description.v1.js";
 
 /** changed_line_ranges wire shape: dict[str, tuple[tuple[int,int], ...]] → keyed by relative path,
  *  ChangedLineRange is the [start, end] tuple ported in chunk_and_redact.v1.ts. Matches the existing TS
@@ -139,6 +142,20 @@ export type ReviewActivityPorts = {
   citationValidate?(input: CitationValidateInputV1): Promise<CitationValidationResultV1>;
   emitOutputSafetyAudit?(input: EmitOutputSafetyAuditEventInput): Promise<void>;
   recordDeliverySkipped?(input: SkippedInputV1): Promise<number>;
+  // ── Stage-4 ports (provenance-backed evidence + PR-description summary) ──
+  // OPTIONAL: when omitted, the orchestrator/posting falls back to the pre-Stage-4 behaviour (the Python
+  // `is None` branch).
+  //   * buildRetrievedEvidence     — per-chunk evidence-manifest producer (mints ev_ ids via node:crypto, so
+  //     it MUST run in a Node activity — the workflow sandbox bans crypto, ADR-0065/0066). When omitted,
+  //     buildChunkContext threads retrieved_evidence=[] (the Stage-1 default) and the parser's evidence-refs
+  //     validation is a no-op. The orchestrator dispatches it per chunk in buildChunkContext.
+  //   * updatePrDescriptionSummary — the S19.NOW8.B PR-description appendage (GET-modify-PATCH the PR body
+  //     with the codemaster summary block). The Python runs it INSIDE `_post_review` after the review lands
+  //     (fail-open per AC3 — the posted review is the value; the appendage is polish). posting.ts dispatches
+  //     it after the post succeeds when wired. Returns void (the activity's persisted side effect is the
+  //     PATCH).
+  buildRetrievedEvidence?(input: BuildRetrievedEvidenceInputV1): Promise<ReadonlyArray<RetrievedEvidenceV1>>;
+  updatePrDescriptionSummary?(input: UpdatePrDescriptionInputV1): Promise<void>;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -388,6 +405,28 @@ export const RETRY_POLICIES = {
   recordDeliveryDegraded: {
     startToCloseTimeout: "30s",
     retry: { initialInterval: "1s", backoffCoefficient: 2.0, maximumAttempts: 3 },
+  },
+
+  // build_retrieved_evidence — NEW activity introduced DURING the port. The frozen Python calls
+  // `build_retrieved_evidence` INLINE in the workflow body (review_pull_request.py:1813) — Python's
+  // `mint_evidence_id` is pure stdlib hashlib/uuid, permitted in the Python sandbox. The TS `mintEvidenceId`
+  // mints via node:crypto (RESTRICTED in the V8-isolate workflow sandbox; ADR-0065/0066), so the producer
+  // MUST move to a Node activity — there is therefore no Python dispatch-site retry policy to transcribe.
+  // The producer is pure modulo the crypto hash (no DB / network / GitHub), so it gets a tight curve sized
+  // like its sibling pure activities: start_to_close 15s, retry initial_interval=2s, max_attempts=3.
+  // Idempotent by construction (deterministic UUIDv5 ev_ids), so a retry recomputes bit-identical output.
+  buildRetrievedEvidence: {
+    startToCloseTimeout: "15s",
+    retry: { initialInterval: "2s", maximumAttempts: 3 },
+  },
+
+  // update_pr_description_summary (review_pull_request.py:2740-2744): start_to_close 30s,
+  // retry initial_interval=2s, max_attempts=2. Runs INSIDE the post path AFTER the review lands; the
+  // posting.ts stage_outcome wrap is fail-open (AC3 — the posted review is the value; the description
+  // appendage is polish), so a failure here never fails the workflow.
+  updatePrDescriptionSummary: {
+    startToCloseTimeout: "30s",
+    retry: { initialInterval: "2s", maximumAttempts: 2 },
   },
 
   // record_review_lifecycle_event_activity (review_pull_request.py:678-682 ANALYSIS_STARTED; :3987-3994

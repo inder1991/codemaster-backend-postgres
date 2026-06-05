@@ -20,11 +20,17 @@
 // retrieval-knowledge-wiring, persist-review-walkthrough. The collapsed reads documented inline cite their
 // gates.ts ledger entry.
 //
+// ── STAGE-4 WIRED (build-retrieved-evidence collapse-on) ──
+//   * retrieved_evidence / build_retrieved_evidence — the per-chunk evidence manifest producer is now
+//     dispatched as a Node ACTIVITY (ports.buildRetrievedEvidence) inside buildChunkContext, because the TS
+//     ev_id mint uses node:crypto (banned in the workflow sandbox; ADR-0065/0066). The orchestrator only
+//     holds the RetrievedEvidenceV1 TYPE (type-only import; erased at emit) so the bundle stays crypto-free.
+//     When the port is omitted (unit tests) retrieved_evidence stays [] (the legacy default).
+//
 // ── DEFERRED (tracked; pass empty/None per the task) ──
-//   * retrieved_evidence / build_retrieved_evidence (Stage 4 — mints ev_ ids via crypto, must run in an
-//     activity; the workflow sandbox bans node:crypto). Passed as [] here.
-//   * confluence pr_context + label routing (Stage 4 — confluence cluster). retrieveKnowledge dispatched
-//     WITHOUT pr_context / yaml_config / platform_exposed_labels (the legacy BM25+ANN+RRF fast path).
+//   * confluence pr_context + label routing (Stage 4 — confluence cluster, FOLLOW-UP-confluence-cluster).
+//     retrieveKnowledge dispatched WITHOUT pr_context / yaml_config / platform_exposed_labels (the legacy
+//     BM25+ANN+RRF fast path).
 //   * citation_validate (Stage 3 — its own activity boundary; Path.resolve syscalls). Step 7.5 skipped.
 //   * apply_policy_post_filter (Stage 5 — policy post-filter relocation). Step 7.2 skipped.
 //   * apply_arbitration / record_tool_runs (Stage 5 — arbitration layer). Step 7.7 skipped.
@@ -78,6 +84,11 @@ import type { ReviewChunkResponseV1 } from "#contracts/review_chunk_response.v1.
 import type { PRTopologyEntryV1 } from "#contracts/pr_topology.v1.js";
 import type { KnowledgeChunkV1 } from "#contracts/knowledge_chunks.v1.js";
 import type { WorkspaceHandle } from "#contracts/workspace_handle.v1.js";
+import type { LinkedIssueV1 } from "#contracts/walkthrough.v1.js";
+// TYPE-ONLY — RetrievedEvidenceV1 lives in retrieved_evidence.v1.ts which imports node:crypto (the ev_id
+// minting). The `import type` is ERASED at emit under verbatimModuleSyntax, so NO runtime edge to the
+// crypto-importing contract is created — the workflow bundle stays crypto-free (check_workflow_bundle).
+import type { RetrievedEvidenceV1 } from "#contracts/retrieved_evidence.v1.js";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // ReviewPipelineContext (finding 2) — the single typed orchestrate() argument.
@@ -145,6 +156,20 @@ export type ReviewPipelineContext = {
   readonly activities: ReviewActivityPorts;
   readonly limits: ReviewPipelineLimits;
   readonly state: ReviewWorkflowState;
+  /** The PR's linked issues (Stage 4 — DM-WIRE T4). The Python fetched these INSIDE the `_walkthrough`
+   *  closure (review_pull_request.py:2086-2154) right before `generate_walkthrough`; the TS port pulled
+   *  `generateWalkthrough` into the orchestrator, so the workflow body resolves them up-front (their inputs
+   *  are payload-only) — fetching `fetch_linked_issues_activity` fail-open — and threads the RESOLVED tuple
+   *  here. Both walkthrough sites (the normal Step 8 + the advisory path-filters-excluded-all Step 2a.1)
+   *  read it, exactly like the Python closure that fed both. Default [] (omitted in unit tests; the Python
+   *  fail-open / skipped / `github_installation_id is None` branches all yield the empty tuple). */
+  readonly linkedIssues?: ReadonlyArray<LinkedIssueV1>;
+  /** The PR's CODEOWNERS-derived suggested reviewers (Stage 4 — S23.AR.3 / B5). Same threading rationale as
+   *  `linkedIssues`: the Python fetched `fetch_suggested_reviewers_activity` inside `_walkthrough`
+   *  (review_pull_request.py:2170-2218) fail-open; the TS port resolves it in the workflow body and threads
+   *  the RESOLVED tuple here for both walkthrough sites. Default [] (flag-off / no-files / no-rules / unit
+   *  tests). */
+  readonly suggestedReviewers?: ReadonlyArray<string>;
   /** The WARN sink stageOutcome emits its degradation log line on. The workflow body injects the Temporal
    *  `workflow.log` (sandbox-safe + replay-safe); unit tests inject a recording logger to assert the WARN
    *  lines. Optional: when omitted, degradation WARN lines are dropped (record_stage in degradation.ts
@@ -184,6 +209,11 @@ const CLASSIFIER_FAILURE_THRESHOLD = 0.1;
  *  RetrieveKnowledgeInputV1 query field is bounded max(8000); the embed query field is bounded max(8000)
  *  too — slice keeps both within bound regardless of path/title length. */
 const QUERY_TEXT_MAX = 8000;
+
+/** The hard cap on the per-chunk retrieved-evidence manifest (the Python `_DEFAULT_ENTRY_CAP`). Matches
+ *  `ReviewContextV1.retrieved_evidence` max_length (100) so the producer output never overflows the
+ *  ReviewContextV1 field that carries it. The producer drops the LOWEST-priority entries first. */
+const EVIDENCE_ENTRY_CAP = 100;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // orchestrate — drive the full review pipeline through one PR push.
@@ -312,8 +342,13 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
         schema_version: 1,
         pr_meta: pr.prMeta,
         aggregated: aggregatedEmpty,
-        linked_issues: [],
-        suggested_reviewers: [],
+        // Stage-4 walkthrough threading: the advisory path-filters-excluded-all walkthrough still renders the
+        // "Linked issues" / "Suggested reviewers" sections, exactly like the Python `_walkthrough` closure
+        // that fed BOTH the normal and advisory `generate_walkthrough(pr_meta, aggregated)` calls (the closure
+        // fetched the two tuples internally, so the advisory post got them too). Threaded from the
+        // workflow-body-resolved context (default [] when omitted).
+        linked_issues: [...(ctx.linkedIssues ?? [])],
+        suggested_reviewers: [...(ctx.suggestedReviewers ?? [])],
       });
 
       // The advisory post also runs through posting.ts::postReviewResults so it populates state.postedReview
@@ -324,8 +359,9 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
           ? {
               recordDeliverySkipped: ports.recordDeliverySkipped,
               persistedFindingIds: state.persistedFindingIds,
+              logger: ctx.logger ?? NULL_LOGGER,
             }
-          : { persistedFindingIds: state.persistedFindingIds };
+          : { persistedFindingIds: state.persistedFindingIds, logger: ctx.logger ?? NULL_LOGGER };
       await Promise.all([
         postReviewResults(ports, state, walkthroughEmpty, aggregatedEmpty, pr, advisoryPostingDeps),
         postCheckRun(ports, pr, headSha, walkthroughEmpty.tldr),
@@ -536,13 +572,16 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
     );
     state.persistedFindingIds = persistedIds ?? [];
 
-    // Step 8 — walkthrough.
+    // Step 8 — walkthrough. Stage-4 walkthrough threading: the resolved linked-issues + suggested-reviewers
+    // tuples (fetched fail-open by the workflow body, threaded onto the context — 1:1 with the Python
+    // `_walkthrough` closure that fetched them right before `generate_walkthrough`) are rendered into the
+    // "Linked issues" / "Suggested reviewers" sections. Default [] when omitted (unit tests / fail-open).
     const walkthrough = await ports.generateWalkthrough({
       schema_version: 1,
       pr_meta: pr.prMeta,
       aggregated,
-      linked_issues: [],
-      suggested_reviewers: [],
+      linked_issues: [...(ctx.linkedIssues ?? [])],
+      suggested_reviewers: [...(ctx.suggestedReviewers ?? [])],
     });
     // output-safety-emit-walkthrough (collapse-on): same idempotent-emit / independent-retry rationale as
     // the chunk-side dispatch. SKIPPED when ctx.activities.emitOutputSafetyAudit is omitted.
@@ -576,8 +615,12 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
     // dropped-state failure dispatches record_delivery_skipped inline before re-raising.
     const postingDeps: PostingLifecycleDeps =
       ports.recordDeliverySkipped !== undefined
-        ? { recordDeliverySkipped: ports.recordDeliverySkipped, persistedFindingIds: state.persistedFindingIds }
-        : { persistedFindingIds: state.persistedFindingIds };
+        ? {
+            recordDeliverySkipped: ports.recordDeliverySkipped,
+            persistedFindingIds: state.persistedFindingIds,
+            logger: ctx.logger ?? NULL_LOGGER,
+          }
+        : { persistedFindingIds: state.persistedFindingIds, logger: ctx.logger ?? NULL_LOGGER };
     await Promise.all([
       postReviewResults(ports, state, walkthrough, aggregated, pr, postingDeps),
       postCheckRun(ports, pr, headSha, walkthrough.tldr),
@@ -730,8 +773,37 @@ async function buildChunkContext(
     retrievalDegraded = true;
   }
 
-  // DEFERRED: build_retrieved_evidence (Stage 4 — mints ev_ ids via crypto; must run in an activity).
-  // retrieved_evidence passed as [] here; the parser's evidence-refs validation runs in the Stage-4 wiring.
+  // Step 5a — v10 R-12 provenance-backed evidence manifest (Stage 4 — build-retrieved-evidence collapse-on).
+  // Assemble the per-chunk evidence the LLM is permitted to cite via ReviewFindingV1.evidence_refs, from the
+  // already-resolved per-chunk inputs (chunk body, retrieved knowledge, tier-1 findings, tool statuses, PR
+  // topology). 1:1 with the Python inline `build_retrieved_evidence(...)` call (review_pull_request.py:1813),
+  // EXCEPT the producer is dispatched as a Node ACTIVITY here: the TS `mintEvidenceId` mints ev_ ids via
+  // node:crypto, which is RESTRICTED in the V8-isolate workflow sandbox (ADR-0065/0066) — so per the
+  // GATE-COLLAPSE/SANDBOX rules the crypto-minting MUST move to the Node runtime. Replay-safe: the activity
+  // is pure modulo the deterministic UUIDv5 (content-addressable; no clock / RNG / DB), so a replay mints
+  // bit-identical ev_ids. SKIPPED when ctx.activities.buildRetrievedEvidence is omitted (unit tests; the
+  // Python `is not None` analogue) — then retrieved_evidence stays [] (the Stage-1 default) and the parser's
+  // evidence-refs validation is a no-op. The parser at the bedrock_review_chunk boundary asserts
+  // finding.evidence_refs ⊆ {ev.evidence_id} so the LLM cannot invent grounding (CLAUDE.md invariant 15).
+  let retrievedEvidence: ReadonlyArray<RetrievedEvidenceV1> = [];
+  if (ports.buildRetrievedEvidence !== undefined) {
+    retrievedEvidence = await ports.buildRetrievedEvidence({
+      schema_version: 1,
+      chunk,
+      retrieved_knowledge: [...retrievedKnowledge],
+      // The producer assembles entries from the SAME tier-1 / tool-status / topology context the chunk's
+      // ReviewContextV1 carries (the fan-out threading), so the evidence ids the LLM may cite line up
+      // exactly with what the prompt renders.
+      tier1_findings: [...threading.tier1Findings],
+      tool_statuses: [...threading.toolStatuses],
+      pr_topology_manifest: [...threading.prTopologyManifest],
+      // The hard cap on the output tuple length — matches the producer's _DEFAULT_ENTRY_CAP AND
+      // ReviewContextV1.retrieved_evidence max_length (100), so the manifest never overflows the contract
+      // that carries it. Explicit because the dispatch builds a parsed-output-shaped object.
+      max_entries: EVIDENCE_ENTRY_CAP,
+    });
+  }
+
   return {
     schema_version: 1,
     pr_id: pr.prMeta.pr_id,
@@ -756,8 +828,8 @@ async function buildChunkContext(
     // tier2-linter-aware-prompt collapse-on: thread the Tier-1 context straight from the fan-out threading.
     tier1_findings: [...threading.tier1Findings],
     tool_statuses: [...threading.toolStatuses],
-    // DEFERRED: retrieved_evidence (Stage 4).
-    retrieved_evidence: [],
+    // build-retrieved-evidence collapse-on: the per-chunk manifest the producer activity assembled above.
+    retrieved_evidence: [...retrievedEvidence],
     // pr-topology-manifest collapse-on: the manifest the fan-out threaded in.
     pr_topology_manifest: [...threading.prTopologyManifest],
     manifests: [],

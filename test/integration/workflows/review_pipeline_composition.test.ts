@@ -45,6 +45,8 @@ import { CitationValidationResultV1 } from "#contracts/citation_validation.v1.js
 import { CodemasterConfigV1 } from "#contracts/codemaster_config.v1.js";
 import { ComputedPolicyRulesV1 } from "#contracts/policy_compute.v1.js";
 import { WorkspaceHandle } from "#contracts/workspace_handle.v1.js";
+import { PrFilesEnrichmentResultV1 } from "#contracts/pr_files_enrichment.v1.js";
+import { RetrievedEvidenceV1 } from "#contracts/retrieved_evidence.v1.js";
 import {
   ReviewPullRequestPayloadV1,
   ReviewPullRequestResultV1,
@@ -103,6 +105,9 @@ const PAYLOAD = ReviewPullRequestPayloadV1.parse({
   policy_revision: 3,
   run_id: uuidFor(4),
   review_id: uuidFor(5),
+  // Stage-4: a non-null github_installation_id ARMS the enrich-pr-files + linked-issues + suggested-reviewers
+  // body steps (the Python `github_installation_id is not None` gate). With it null they'd all be skipped.
+  github_installation_id: 555,
 });
 
 // ─── the stub activity surface (registered under the WORKER's REGISTERED names) ─────────────────────
@@ -193,6 +198,58 @@ function makeStubActivities(calls: Array<string>): Record<string, (input: never)
     // ── Stage-2 lifecycle: mutex release (body finally; void) ──
     releasePrReviewMutexActivity: async (): Promise<void> => {
       calls.push("releaseMutex");
+    },
+    // ── Stage-4 enrichment: changed-files enrich (body, before allocate). Returns the PR's changed file +
+    //    its post-image hunk range so the orchestrator reviews the REAL file (src/a.ts, matching THE_CHUNK). ──
+    enrichPrFilesV2: async (): Promise<unknown> => {
+      calls.push("enrichPrFiles");
+      return PrFilesEnrichmentResultV1.parse({
+        files: [
+          {
+            pr_file_id: uuidFor(601),
+            pr_id: PAYLOAD.pr_id,
+            installation_id: PAYLOAD.installation_id,
+            repository_id: PAYLOAD.repository_id,
+            file_path: "src/a.ts",
+            status: "modified",
+            additions: 3,
+            deletions: 1,
+            previous_path: null,
+            language: null,
+            created_at: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        changed_line_ranges: { "src/a.ts": [[1, 10]] },
+        truncated_at: null,
+      });
+    },
+    // ── Stage-4: linked issues (body, before orchestrate) — fed into generateWalkthrough. ──
+    fetchLinkedIssues: async (): Promise<unknown> => {
+      calls.push("fetchLinkedIssues");
+      return [];
+    },
+    // ── Stage-4: suggested reviewers (body, before orchestrate) — fed into generateWalkthrough. ──
+    fetchSuggestedReviewers: async (): Promise<unknown> => {
+      calls.push("fetchSuggestedReviewers");
+      return [];
+    },
+    // ── Stage-4: per-chunk evidence manifest (orchestrator buildChunkContext) — returns the chunk_body
+    //    entry the producer always emits, threaded into ReviewContextV1.retrieved_evidence. ──
+    buildRetrievedEvidence: async (input: { chunk?: { chunk_id?: string; path?: string } }): Promise<unknown> => {
+      calls.push("buildRetrievedEvidence");
+      return [
+        RetrievedEvidenceV1.parse({
+          evidence_id: "ev_" + "b".repeat(16),
+          source_type: "chunk_body",
+          chunk_id: input.chunk?.chunk_id ?? ONE_CHUNK_ID,
+          path: input.chunk?.path ?? "src/a.ts",
+          excerpt: "// src/a.ts",
+        }),
+      ];
+    },
+    // ── Stage-4: PR-description summary (orchestrator posting, after the post lands; fail-open). ──
+    updatePrDescriptionSummary: async (): Promise<void> => {
+      calls.push("updatePrDescription");
     },
     cloneRepoIntoWorkspace: async (): Promise<unknown> => {
       calls.push("clone");
@@ -414,14 +471,22 @@ describeTemporal("review-pipeline composition (in-process TestWorkflowEnvironmen
     //     idempotent — both are dispatched to the same releaseWorkspace stub which pushes "cleanup").
     const PAIR1 = new Set(["chunkAndRedact", "staticAnalysis"]);
     const PAIR2 = new Set(["postReview", "postCheckRun"]);
-    // Collapse the two pair members (wherever they landed within their pair window) to a single token so
-    // the surrounding strictly-sequential order is asserted exactly.
-    const sequential = collapsePairs(calls, PAIR1, "PAIR1", PAIR2, "PAIR2");
+    // `updatePrDescription` is dispatched INSIDE postReviewResults (the postReview branch of the post
+    // Promise.all), so it interleaves non-deterministically with `postCheckRun` (the other pair member) and
+    // would break the consecutive-pair assumption collapsePairs relies on. Filter it out of the sequential
+    // trace (its membership + after-post ordering are asserted separately below) so the PAIR2 collapse stays
+    // valid. Everything else — including the Stage-4 body steps (enrichPrFiles, fetchLinkedIssues,
+    // fetchSuggestedReviewers) + the fan-out buildRetrievedEvidence — is strictly sequential.
+    const sequentialCalls = calls.filter((c) => c !== "updatePrDescription");
+    const sequential = collapsePairs(sequentialCalls, PAIR1, "PAIR1", PAIR2, "PAIR2");
     expect(sequential).toEqual([
       "gate",
       "postPlaceholder",
+      "enrichPrFiles", // Stage-4: enrich BEFORE allocate (derives the REAL changed_paths / ranges)
       "allocateWorkspace",
       "analysisStarted", // ANALYSIS_STARTED milestone (before the BF-5 try opens / orchestrate)
+      "fetchLinkedIssues", // Stage-4: resolved before orchestrate, threaded into generateWalkthrough
+      "fetchSuggestedReviewers", // Stage-4: resolved before orchestrate, threaded into generateWalkthrough
       "renewLease", // claim-check before clone
       "clone",
       "loadRepoConfig",
@@ -432,6 +497,7 @@ describeTemporal("review-pipeline composition (in-process TestWorkflowEnvironmen
       "selectCarryForward",
       "embedQuery",
       "retrieveKnowledge",
+      "buildRetrievedEvidence", // Stage-4: per-chunk evidence manifest (after retrieve, before reviewChunk)
       "reviewChunk",
       "dedupFindings",
       "renewLease", // claim-check before aggregate
@@ -457,6 +523,20 @@ describeTemporal("review-pipeline composition (in-process TestWorkflowEnvironmen
     expect(calls).toContain("releaseMutex");
     // The lease was renewed at all three claim-check boundaries.
     expect(calls.filter((c) => c === "renewLease").length).toBe(3);
+    // ── PROOF 2b: the Stage-4 enrichment wiring composed end-to-end ──
+    // enrich fired ONCE before allocate; linked-issues + suggested-reviewers fired ONCE each before clone;
+    // buildRetrievedEvidence fired ONCE per chunk (1 chunk); updatePrDescription fired ONCE after the post.
+    expect(calls.filter((c) => c === "enrichPrFiles").length).toBe(1);
+    expect(calls.filter((c) => c === "fetchLinkedIssues").length).toBe(1);
+    expect(calls.filter((c) => c === "fetchSuggestedReviewers").length).toBe(1);
+    expect(calls.filter((c) => c === "buildRetrievedEvidence").length).toBe(1);
+    expect(calls.filter((c) => c === "updatePrDescription").length).toBe(1);
+    // update_pr_description runs AFTER the review post lands (the Python `_post_review` ordering).
+    expect(calls.indexOf("updatePrDescription")).toBeGreaterThan(calls.indexOf("postReview"));
+    // enrich precedes allocate (ENRICH BEFORE ALLOCATE); the issues/reviewers fetch precedes the clone.
+    expect(calls.indexOf("enrichPrFiles")).toBeLessThan(calls.indexOf("allocateWorkspace"));
+    expect(calls.indexOf("fetchLinkedIssues")).toBeLessThan(calls.indexOf("clone"));
+    expect(calls.indexOf("fetchSuggestedReviewers")).toBeLessThan(calls.indexOf("clone"));
 
     // ── PROOF 3: the Stage-3 run-lifecycle milestones fired (ANALYSIS_STARTED → ANALYZED → COMPLETED) ──
     expect(calls.filter((c) => c === "analysisStarted").length).toBe(1);

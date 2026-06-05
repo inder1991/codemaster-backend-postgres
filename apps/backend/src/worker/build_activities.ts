@@ -110,6 +110,26 @@ import {
 import { citationValidate } from "#backend/activities/citation_validate.activity.js";
 import { emitOutputSafetyAuditEvent } from "#backend/activities/emit_output_safety_audit.activity.js";
 
+// ── Stage-4 enrichment activities (changed-files enrich + linked-issues + suggested-reviewers + PR-desc +
+// evidence manifest) ──
+// The workflow body dispatches enrichPrFilesV2 / fetchLinkedIssues / fetchSuggestedReviewers by their
+// registered names; the orchestrator (via the activity_proxy bridge) dispatches buildRetrievedEvidence
+// (per chunk) + updatePrDescriptionSummary (posting). The two self-wiring activities (enrichPrFilesV2,
+// updatePrDescriptionSummary) read env inside the activity body (the deferred-Vault pattern) → registered
+// bare. buildRetrievedEvidence is stateless → registered bare. The two bound-method holders
+// (FetchLinkedIssuesActivity, FetchSuggestedReviewersActivity) are constructed here with their real repos.
+import { enrichPrFilesV2 } from "#backend/activities/enrich_pr_files.activity.js";
+import { FetchLinkedIssuesActivity } from "#backend/activities/fetch_linked_issues.activity.js";
+import { FetchSuggestedReviewersActivity } from "#backend/activities/fetch_suggested_reviewers.activity.js";
+import { updatePrDescriptionSummary } from "#backend/activities/update_pr_description_summary.activity.js";
+import { buildRetrievedEvidence } from "#backend/activities/build_retrieved_evidence.activity.js";
+
+import { GitHubIssueClient } from "#backend/integrations/github/issue_client.js";
+import { PostgresLinkedIssuesRepo } from "#backend/domain/repos/pr_issue_links_repo.js";
+import { PostgresGithubIssuesCacheRepo } from "#backend/domain/repos/github_issues_cache_repo.js";
+import { PostgresPrFilesRepo } from "#backend/domain/repos/pr_files_repo.js";
+import { PostgresCodeOwnersRepo } from "#backend/domain/repos/code_owners_repo.js";
+
 import { resolveEmbeddingsConsumer } from "#backend/adapters/resolve_embeddings.js";
 import { VaultHttpPort } from "#backend/adapters/vault_http.js";
 
@@ -225,6 +245,56 @@ function makeClonerDepsResolver(
   };
 }
 
+// ─── lazy GitHubIssueClient (the fetch_linked_issues github seam — deferred-Vault) ────────────────
+
+/** The `getIssue` slice the FetchLinkedIssuesActivity consumes (1:1 with its `GithubIssuePort`). */
+type GithubIssuePortShape = {
+  getIssue(args: {
+    installationId: number;
+    owner: string;
+    repo: string;
+    issueNumber: number;
+    ifNoneMatch?: string | null;
+  }): Promise<readonly [Record<string, unknown> | null, string | null, number]>;
+};
+
+/**
+ * Build the REAL {@link GitHubIssueClient} for `fetchLinkedIssues`'s `github` seam. Reuses the exact
+ * token-provider construction the cloner + the sibling GitHub activities use (one shared GitHub HTTP
+ * transport, a Vault adapter from env, a {@link GitHubAppTokenProvider} bound to `getToken`). Deferred to
+ * the first `getIssue` call (async `fromEnv`-build) so the worker boot stays off `VAULT_ADDR` / GitHub
+ * round-trips — mirroring the deferred-Vault pattern the cloner + post_* activities use.
+ */
+async function buildIssueClient(): Promise<GitHubIssueClient> {
+  const clock = new WallClock();
+  const githubHttp = new FetchGitHubHttpClient({});
+  const vault = VaultHttpPort.fromEnv();
+  const tokenProvider = await GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
+  return new GitHubIssueClient({
+    tokenProvider: tokenProvider.getToken.bind(tokenProvider),
+    http: githubHttp,
+  });
+}
+
+/**
+ * A {@link GithubIssuePortShape} that builds the real {@link GitHubIssueClient} on first `getIssue` (the
+ * deferred-Vault pattern) and memoizes it. `fetchLinkedIssues` only ever calls `getIssue`, so this thin
+ * lazy adapter is a faithful, fully-real client seam — construction is deferred to the moment a linked-issue
+ * lookup actually fires (so `buildActivities()` stays cheap + off `VAULT_ADDR`).
+ */
+function makeLazyIssueClient(): GithubIssuePortShape {
+  let memo: Promise<GitHubIssueClient> | undefined;
+  return {
+    getIssue: async (args) => {
+      if (memo === undefined) {
+        memo = buildIssueClient();
+      }
+      const client = await memo;
+      return client.getIssue(args);
+    },
+  };
+}
+
 // ─── real LlmClientCache (ledger-wired client factory — ADR-0068) ────────────────────────────────
 
 /**
@@ -333,6 +403,28 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
   // bedrockReviewChunk). `.generateWalkthrough` is an arrow property so it stays bound when destructured.
   const walkthroughActivities = new WalkthroughActivities({ cache: llmCache });
 
+  // ── Stage-4 bound-method holders (fetch_linked_issues + fetch_suggested_reviewers) ──
+  // Both read tenancy-scoped tables off the core DSN (lazy pool — no connection at construction). The
+  // linked-issues holder additionally takes the lazy GitHubIssueClient (deferred-Vault). The
+  // suggested-reviewers holder is flag-gated on `code_owners_v1` via `isEnabled`; the `core.flags` reader
+  // is NOT ported to TS yet (it is an ingest-side helper out of this stage's scope), so `isEnabled` is
+  // wired DEFAULT-OFF — 1:1 with the Python `read_code_owners_v1_enabled` production default (off until an
+  // operator flips the rollout; the activity short-circuits to [] and the renderer drops the section).
+  // FOLLOW-UP-code-owners-v1-flag-reader: port the `core.flags` reader so the operator can flip the rollout.
+  const clock = new WallClock();
+  const fetchLinkedIssuesActivity = new FetchLinkedIssuesActivity({
+    linksRepo: PostgresLinkedIssuesRepo.fromDsn(dsn),
+    cacheRepo: PostgresGithubIssuesCacheRepo.fromDsn({ dsn, clock }),
+    github: makeLazyIssueClient(),
+    clock,
+  });
+  const fetchSuggestedReviewersActivity = new FetchSuggestedReviewersActivity({
+    prFilesRepo: PostgresPrFilesRepo.fromDsn({ dsn, clock }),
+    codeOwnersRepo: PostgresCodeOwnersRepo.fromDsn(dsn),
+    isEnabled: async (): Promise<boolean> => false,
+    clock,
+  });
+
   return {
     // ── 1-arg activities, ready as-is ──
     persistReviewFindings,
@@ -375,6 +467,18 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     // sanitization_event). 1-arg typed inputs; registered bare. ──
     citationValidate,
     emitOutputSafetyAuditEvent,
+    // ── Stage-4 enrichment (changed-files enrich + PR-desc summary + evidence manifest) ──
+    // enrichPrFilesV2 / updatePrDescriptionSummary self-wire env inside the activity body (deferred-Vault)
+    // → 1-arg → registered bare. buildRetrievedEvidence is stateless (pure modulo the node:crypto ev_id
+    // mint, which is fine here in the Node runtime) → 1-arg → registered bare.
+    enrichPrFilesV2,
+    updatePrDescriptionSummary,
+    buildRetrievedEvidence,
+    // ── Stage-4 bound-method activities (linked-issues + suggested-reviewers; bound so they stay wired when
+    // destructured into the map) ──
+    fetchLinkedIssues: fetchLinkedIssuesActivity.fetchLinkedIssues.bind(fetchLinkedIssuesActivity),
+    fetchSuggestedReviewers:
+      fetchSuggestedReviewersActivity.fetchSuggestedReviewers.bind(fetchSuggestedReviewersActivity),
     // ── bound-method activities (real embedder) ──
     aggregateFindings: aggregateActivity.aggregateFindings,
     // dedup_findings — bound arrow property holding the shared real embedder (semantic dedup stage).

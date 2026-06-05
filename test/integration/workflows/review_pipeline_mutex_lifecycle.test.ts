@@ -53,6 +53,8 @@ import { PostedReviewV1, PublicationOutcome } from "#contracts/posted_review.v1.
 import { PostedCheckRunV1 } from "#contracts/posted_check_run.v1.js";
 import { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
 import { CitationValidationResultV1 } from "#contracts/citation_validation.v1.js";
+import { PrFilesEnrichmentResultV1 } from "#contracts/pr_files_enrichment.v1.js";
+import { RetrievedEvidenceV1 } from "#contracts/retrieved_evidence.v1.js";
 import { CodemasterConfigV1 } from "#contracts/codemaster_config.v1.js";
 import { ComputedPolicyRulesV1 } from "#contracts/policy_compute.v1.js";
 import { WorkspaceHandle } from "#contracts/workspace_handle.v1.js";
@@ -230,6 +232,41 @@ function makeStubActivities(
     // ── Stage-2 lifecycle: mutex release (body non-cancellable finally; void) ──
     releasePrReviewMutexActivity: async (): Promise<void> => {
       calls.push("releasePrReviewMutexActivity");
+    },
+    // ── Stage-4 enrichment surface (mirrors review_pipeline_composition.test.ts). These tests seed a
+    //    payload with github_installation_id=null, so enrich/issues/reviewers are body-skipped; but
+    //    buildRetrievedEvidence is dispatched UNGATED per-chunk in orchestrate() and MUST be registered, or
+    //    the workflow dies with ActivityNotRegistered before reaching the before-aggregate claim-check. ──
+    enrichPrFilesV2: async (): Promise<unknown> => {
+      calls.push("enrichPrFiles");
+      return PrFilesEnrichmentResultV1.parse({
+        files: [],
+        changed_line_ranges: {},
+        truncated_at: null,
+      });
+    },
+    fetchLinkedIssues: async (): Promise<unknown> => {
+      calls.push("fetchLinkedIssues");
+      return [];
+    },
+    fetchSuggestedReviewers: async (): Promise<unknown> => {
+      calls.push("fetchSuggestedReviewers");
+      return [];
+    },
+    buildRetrievedEvidence: async (input: { chunk?: { chunk_id?: string; path?: string } }): Promise<unknown> => {
+      calls.push("buildRetrievedEvidence");
+      return [
+        RetrievedEvidenceV1.parse({
+          evidence_id: "ev_" + "b".repeat(16),
+          source_type: "chunk_body",
+          chunk_id: input.chunk?.chunk_id ?? ONE_CHUNK_ID,
+          path: input.chunk?.path ?? "src/a.ts",
+          excerpt: "// src/a.ts",
+        }),
+      ];
+    },
+    updatePrDescriptionSummary: async (): Promise<void> => {
+      calls.push("updatePrDescription");
     },
     cloneRepoIntoWorkspace: async (): Promise<unknown> => {
       calls.push("clone");

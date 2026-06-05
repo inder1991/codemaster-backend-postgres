@@ -136,6 +136,71 @@ describe("postReviewResults — success path", () => {
   });
 });
 
+describe("postReviewResults — Stage-4 update_pr_description appendage", () => {
+  it("dispatches updatePrDescriptionSummary after the post, with owner/repo/pr_number/aggregated", async () => {
+    const state = new ReviewWorkflowState();
+    const ports = portsWith(async () =>
+      PostedReviewV1.parse({
+        review_id: 7,
+        inline_comment_count: 0,
+        publication_outcome: PublicationOutcome.enum.inline_posted,
+      }),
+    );
+    const calls: Array<string> = [];
+    const captured: Array<{ owner: string; repo: string; pr_number: number }> = [];
+    ports.updatePrDescriptionSummary = async (input) => {
+      calls.push("updatePrDescription");
+      captured.push({ owner: input.owner, repo: input.repo, pr_number: input.pr_number });
+    };
+    const deps: PostingLifecycleDeps = { persistedFindingIds: [] };
+    await postReviewResults(ports, state, WALK, AGG, PR, deps);
+
+    expect(calls).toEqual(["updatePrDescription"]);
+    expect(captured).toEqual([{ owner: "acme", repo: "widgets", pr_number: 42 }]);
+    // The capture from the (successful) post still landed.
+    expect(state.postedReview.reviewId).toBe(7);
+  });
+
+  it("is FAIL-OPEN — an update_pr_description failure does NOT reject postReviewResults", async () => {
+    const state = new ReviewWorkflowState();
+    const ports = portsWith(async () =>
+      PostedReviewV1.parse({
+        review_id: 7,
+        inline_comment_count: 0,
+        publication_outcome: PublicationOutcome.enum.inline_posted,
+      }),
+    );
+    const warnings: Array<string> = [];
+    ports.updatePrDescriptionSummary = async () => {
+      throw new Error("update-pr-description boom");
+    };
+    const deps: PostingLifecycleDeps = {
+      persistedFindingIds: [],
+      logger: { warning: (m) => warnings.push(m) },
+    };
+    // MUST resolve (the posted review is the value; the description appendage is polish).
+    const posted = await postReviewResults(ports, state, WALK, AGG, PR, deps);
+    expect(posted.review_id).toBe(7);
+    // The stageOutcome wrap logged the WARN (and swallowed) — operator visibility without a workflow failure.
+    expect(warnings.length).toBeGreaterThan(0);
+  });
+
+  it("skips the appendage when updatePrDescriptionSummary is not injected (back-compat)", async () => {
+    const state = new ReviewWorkflowState();
+    const ports = portsWith(async () =>
+      PostedReviewV1.parse({
+        review_id: 7,
+        inline_comment_count: 0,
+        publication_outcome: PublicationOutcome.enum.inline_posted,
+      }),
+    );
+    // No updatePrDescriptionSummary port — postReviewResults must still resolve cleanly.
+    const deps: PostingLifecycleDeps = { persistedFindingIds: [] };
+    const posted = await postReviewResults(ports, state, WALK, AGG, PR, deps);
+    expect(posted.review_id).toBe(7);
+  });
+});
+
 describe("extractDroppedStateFromPostFailure — failure-shape narrowing", () => {
   const DETAILS = {
     dropped_classifications: [{ index: 0, eligibility_reason: "outside_hunk" }],

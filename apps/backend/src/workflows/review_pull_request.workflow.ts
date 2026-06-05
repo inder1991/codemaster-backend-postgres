@@ -79,8 +79,13 @@ import { makeActivityPorts, toActivityOptions } from "./activity_proxy.js";
 import { ReviewPullRequestPayloadV1 } from "#contracts/review_pull_request.v1.js";
 
 import type { ReviewPipelineResult } from "#backend/review/pipeline/pipeline_result.js";
+import type { ChangedLineRanges } from "#backend/review/pipeline/activity_ports.js";
 import type { ReviewPullRequestResultV1 } from "#contracts/review_pull_request.v1.js";
-import type { PrMetaV1 } from "#contracts/walkthrough.v1.js";
+import type { PrMetaV1, LinkedIssueV1 } from "#contracts/walkthrough.v1.js";
+import type { PrFilesEnrichmentResultV1 } from "#contracts/pr_files_enrichment.v1.js";
+import type { EnrichPrFilesInputV1 } from "#contracts/enrich_pr_files_input.v1.js";
+import type { FetchLinkedIssuesInputV1 } from "#contracts/fetch_linked_issues_input.v1.js";
+import type { FetchSuggestedReviewersInputV1 } from "#contracts/fetch_suggested_reviewers_input.v1.js";
 import type { WorkspaceHandle } from "#contracts/workspace_handle.v1.js";
 import type { AllocateWorkspaceInput } from "#contracts/allocate_workspace_input.v1.js";
 import type { ReleaseWorkspaceInput } from "#contracts/release_workspace_input.v1.js";
@@ -183,6 +188,54 @@ const { deleteReviewPlaceholder } = proxyActivities<{
     maximumAttempts: 2,
     nonRetryableErrorTypes: ["RuntimeError"],
   },
+});
+
+// ─── Stage-4 enrichment activity proxies (dispatched DIRECTLY by the workflow body) ─────────────────
+//
+// These populate the REAL changed_paths / changed_line_ranges (enrich) + the walkthrough's linked-issues /
+// suggested-reviewers sections. Each is dispatched by the body (NOT the orchestrator's activity_proxy
+// bridge) because its INPUTS are payload-only (no orchestrate() state) and its OUTPUTS thread into the
+// ReviewPipelineContext the body builds. Each carries the RETRY_POLICIES the Python execute_activity sites
+// used, transcribed 1:1. Registered names are the worker-registry names (enrichPrFilesV2, fetchLinkedIssues,
+// fetchSuggestedReviewers). GATE COLLAPSE: enrich-pr-files-v2 is collapse-on — the v2 PrFilesEnrichmentResultV1
+// path is live; the v1 legacy branch is NOT ported, no workflow.patched() is called.
+
+/** ENRICH — enrich_pr_files_activity_v2 (review_pull_request.py:830-835): 30s timeout, 3 attempts,
+ *  GitHubAppUnauthorized non-retryable. Returns the PrFilesEnrichmentResultV1 (file list + per-file ranges
+ *  + truncation marker). The result type is given explicitly by this proxy's interface (string-name
+ *  dispatch does NOT auto-infer the result type — see feedback_temporal_string_name_result_type). */
+const { enrichPrFilesV2 } = proxyActivities<{
+  enrichPrFilesV2(input: EnrichPrFilesInputV1): Promise<PrFilesEnrichmentResultV1>;
+}>({
+  startToCloseTimeout: "30 seconds",
+  retry: {
+    initialInterval: "2 seconds",
+    maximumAttempts: 3,
+    nonRetryableErrorTypes: ["GitHubAppUnauthorized"],
+  },
+});
+
+/** LINKED ISSUES — fetch_linked_issues_activity (review_pull_request.py:2143-2148): 30s timeout, 2 attempts,
+ *  GitHubAppUnauthorized non-retryable. Returns the resolved tuple[LinkedIssueV1, ...] for the walkthrough. */
+const { fetchLinkedIssues } = proxyActivities<{
+  fetchLinkedIssues(input: FetchLinkedIssuesInputV1): Promise<ReadonlyArray<LinkedIssueV1>>;
+}>({
+  startToCloseTimeout: "30 seconds",
+  retry: {
+    initialInterval: "2 seconds",
+    maximumAttempts: 2,
+    nonRetryableErrorTypes: ["GitHubAppUnauthorized"],
+  },
+});
+
+/** SUGGESTED REVIEWERS — fetch_suggested_reviewers_activity (review_pull_request.py:2211-2215): 15s timeout,
+ *  2 attempts (NO non-retryable types — pure DB+ranking, no GitHub call). Returns tuple[str, ...] of the
+ *  top-N CODEOWNERS-derived reviewer logins (flag-gated INSIDE the activity on code_owners_v1). */
+const { fetchSuggestedReviewers } = proxyActivities<{
+  fetchSuggestedReviewers(input: FetchSuggestedReviewersInputV1): Promise<ReadonlyArray<string>>;
+}>({
+  startToCloseTimeout: "15 seconds",
+  retry: { initialInterval: "2 seconds", maximumAttempts: 2 },
 });
 
 // ─── Stage-3 run-lifecycle activity proxies (dispatched DIRECTLY by the workflow body) ──────────────
@@ -320,6 +373,55 @@ export async function reviewPullRequest(
     },
   );
 
+  // ─── Step 3.5: enrich PR files → REAL changed_paths / changed_line_ranges (review_pull_request.py:776-917) ──
+  // ENRICH BEFORE ALLOCATE: fetch the PR's changed files from GitHub (paginated) BEFORE allocate_workspace,
+  // so the orchestrator reviews the REAL changed files (replacing the Stage-1 changed_paths=[] /
+  // changed_line_ranges={} stubs). GATE COLLAPSE: enrich-pr-files-v2 is collapse-on — only the v2
+  // PrFilesEnrichmentResultV1 path is dispatched (no workflow.patched(), no v1 legacy branch).
+  //
+  // Gated on `github_installation_id != null` (the numeric GitHub-API id the files-fetch needs; pre-T1
+  // outbox rows where it's null skip with a "skipped" stage outcome — fail-open). FAIL-OPEN: the
+  // stageOutcome wrap (raiseAfterLog defaults false) swallows a fetch failure → `enrichment` stays null →
+  // the derivation below falls back to the empty tuple/dict (the Python `enrichment is None` branch).
+  // skipOutcome() defers to the canonical `_log_stage("enrich_pr_files")` success emit (the activity owns it).
+  let enrichment: PrFilesEnrichmentResultV1 | undefined;
+  if (payload.github_installation_id !== null) {
+    const githubInstallationId = payload.github_installation_id;
+    enrichment = await stageOutcome(
+      "enrich_pr_files",
+      { logger, headSha: payload.head_sha, runId: payload.run_id },
+      async (handle): Promise<PrFilesEnrichmentResultV1> => {
+        handle.skipOutcome();
+        return enrichPrFilesV2({
+          schema_version: 1,
+          installation_id: payload.installation_id,
+          github_installation_id: githubInstallationId,
+          repository_id: payload.repository_id,
+          pr_id: payload.pr_id,
+          gh_owner: payload.gh_owner,
+          gh_repo_name: payload.gh_repo_name,
+          pr_number: payload.pr_number,
+        });
+      },
+    );
+  }
+  // Derive the orchestrator inputs from the enrichment result (review_pull_request.py:897-917). Fail-open
+  // (enrichment undefined — github_installation_id null, or the v2 fetch errored + stageOutcome swallowed)
+  // preserves the Stage-1 behaviour: empty changed_paths + empty changed_line_ranges. A truncation marker
+  // surfaces a WARN (the PR has more files than MAX_FILES_PER_ENRICHMENT).
+  let changedPathsForOrchestrator: ReadonlyArray<string> = [];
+  let changedLineRangesForOrchestrator: ChangedLineRanges = {};
+  if (enrichment !== undefined) {
+    changedPathsForOrchestrator = enrichment.files.map((pf) => pf.file_path);
+    changedLineRangesForOrchestrator = enrichment.changed_line_ranges;
+    if (enrichment.truncated_at !== null) {
+      workflowLog.warn(
+        `review_pipeline.enrichment_truncated: files capped at ${enrichment.truncated_at} ` +
+          `(PR has more files than MAX_FILES_PER_ENRICHMENT)`,
+      );
+    }
+  }
+
   // ─── Step 4a: allocate the REAL workspace (replaces the Stage-1 deterministic stub) ────────────────
   // The returned WorkspaceHandle carries the workspace identity + lease key; the clone activity targets it
   // and the finally releases by its workspace_id. A failure here propagates past orchestrate entirely, but
@@ -358,12 +460,64 @@ export async function reviewPullRequest(
     },
   });
 
+  // ─── Step 8.5 + S23.AR.3: fetch linked issues + suggested reviewers (review_pull_request.py:2086-2220) ──
+  // The Python fetched these INSIDE the `_walkthrough` closure right before `generate_walkthrough`. The TS
+  // port pulled `generateWalkthrough` into the orchestrator, so the body resolves them up-front (their
+  // inputs are payload-only) and threads the RESOLVED tuples onto the context — both walkthrough sites (the
+  // normal Step 8 + the advisory path-filters-excluded-all Step 2a.1) read them, exactly like the Python
+  // closure that fed both. Both gated on `github_installation_id != null` + FAIL-OPEN (the stageOutcome wrap
+  // swallows → the empty tuple stays → the renderer drops the section). skipOutcome() defers to the
+  // canonical `_log_stage(...)` success emit. suggested_reviewers is additionally flag-gated INSIDE its
+  // activity on `code_owners_v1` (returns [] when off; default-off in the composition root).
+  let linkedIssues: ReadonlyArray<LinkedIssueV1> = [];
+  let suggestedReviewers: ReadonlyArray<string> = [];
+  if (payload.github_installation_id !== null) {
+    const githubInstallationId = payload.github_installation_id;
+    const resolvedLinked = await stageOutcome(
+      "fetch_linked_issues",
+      { logger, headSha: payload.head_sha, runId: payload.run_id },
+      async (handle): Promise<ReadonlyArray<LinkedIssueV1>> => {
+        handle.skipOutcome();
+        return fetchLinkedIssues({
+          schema_version: 1,
+          installation_id_uuid: payload.installation_id,
+          installation_id_int: githubInstallationId,
+          repository_id: payload.repository_id,
+          pr_id: payload.pr_id,
+          owner: payload.gh_owner,
+          repo: payload.gh_repo_name,
+        });
+      },
+    );
+    if (resolvedLinked !== undefined) {
+      linkedIssues = resolvedLinked;
+    }
+
+    const resolvedSuggested = await stageOutcome(
+      "fetch_suggested_reviewers",
+      { logger, headSha: payload.head_sha, runId: payload.run_id },
+      async (handle): Promise<ReadonlyArray<string>> => {
+        handle.skipOutcome();
+        return fetchSuggestedReviewers({
+          schema_version: 1,
+          installation_id: payload.installation_id,
+          repository_id: payload.repository_id,
+          pr_id: payload.pr_id,
+        });
+      },
+    );
+    if (resolvedSuggested !== undefined) {
+      suggestedReviewers = resolvedSuggested;
+    }
+  }
+
   // ─── build the ReviewPipelineContext with the Stage-2 lifecycle callbacks ─────────────────────────
   const state = new ReviewWorkflowState();
   const ctx: ReviewPipelineContext = {
     repo: {
       repoUrl: `https://github.com/${payload.gh_owner}/${payload.gh_repo_name}.git`,
-      changedPaths: [],
+      // Stage-4 enrichment: the REAL changed paths the PR-files fetch resolved (replaces the Stage-1 []).
+      changedPaths: [...changedPathsForOrchestrator],
       workspaceHandle,
     },
     pr: {
@@ -373,7 +527,8 @@ export async function reviewPullRequest(
       reviewId: payload.review_id,
       policyRevision: payload.policy_revision,
       prNumber: payload.pr_number,
-      changedLineRanges: {},
+      // Stage-4 enrichment: the REAL per-file post-image hunk ranges (replaces the Stage-1 {}).
+      changedLineRanges: changedLineRangesForOrchestrator,
       parentFindings: [],
       parentReviewId: null,
     },
@@ -381,6 +536,10 @@ export async function reviewPullRequest(
     limits: { chunkConcurrency: CHUNK_CONCURRENCY_DEFAULT },
     state,
     logger,
+    // Stage-4 walkthrough threading: the resolved linked-issues + suggested-reviewers tuples (fetched
+    // fail-open above) flow into BOTH the orchestrator's generateWalkthrough sites.
+    linkedIssues,
+    suggestedReviewers,
     // CLAIM-CHECK seam: the renewal-backed lease check, fired by the orchestrator before clone, classify,
     // aggregate (the three Python `_abort_if_claim_lost` boundaries). A lost lease raises a non-retryable
     // ApplicationFailure that propagates out of orchestrate (the finally still releases the mutex/workspace).

@@ -54,6 +54,11 @@ import { ResolvedGuidanceBundleV1 } from "#contracts/resolved_guidance.v1.js";
 import { CitationValidationResultV1 } from "#contracts/citation_validation.v1.js";
 import type { CitationValidateInputV1 } from "#contracts/citation_validate_input.v1.js";
 import type { EmitOutputSafetyAuditEventInput } from "#contracts/emit_output_safety_audit.v1.js";
+import { RetrievedEvidenceV1 } from "#contracts/retrieved_evidence.v1.js";
+import type { BuildRetrievedEvidenceInputV1 } from "#contracts/build_retrieved_evidence_input.v1.js";
+import type { UpdatePrDescriptionInputV1 } from "#contracts/update_pr_description.v1.js";
+import type { GenerateWalkthroughInputV1 } from "#contracts/generate_walkthrough_input.v1.js";
+import { LinkedIssueV1 } from "#contracts/walkthrough.v1.js";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // Fixtures — built through the Zod schemas so contract defaults / validators apply.
@@ -137,6 +142,14 @@ type StubOverrides = {
   chunkSanitizationEvent?: boolean;
   /** When true, generateWalkthrough attaches a sanitization_event to its envelope. */
   walkthroughSanitizationEvent?: boolean;
+  // ── Stage-4 wiring overrides ──
+  /** When set, the buildRetrievedEvidence port is injected (the orchestrator dispatches it per chunk to
+   *  populate ReviewContextV1.retrieved_evidence). */
+  withBuildEvidence?: boolean;
+  /** When set, the updatePrDescriptionSummary port is injected (posting.ts dispatches it after the post). */
+  withUpdatePrDescription?: boolean;
+  /** When true, the injected updatePrDescriptionSummary port THROWS (asserts the posting fail-open wrap). */
+  updatePrDescriptionThrows?: boolean;
 };
 
 type RecordingStub = {
@@ -146,6 +159,9 @@ type RecordingStub = {
   embedCalls: Array<string>;
   citationInputs: Array<CitationValidateInputV1>;
   auditEvents: Array<EmitOutputSafetyAuditEventInput>;
+  buildEvidenceInputs: Array<BuildRetrievedEvidenceInputV1>;
+  updatePrDescriptionInputs: Array<UpdatePrDescriptionInputV1>;
+  walkthroughInputs: Array<GenerateWalkthroughInputV1>;
   cleanupCalled: () => boolean;
 };
 
@@ -168,6 +184,9 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
   const embedCalls: Array<string> = [];
   const citationInputs: Array<CitationValidateInputV1> = [];
   const auditEvents: Array<EmitOutputSafetyAuditEventInput> = [];
+  const buildEvidenceInputs: Array<BuildRetrievedEvidenceInputV1> = [];
+  const updatePrDescriptionInputs: Array<UpdatePrDescriptionInputV1> = [];
+  const walkthroughInputs: Array<GenerateWalkthroughInputV1> = [];
   let cleanupCalled = false;
 
   const reviewFiles = o.reviewFiles ?? ["src/a.ts", "src/b.ts"];
@@ -281,8 +300,9 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
       }
       return input.aggregated.findings.map((_f, i) => uuidFor(500 + i));
     },
-    generateWalkthrough: async () => {
+    generateWalkthrough: async (input) => {
       calls.push("generateWalkthrough");
+      walkthroughInputs.push(input);
       return WalkthroughV1.parse({
         tldr: "all good",
         sanitization_event: o.walkthroughSanitizationEvent
@@ -334,6 +354,33 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
       auditEvents.push(input);
     };
   }
+  if (o.withBuildEvidence) {
+    ports.buildRetrievedEvidence = async (input: BuildRetrievedEvidenceInputV1) => {
+      calls.push("buildRetrievedEvidence");
+      buildEvidenceInputs.push(input);
+      // Return one deterministic evidence entry per chunk (the chunk_body entry the producer always emits).
+      // The ev_id is a synthetic but valid `^ev_[0-9a-f]{16}$` string so the ReviewContextV1 carrying it
+      // parses; the orchestrator threads whatever the port returns.
+      return [
+        RetrievedEvidenceV1.parse({
+          evidence_id: "ev_" + "a".repeat(16),
+          source_type: "chunk_body",
+          chunk_id: input.chunk.chunk_id,
+          path: input.chunk.path,
+          excerpt: input.chunk.body,
+        }),
+      ];
+    };
+  }
+  if (o.withUpdatePrDescription) {
+    ports.updatePrDescriptionSummary = async (input: UpdatePrDescriptionInputV1) => {
+      calls.push("updatePrDescription");
+      updatePrDescriptionInputs.push(input);
+      if (o.updatePrDescriptionThrows) {
+        throw new Error("update-pr-description boom");
+      }
+    };
+  }
 
   return {
     ports,
@@ -342,11 +389,21 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
     embedCalls,
     citationInputs,
     auditEvents,
+    buildEvidenceInputs,
+    updatePrDescriptionInputs,
+    walkthroughInputs,
     cleanupCalled: () => cleanupCalled,
   };
 }
 
-function makeCtx(stub: RecordingStub, logger?: { warning(msg: string): void }): ReviewPipelineContext {
+function makeCtx(
+  stub: RecordingStub,
+  logger?: { warning(msg: string): void },
+  walkthroughThreading?: {
+    linkedIssues?: ReadonlyArray<LinkedIssueV1>;
+    suggestedReviewers?: ReadonlyArray<string>;
+  },
+): ReviewPipelineContext {
   const base: ReviewPipelineContext = {
     repo: {
       repoUrl: "https://example.com/acme/widgets.git",
@@ -368,7 +425,14 @@ function makeCtx(stub: RecordingStub, logger?: { warning(msg: string): void }): 
     limits: { chunkConcurrency: 4 },
     state: new ReviewWorkflowState(),
   };
-  return logger === undefined ? base : { ...base, logger };
+  let ctx: ReviewPipelineContext = logger === undefined ? base : { ...base, logger };
+  if (walkthroughThreading?.linkedIssues !== undefined) {
+    ctx = { ...ctx, linkedIssues: walkthroughThreading.linkedIssues };
+  }
+  if (walkthroughThreading?.suggestedReviewers !== undefined) {
+    ctx = { ...ctx, suggestedReviewers: walkthroughThreading.suggestedReviewers };
+  }
+  return ctx;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -805,6 +869,120 @@ describe("orchestrate — Stage-3 post capture population (posting.ts)", () => {
     expect(ctx.state.postedReview.publicationOutcome).toBe(PublicationOutcome.enum.inline_posted);
     // posted_review_pr_id is bound to pr_meta.pr_id (the core.posted_reviews PK keyed by PR).
     expect(ctx.state.postedReview.postedReviewPrId).toBe(PR_META.pr_id);
+  });
+});
+
+describe("orchestrate — Stage-4 enrichment wiring (evidence + walkthrough threading + PR-desc)", () => {
+  it("dispatches buildRetrievedEvidence per chunk and threads its result into ReviewContextV1.retrieved_evidence", async () => {
+    const stub = makeStub({ chunkCount: 2, withBuildEvidence: true });
+    await orchestrate(makeCtx(stub));
+
+    // One dispatch per chunk (the producer is per-chunk).
+    expect(stub.calls.filter((c) => c === "buildRetrievedEvidence").length).toBe(2);
+    expect(stub.buildEvidenceInputs.length).toBe(2);
+    // Each per-chunk ReviewContextV1 carries the evidence the producer returned for THAT chunk (the chunk_body
+    // entry whose chunk_id matches the chunk under review) — replacing the Stage-1 empty default.
+    for (const ctxInput of stub.reviewChunkInputs) {
+      expect(ctxInput.retrieved_evidence.length).toBe(1);
+      expect(ctxInput.retrieved_evidence[0]!.chunk_id).toBe(ctxInput.chunk.chunk_id);
+      expect(ctxInput.retrieved_evidence[0]!.source_type).toBe("chunk_body");
+    }
+  });
+
+  it("threads the SAME tier1/tool-status/topology context into buildRetrievedEvidence that the chunk carries", async () => {
+    const stub = makeStub({ chunkCount: 1, withBuildEvidence: true });
+    await orchestrate(makeCtx(stub));
+
+    expect(stub.buildEvidenceInputs.length).toBe(1);
+    const evInput = stub.buildEvidenceInputs[0]!;
+    const ctxInput = stub.reviewChunkInputs[0]!;
+    // The producer is fed the chunk under review + the fan-out threading (tier1 / tool-status / topology),
+    // so the ev_ids the LLM may cite line up with what the prompt renders. Stage-1 staticAnalysis is empty,
+    // so these are empty here — the WIRING is what we assert.
+    expect(evInput.chunk.chunk_id).toBe(ctxInput.chunk.chunk_id);
+    expect(evInput.tier1_findings).toEqual([...ctxInput.tier1_findings]);
+    expect(evInput.tool_statuses).toEqual([...ctxInput.tool_statuses]);
+    expect(evInput.pr_topology_manifest).toEqual([...ctxInput.pr_topology_manifest]);
+    expect(evInput.max_entries).toBe(100);
+  });
+
+  it("leaves retrieved_evidence empty when the buildRetrievedEvidence port is omitted (back-compat)", async () => {
+    const stub = makeStub({ chunkCount: 1 }); // no withBuildEvidence
+    await orchestrate(makeCtx(stub));
+
+    expect(stub.calls).not.toContain("buildRetrievedEvidence");
+    expect(stub.reviewChunkInputs[0]!.retrieved_evidence).toEqual([]);
+  });
+
+  it("threads context linkedIssues + suggestedReviewers into generateWalkthrough", async () => {
+    const stub = makeStub({ chunkCount: 1 });
+    const linked = [
+      LinkedIssueV1.parse({ issue_number: 7, title: "an issue", state: "open", linkage_kind: "closes" }),
+    ];
+    const reviewers = ["alice", "bob"];
+    await orchestrate(makeCtx(stub, undefined, { linkedIssues: linked, suggestedReviewers: reviewers }));
+
+    expect(stub.walkthroughInputs.length).toBe(1);
+    const wInput = stub.walkthroughInputs[0]!;
+    expect(wInput.linked_issues).toEqual(linked);
+    expect(wInput.suggested_reviewers).toEqual(reviewers);
+  });
+
+  it("passes empty linked_issues / suggested_reviewers when the context omits them (default)", async () => {
+    const stub = makeStub({ chunkCount: 1 });
+    await orchestrate(makeCtx(stub));
+
+    expect(stub.walkthroughInputs[0]!.linked_issues).toEqual([]);
+    expect(stub.walkthroughInputs[0]!.suggested_reviewers).toEqual([]);
+  });
+
+  it("also threads linkedIssues + suggestedReviewers into the advisory (path-filters-excluded-all) walkthrough", async () => {
+    // path_filters that exclude EVERY review file → the advisory early-exit walkthrough.
+    const stub = makeStub({ chunkCount: 1, reviewFiles: ["src/a.ts"], pathFilters: ["!**"] });
+    const linked = [
+      LinkedIssueV1.parse({ issue_number: 3, title: "advisory issue", state: "closed", linkage_kind: "fixes" }),
+    ];
+    await orchestrate(makeCtx(stub, undefined, { linkedIssues: linked, suggestedReviewers: ["carol"] }));
+
+    // The advisory path skipped chunk/fan-out but still dispatched generateWalkthrough once with the threading.
+    expect(stub.calls).not.toContain("reviewChunk");
+    expect(stub.walkthroughInputs.length).toBe(1);
+    expect(stub.walkthroughInputs[0]!.linked_issues).toEqual(linked);
+    expect(stub.walkthroughInputs[0]!.suggested_reviewers).toEqual(["carol"]);
+  });
+
+  it("dispatches updatePrDescriptionSummary after the post lands, with owner/repo/pr_number/aggregated", async () => {
+    const stub = makeStub({ chunkCount: 1, withUpdatePrDescription: true });
+    await orchestrate(makeCtx(stub));
+
+    expect(stub.calls).toContain("updatePrDescription");
+    // It runs AFTER the post (the Python `_post_review` ordering).
+    expect(stub.calls.indexOf("updatePrDescription")).toBeGreaterThan(stub.calls.indexOf("postReview"));
+    expect(stub.updatePrDescriptionInputs.length).toBe(1);
+    const u = stub.updatePrDescriptionInputs[0]!;
+    expect(u.owner).toBe("acme");
+    expect(u.repo).toBe("widgets");
+    expect(u.pr_number).toBe(42);
+    // The aggregated findings tuple is threaded through (the summary block renders from it).
+    expect(u.aggregated.findings.length).toBe(1);
+  });
+
+  it("is FAIL-OPEN on an update_pr_description failure (the posted review is the value)", async () => {
+    const stub = makeStub({ chunkCount: 1, withUpdatePrDescription: true, updatePrDescriptionThrows: true });
+    // The orchestrate() call MUST still resolve cleanly — the description appendage failure is swallowed.
+    const result = await orchestrate(makeCtx(stub));
+
+    expect(result.status).toBe("accepted");
+    expect(stub.calls).toContain("updatePrDescription");
+    // The post + check-run + cleanup still ran (the failure did not short-circuit the post path).
+    expect(stub.calls).toContain("postReview");
+    expect(stub.calls).toContain("cleanup");
+  });
+
+  it("skips updatePrDescriptionSummary when the port is omitted (back-compat)", async () => {
+    const stub = makeStub({ chunkCount: 1 }); // no withUpdatePrDescription
+    await orchestrate(makeCtx(stub));
+    expect(stub.calls).not.toContain("updatePrDescription");
   });
 });
 

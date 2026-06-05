@@ -70,6 +70,15 @@ const EXPECTED_ACTIVITY_NAMES = [
   "recordDeliveryDegraded",
   "citationValidate",
   "emitOutputSafetyAuditEvent",
+  // Stage-4 enrichment: changed-files enrich (body) + linked-issues / suggested-reviewers (body) +
+  // PR-description summary (posting) + per-chunk evidence manifest (buildChunkContext). The two self-wiring
+  // activities (enrichPrFilesV2, updatePrDescriptionSummary) + the stateless buildRetrievedEvidence are
+  // registered bare; the two bound-method holders (fetchLinkedIssues, fetchSuggestedReviewers) are bound.
+  "enrichPrFilesV2",
+  "fetchLinkedIssues",
+  "fetchSuggestedReviewers",
+  "updatePrDescriptionSummary",
+  "buildRetrievedEvidence",
 ] as const;
 
 describe("buildActivities() composition root", () => {

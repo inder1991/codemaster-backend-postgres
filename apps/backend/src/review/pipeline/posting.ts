@@ -26,6 +26,7 @@ import {
 } from "@temporalio/common";
 
 import { stageOutcomeForPublication } from "./helpers.js";
+import { stageOutcome, type StageLogger } from "./degradation.js";
 
 import type { ReviewActivityPorts, ChangedLineRanges } from "./activity_ports.js";
 import type { ReviewPipelinePrCtx } from "./orchestrator.js";
@@ -61,6 +62,10 @@ export type PostingLifecycleDeps = {
   readonly recordDeliverySkipped?: (input: SkippedInputV1) => Promise<number>;
   /** The ordered rfids _persist_findings wrote (state.persistedFindingIds), for the dropped-index mapping. */
   readonly persistedFindingIds: ReadonlyArray<string>;
+  /** The WARN sink the fail-open `update_pr_description` stageOutcome wrap logs on (the Temporal workflow
+   *  logger in production; a recording logger in tests). Omitted → the stageOutcome wrap drops its WARN line
+   *  (record_stage stays the metric source of truth). */
+  readonly logger?: StageLogger;
 };
 
 /**
@@ -295,5 +300,42 @@ export async function postReviewResults(
     throw postReviewExc;
   }
   captureFromPostedReview(state, posted, pr);
+
+  // S19.NOW8.B — append the codemaster summary to the PR DESCRIPTION (GET-modify-PATCH the PR body). The
+  // Python runs this INSIDE `_post_review` AFTER the review lands + the publication-outcome stage emit
+  // (review_pull_request.py:2729-2746). FAIL-OPEN (AC3): a failure here NEVER fails the workflow — the
+  // already-posted review is the value; the description appendage is polish. The stageOutcome wrap
+  // (raiseAfterLog defaults false) swallows + records outcome=error; skipOutcome() defers to the activity's
+  // own success (the Python `_log_stage("update_pr_description", outcome="ok")` is the canonical emit — the
+  // wrap's auto-ok would double-count). SKIPPED when ctx.activities.updatePrDescriptionSummary is omitted
+  // (unit tests; the Python wiring-not-injected analogue). The advisory path-filters-excluded-all post goes
+  // through postReviewResults too, so it fires there as well (1:1 with the Python `_post_review` closure
+  // serving both paths). The activity is INDEPENDENT of the parallel post_check_run dispatch.
+  if (ports.updatePrDescriptionSummary !== undefined) {
+    const updatePort = ports.updatePrDescriptionSummary;
+    await stageOutcome(
+      "update_pr_description",
+      { logger: deps.logger ?? NULL_POSTING_LOGGER, headSha: pr.headSha, runId: pr.runId },
+      async (handle): Promise<void> => {
+        handle.skipOutcome();
+        await updatePort({
+          schema_version: 1,
+          owner: ownerOf(pr.prMeta.repo),
+          repo: repoNameOf(pr.prMeta.repo),
+          pr_number: pr.prNumber,
+          aggregated,
+        });
+      },
+    );
+  }
+
   return posted;
 }
+
+/** A no-op StageLogger for when `deps.logger` is omitted (the update_pr_description fail-open wrap). Inert
+ *  by construction (sandbox-safe — no console binding); record_stage stays the metric source of truth. */
+const NULL_POSTING_LOGGER: StageLogger = {
+  warning(): void {
+    // intentionally inert — see PostingLifecycleDeps.logger
+  },
+};
