@@ -516,6 +516,119 @@ describe("orchestrate — cleanup is finally-guaranteed", () => {
   });
 });
 
+describe("orchestrate — Stage-2 claim-check + placeholder-teardown hooks", () => {
+  it("invokes ctx.claimCheck exactly three times at the Python boundaries (clone/classify/aggregate)", async () => {
+    // The claim-check records the LAST stage dispatched at each invocation, so we can assert it fires
+    // BEFORE clone (empty trace), BEFORE classify (after computePolicyRules), and BEFORE aggregate
+    // (after dedupFindings) — the three `_abort_if_claim_lost` sites.
+    const stub = makeStub({ chunkCount: 1 });
+    const ctx = makeCtx(stub);
+    const checkPositions: Array<string> = [];
+    const ctxWithCheck: ReviewPipelineContext = {
+      ...ctx,
+      claimCheck: async () => {
+        checkPositions.push(stub.calls.length === 0 ? "<before-clone>" : stub.calls[stub.calls.length - 1]!);
+      },
+    };
+    await orchestrate(ctxWithCheck);
+    expect(checkPositions).toEqual(["<before-clone>", "computePolicyRules", "dedupFindings"]);
+  });
+
+  it("fires claimCheck immediately before classify (right after computePolicyRules)", async () => {
+    const stub = makeStub({ chunkCount: 1 });
+    const ctx = makeCtx(stub);
+    const before: Array<string> = [];
+    const ctxWithCheck: ReviewPipelineContext = {
+      ...ctx,
+      claimCheck: async () => {
+        before.push([...stub.calls].join(","));
+      },
+    };
+    await orchestrate(ctxWithCheck);
+    // 2nd claim-check (index 1) is the before-classify one: trace at that point is clone,loadRepoConfig,
+    // computePolicyRules (classify NOT yet dispatched).
+    expect(before[1]).toBe("clone,loadRepoConfig,computePolicyRules");
+    // 3rd claim-check (index 2) is the before-aggregate one: dedupFindings has run, aggregate has not.
+    expect(before[2]?.endsWith("dedupFindings")).toBe(true);
+    expect(before[2]?.includes("aggregate")).toBe(false);
+  });
+
+  it("aborts the whole pipeline non-retryably when claimCheck raises before clone (no clone dispatched)", async () => {
+    const stub = makeStub({ chunkCount: 1 });
+    const ctx = makeCtx(stub);
+    const ctxWithCheck: ReviewPipelineContext = {
+      ...ctx,
+      claimCheck: async () => {
+        throw new Error("PrMutexLostClaim");
+      },
+    };
+    await expect(orchestrate(ctxWithCheck)).rejects.toThrow(/PrMutexLostClaim/);
+    // The abort fired BEFORE clone → no stages dispatched, cleanup not armed (clone never returned).
+    expect(stub.calls).toEqual([]);
+    expect(stub.cleanupCalled()).toBe(false);
+  });
+
+  it("runs cleanup when claimCheck raises AFTER clone (workspace populated → finally armed)", async () => {
+    const stub = makeStub({ chunkCount: 1 });
+    const ctx = makeCtx(stub);
+    let calls = 0;
+    const ctxWithCheck: ReviewPipelineContext = {
+      ...ctx,
+      claimCheck: async () => {
+        calls += 1;
+        // first call (before clone) passes; the second (before classify, after clone) aborts.
+        if (calls >= 2) {
+          throw new Error("PrMutexLostClaim");
+        }
+      },
+    };
+    await expect(orchestrate(ctxWithCheck)).rejects.toThrow(/PrMutexLostClaim/);
+    // clone ran (finally armed) → cleanup released the workspace even though the abort propagated.
+    expect(stub.calls).toContain("clone");
+    expect(stub.cleanupCalled()).toBe(true);
+  });
+
+  it("invokes onPlaceholderTeardown once, after the post pair (normal path)", async () => {
+    const stub = makeStub({ chunkCount: 1 });
+    const ctx = makeCtx(stub);
+    const teardownAt: Array<string> = [];
+    const ctxWithTeardown: ReviewPipelineContext = {
+      ...ctx,
+      onPlaceholderTeardown: async () => {
+        teardownAt.push([...stub.calls].join(","));
+      },
+    };
+    await orchestrate(ctxWithTeardown);
+    // Exactly one teardown, fired after BOTH postReview and postCheckRun landed and BEFORE cleanup.
+    expect(teardownAt.length).toBe(1);
+    expect(teardownAt[0]?.includes("postReview")).toBe(true);
+    expect(teardownAt[0]?.includes("postCheckRun")).toBe(true);
+    expect(teardownAt[0]?.includes("cleanup")).toBe(false);
+  });
+
+  it("invokes onPlaceholderTeardown on the path-filters-excluded-all advisory post", async () => {
+    // pathFilters exclude every review file → advisory post path. Teardown must still fire after that post.
+    const stub = makeStub({ pathFilters: ["!**"] });
+    const ctx = makeCtx(stub);
+    let teardowns = 0;
+    const ctxWithTeardown: ReviewPipelineContext = {
+      ...ctx,
+      onPlaceholderTeardown: async () => {
+        teardowns += 1;
+      },
+    };
+    const result = await orchestrate(ctxWithTeardown);
+    expect(result.degradationNotes).toContain("path_filters_excluded_all");
+    expect(teardowns).toBe(1);
+  });
+
+  it("is a no-op when neither hook is provided (back-compat: existing callers unaffected)", async () => {
+    const stub = makeStub({ chunkCount: 1 });
+    const result = await orchestrate(makeCtx(stub));
+    expect(result.status).toBe("accepted");
+  });
+});
+
 describe("orchestrate — logger injection", () => {
   it("emits the stageOutcome WARN line on the injected logger for a degraded stage", async () => {
     const warnings: Array<string> = [];

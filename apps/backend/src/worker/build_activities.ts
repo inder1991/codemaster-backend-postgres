@@ -79,6 +79,17 @@ import { releaseWorkspace } from "#backend/activities/release_workspace.activity
 import { selectCarryForward } from "#backend/activities/select_carry_forward.activity.js";
 import { staticAnalysis } from "#backend/activities/static_analysis.activity.js";
 
+// ── Stage-2 lifecycle activities (mutex GATE + lease renew/release + placeholder post/delete) ──
+// The workflow body (review_pull_request.workflow.ts) dispatches these directly by their registered names
+// (NOT through the orchestrator's activity_proxy bridge). Each is a self-defaulting 1-arg activity (the
+// mutex/renew/release take an optional 2nd `deps` arg → fn.length === 1, registered bare; the gate +
+// placeholder take exactly one positional input).
+import { startReviewForWebhook } from "#backend/activities/start_review_for_webhook.activity.js";
+import { renewPrReviewMutexLeaseActivity } from "#backend/activities/renew_pr_review_mutex_lease.activity.js";
+import { releasePrReviewMutexActivity } from "#backend/activities/release_pr_review_mutex.activity.js";
+import { postReviewPlaceholder } from "#backend/activities/post_review_placeholder.activity.js";
+import { deleteReviewPlaceholder } from "#backend/activities/delete_review_placeholder.activity.js";
+
 import { resolveEmbeddingsConsumer } from "#backend/adapters/resolve_embeddings.js";
 import { VaultHttpPort } from "#backend/adapters/vault_http.js";
 
@@ -320,6 +331,15 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     // ── self-defaulting (optional 2nd `deps` arg → fn.length === 1) — registered bare ──
     allocateWorkspace,
     releaseWorkspace,
+    // ── Stage-2 lifecycle (gate + mutex lease renew/release + placeholder post/delete) ──
+    // The gate (1-arg, raw payload), the renew/release mutex (mutex_id string + optional deps → fn.length
+    // === 1), and the placeholder post/delete (1 typed input each). All registered bare. The workflow body
+    // dispatches them directly by these registered names.
+    startReviewForWebhook,
+    renewPrReviewMutexLeaseActivity,
+    releasePrReviewMutexActivity,
+    postReviewPlaceholder,
+    deleteReviewPlaceholder,
     // ── bound-method activities (real embedder) ──
     aggregateFindings: aggregateActivity.aggregateFindings,
     // dedup_findings — bound arrow property holding the shared real embedder (semantic dedup stage).

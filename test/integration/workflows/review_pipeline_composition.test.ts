@@ -43,6 +43,7 @@ import { PostedCheckRunV1 } from "#contracts/posted_check_run.v1.js";
 import { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
 import { CodemasterConfigV1 } from "#contracts/codemaster_config.v1.js";
 import { ComputedPolicyRulesV1 } from "#contracts/policy_compute.v1.js";
+import { WorkspaceHandle } from "#contracts/workspace_handle.v1.js";
 import {
   ReviewPullRequestPayloadV1,
   ReviewPullRequestResultV1,
@@ -112,6 +113,44 @@ const PAYLOAD = ReviewPullRequestPayloadV1.parse({
 
 function makeStubActivities(calls: Array<string>): Record<string, (input: never) => Promise<unknown>> {
   const acts = {
+    // ── Stage-2 lifecycle: GATE (accepts; mints a mutex_id) ──
+    startReviewForWebhook: async (): Promise<unknown> => {
+      calls.push("gate");
+      return ReviewPullRequestResultV1.parse({
+        status: "accepted",
+        pr_number: PAYLOAD.pr_number,
+        mutex_id: uuidFor(900),
+      });
+    },
+    // ── Stage-2 lifecycle: placeholder post (best-effort void) ──
+    postReviewPlaceholder: async (): Promise<void> => {
+      calls.push("postPlaceholder");
+    },
+    // ── Stage-2 lifecycle: allocate the REAL workspace handle ──
+    allocateWorkspace: async (): Promise<unknown> => {
+      calls.push("allocateWorkspace");
+      return WorkspaceHandle.parse({
+        workspace_id: uuidFor(901),
+        installation_id: PAYLOAD.installation_id,
+        run_id: PAYLOAD.run_id,
+        derived_path: "/ws/abc",
+        state: "ALLOCATED",
+      });
+    },
+    // ── Stage-2 lifecycle: lease renewal (still-held=true) — fired by the claim-check at clone/classify/
+    //    aggregate. The result type comes from the string-name proxy's interface (boolean). ──
+    renewPrReviewMutexLeaseActivity: async (): Promise<boolean> => {
+      calls.push("renewLease");
+      return true;
+    },
+    // ── Stage-2 lifecycle: placeholder delete (best-effort void) — fired after the real post lands ──
+    deleteReviewPlaceholder: async (): Promise<void> => {
+      calls.push("deletePlaceholder");
+    },
+    // ── Stage-2 lifecycle: mutex release (body finally; void) ──
+    releasePrReviewMutexActivity: async (): Promise<void> => {
+      calls.push("releaseMutex");
+    },
     cloneRepoIntoWorkspace: async (): Promise<unknown> => {
       calls.push("clone");
       return ClonedRepoV1.parse({
@@ -315,20 +354,35 @@ describeTemporal("review-pipeline composition (in-process TestWorkflowEnvironmen
     // Re-parse through the contract to prove the returned value is a VALID ReviewPullRequestResultV1.
     expect(() => ReviewPullRequestResultV1.parse(result)).not.toThrow();
 
-    // ── PROOF 2: the spine drove the full clone → … → post stage order ──
+    // ── PROOF 2: the spine drove the GATE → lifecycle → clone → … → post → cleanup stage order ──
     // The two parallel pairs ({chunkAndRedact, staticAnalysis} and {postReview, postCheckRun}) cross the
     // Temporal wire concurrently, so the WORKER may execute either member of a pair first — their relative
     // order within the pair is NOT deterministic. We therefore assert the SEQUENTIAL spine order with each
     // parallel pair collapsed to a position-stable set, plus membership of the pair members.
+    //
+    // Stage-2 lifecycle threading (vs the Stage-1 thin body):
+    //   * `gate` runs FIRST (start_review_for_webhook → accepted, mints mutex_id).
+    //   * `postPlaceholder` then `allocateWorkspace` precede the orchestrator.
+    //   * `renewLease` fires THREE times — the claim-check at the before-clone, before-classify, and
+    //     before-aggregate boundaries (the orchestrator's ctx.claimCheck seam → renew activity).
+    //   * `deletePlaceholder` fires after the post pair (the onPlaceholderTeardown seam).
+    //   * `cleanup` (releaseWorkspace) fires once from the orchestrator's finally; then the body's
+    //     non-cancellable finally fires `releaseMutex` + a backstop `cleanup` (releaseWorkspace again,
+    //     idempotent — both are dispatched to the same releaseWorkspace stub which pushes "cleanup").
     const PAIR1 = new Set(["chunkAndRedact", "staticAnalysis"]);
     const PAIR2 = new Set(["postReview", "postCheckRun"]);
     // Collapse the two pair members (wherever they landed within their pair window) to a single token so
     // the surrounding strictly-sequential order is asserted exactly.
     const sequential = collapsePairs(calls, PAIR1, "PAIR1", PAIR2, "PAIR2");
     expect(sequential).toEqual([
+      "gate",
+      "postPlaceholder",
+      "allocateWorkspace",
+      "renewLease", // claim-check before clone
       "clone",
       "loadRepoConfig",
       "computePolicyRules",
+      "renewLease", // claim-check before classify
       "classify",
       "PAIR1", // {chunkAndRedact, staticAnalysis} (order-free within the pair)
       "selectCarryForward",
@@ -336,17 +390,70 @@ describeTemporal("review-pipeline composition (in-process TestWorkflowEnvironmen
       "retrieveKnowledge",
       "reviewChunk",
       "dedupFindings",
+      "renewLease", // claim-check before aggregate
       "aggregate",
       "persistReviewFindings",
       "generateWalkthrough",
       "persistReviewWalkthrough",
       "PAIR2", // {postReview, postCheckRun} (order-free within the pair)
-      "cleanup",
+      "deletePlaceholder", // onPlaceholderTeardown after the post pair
+      "cleanup", // orchestrator finally (releaseWorkspace)
+      "releaseMutex", // body non-cancellable finally (releasePrReviewMutex)
+      "cleanup", // body backstop (releaseWorkspace again — idempotent)
     ]);
     // Both members of each parallel pair were actually dispatched.
     expect(calls).toContain("chunkAndRedact");
     expect(calls).toContain("staticAnalysis");
     expect(calls).toContain("postReview");
     expect(calls).toContain("postCheckRun");
+    // The mutex was released by the body's finally.
+    expect(calls).toContain("releaseMutex");
+    // The lease was renewed at all three claim-check boundaries.
+    expect(calls.filter((c) => c === "renewLease").length).toBe(3);
+  }, 60_000);
+
+  it("short-circuits the whole workflow when the gate does NOT accept (skipped_busy)", async () => {
+    const calls: Array<string> = [];
+
+    // A gate that returns skipped_busy MUST short-circuit: no placeholder, no allocate, no orchestrate, no
+    // mutex/workspace release — the workflow returns the gate result verbatim. Override the gate stub.
+    const stubs = makeStubActivities(calls);
+    stubs["startReviewForWebhook"] = (async (): Promise<unknown> => {
+      calls.push("gate");
+      return ReviewPullRequestResultV1.parse({ status: "skipped_busy", pr_number: PAYLOAD.pr_number });
+    }) as (input: never) => Promise<unknown>;
+
+    const worker = await Worker.create({
+      connection: testEnv.nativeConnection,
+      namespace: testEnv.namespace ?? "default",
+      taskQueue: "review-pipeline-composition-gate-skip",
+      workflowsPath: fileURLToPath(
+        new URL(
+          "../../../apps/backend/src/workflows/review_pull_request.workflow.ts",
+          import.meta.url,
+        ),
+      ),
+      dataConverter: {
+        payloadConverterPath: fileURLToPath(
+          new URL("../../../apps/backend/src/worker/data_converter.ts", import.meta.url),
+        ),
+      },
+      activities: stubs,
+    });
+
+    const result: ReviewPullRequestResultV1 = await worker.runUntil(
+      testEnv.client.workflow.execute("reviewPullRequest", {
+        taskQueue: "review-pipeline-composition-gate-skip",
+        workflowId: `composition-gate-skip-${PAYLOAD.run_id}`,
+        args: [PAYLOAD],
+      }),
+    );
+
+    // The gate result is returned verbatim — skipped_busy short-circuits BEFORE any pipeline work.
+    expect(result.status).toBe("skipped_busy");
+    expect(result.pr_number).toBe(PAYLOAD.pr_number);
+    expect(() => ReviewPullRequestResultV1.parse(result)).not.toThrow();
+    // ONLY the gate ran — no placeholder, no allocate, no clone, no post, no cleanup, no mutex release.
+    expect(calls).toEqual(["gate"]);
   }, 60_000);
 });

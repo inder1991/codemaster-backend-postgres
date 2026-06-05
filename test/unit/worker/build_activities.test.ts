@@ -51,6 +51,13 @@ const EXPECTED_ACTIVITY_NAMES = [
   "retrieveKnowledge",
   "bedrockReviewChunk",
   "generateWalkthrough",
+  // Stage-2 lifecycle: gate + mutex lease renew/release + placeholder post/delete (dispatched directly by
+  // the workflow body, not the orchestrator's activity_proxy bridge).
+  "startReviewForWebhook",
+  "renewPrReviewMutexLeaseActivity",
+  "releasePrReviewMutexActivity",
+  "postReviewPlaceholder",
+  "deleteReviewPlaceholder",
 ] as const;
 
 describe("buildActivities() composition root", () => {

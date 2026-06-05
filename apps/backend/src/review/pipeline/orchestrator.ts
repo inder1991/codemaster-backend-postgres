@@ -147,6 +147,20 @@ export type ReviewPipelineContext = {
    *  lines. Optional: when omitted, degradation WARN lines are dropped (record_stage in degradation.ts
    *  remains the metric source of truth) — but the workflow body ALWAYS injects it in production. */
   readonly logger?: StageLogger;
+  /** The PR-mutex lease CLAIM-CHECK seam (Stage 2 — the workflow body's `_abort_if_claim_lost`). Called at
+   *  the THREE Python stage boundaries (before clone, before classify/the Bedrock fan-out, before aggregate)
+   *  so a review whose lease was reclaimed by a superseding review aborts non-retryably (the callback raises
+   *  a non-retryable ApplicationFailure) rather than wasting Bedrock budget on a stolen review. The body
+   *  injects the renewal-backed check; unit tests omit it (then it is a no-op). Replay-safe: the callback's
+   *  only side effect is a `renew_pr_review_mutex_lease_activity` dispatch (Temporal-serialized). */
+  readonly claimCheck?: () => Promise<void>;
+  /** The placeholder TEARDOWN seam (Stage 2 — the workflow body's `delete_review_placeholder` call, which
+   *  the Python places INSIDE `_post_review` AFTER the real review post lands). Called ONCE, right after the
+   *  `postReview` activity succeeds (the normal post path AND the path-filters-excluded-all advisory post),
+   *  so the "reviewing this PR..." placeholder comment is torn down only once the real review is on GitHub.
+   *  Best-effort by construction (the injected callback wraps the dispatch in stageOutcome + swallows). The
+   *  body injects it; unit tests omit it (then it is a no-op). */
+  readonly onPlaceholderTeardown?: () => Promise<void>;
 };
 
 /** A no-op StageLogger for when `ctx.logger` is omitted. SANDBOX-SAFE: pure inert sink (no console binding,
@@ -192,6 +206,14 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
   const { activities: ports, pr, repo, state } = ctx;
   const headSha = pr.headSha;
   const runId = pr.runId;
+
+  // Claim-check BEFORE clone (Python `_clone` boundary: `await _abort_if_claim_lost()` at the top of the
+  // closure, review_pull_request.py:1069). No-op when ctx.claimCheck is omitted (unit tests). A lost lease
+  // raises a non-retryable ApplicationFailure here, BEFORE the workspace is populated — so the finally-block
+  // cleanup below is not yet armed (it arms once clone returns), exactly like the Python ordering.
+  if (ctx.claimCheck !== undefined) {
+    await ctx.claimCheck();
+  }
 
   // Step 1 — clone (workspace-aware: clones INTO the pre-allocated, validated workspace handle). This is
   // OUTSIDE the try: a clone failure ends the workflow with no partial review possible (the Python "clone
@@ -239,6 +261,15 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
       state.policyBundles.set(path, bundle);
     }
 
+    // Claim-check BEFORE classify (Python `_classify` boundary: `await _abort_if_claim_lost()` at the top of
+    // the closure, "stop before the Bedrock fan-out if lease lost", review_pull_request.py:1099). classify is
+    // the gateway into the per-chunk fan-out, so a lost lease aborts here before any Bedrock spend. No-op
+    // when ctx.claimCheck is omitted. INSIDE the try → the finally-block cleanup still releases the workspace
+    // even when the abort raises (the workspace was populated by the clone above).
+    if (ctx.claimCheck !== undefined) {
+      await ctx.claimCheck();
+    }
+
     // Step 2 — classify.
     const routing = await ports.classify({
       workspacePath: workspaceRoot,
@@ -264,6 +295,11 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
     // workspace. GUARD: fire ONLY when filtering emptied a NON-EMPTY set (a clean PR with zero review files
     // and no filters must fall through to the normal path).
     if (routing.review_files.length > 0 && reviewFiles.length === 0) {
+      // Claim-check BEFORE the advisory aggregate (the Python `_aggregate` boundary guards EVERY aggregate
+      // dispatch, including this advisory one). No-op when ctx.claimCheck is omitted.
+      if (ctx.claimCheck !== undefined) {
+        await ctx.claimCheck();
+      }
       const emptyNotice = pathFiltersExcludedAllFinding();
       const aggregatedEmpty = await ports.aggregate({
         findings: [emptyNotice],
@@ -281,6 +317,12 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
         postReview(ports, walkthroughEmpty, aggregatedEmpty, pr),
         postCheckRun(ports, pr, headSha, walkthroughEmpty.tldr),
       ]);
+
+      // Placeholder teardown AFTER the advisory review post (Python places `delete_review_placeholder`
+      // inside `_post_review`, so it fires for this advisory post too). No-op when omitted.
+      if (ctx.onPlaceholderTeardown !== undefined) {
+        await ctx.onPlaceholderTeardown();
+      }
 
       state.degradation.add("path_filters_excluded_all");
       return makeReviewPipelineResult({
@@ -394,6 +436,13 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
       state.degradation.add("dedup semantic stage skipped; exact-match dedupe still applied");
     }
 
+    // Claim-check BEFORE aggregate (Python `_aggregate` boundary: `await _abort_if_claim_lost()` at the top
+    // of the closure, "don't aggregate/post a superseded review", review_pull_request.py:1968). This is the
+    // last gate before the review is aggregated + posted to GitHub. No-op when ctx.claimCheck is omitted.
+    if (ctx.claimCheck !== undefined) {
+      await ctx.claimCheck();
+    }
+
     // Step 7 — aggregate. (const: Stage 1 does NOT mutate `aggregated` post-aggregate — the apply_policy_
     // post_filter / citation_validate reassignments are DEFERRED to Stage 3/5, where this becomes a `let`.)
     const aggregated: AggregatedFindingsV1 = await ports.aggregate({
@@ -465,6 +514,16 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
       postReview(ports, walkthrough, aggregated, pr),
       postCheckRun(ports, pr, headSha, walkthrough.tldr),
     ]);
+
+    // Step 9a — placeholder teardown (Stage 2). The Python invokes `delete_review_placeholder` INSIDE
+    // `_post_review`, AFTER the real `post_review_results` activity lands the review (review_pull_request.py
+    // :2809-2853). The TS port surfaces it as a context callback invoked ONCE here, right after the post
+    // pair resolves, so the "reviewing this PR..." placeholder comment is torn down only once the real
+    // review is on GitHub. Best-effort: the injected callback swallows (stageOutcome) — it never fails the
+    // pipeline. No-op when ctx.onPlaceholderTeardown is omitted (unit tests).
+    if (ctx.onPlaceholderTeardown !== undefined) {
+      await ctx.onPlaceholderTeardown();
+    }
 
     return makeReviewPipelineResult(
       {
