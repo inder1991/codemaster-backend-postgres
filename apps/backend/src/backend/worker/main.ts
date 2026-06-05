@@ -35,7 +35,7 @@ import { createRequire } from "node:module";
 import { NativeConnection, Worker } from "@temporalio/worker";
 
 import { startupSelfCheck } from "../chunking/treesitter_loader.js";
-import { activities } from "./registry.js";
+import { buildActivities } from "./registry.js";
 
 /** ESM→CJS bridge: a `require` bound to THIS module's URL, so `require.resolve` works under ESM. */
 const require_ = createRequire(import.meta.url);
@@ -60,6 +60,12 @@ export async function runWorker(): Promise<void> {
   const connection = await NativeConnection.connect(
     process.env.TEMPORAL_TLS === "1" ? { address, tls: {} } : { address },
   );
+
+  // Build the full review-pipeline activity surface via the composition root (real collaborators, every
+  // activity curried/bound to a 1-arg Temporal activity, the ADR-0068 ledger wired into the LlmClientCache).
+  // Constructed HERE (not at module load) so the env reads `buildActivities()` performs happen with the
+  // worker's populated environment.
+  const activities = buildActivities();
 
   const worker = await Worker.create({
     connection,

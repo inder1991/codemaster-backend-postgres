@@ -1,35 +1,20 @@
 /**
- * Activity registry — the map the worker passes to `Worker.create({ activities })`. A thin re-export so
- * the worker bootstrap (`main.ts`) and the bundle self-check stay decoupled from the individual activity
- * modules, and so 2.1 grows the registered surface by adding ONE entry here (additively) rather than
- * editing the worker bootstrap.
+ * Activity registry — a thin re-export of the {@link buildActivities} COMPOSITION ROOT.
  *
- * Phase 2.0 walking skeleton: exactly ONE activity. The key MUST match the name the workflow's
- * `proxyActivities<{ persistReviewFindings(...) }>` calls — Temporal resolves the activity by this key.
+ * The worker registry used to be a STATIC map that (a) registered only a partial slice of the
+ * review-pipeline surface and (b) registered the 2-arg `cloneRepoIntoWorkspace(req, deps)` BARE — so a
+ * Temporal dispatch (a single positional argument) left `deps === undefined` and crashed. That static
+ * map is GONE: the registered surface is now constructed by `buildActivities()`, which builds the real
+ * collaborators (git cloner, platform embedder, the ledger-wired LlmClientCache) and binds / curries
+ * EVERY activity into a 1-arg Temporal activity — closing both the missing-activities gap and the
+ * 2-arg-crash class.
  *
- * Phase 2.1: adds `aggregateFindings`, `classifyFiles`, `loadRepoConfigActivity`,
- * `computePolicyRules`, and `postCheckRun` (the ported core-loop activities). Each is registered here but
- * NOT yet wired into a workflow body (orchestration wiring is Phase 2.2) — registration is additive and
- * independent of the workflow.
+ * `buildActivities()` reads env (`CODEMASTER_PG_CORE_DSN`, `CODEMASTER_GITHUB_INSTALLATION_ID`, the
+ * embedder vars) and constructs LAZY pools / deferred-Vault wiring, so calling it at module load would
+ * couple any importer to those env reads. The worker bootstrap (`main.ts`) therefore calls
+ * `buildActivities()` itself at `runWorker()` time (when the env is populated). This module re-exports the
+ * composition root so the bootstrap + any bundle self-check stay decoupled from the individual activity
+ * modules.
  */
 
-import { aggregateFindings } from "../activities/aggregate_findings.activity.js";
-import { classifyFiles } from "../activities/classify_files.activity.js";
-import { cloneRepoIntoWorkspace } from "../activities/clone_repo_into_workspace.activity.js";
-import { computePolicyRules } from "../activities/compute_policy_rules.activity.js";
-import { loadRepoConfigActivity } from "../activities/load_repo_config.activity.js";
-import { persistReviewFindings } from "../activities/persist_review_findings.activity.js";
-import { postCheckRun } from "../activities/post_check_run.activity.js";
-import { postReviewResults } from "../activities/post_review_results.activity.js";
-
-/** The activities map the worker registers. Grown additively in Phase 2.1. */
-export const activities = {
-  persistReviewFindings,
-  aggregateFindings,
-  classifyFiles,
-  cloneRepoIntoWorkspace,
-  loadRepoConfigActivity,
-  computePolicyRules,
-  postCheckRun,
-  postReviewResults,
-};
+export { buildActivities } from "./build_activities.js";
