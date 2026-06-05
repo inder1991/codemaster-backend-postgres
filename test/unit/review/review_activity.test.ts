@@ -14,6 +14,8 @@ import {
   type LlmClientCacheLike,
 } from "#backend/review/review_activity.js";
 
+import { InMemoryBlobStoreAdapter } from "../../support/llm/cassette_sdk.js";
+
 import { computeChunkId } from "#contracts/diff_chunking.v1.js";
 import { ReviewContextV1 } from "#contracts/review_context.v1.js";
 
@@ -60,6 +62,7 @@ function cacheReturning(response: Record<string, unknown>): LlmClientCacheLike {
   const client = new LlmClient({
     sdk,
     costCap: new InMemoryCostCapEnforcer({ globalCapCents: 500_000, perOrgCapCents: 100_000 }),
+    blobStore: new InMemoryBlobStoreAdapter(),
     clock: new FakeClock(),
   });
   return {
@@ -79,6 +82,7 @@ function cacheThrowingFromSdk(err: Error): LlmClientCacheLike {
   const client = new LlmClient({
     sdk,
     costCap: new InMemoryCostCapEnforcer({ globalCapCents: 500_000, perOrgCapCents: 100_000 }),
+    blobStore: new InMemoryBlobStoreAdapter(),
     clock: new FakeClock(),
   });
   return {
@@ -101,7 +105,12 @@ function cacheWithBudgetDeny(): LlmClientCacheLike {
       throw new Error("SDK must not be reached when the pre-call cost-cap denies");
     },
   };
-  const client = new LlmClient({ sdk, costCap, clock: new FakeClock() });
+  const client = new LlmClient({
+    sdk,
+    costCap,
+    blobStore: new InMemoryBlobStoreAdapter(),
+    clock: new FakeClock(),
+  });
   return {
     async forRole(): Promise<LlmClient> {
       return client;

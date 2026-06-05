@@ -8,21 +8,36 @@
 // byte-faithfully (Python lines 491-584).
 //
 // The production side-effects are NOT on the observable-output path, so they are modeled as INJECTED
-// collaborator Protocols with no-op / in-memory defaults so the cassette dual-run is faithful:
-//   - CostCap        — pre-call check + post-call record. Default: allow-all in-memory (mirrors the
-//                      Python InMemoryCostCapEnforcer the cassette test wires). A pre-call deny still
-//                      raises BedrockBudgetExceededError (that IS observable — it short-circuits the
-//                      activity into a non-retryable ApplicationFailure), so the enforcer Protocol is
-//                      wired, just defaulted to allow-all.
-//   - BlobStore      — request/response payload archive. Default: in-memory (mirrors
-//                      BlobStoreInMemoryAdapter). The archive BlobRef is the `payload_blob_ref` of the
-//                      result, so a default must produce a well-formed BlobRef; bytes are discarded.
-//   - ArchiveRedactor — PII/secret redaction of archived payloads. Default: no-op (identity). Archive
-//                      content is never read back on the observable path.
-//   - telemetry/Langfuse — the Python writes a telemetry.llm_calls row + a fire-and-forget Langfuse
-//                      trace. Both are pure side-effects with no return on the observable path, so they
-//                      are OMITTED here (no DB in this slice; no Langfuse dep). Tracked as deferred
-//                      follow-ups (see notes at the bottom).
+// collaborator Protocols. The two REAL production side-effects — cost-cap + blob — are REQUIRED
+// constructor args (no in-module default), so there is NO faking stub on the production path:
+//   - CostCap        — pre-call check + post-call record. REQUIRED. Production injects the REAL
+//                      `PostgresCostCapEnforcer` (the always-on path the frozen worker wires); unit /
+//                      cassette tests inject the `InMemoryCostCapEnforcer` test double explicitly. A
+//                      pre-call deny raises BedrockBudgetExceededError (that IS observable — it
+//                      short-circuits the activity into a non-retryable ApplicationFailure). There is
+//                      deliberately no allow-all default: an un-injected cost-cap is a wiring bug, not a
+//                      silent fall-through to "spend without a cap".
+//   - BlobStore      — request/response payload archive. REQUIRED. Production injects the REAL
+//                      `BlobStorePostgresAdapter`; tests inject the in-memory `InMemoryBlobStoreAdapter`
+//                      test double explicitly. The archive BlobRef is the `payload_blob_ref` of the
+//                      result, so the injected store must produce a well-formed BlobRef.
+//   - ArchiveRedactor — PII/secret redaction of archived payloads. Default: the REAL ported
+//                      `redactPii` (#backend/redact/pii_redactor.js), wrapping the Python
+//                      RegexPiiRedactor the frozen client wires by default — NOT a no-op. The Python
+//                      `_archive_redactor or RegexPiiRedactor()` default is the real redactor, so the
+//                      TS default matches it (the in-memory cassette path archives redacted bytes too).
+//   - telemetry      — the Python writes a telemetry.llm_calls row on BOTH the success and failure
+//                      paths (status ok/failed/timeout) so cost telemetry stays accurate even when the
+//                      SDK raises. This is now WIRED (de-stub part 2): the REAL
+//                      `PostgresLlmCallsTelemetryWriter` (Kysely seam, ADR-0062) INSERTs into
+//                      telemetry.llm_calls. The default is a no-op recorder (the cassette dual-run has
+//                      no DB and asserts nothing on the row — faithful to the Python cassette test,
+//                      which wires an in-memory enforcer and never reads the llm_calls row); the
+//                      production `LlmClientCache` injects the real writer (the always-on path).
+//   - Langfuse/OTel  — the Python's fire-and-forget Langfuse trace + the wrapping OTel span are
+//                      env-gated in Python (`self._langfuse is None` → no-op; OTel exporter off unless
+//                      configured) and are INTENTIONALLY not wired here — faithfully OFF, NOT a stub.
+//                      Wiring them is a separate observability workflow.
 //
 // Output-safety IS on the observable path (it can BLOCK), so the REAL ported OutputSafetyValidator is
 // wired (injected, defaulting to a fresh real validator) and a block raises the REAL ported
@@ -32,16 +47,19 @@
 // Python `time.perf_counter()`); request_id is minted via the platform SystemRandom seam (the Python
 // `uuid.uuid4()`). NO raw Date.now / Math.random.
 
+import { type Kysely, sql } from "kysely";
+
 import { type Clock, WallClock } from "#platform/clock.js";
+import { tenantKysely } from "#platform/db/database.js";
 import { SystemRandom } from "#platform/randomness.js";
 
 import { BedrockBudgetExceededError, type CostCapEnforcer } from "#backend/cost/enforcer.js";
+import { redactPii } from "#backend/redact/pii_redactor.js";
 import { OutputSafetyValidator } from "#backend/security/output_safety.js";
 
-import { LlmInvocationError, LlmOutputUnsafeError } from "./errors.js";
+import { LlmInvocationError, LlmOutputUnsafeError, LlmTimeoutError } from "./errors.js";
 
 import type { BlobRef } from "#contracts/blob_ref.v1.js";
-import { CostCapDecisionV1 } from "#contracts/cost_cap_decision.v1.js";
 import { LlmInvokeResultV1 } from "#contracts/llm_invoke_result.v1.js";
 import type { LlmMessage } from "#contracts/llm_message.v1.js";
 
@@ -107,7 +125,8 @@ export type LlmSdk = {
 
 /**
  * The archive store the client writes request/response payloads to (mirrors the slice of `BlobStorePort`
- * the client uses — `put` only). Default: an in-memory adapter (mirrors `BlobStoreInMemoryAdapter`).
+ * the client uses — `put` only). REQUIRED at construction: production injects the REAL
+ * `BlobStorePostgresAdapter`; tests inject the in-memory `InMemoryBlobStoreAdapter` double.
  */
 export type BlobStore = {
   put(args: {
@@ -119,66 +138,128 @@ export type BlobStore = {
 };
 
 /**
- * Redacts archived payload text before it is stored (mirrors `PiiRedactorPort`). Default: a no-op
- * identity redactor — archive content is never read back on the observable path.
+ * Redacts archived payload text before it is stored (mirrors `PiiRedactorPort`). Default: the REAL
+ * ported `redactPii` (RegexPiiRedactor), so raw PII / secrets never land in telemetry.llm_payloads —
+ * the Python client defaults to `RegexPiiRedactor()`.
  */
 export type ArchiveRedactor = {
   redact(text: string): string;
 };
 
-// ─── default no-op / in-memory collaborators ───────────────────────────────────────────────────────
-
 /**
- * Allow-all in-memory cost-cap default (mirrors the Python InMemoryCostCapEnforcer the cassette test
- * wires). check never raises; record is a no-op accumulator-free stub. The production enforcer
- * (PostgresCostCapEnforcer) is a deferred follow-up — see notes.
+ * Persists one `telemetry.llm_calls` row per invocation (mirrors the Python inline INSERT +
+ * `_record_failure`). The frozen Python writes this row on BOTH the success and failure paths so cost
+ * telemetry stays accurate even when the SDK raises. Default: a no-op recorder (the cassette dual-run
+ * has no DB); the production `LlmClientCache` injects {@link PostgresLlmCallsTelemetryWriter}.
  */
-class AllowAllCostCap implements CostCapEnforcer {
-  public async checkOrRaise(): Promise<CostCapDecisionV1> {
-    return CostCapDecisionV1.parse({
-      allowed: true,
-      cents_spent_today_global: 0,
-      cents_spent_today_org: 0,
-      cents_estimated: 0,
-    });
-  }
-
-  public async recordCallCost(): Promise<void> {
-    // no-op
-  }
-}
-
-/**
- * In-memory blob store default (mirrors `BlobStoreInMemoryAdapter`). Discards bytes; returns a
- * well-formed BlobRef so the result's `payload_blob_ref` is valid. The production object-store adapter
- * is a deferred follow-up — see notes.
- */
-class InMemoryBlobStore implements BlobStore {
-  private readonly clock: Clock;
-
-  public constructor(clock: Clock) {
-    this.clock = clock;
-  }
-
-  public async put(args: {
+export type LlmCallsTelemetryWriter = {
+  /**
+   * Write one `telemetry.llm_calls` row. The `status` is the validator-aware status on the success path
+   * (`ok` / `failed`) and the failure status on the SDK-error path (`failed` / `timeout`). On the
+   * failure path `promptTokens` / `completionTokens` / `costUsdCents` are all 0 (tokens were never
+   * counted), matching the Python `_record_failure` literal-zero INSERT.
+   */
+  recordCall(args: {
     installationId: string;
-    key: string;
-    body: Uint8Array;
-    contentType: string;
-  }): Promise<BlobRef> {
-    return {
-      schema_version: 1,
-      installation_id: args.installationId,
-      key: args.key,
-      byte_size: args.body.length,
-      content_type: args.contentType,
-      created_at: this.clock.now().toISOString(),
-    };
+    requestId: string;
+    model: string;
+    promptTokens: number;
+    completionTokens: number;
+    latencyMs: number;
+    costUsdCents: number;
+    status: "ok" | "failed" | "timeout";
+    createdAt: Date;
+  }): Promise<void>;
+};
+
+// ─── default collaborators (all REAL or no-op-observability — NO faking stubs) ───────────────────────
+//
+// Note: cost-cap + blob have NO in-module default — they are REQUIRED constructor args (production
+// injects the REAL Postgres-backed implementations; tests inject the in-memory doubles). The defaults
+// that remain below are either the REAL ported implementation (archive redactor) or a no-op on a pure
+// off-observable-path side-effect the cassette dual-run asserts nothing on (telemetry writer).
+
+/**
+ * Default archive redactor: the REAL ported `redactPii` (RegexPiiRedactor). Returns the rewritten text
+ * (`[REDACTED:<kind>]` placeholders); the findings are discarded here because the client only stores
+ * the redacted body (the Python logs the finding KINDS at INFO — that log is a side-effect off the
+ * observable path, intentionally not reproduced). Mirrors the Python `RegexPiiRedactor()` default.
+ */
+const REAL_ARCHIVE_REDACTOR: ArchiveRedactor = {
+  redact: (text: string): string => redactPii(text).rewritten,
+};
+
+/**
+ * No-op telemetry writer default — the cassette/unit path has no DB and asserts nothing on the
+ * llm_calls row (faithful to the Python cassette test, which wires an in-memory enforcer and never
+ * reads the row). The production `LlmClientCache` injects {@link PostgresLlmCallsTelemetryWriter}.
+ */
+const NOOP_TELEMETRY_WRITER: LlmCallsTelemetryWriter = {
+  async recordCall(): Promise<void> {
+    // no-op
+  },
+};
+
+/**
+ * Production `telemetry.llm_calls` writer — the REAL, ALWAYS-ON path the frozen worker wires. INSERTs
+ * one row per invocation over the shared single-pool Kysely seam (ADR-0062). The exact column set
+ * mirrors the Python inline INSERT + `_record_failure`:
+ *   llm_call_id, installation_id, request_id, model, prompt_tokens, completion_tokens, latency_ms,
+ *   cost_usd_cents, payload_blob_id, status, created_at
+ *
+ * `llm_call_id` + `payload_blob_id` are minted via the platform randomness seam — `payload_blob_id` is
+ * a PLACEHOLDER UUID exactly as in the Python (`"blob": uuid.uuid4(),  # placeholder — Sprint 6 wires
+ * real blob_id`); wiring the real archive blob id is a separate follow-up, faithful to the frozen
+ * source. Tenancy: `telemetry.llm_calls` carries `installation_id`, which is written explicitly in the
+ * INSERT target (the raw-SQL gate's "installation_id token in the SQL" escape hatch).
+ */
+export class PostgresLlmCallsTelemetryWriter implements LlmCallsTelemetryWriter {
+  private readonly db: Kysely<unknown>;
+  private readonly random = new SystemRandom();
+
+  public constructor(args: { db: Kysely<unknown> }) {
+    this.db = args.db;
+  }
+
+  /**
+   * Build a writer over the shared single-pool tenant Kysely for `dsn` (ADR-0062 seam). The production
+   * `LlmClientCache` uses this to construct the always-on writer from `CODEMASTER_PG_CORE_DSN`.
+   */
+  public static fromDsn(args: { dsn: string }): PostgresLlmCallsTelemetryWriter {
+    return new PostgresLlmCallsTelemetryWriter({ db: tenantKysely<unknown>(args.dsn) });
+  }
+
+  public async recordCall(args: {
+    installationId: string;
+    requestId: string;
+    model: string;
+    promptTokens: number;
+    completionTokens: number;
+    latencyMs: number;
+    costUsdCents: number;
+    status: "ok" | "failed" | "timeout";
+    createdAt: Date;
+  }): Promise<void> {
+    // tenancy: filtered on installation_id (the column is written explicitly in the INSERT target).
+    await sql`
+      INSERT INTO telemetry.llm_calls
+        (llm_call_id, installation_id, request_id, model, prompt_tokens, completion_tokens,
+         latency_ms, cost_usd_cents, payload_blob_id, status, created_at)
+      VALUES (${this.uuid4()}::uuid, ${args.installationId}::uuid, ${args.requestId}::uuid,
+              ${args.model}, ${args.promptTokens}, ${args.completionTokens}, ${args.latencyMs},
+              ${args.costUsdCents}, ${this.uuid4()}::uuid, ${args.status}, ${args.createdAt})
+    `.execute(this.db);
+  }
+
+  /** Mint a random RFC4122 v4 UUID via the platform randomness seam (the Python `uuid.uuid4()`). */
+  private uuid4(): string {
+    const b = Buffer.from(this.random.tokenBytes(16));
+    b[6] = (b[6]! & 0x0f) | 0x40; // version 4
+    b[8] = (b[8]! & 0x3f) | 0x80; // RFC4122 variant
+    const h = b.toString("hex");
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
   }
 }
-
-/** No-op identity redactor default. */
-const NOOP_ARCHIVE_REDACTOR: ArchiveRedactor = { redact: (text: string): string => text };
 
 // ─── the client ─────────────────────────────────────────────────────────────────────────────────
 
@@ -191,23 +272,28 @@ export class LlmClient {
   private readonly costCap: CostCapEnforcer;
   private readonly blobStore: BlobStore;
   private readonly archiveRedactor: ArchiveRedactor;
+  private readonly telemetry: LlmCallsTelemetryWriter;
   private readonly outputSafety: OutputSafetyValidator;
   private readonly clock: Clock;
   private readonly random: SystemRandom;
 
   public constructor(args: {
     sdk: LlmSdk;
-    costCap?: CostCapEnforcer;
-    blobStore?: BlobStore;
+    // cost-cap + blob are REQUIRED — no faking-stub default. Production injects the REAL Postgres-backed
+    // implementations (the always-on path); unit / cassette tests inject the in-memory doubles.
+    costCap: CostCapEnforcer;
+    blobStore: BlobStore;
     archiveRedactor?: ArchiveRedactor;
+    telemetry?: LlmCallsTelemetryWriter;
     outputSafety?: OutputSafetyValidator;
     clock?: Clock;
   }) {
     this.clock = args.clock ?? new WallClock();
     this.sdk = args.sdk;
-    this.costCap = args.costCap ?? new AllowAllCostCap();
-    this.blobStore = args.blobStore ?? new InMemoryBlobStore(this.clock);
-    this.archiveRedactor = args.archiveRedactor ?? NOOP_ARCHIVE_REDACTOR;
+    this.costCap = args.costCap;
+    this.blobStore = args.blobStore;
+    this.archiveRedactor = args.archiveRedactor ?? REAL_ARCHIVE_REDACTOR;
+    this.telemetry = args.telemetry ?? NOOP_TELEMETRY_WRITER;
     this.outputSafety = args.outputSafety ?? new OutputSafetyValidator();
     this.random = new SystemRandom();
   }
@@ -300,9 +386,21 @@ export class LlmClient {
         role: args.role,
       });
     } catch (e) {
-      // The Python distinguishes TimeoutError from other exceptions for the telemetry status label
-      // only; both map to LlmInvocationError on the observable path. The failure-row write + cost-cap
-      // reservation release + Langfuse export are off-path side-effects (deferred follow-ups).
+      // The Python distinguishes TimeoutError (status='timeout') from any other exception
+      // (status='failed') for the telemetry status label; BOTH map to LlmInvocationError on the
+      // observable path. The failure-row write (so cost telemetry stays accurate even on failure) and
+      // the cost-cap reservation release ARE on the always-on production path and are reproduced here.
+      // The Langfuse export stays intentionally OFF (env-gated in Python). Mirrors client.py:421-476.
+      const failedLatencyMs = Math.trunc((this.clock.monotonic() - started) * 1000);
+      const failureStatus: "failed" | "timeout" = isTimeoutError(e) ? "timeout" : "failed";
+      await this.recordFailure({
+        installationId: telemetryIid,
+        requestId,
+        model,
+        latencyMs: failedLatencyMs,
+        status: failureStatus,
+      });
+      await this.releaseCostCapReservation({ installationId: telemetryIid, estimated });
       throw new LlmInvocationError(`bedrock invocation failed: ${formatErr(e)}`);
     }
     const latencyMs = Math.trunc((this.clock.monotonic() - started) * 1000);
@@ -348,6 +446,23 @@ export class LlmClient {
     // so cost-cap accounting still runs (record below). This IS on the observable path.
     const decision = this.outputSafety.validate(contentText);
     const blocked = decision.decision !== "allow";
+    // Validator-aware status: a blocked completion is recorded as 'failed' (the tokens were spent, so
+    // the row + cost accounting still run). Mirrors the Python `call_status = "ok" if allow else "failed"`.
+    const callStatus: "ok" | "failed" = blocked ? "failed" : "ok";
+
+    // Write the telemetry.llm_calls row with the validator-aware status (the always-on production path;
+    // a no-op on the default writer). Ordered before record_call_cost, matching client.py:512-543.
+    await this.telemetry.recordCall({
+      installationId: telemetryIid,
+      requestId,
+      model,
+      promptTokens,
+      completionTokens,
+      latencyMs,
+      costUsdCents: computedFinalCents,
+      status: callStatus,
+      createdAt: this.clock.now(),
+    });
 
     // record_call_cost (off-path side-effect, but harmless on the in-memory default). Mirrors Python.
     await this.costCap.recordCallCost({
@@ -402,6 +517,61 @@ export class LlmClient {
     return redacted;
   }
 
+  /**
+   * Write the failure telemetry.llm_calls row (status='failed'|'timeout') with literal-zero tokens +
+   * cost — the Python `_record_failure`. Wrapped in a guard so a telemetry write failure NEVER masks
+   * the original SDK exception (the Python `except Exception as e: _LOG.warning(...)`), and the
+   * LlmInvocationError still propagates to the caller.
+   */
+  private async recordFailure(args: {
+    installationId: string;
+    requestId: string;
+    model: string;
+    latencyMs: number;
+    status: "failed" | "timeout";
+  }): Promise<void> {
+    try {
+      await this.telemetry.recordCall({
+        installationId: args.installationId,
+        requestId: args.requestId,
+        model: args.model,
+        promptTokens: 0,
+        completionTokens: 0,
+        latencyMs: args.latencyMs,
+        costUsdCents: 0,
+        status: args.status,
+        createdAt: this.clock.now(),
+      });
+    } catch {
+      // Last-ditch: a telemetry write failure must not mask the SDK error. Mirrors the Python
+      // `_record_failure` swallow (`_LOG.warning("failed to record llm_calls failure row: %s", e)`).
+    }
+  }
+
+  /**
+   * Release the optimistic `estimated` reservation made by the pre-call check after the SDK call
+   * failed — modeled as cost_cents=0 so the diff `0 - estimated` walks the daily total back. Wrapped in
+   * a guard so a release failure never masks the original SDK exception. Mirrors the Python
+   * `_release_cost_cap_reservation`. (A no-op on the AllowAll default; meaningful on the atomic
+   * PostgresCostCapEnforcer.)
+   */
+  private async releaseCostCapReservation(args: {
+    installationId: string;
+    estimated: number;
+  }): Promise<void> {
+    try {
+      await this.costCap.recordCallCost({
+        installationId: args.installationId,
+        costCents: 0,
+        today: isoDate(this.clock.now()),
+        estimatedCents: args.estimated,
+      });
+    } catch {
+      // Defense in depth — a release failure may over-count the daily total by `estimated` for this
+      // call, but must not mask the original SDK error. Mirrors the Python warning-and-continue.
+    }
+  }
+
   /** Mint a random RFC4122 v4 UUID via the platform randomness seam (the Python `uuid.uuid4()`). */
   private uuid4(): string {
     const b = Buffer.from(this.random.tokenBytes(16));
@@ -410,6 +580,16 @@ export class LlmClient {
     const h = b.toString("hex");
     return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
   }
+}
+
+/**
+ * True iff `e` should be recorded as a `timeout` (vs `failed`) telemetry status — the Python
+ * `except TimeoutError` branch. The SDK adapter maps a Bedrock timeout to {@link LlmTimeoutError}; we
+ * also match an error whose `name` is `TimeoutError` (a raw transport abort) for robustness. Everything
+ * else is `failed`.
+ */
+function isTimeoutError(e: unknown): boolean {
+  return e instanceof LlmTimeoutError || (e instanceof Error && e.name === "TimeoutError");
 }
 
 // The all-ones UUID placeholder the Python TELEMETRY_MISSING_INSTALLATION_ID sentinel mints. Off the

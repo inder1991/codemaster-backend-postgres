@@ -1,18 +1,20 @@
 // Cassette replay seam — mirrors the Python tests/integration/test_bedrock_review_chunk_cassettes.py
 // `_CassetteSdk` + `_CacheShim` + the InMemoryCostCapEnforcer / BlobStoreInMemoryAdapter wiring.
 //
-// This is the DUAL-RUN REPLAY SEAM: a cassette SDK stub that satisfies the LlmSdk Protocol by returning
-// the recorded `response` dict (the same response the real anthropic SDK would have produced), plus an
-// allow-all in-memory cost-cap, an in-memory blob store, and a CacheShim whose `forRole` returns a
-// pre-built LlmClient — so `doReview` can run against a cassette with NO network, NO DB, NO real SDK.
+// TEST-SUPPORT ONLY. This file lives under `test/support/` (NOT the `apps/backend/src` tree): it is the
+// DUAL-RUN REPLAY SEAM, a cassette SDK stub that satisfies the LlmSdk Protocol by returning the recorded
+// `response` dict (the same response the real anthropic SDK would have produced), plus an allow-all
+// in-memory cost-cap, an in-memory blob store, and a CacheShim whose `forRole` returns a pre-built
+// LlmClient — so `doReview` can run against a cassette with NO network, NO DB, NO real SDK. NONE of
+// these doubles ship on the production path: the production `LlmClientCache.defaultClientFactory`
+// injects the REAL Postgres-backed cost-cap / blob / telemetry collaborators instead.
 //
 // NO @anthropic-ai/* import — the SDK is the injected LlmSdk Protocol, and the cassette stub satisfies it.
 
 import { WallClock } from "#platform/clock.js";
 
 import { InMemoryCostCapEnforcer } from "#backend/cost/enforcer.js";
-
-import { type BlobStore, type LlmSdk, LlmClient } from "./client.js";
+import { type BlobStore, type LlmSdk, LlmClient } from "#backend/integrations/llm/client.js";
 
 import type { BlobRef } from "#contracts/blob_ref.v1.js";
 
@@ -43,7 +45,9 @@ export class CassetteSdk implements LlmSdk {
 
 /**
  * In-memory blob store mirroring the Python `BlobStoreInMemoryAdapter`. Retains the bytes (keyed by
- * `installationId\0key`) so a test could assert on them; returns a well-formed BlobRef.
+ * `installationId\0key`) so a test could assert on them; returns a well-formed BlobRef. This is the
+ * test double that the (now-required) `LlmClient.blobStore` arg is given in tests — production injects
+ * the REAL `BlobStorePostgresAdapter` instead.
  */
 export class InMemoryBlobStoreAdapter implements BlobStore {
   private readonly clock = new WallClock();

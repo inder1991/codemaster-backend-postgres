@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { load as yamlLoad } from "js-yaml";
 import { describe, expect, it } from "vitest";
 
-import { type CassetteSpec, cassetteCache } from "#backend/integrations/llm/cassette_sdk.js";
+import { type CassetteSpec, cassetteCache } from "../../support/llm/cassette_sdk.js";
 import { doReview } from "#backend/review/review_activity.js";
 
 import { computeChunkId } from "#contracts/diff_chunking.v1.js";

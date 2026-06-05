@@ -6,6 +6,8 @@ import { InMemoryCostCapEnforcer } from "#backend/cost/enforcer.js";
 import { LlmClient, type LlmSdk } from "#backend/integrations/llm/client.js";
 import { LlmInvocationError, LlmOutputUnsafeError } from "#backend/integrations/llm/errors.js";
 
+import { InMemoryBlobStoreAdapter } from "../../support/llm/cassette_sdk.js";
+
 import type { LlmMessage } from "#contracts/llm_message.v1.js";
 
 // Unit coverage of the PARITY-CRITICAL invoke_model transform (client.py lines 491-584): content_text
@@ -27,6 +29,7 @@ function newClient(response: Record<string, unknown>): LlmClient {
   return new LlmClient({
     sdk: stubSdk(response),
     costCap: new InMemoryCostCapEnforcer({ globalCapCents: 500_000, perOrgCapCents: 100_000 }),
+    blobStore: new InMemoryBlobStoreAdapter(),
     clock: new FakeClock(),
   });
 }
@@ -135,6 +138,7 @@ describe("LlmClient.invokeModel — pure transform", () => {
         },
       },
       costCap: new InMemoryCostCapEnforcer({ globalCapCents: 500_000, perOrgCapCents: 100_000 }),
+      blobStore: new InMemoryBlobStoreAdapter(),
       clock: new FakeClock(),
     });
     await expect(invoke(client)).rejects.toBeInstanceOf(LlmInvocationError);

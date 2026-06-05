@@ -32,10 +32,17 @@
  *     the settings row (`row.provider`, e.g. `"bedrock"`); today only Bedrock is wired, so it is
  *     accepted-and-ignored — a future second provider branches on it here.
  *   - `clientFactory(sdk)` → an {@link LlmClient}. The default ({@link defaultClientFactory}) builds the
- *     REAL `LlmClient` with its in-client defaults. For THIS de-stub step the cost-cap + blob-store
- *     stay the `LlmClient` defaults (allow-all in-memory cost-cap + in-memory blob store) — the
- *     production `PostgresCostCapEnforcer` + object-store blob adapter are wired in the NEXT workflow
- *     (the cassette dual-run never exercises a real cost-cap/blob, so the defaults are faithful).
+ *     REAL `LlmClient` wired with the REAL, ALWAYS-ON production collaborators — the
+ *     {@link PostgresCostCapEnforcer} (atomic optimistic-reservation cost gate, ADR-0062 single-pool
+ *     Kysely), the {@link BlobStorePostgresAdapter} (zstd-compressed payload archive into
+ *     `telemetry.llm_payloads`), and the {@link PostgresLlmCallsTelemetryWriter} (one `telemetry.llm_calls`
+ *     row per invocation). All three are built from `CODEMASTER_PG_CORE_DSN` + the shared {@link WallClock}
+ *     and memoized once per process ({@link sharedClientCollaborators}) so every role's client shares the
+ *     same singletons — exactly the Python `_client_factory` closure that captures the spine's shared
+ *     `cost_cap` / `blob_store` / `session_factory` / `clock`. After this de-stub step the
+ *     production `forRole` path is FULLY real: there is NO allow-all / in-memory faking stub on it.
+ *     (The cassette / unit tests build their own `LlmClient` with the in-memory test doubles — those
+ *     never flow through `defaultClientFactory`.)
  *
  * ── ADR-0061 D2 (shutdown teardown) ──
  * {@link LlmClientCache.aclose} closes every cached client's SDK pool under the same lock `for_role`
@@ -43,16 +50,28 @@
  * shutdown rather than reclaimed by GC on the workflow sandbox loop (the ADR-0061 crash class).
  */
 
+import { type Clock, WallClock } from "#platform/clock.js";
+
+import { BlobStorePostgresAdapter } from "#backend/adapters/blobstore_postgres.js";
+import { PostgresCostCapEnforcer } from "#backend/cost/postgres_enforcer.js";
 import { KeyedMutex } from "#backend/integrations/github/installation_token.js";
 import { AnthropicBedrockSdkAdapter } from "#backend/integrations/llm/bedrock_sdk_adapter.js";
+import {
+  type BlobStore,
+  type LlmCallsTelemetryWriter,
+  type LlmSdk,
+  LlmClient,
+  PostgresLlmCallsTelemetryWriter,
+} from "#backend/integrations/llm/client.js";
 import { type LlmCredentialsProvider } from "#backend/integrations/llm/credentials_provider.js";
 import { LlmRoleNotConfiguredError } from "#backend/integrations/llm/errors.js";
-import { type LlmSdk, LlmClient } from "#backend/integrations/llm/client.js";
 import {
   type LlmProviderRole,
   type LlmProviderSettings,
   type RotationFingerprintEntry,
 } from "#backend/integrations/llm/llm_provider_settings_repo.js";
+
+import type { CostCapEnforcer } from "#backend/cost/enforcer.js";
 
 // ─── The repo slice the cache depends on (the two reads it uses) ────────────────────────────────
 
@@ -104,14 +123,75 @@ export const defaultSdkFactory: SdkFactory = (args: {
 };
 
 /**
- * Production default {@link ClientFactory}: the REAL `LlmClient` with its in-client defaults.
- *
- * For THIS de-stub step the cost-cap + blob-store stay the `LlmClient` defaults (allow-all in-memory
- * cost-cap + in-memory blob store); the production `PostgresCostCapEnforcer` + object-store blob
- * adapter are wired in the NEXT workflow.
+ * The REAL, ALWAYS-ON production collaborators an {@link LlmClient} needs beyond its SDK — the
+ * Postgres-backed cost-cap, blob store, and `llm_calls` telemetry writer, plus the shared clock. These
+ * are the objects that REPLACE the (now-removed) in-client faking stubs on the production path.
+ */
+export type ClientCollaborators = {
+  readonly costCap: CostCapEnforcer;
+  readonly blobStore: BlobStore;
+  readonly telemetry: LlmCallsTelemetryWriter;
+  readonly clock: Clock;
+};
+
+/**
+ * Process-wide memo of the shared production collaborators, keyed on DSN. The Python `_client_factory`
+ * captures the spine's shared `cost_cap` / `blob_store` / `session_factory` / `clock` singletons; here
+ * we mirror that by building them ONCE per DSN and reusing them across every role's client. Each
+ * Postgres collaborator is built via its `fromDsn` constructor, which reuses the ADR-0062 single pool —
+ * so this memo is belt-and-suspenders against constructing redundant Kysely wrappers per `forRole`.
+ */
+const SHARED_COLLABORATORS = new Map<string, ClientCollaborators>();
+
+/**
+ * Read the canonical core-store DSN from the environment (static access — no dynamic indexing, so no
+ * object-injection sink). Throws loudly when unset: the production client cannot wire a real cost-cap /
+ * blob / telemetry without a database, and a silent fall-through to a faking stub is exactly the hazard
+ * this de-stub step removes.
+ */
+function requireCoreDsn(): string {
+  const dsn = process.env.CODEMASTER_PG_CORE_DSN;
+  if (dsn === undefined || dsn === "") {
+    throw new Error(
+      "CODEMASTER_PG_CORE_DSN is not set; the production LlmClientCache cannot construct the " +
+        "PostgresCostCapEnforcer / BlobStorePostgresAdapter / PostgresLlmCallsTelemetryWriter",
+    );
+  }
+  return dsn;
+}
+
+/**
+ * Build (or return the memoized) shared production collaborators for `dsn`. The cost-cap is constructed
+ * with `readCapsFromDb: true` — the production posture the frozen Python worker wires (live caps from
+ * `core.cost_cap_overrides` + `core.cost_cap_settings`, env-var seed as first-boot fallback).
+ */
+export function sharedClientCollaborators(dsn: string): ClientCollaborators {
+  const existing = SHARED_COLLABORATORS.get(dsn);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const clock = new WallClock();
+  const collaborators: ClientCollaborators = {
+    costCap: PostgresCostCapEnforcer.fromDsn({ dsn, clock, readCapsFromDb: true }),
+    blobStore: BlobStorePostgresAdapter.fromDsn({ dsn, clock }),
+    telemetry: PostgresLlmCallsTelemetryWriter.fromDsn({ dsn }),
+    clock,
+  };
+  SHARED_COLLABORATORS.set(dsn, collaborators);
+  return collaborators;
+}
+
+/**
+ * Production default {@link ClientFactory}: the REAL `LlmClient` wired with the REAL, ALWAYS-ON
+ * production collaborators — {@link PostgresCostCapEnforcer} + {@link BlobStorePostgresAdapter} +
+ * {@link PostgresLlmCallsTelemetryWriter}, all built from `CODEMASTER_PG_CORE_DSN` + the shared
+ * {@link WallClock} and memoized once per process. This is the FULLY-real `forRole` path: NO allow-all
+ * cost-cap, NO in-memory blob store, NO faking stub of any kind flows through here. The cassette / unit
+ * tests construct their own `LlmClient` with the in-memory test doubles and NEVER call this factory.
  */
 export const defaultClientFactory: ClientFactory = (args: { sdk: LlmSdk }): LlmClient => {
-  return new LlmClient({ sdk: args.sdk });
+  const { costCap, blobStore, telemetry, clock } = sharedClientCollaborators(requireCoreDsn());
+  return new LlmClient({ sdk: args.sdk, costCap, blobStore, telemetry, clock });
 };
 
 // ─── Cache envelope ────────────────────────────────────────────────────────────────────────────

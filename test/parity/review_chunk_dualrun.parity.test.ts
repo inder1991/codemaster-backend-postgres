@@ -33,6 +33,8 @@ import {
   type LlmClientCacheLike,
 } from "#backend/review/review_activity.js";
 
+import { InMemoryBlobStoreAdapter } from "../support/llm/cassette_sdk.js";
+
 import { computeChunkId } from "#contracts/diff_chunking.v1.js";
 import { ReviewContextV1 } from "#contracts/review_context.v1.js";
 import type { ReviewChunkResponseV1 } from "#contracts/review_chunk_response.v1.js";
@@ -90,6 +92,7 @@ function cacheReturning(
   const client = new LlmClient({
     sdk,
     costCap: costCap ?? new InMemoryCostCapEnforcer({ globalCapCents: 500_000, perOrgCapCents: 100_000 }),
+    blobStore: new InMemoryBlobStoreAdapter(),
     // FakeClock so latency/created_at are deterministic (off the observable path, but disciplined).
     clock: new FakeClock(),
   });
