@@ -72,7 +72,7 @@ import { redactPii } from "#backend/redact/pii_redactor.js";
 import { OutputSafetyValidator } from "#backend/security/output_safety.js";
 
 import { LlmInvocationError, LlmOutputUnsafeError, LlmTimeoutError } from "./errors.js";
-import { hashMessagesForLedger, type LlmInvocationLedger } from "./invocation_ledger.js";
+import { hashMessagesForLedger, type LlmInvocationLedgerPort } from "./invocation_ledger.js";
 
 import type { BlobRef } from "#contracts/blob_ref.v1.js";
 import { LlmInvokeResultV1 } from "#contracts/llm_invoke_result.v1.js";
@@ -298,7 +298,7 @@ export class LlmClient {
   // `idempotency` context is passed to invokeModel, a HIT replays the stored provider response and SKIPS
   // the paid SDK call; a MISS stores the raw response BEFORE returning. Platform jobs / unit tests leave
   // it undefined.
-  private readonly ledger: LlmInvocationLedger | undefined;
+  private readonly ledger: LlmInvocationLedgerPort | undefined;
 
   public constructor(args: {
     sdk: LlmSdk;
@@ -316,7 +316,7 @@ export class LlmClient {
     clock?: Clock;
     // TS hardening divergence (ADR-0068) — OPTIONAL idempotency ledger. Absent → exactly-as-Python (no
     // replay). Production review wiring injects the REAL Postgres-backed ledger; platform jobs omit it.
-    ledger?: LlmInvocationLedger;
+    ledger?: LlmInvocationLedgerPort;
   }) {
     this.clock = args.clock ?? new WallClock();
     this.sdk = args.sdk;
@@ -396,69 +396,18 @@ export class LlmClient {
     const promptChars = args.messages.reduce((acc, m) => acc + m.content.length, 0);
     const estimated = estimateCentsPreCall(model, promptChars);
 
-    // Cost-cap pre-call check (FAIL-CLOSED). Retry ONCE on lock-timeout (S14.D edge case 5: the
-    // telemetry.cost_daily row lock is contended under `SET LOCAL lock_timeout='2s'` →
-    // CostCapLockTimeoutError); a second timeout fails closed via BedrockBudgetExceededError so no LLM
-    // invocation proceeds without an atomic cost record. 1:1 with the frozen Python invoke_model.
-    const todayForCheck = isoDate(this.clock.now());
-    try {
-      await this.costCap.checkOrRaise({
-        installationId: telemetryIid,
-        estimatedCents: estimated,
-        today: todayForCheck,
-      });
-    } catch (e) {
-      if (!(e instanceof CostCapLockTimeoutError)) {
-        throw e;
-      }
-      try {
-        await this.costCap.checkOrRaise({
-          installationId: telemetryIid,
-          estimatedCents: estimated,
-          today: todayForCheck,
-        });
-      } catch (retryErr) {
-        if (retryErr instanceof CostCapLockTimeoutError) {
-          throw new BedrockBudgetExceededError({
-            reason:
-              "cost-cap row lock timed out twice; failing closed to preserve daily-budget invariant",
-            scope: "kill_switch",
-          });
-        }
-        throw retryErr;
-      }
-    }
-
-    // Archive request payload BEFORE invocation (forensics even if the SDK raises). Off the observable
-    // path; the BlobRef is discarded (the result carries the RESPONSE blob ref).
-    const redactedMessages = args.messages.map((m) => ({
-      role: m.role,
-      content: this.archiveRedactor.redact(m.content),
-    }));
-    await this.blobStore.put({
-      installationId: telemetryIid,
-      key: `llm-payloads/${requestId}/request.json`,
-      body: utf8(
-        jsonCompact({
-          model,
-          messages: redactedMessages,
-          max_tokens: maxTokens,
-          purpose,
-        }),
-      ),
-      contentType: "application/json",
-    });
-
-    // TS hardening divergence (ADR-0068) — Python has NO invocation ledger: it ALWAYS calls the SDK, so
-    // a post-call persistence failure + a Temporal retry buys a SECOND paid completion. When this client
-    // has a `ledger` AND the caller passed an `idempotency` context, compute the stable key from the
-    // deterministic activity inputs (reviewId + chunkId + role + model + prompt hash + toolSchemaVersion)
-    // and probe the ledger FIRST. On a HIT we REPLAY the stored provider response and SKIP the paid SDK
-    // call entirely (the only non-repeatable, paid edge); the post-call transform + output-safety +
-    // telemetry/Langfuse below run UNCHANGED against the replayed response (owner decision: keep
-    // telemetry/Langfuse as replayable side effects against the stored result). When `ledger` /
-    // `idempotency` are absent (platform jobs / unit tests) `idempotencyKey` is null and the path below
-    // is identical to the frozen Python (invoke, no ledger).
+    // TS hardening divergence (ADR-0068, "check the idempotency record FIRST" — owner decision verbatim).
+    // Python has NO invocation ledger: it ALWAYS calls the SDK, so a post-call persistence failure + a
+    // Temporal retry buys a SECOND paid completion. When this client has a `ledger` AND the caller passed
+    // an `idempotency` context, compute the stable key from the deterministic activity inputs (reviewId +
+    // chunkId + role + model + prompt hash + toolSchemaVersion) and probe the ledger FIRST — BEFORE the
+    // cost-cap reservation and the request archive. On a HIT the call is a PURE READ: the cost was gated +
+    // recorded on the first invoke, so checkOrRaise, the request archive, AND recordCallCost (below) are
+    // ALL skipped, so a retried chunk does NOT double-count spend in cost_daily. The SDK call is the only
+    // non-repeatable, paid edge. The post-call transform + output-safety + telemetry/Langfuse below DO run
+    // against the replayed response (owner decision: keep telemetry/Langfuse as replayable observability
+    // side effects). When `ledger` / `idempotency` are absent (platform jobs / unit tests) `idempotencyKey`
+    // is null, `isReplay` is false, and the path is identical to the frozen Python (invoke, no ledger).
     const idempotencyKey =
       this.ledger !== undefined && args.idempotency !== undefined
         ? this.ledger.computeKey({
@@ -472,18 +421,72 @@ export class LlmClient {
         : null;
 
     const started = this.clock.monotonic();
-    let response: Record<string, unknown>;
-
     const replayed =
       this.ledger !== undefined && idempotencyKey !== null
         ? await this.ledger.lookup({ key: idempotencyKey, installationId: telemetryIid })
         : null;
+    const isReplay = replayed !== null;
+    let response: Record<string, unknown>;
 
-    if (replayed !== null) {
-      // HIT — replay the stored provider response; the paid SDK call is SKIPPED. No store (the row
-      // already exists). The transform + telemetry/Langfuse below run against this replayed response.
+    if (isReplay) {
+      // HIT — replay the stored provider response; the paid SDK call, the cost-cap reservation, and the
+      // request archive are all SKIPPED (already done on the first invoke). No store (the row exists). The
+      // transform + telemetry/Langfuse below run against this replayed response.
       response = replayed;
     } else {
+      // MISS — the paid path. Cost-cap pre-call check (FAIL-CLOSED). Retry ONCE on lock-timeout (S14.D
+      // edge case 5: the telemetry.cost_daily row lock is contended under `SET LOCAL lock_timeout='2s'` →
+      // CostCapLockTimeoutError); a second timeout fails closed via BedrockBudgetExceededError so no LLM
+      // invocation proceeds without an atomic cost record. 1:1 with the frozen Python invoke_model.
+      const todayForCheck = isoDate(this.clock.now());
+      try {
+        await this.costCap.checkOrRaise({
+          installationId: telemetryIid,
+          estimatedCents: estimated,
+          today: todayForCheck,
+        });
+      } catch (e) {
+        if (!(e instanceof CostCapLockTimeoutError)) {
+          throw e;
+        }
+        try {
+          await this.costCap.checkOrRaise({
+            installationId: telemetryIid,
+            estimatedCents: estimated,
+            today: todayForCheck,
+          });
+        } catch (retryErr) {
+          if (retryErr instanceof CostCapLockTimeoutError) {
+            throw new BedrockBudgetExceededError({
+              reason:
+                "cost-cap row lock timed out twice; failing closed to preserve daily-budget invariant",
+              scope: "kill_switch",
+            });
+          }
+          throw retryErr;
+        }
+      }
+
+      // Archive request payload BEFORE invocation (forensics even if the SDK raises). Off the observable
+      // path; the BlobRef is discarded (the result carries the RESPONSE blob ref).
+      const redactedMessages = args.messages.map((m) => ({
+        role: m.role,
+        content: this.archiveRedactor.redact(m.content),
+      }));
+      await this.blobStore.put({
+        installationId: telemetryIid,
+        key: `llm-payloads/${requestId}/request.json`,
+        body: utf8(
+          jsonCompact({
+            model,
+            messages: redactedMessages,
+            max_tokens: maxTokens,
+            purpose,
+          }),
+        ),
+        contentType: "application/json",
+      });
+
       try {
         response = await this.sdk.createMessage({
           model,
@@ -605,13 +608,17 @@ export class LlmClient {
       createdAt: this.clock.now(),
     });
 
-    // record_call_cost (off-path side-effect, but harmless on the in-memory default). Mirrors Python.
-    await this.costCap.recordCallCost({
-      installationId: telemetryIid,
-      costCents: computedFinalCents,
-      today: isoDate(this.clock.now()),
-      estimatedCents: estimated,
-    });
+    // record_call_cost (off-path side-effect, but harmless on the in-memory default). Mirrors Python on
+    // the paid path. SKIPPED on a replay HIT (ADR-0068 check-first): the spend was already recorded on the
+    // first invoke, so re-running it would double-count cost_daily for a single paid completion.
+    if (!isReplay) {
+      await this.costCap.recordCallCost({
+        installationId: telemetryIid,
+        costCents: computedFinalCents,
+        today: isoDate(this.clock.now()),
+        estimatedCents: estimated,
+      });
+    }
 
     // Langfuse trace export (fire-and-forget). Carries the validator-aware status so blocked completions
     // surface in observability without leaking the unsafe text (completion_text is "" when blocked).

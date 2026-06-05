@@ -190,11 +190,14 @@ which the dual-run parity oracle still covers. This is NOT a stub: the ledger, i
 
 - **A retry no longer buys a duplicate paid completion** when the ledger is wired — the dominant spend
   leak this addendum closes.
-- **Cost-cap on replay**: the replay path re-runs `recordCallCost` against the stored response. Re-applying
-  internal cost accounting on a replay can slightly over-count the daily budget, but it NEVER buys a real
-  completion (the external paid edge — the SDK call — is skipped). This is a deliberate narrow-scope
-  trade: the dollar that matters (the Bedrock call) is saved; the internal accounting row is idempotent
-  enough for the daily-budget invariant.
+- **Cost-cap on replay (check-first)**: the owner spec says "check the idempotency record FIRST … make
+  provider invocation the only non-repeatable paid edge." `invokeModel` probes the ledger BEFORE the
+  cost-cap reservation and the request archive, so a replay HIT is a PURE READ: `checkOrRaise`, the
+  request-payload archive, AND `recordCallCost` are all skipped — the cost was gated + recorded on the
+  first invoke, so a retried chunk does NOT double-count `cost_daily`. `telemetry.recordCall` + the
+  Langfuse export DO re-fire on the replay (replayable observability side effects against the stored
+  result). Pinned by the always-on unit test `test/unit/llm/llm_client_idempotency.test.ts` (asserts
+  `checkOrRaise×0` + `recordCallCost×0` on the replay) via the `LlmInvocationLedgerPort` injection seam.
 - **A ledger write failure is guarded** so it never masks a successful invocation; the fallback is a retry
   re-paying (the pre-ADR-0068 Python behavior), strictly no worse than before.
 

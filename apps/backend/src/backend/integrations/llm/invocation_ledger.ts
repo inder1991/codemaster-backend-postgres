@@ -60,6 +60,19 @@ export type LlmInvocationLedgerEntry = {
   providerResponse: Record<string, unknown>;
 };
 
+/**
+ * The injection seam the {@link LlmClient} depends on — the concrete {@link LlmInvocationLedger}
+ * satisfies it structurally. Typing the client field to this PORT (not the concrete class) lets unit
+ * tests inject an in-memory fake without a Postgres pool, exactly as every other client collaborator
+ * (cost-cap, blob, telemetry, Langfuse) is a port. The Postgres-backed `LlmInvocationLedger` is the only
+ * production implementation.
+ */
+export type LlmInvocationLedgerPort = {
+  computeKey(inputs: LlmInvocationKeyInputs): string;
+  lookup(args: { key: string; installationId: string }): Promise<Record<string, unknown> | null>;
+  store(args: { key: string; entry: LlmInvocationLedgerEntry }): Promise<void>;
+};
+
 /** Field separator in the key pre-image — `\0` cannot appear in any of the (uuid / token) parts. */
 const KEY_FIELD_SEP = "\0";
 
