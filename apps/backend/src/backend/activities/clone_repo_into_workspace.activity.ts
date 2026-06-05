@@ -9,7 +9,7 @@
  * `CloneFailedError` / `WorkspaceTooLargeError` taxonomy + `byteSizeOfDir` walk are the part-1
  * imports under `#backend/integrations/git/`.
  *
- * ## Deferred lease/heartbeat seam (the load-bearing divergence from the Python)
+ * ## Lease state-assertion + heartbeat seam (REAL — de-stubbed, 1:1 with the Python)
  *
  * The Python activity steps 1+2 open a DB transaction to (a) assert the lease row is still
  * `ALLOCATED` via a no-op `transition_lease(from=ALLOCATED, to=ALLOCATED)` (raising `StateDrift`
@@ -17,20 +17,24 @@
  * It also calls `activity.heartbeat({...})` four times to surface in-flight progress within the
  * Temporal heartbeat window.
  *
- * THIS slice has NO DB (the lease/heartbeat machinery is DEFERRED). Per the established TS activity
- * pattern (explicit collaborator arg, NOT Python module-level `configure()` globals), both halves
- * are modeled as INJECTED collaborators with NO-OP defaults:
+ * Per the established TS activity pattern (explicit collaborator arg, NOT Python module-level
+ * `configure()` globals), both halves are modeled as INJECTED collaborators — but their PRODUCTION
+ * DEFAULTS are now the REAL impls (parts 1+2 of the workspace-lease subsystem have landed), matching
+ * the LLM-client de-stub pattern: NO no-op survives on the shipped path.
  *
- *   - `assertLeaseAllocated?`: defaults to a no-op. The production impl (when the lease subsystem
- *     lands) performs the DB state-assertion and throws on drift — i.e. the StateDrift error path.
- *     Tracked: FOLLOW-UP-workspace-lease-lifecycle.
- *   - `heartbeat?`: defaults to a no-op. The production impl forwards to Temporal's
- *     `activity.heartbeat(...)`. Tracked: FOLLOW-UP-clone-activity-heartbeats.
+ *   - `assertLeaseAllocated`: the production default ({@link defaultAssertLeaseAllocated}) opens ONE
+ *     transaction on the shared ADR-0062 pool (resolved from `CODEMASTER_PG_CORE_DSN`) and runs the
+ *     no-op `transitionLease(ALLOCATED → ALLOCATED, activity="clone_repo_into_workspace_activity")`,
+ *     asserting the outcome is `ALREADY_APPLIED` (an `APPLIED` outcome is structurally impossible for
+ *     a same-state transition and surfaces as a `RuntimeError`; a `StateDrift` propagates when the
+ *     row moved off `ALLOCATED`). It then bumps `LeaseRepo.touchHeartbeat(workspace_id)` in the SAME
+ *     transaction (1:1 with the Python `async with session.begin(): …`).
+ *   - `heartbeat`: the production default ({@link defaultHeartbeat}) forwards the phase payload to
+ *     Temporal's `Context.current().heartbeat(...)` (real Temporal heartbeat; works inside the worker
+ *     activity context). Tests inject a no-op double (there is no Temporal context under unit/integration).
  *
- * The observable output ({@link ClonedRepoV1}) does NOT depend on either collaborator, so the
- * no-op defaults make the lease/heartbeat machinery deferrable WITHOUT changing the parity surface.
- * The heartbeat call sites are preserved at the same four phase boundaries as the Python so the
- * production impl drops in with identical granularity.
+ * The observable output ({@link ClonedRepoV1}) does NOT depend on either collaborator. The four
+ * heartbeat call sites sit at the same four phase boundaries as the Python so the granularity matches.
  *
  * ## Error-wrapping rule (parity-significant)
  *
@@ -41,6 +45,8 @@
  *   - `byteSizeOfDir(workspace) > MAX_WORKSPACE_BYTES` → `WorkspaceTooLargeError`.
  */
 
+import { Context } from "@temporalio/activity";
+
 import { byteSizeOfDir } from "#backend/integrations/git/byte_size.js";
 import { type GitCloner, REPO_SUBDIR_NAME } from "#backend/integrations/git/cloner.js";
 import {
@@ -48,6 +54,11 @@ import {
   MAX_WORKSPACE_BYTES,
   WorkspaceTooLargeError,
 } from "#backend/integrations/git/errors.js";
+import { LeaseRepo } from "#backend/workspace/lease_repo.js";
+import { LeaseTransitionOutcome, transitionLease } from "#backend/workspace/transition.js";
+
+import { tenantKysely } from "#platform/db/database.js";
+import { type Clock, WallClock } from "#platform/clock.js";
 
 import { ClonedRepoV1 } from "#contracts/cloned_repo.v1.js";
 import type { CloneRepoIntoWorkspaceInput } from "#contracts/clone_repo_into_workspace_input.v1.js";
@@ -60,35 +71,94 @@ import type { CloneRepoIntoWorkspaceInput } from "#contracts/clone_repo_into_wor
 export const MIN_HEAD_SHA_LEN = 7;
 
 /**
- * Injected collaborators. Both are OPTIONAL with NO-OP defaults so the deferred lease/heartbeat
- * machinery does not change the observable output (see the module docstring).
+ * Injected collaborators. `cloner` is required; the lease-assertion + heartbeat seams are OPTIONAL
+ * with REAL production defaults (see {@link defaultAssertLeaseAllocated} / {@link defaultHeartbeat}).
+ * The defaults are NOT no-ops — they are the de-stubbed lease-lifecycle impls. Tests inject no-op
+ * doubles (there is no DB / Temporal activity context under unit/integration unless explicitly wired).
  */
 export type CloneRepoIntoWorkspaceDeps = {
   /** The git-driver seam (part-1 {@link GitCloner}). Production: subprocess-git; tests: a stub. */
   cloner: GitCloner;
   /**
-   * Lease-state assertion + heartbeat-bump, deferred. Default: no-op. The production impl asserts
-   * the lease row is still `ALLOCATED` and THROWS on drift (the StateDrift error path).
-   * Tracked: FOLLOW-UP-workspace-lease-lifecycle.
+   * Lease-state assertion + heartbeat-bump. Production default: {@link defaultAssertLeaseAllocated}
+   * (opens one txn on the shared ADR-0062 pool, asserts the lease is still `ALLOCATED`, bumps the
+   * heartbeat). Throws {@link StateDrift} when the row moved off `ALLOCATED`. Tests inject a no-op.
    */
   assertLeaseAllocated?: (workspaceId: string) => Promise<void>;
   /**
-   * Temporal in-flight progress heartbeat, deferred. Default: no-op. The production impl forwards
-   * the phase payload to `activity.heartbeat(...)`. Tracked: FOLLOW-UP-clone-activity-heartbeats.
+   * Temporal in-flight progress heartbeat. Production default: {@link defaultHeartbeat} (forwards to
+   * `Context.current().heartbeat(...)`). Tests inject a no-op (no Temporal context off-worker).
    */
   heartbeat?: (payload: unknown) => void;
 };
 
-// No-op defaults. The signatures match {@link CloneRepoIntoWorkspaceDeps} structurally; an impl may
-// omit unused trailing parameters (the established repo idiom for no-op collaborators).
-const noopAssertLease = async (): Promise<void> => {};
-const noopHeartbeat = (): void => {};
+/**
+ * REAL production default for `assertLeaseAllocated` (1:1 with the Python steps 1+2, one transaction).
+ *
+ * Resolves the shared ADR-0062 Kysely from `CODEMASTER_PG_CORE_DSN` (the same DSN/pool seam the
+ * allocate + release activities use), opens ONE transaction, and within it:
+ *   1. runs the no-op `transitionLease(ALLOCATED → ALLOCATED, activity="clone_repo_into_workspace_activity")`,
+ *      asserting the outcome is `ALREADY_APPLIED`. `APPLIED` is structurally impossible for a same-state
+ *      transition (the primitive returns `ALREADY_APPLIED` whenever `current === toState`, before the
+ *      UPDATE) — a defensive `RuntimeError` surfaces `LeaseTransitionOutcome`-table drift rather than
+ *      masking it (1:1 with the Python defensive raise). A `StateDrift` propagates when the row is
+ *      missing OR no longer `ALLOCATED` (e.g. a concurrent cancellation flipped it to RELEASE_REQUESTED).
+ *   2. bumps `LeaseRepo.touchHeartbeat(workspace_id)` so the janitor's orphan timer is reset — in the
+ *      SAME transaction, so the assertion + heartbeat commit atomically.
+ *
+ * The clone activity passes NO `expectedInstallationId` (the BF-9 Phase-B grace period — 1:1 with the
+ * Python, which also passes none here; `transitionLease` logs the structured WARN + proceeds).
+ *
+ * @throws {Error}       `CODEMASTER_PG_CORE_DSN` unset, OR the transition returned a non-`ALREADY_APPLIED`
+ *                       outcome (table drift).
+ * @throws {StateDrift}  the lease row is missing or no longer `ALLOCATED`.
+ */
+export async function defaultAssertLeaseAllocated(
+  workspaceId: string,
+  clock: Clock = new WallClock(),
+): Promise<void> {
+  const dsn = process.env.CODEMASTER_PG_CORE_DSN;
+  if (dsn === undefined || dsn === "") {
+    throw new Error(
+      "CODEMASTER_PG_CORE_DSN is not set and no assertLeaseAllocated injected; cannot assert the clone lease state",
+    );
+  }
+  const db = tenantKysely<unknown>(dsn);
+  await db.transaction().execute(async (tx) => {
+    const outcome = await transitionLease({
+      tx,
+      workspaceId,
+      fromState: "ALLOCATED",
+      toState: "ALLOCATED",
+      activity: "clone_repo_into_workspace_activity",
+      reason: "state-assertion noop",
+      clock,
+    });
+    if (outcome !== LeaseTransitionOutcome.ALREADY_APPLIED) {
+      throw new Error(
+        `clone_repo_into_workspace_activity: unexpected transitionLease outcome ${JSON.stringify(
+          outcome,
+        )} on heartbeat noop for workspace_id=${JSON.stringify(workspaceId)}`,
+      );
+    }
+    await new LeaseRepo({ db: tx }).touchHeartbeat(workspaceId);
+  });
+}
+
+/**
+ * REAL production default for `heartbeat` — forwards the phase payload to the Temporal activity
+ * heartbeat (1:1 with the Python `activity.heartbeat({...})`). Only valid inside a worker activity
+ * context; tests inject a no-op since there is no Temporal context off-worker.
+ */
+export function defaultHeartbeat(payload: unknown): void {
+  Context.current().heartbeat(payload);
+}
 
 /**
  * Clone into an EXISTING workspace. 1:1 with the frozen Python activity body.
  *
  * Steps:
- *   1. + 2. Assert lease state `ALLOCATED` + bump heartbeat (DEFERRED — injected no-op seam).
+ *   1. + 2. Assert lease state `ALLOCATED` + bump heartbeat ({@link defaultAssertLeaseAllocated}).
  *   3. + 4. `head_sha` precondition then git clone into `handle.derived_path` (no workflow subdir —
  *      the path is already workflow-scoped).
  *   5. Enforce {@link MAX_WORKSPACE_BYTES} (200 MiB).
@@ -99,16 +169,15 @@ export async function cloneRepoIntoWorkspace(
   deps: CloneRepoIntoWorkspaceDeps,
 ): Promise<ClonedRepoV1> {
   const { cloner } = deps;
-  const assertLeaseAllocated = deps.assertLeaseAllocated ?? noopAssertLease;
-  const heartbeat = deps.heartbeat ?? noopHeartbeat;
+  const assertLeaseAllocated = deps.assertLeaseAllocated ?? defaultAssertLeaseAllocated;
+  const heartbeat = deps.heartbeat ?? defaultHeartbeat;
 
   const workspaceId = req.handle.workspace_id;
   const workspacePath = req.handle.derived_path;
 
-  // 1. + 2. State assertion + heartbeat bump (DEFERRED). The production impl throws StateDrift if
-  // the lease row moved off ALLOCATED. The no-op default makes this deferrable without affecting
-  // the observable output. Mirrors the Python transaction + `activity.heartbeat({phase:
-  // "state_assertion_done"})`.
+  // 1. + 2. State assertion + heartbeat bump (REAL). The default opens one txn on the shared pool,
+  // asserts the lease is still ALLOCATED (throws StateDrift if it moved), and bumps the lease
+  // heartbeat. Mirrors the Python transaction + `activity.heartbeat({phase: "state_assertion_done"})`.
   await assertLeaseAllocated(workspaceId);
   heartbeat({ phase: "state_assertion_done" });
 
@@ -122,7 +191,7 @@ export async function cloneRepoIntoWorkspace(
   }
 
   // Heartbeat BEFORE the clone shell-out so a stalled subprocess is detectable within the heartbeat
-  // window (DEFERRED no-op). Mirrors the Python `activity.heartbeat({phase: "clone_started"})`.
+  // window. Mirrors the Python `activity.heartbeat({phase: "clone_started"})`.
   heartbeat({ phase: "clone_started" });
   try {
     await cloner.clone({
@@ -143,7 +212,7 @@ export async function cloneRepoIntoWorkspace(
       reason: e instanceof Error ? e.message : String(e),
     });
   }
-  // Heartbeat AFTER the clone returns (DEFERRED no-op).
+  // Heartbeat AFTER the clone returns.
   heartbeat({ phase: "clone_completed" });
 
   const byteSize = await byteSizeOfDir(workspacePath);
@@ -154,7 +223,7 @@ export async function cloneRepoIntoWorkspace(
       byteSize,
     });
   }
-  // Final heartbeat after the size check (DEFERRED no-op).
+  // Final heartbeat after the size check.
   heartbeat({ phase: "size_checked", byte_size: byteSize });
 
   // Construct via the Zod contract so schema_version (=2) + head_sha/byte_size constraints are

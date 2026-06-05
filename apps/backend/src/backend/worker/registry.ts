@@ -15,6 +15,7 @@
 
 import { aggregateFindings } from "../activities/aggregate_findings.activity.js";
 import { classifyFiles } from "../activities/classify_files.activity.js";
+import { cloneRepoIntoWorkspace } from "../activities/clone_repo_into_workspace.activity.js";
 import { computePolicyRules } from "../activities/compute_policy_rules.activity.js";
 import { loadRepoConfigActivity } from "../activities/load_repo_config.activity.js";
 import { persistReviewFindings } from "../activities/persist_review_findings.activity.js";
@@ -26,6 +27,7 @@ export const activities = {
   persistReviewFindings,
   aggregateFindings,
   classifyFiles,
+  cloneRepoIntoWorkspace,
   loadRepoConfigActivity,
   computePolicyRules,
   postCheckRun,

@@ -10,8 +10,12 @@
  *   - cloner throwing a CloneFailedError → re-thrown unchanged.
  *   - oversized tree → WorkspaceTooLargeError (byteSizeOfDir mocked over the cap, mirroring the
  *     Python `monkeypatch.setattr(_byte_size_of_dir, lambda _p: 1024)` idiom).
- *   - the no-op lease/heartbeat defaults do not affect the output; an injected assertLease/heartbeat
+ *   - injected no-op lease/heartbeat doubles do not affect the output; an injected assertLease/heartbeat
  *     is observed at the right phases, and a throwing assertLease surfaces (the StateDrift path).
+ *   - the REAL production defaults are de-stubbed (no no-op survives on the shipped path):
+ *     `defaultAssertLeaseAllocated` throws when `CODEMASTER_PG_CORE_DSN` is unset (its DB round-trip is
+ *     exercised against a disposable PG in the integration test), and `defaultHeartbeat` is the
+ *     Temporal-context forwarder. Tests inject no-op doubles since there is no DB / Temporal context here.
  *
  * Workspaces are created under os.tmpdir and removed after each test.
  */
@@ -24,6 +28,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   cloneRepoIntoWorkspace,
+  defaultAssertLeaseAllocated,
+  defaultHeartbeat,
   MIN_HEAD_SHA_LEN,
   StubCloner,
 } from "#backend/activities/clone_repo_into_workspace.activity.js";
@@ -59,6 +65,23 @@ function input(workspace: string, overrides: Partial<{ head_sha: string }> = {})
   });
 }
 
+// Injected no-op doubles for the lease-assertion + heartbeat seams. The PRODUCTION defaults are REAL
+// (a DB round-trip + a Temporal-context heartbeat); neither composes in a unit context, so every unit
+// call injects these explicit no-op doubles. `deps` threads the doubles into the required `cloner`.
+const noopAssertLeaseDouble = async (id: string): Promise<void> => {
+  void id;
+};
+const noopHeartbeatDouble = (payload: unknown): void => {
+  void payload;
+};
+function deps(cloner: GitCloner, overrides: Partial<{ assertLeaseAllocated: (id: string) => Promise<void> }> = {}) {
+  return {
+    cloner,
+    assertLeaseAllocated: overrides.assertLeaseAllocated ?? noopAssertLeaseDouble,
+    heartbeat: noopHeartbeatDouble,
+  };
+}
+
 afterEach(async () => {
   vi.restoreAllMocks();
   while (createdWorkspaces.length > 0) {
@@ -74,7 +97,7 @@ describe("cloneRepoIntoWorkspace — happy path", () => {
     const ws = await makeWorkspace();
     const cloner = new StubCloner({ markerBody: "twelve-bytes" }); // 12 bytes
 
-    const result = await cloneRepoIntoWorkspace(input(ws), { cloner });
+    const result = await cloneRepoIntoWorkspace(input(ws), deps(cloner));
 
     expect(result.schema_version).toBe(2);
     expect(result.workspace_path).toBe(ws);
@@ -84,15 +107,31 @@ describe("cloneRepoIntoWorkspace — happy path", () => {
     expect(result.byte_size).toBe(12);
   });
 
-  it("no-op lease/heartbeat defaults do not affect the output", async () => {
+  it("injected no-op lease/heartbeat doubles do not affect the output", async () => {
     const ws = await makeWorkspace();
     const cloner = new StubCloner({ markerBody: "x" });
 
-    // No assertLeaseAllocated / heartbeat injected — defaults are no-ops.
-    const result = await cloneRepoIntoWorkspace(input(ws), { cloner });
+    // No-op doubles injected for both seams (the production defaults are REAL and need DB/Temporal).
+    const result = await cloneRepoIntoWorkspace(input(ws), deps(cloner));
 
     expect(result.workspace_path).toBe(ws);
     expect(result.byte_size).toBe(1);
+  });
+
+  it("the de-stubbed production defaults are real (no no-op survives the shipped path)", async () => {
+    // `defaultHeartbeat` is the Temporal-context forwarder (callable; only valid inside a worker).
+    expect(typeof defaultHeartbeat).toBe("function");
+
+    // `defaultAssertLeaseAllocated` performs a DB round-trip on the shared pool; with no
+    // CODEMASTER_PG_CORE_DSN configured it FAILS LOUD rather than silently no-op'ing. (The DB happy
+    // path is exercised against a disposable PG in clone_asserts_lease.integration.test.ts.)
+    const prior = process.env.CODEMASTER_PG_CORE_DSN;
+    delete process.env.CODEMASTER_PG_CORE_DSN;
+    try {
+      await expect(defaultAssertLeaseAllocated(UUID)).rejects.toThrow(/CODEMASTER_PG_CORE_DSN is not set/);
+    } finally {
+      if (prior !== undefined) process.env.CODEMASTER_PG_CORE_DSN = prior;
+    }
   });
 
   it("invokes the injected lease assertion + heartbeat at the expected phases", async () => {
@@ -123,7 +162,7 @@ describe("cloneRepoIntoWorkspace — error paths", () => {
     const clone = vi.fn(async () => {});
     const cloner: GitCloner = { clone };
 
-    await expect(cloneRepoIntoWorkspace(input(ws, { head_sha: "abc" }), { cloner })).rejects.toMatchObject({
+    await expect(cloneRepoIntoWorkspace(input(ws, { head_sha: "abc" }), deps(cloner))).rejects.toMatchObject({
       name: "CloneFailedError",
       reason: "missing head_sha",
     });
@@ -140,7 +179,7 @@ describe("cloneRepoIntoWorkspace — error paths", () => {
       },
     };
 
-    const err = await cloneRepoIntoWorkspace(input(ws), { cloner }).catch((e: unknown) => e);
+    const err = await cloneRepoIntoWorkspace(input(ws), deps(cloner)).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(CloneFailedError);
     expect((err as CloneFailedError).reason).toBe("network partition");
     expect((err as CloneFailedError).repo).toBe("https://github.com/acme/widget");
@@ -156,7 +195,7 @@ describe("cloneRepoIntoWorkspace — error paths", () => {
       },
     };
 
-    const err = await cloneRepoIntoWorkspace(input(ws), { cloner }).catch((e: unknown) => e);
+    const err = await cloneRepoIntoWorkspace(input(ws), deps(cloner)).catch((e: unknown) => e);
     expect(err).toBe(original); // same instance — not re-wrapped
     expect((err as CloneFailedError).reason).toBe("auth");
   });
@@ -169,9 +208,9 @@ describe("cloneRepoIntoWorkspace — error paths", () => {
       throw new Error("StateDrift: lease no longer ALLOCATED");
     };
 
-    await expect(cloneRepoIntoWorkspace(input(ws), { cloner, assertLeaseAllocated })).rejects.toThrow(
-      "StateDrift",
-    );
+    await expect(
+      cloneRepoIntoWorkspace(input(ws), deps(cloner, { assertLeaseAllocated })),
+    ).rejects.toThrow("StateDrift");
     expect(clone).not.toHaveBeenCalled();
   });
 });
@@ -186,7 +225,7 @@ describe("cloneRepoIntoWorkspace — oversized tree", () => {
     const ws = await makeWorkspace();
     const cloner = new StubCloner({ markerBody: "x" });
 
-    const err = await cloneRepoIntoWorkspace(input(ws), { cloner }).catch((e: unknown) => e);
+    const err = await cloneRepoIntoWorkspace(input(ws), deps(cloner)).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(WorkspaceTooLargeError);
     expect((err as WorkspaceTooLargeError).byteSize).toBe(200 * 1024 * 1024 + 1);
     expect((err as WorkspaceTooLargeError).repo).toBe("https://github.com/acme/widget");
