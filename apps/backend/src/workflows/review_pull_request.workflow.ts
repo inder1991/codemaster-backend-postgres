@@ -65,6 +65,7 @@ import {
   proxyActivities,
   isCancellation,
   log as workflowLog,
+  workflowInfo,
 } from "@temporalio/workflow";
 import { ApplicationFailure } from "@temporalio/common";
 
@@ -74,6 +75,10 @@ import { CHUNK_CONCURRENCY_DEFAULT } from "#backend/review/pipeline/parallelism.
 import { stageOutcome, type StageLogger } from "#backend/review/pipeline/degradation.js";
 import { resolveDegradedPayload, buildAnalyzedPayload } from "#backend/review/pipeline/helpers.js";
 import { RETRY_POLICIES } from "#backend/review/pipeline/activity_ports.js";
+import {
+  recordLifecycleSetterSucceeded,
+  recordLifecycleSetterFailed,
+} from "#backend/observability/finding_lifecycle_metrics.js";
 import { makeActivityPorts, toActivityOptions } from "./activity_proxy.js";
 
 import { ReviewPullRequestPayloadV1 } from "#contracts/review_pull_request.v1.js";
@@ -540,6 +545,11 @@ export async function reviewPullRequest(
     // fail-open above) flow into BOTH the orchestrator's generateWalkthrough sites.
     linkedIssues,
     suggestedReviewers,
+    // Stage-5 arbitration `now` (the Python `now=workflow.now()` kwarg). The orchestrator runs in the
+    // workflow sandbox where Date.now()/new Date() are clock-gate-banned, so the body resolves the instant
+    // HERE from the SDK-provided, replay-deterministic workflow start time and threads the RFC3339 string.
+    // Written onto SUPPRESSED_BY_LLM decisions' suppressed_at by the apply_arbitration activity.
+    arbitrationNow: workflowInfo().startTime.toISOString(),
     // CLAIM-CHECK seam: the renewal-backed lease check, fired by the orchestrator before clone, classify,
     // aggregate (the three Python `_abort_if_claim_lost` boundaries). A lost lease raises a non-retryable
     // ApplicationFailure that propagates out of orchestrate (the finally still releases the mutex/workspace).
@@ -777,13 +787,16 @@ async function runLifecycleBookkeeping(
   ) {
     if (keptRfids.length !== capture.commentIds.length) {
       // F9 — len-mismatch is a permanent data-quality invariant violation, NOT a transient condition. Emit
-      // observability (WARN) instead of silently skipping; do NOT dispatch (a mismatched finalize would
-      // pair rfids with the wrong comment_ids).
+      // observability (WARN + the finalized_len_mismatch failure counter, retryable=false) instead of
+      // silently skipping; do NOT dispatch (a mismatched finalize would pair rfids with the wrong
+      // comment_ids). 1:1 with the Python record_lifecycle_setter_failed(setter="finalized_len_mismatch",
+      // retryable=False) + the _setter_failures append.
       workflowLog.warn(
         `lifecycle finalize skipped (rfid/comment_id length mismatch): ` +
           `kept=${keptRfids.length} comments=${capture.commentIds.length} ` +
           `pr_id=${payload.pr_id} run_id=${payload.run_id}`,
       );
+      recordLifecycleSetterFailed({ setter: "finalized_len_mismatch", retryable: false });
     } else {
       try {
         await recordDeliveryFinalized({
@@ -795,12 +808,14 @@ async function runLifecycleBookkeeping(
           comment_ids: [...capture.commentIds],
           posted_review_pr_id: postedReviewPrId,
         });
+        recordLifecycleSetterSucceeded({ setter: "finalized" });
       } catch (e) {
         workflowLog.warn(
           `lifecycle setter failed (bookkeeping-only; review already posted): ` +
             `setter=record_delivery_finalized error=${String(e)} ` +
             `pr_id=${payload.pr_id} run_id=${payload.run_id}`,
         );
+        recordLifecycleSetterFailed({ setter: "finalized" });
       }
     }
   }
@@ -817,12 +832,14 @@ async function runLifecycleBookkeeping(
         reasons: [...skippedReasons],
         posted_review_pr_id: postedReviewPrId,
       });
+      recordLifecycleSetterSucceeded({ setter: "skipped" });
     } catch (e) {
       workflowLog.warn(
         `lifecycle setter failed (bookkeeping-only; review already posted): ` +
           `setter=record_delivery_skipped error=${String(e)} ` +
           `pr_id=${payload.pr_id} run_id=${payload.run_id}`,
       );
+      recordLifecycleSetterFailed({ setter: "skipped" });
     }
   }
 
@@ -839,12 +856,14 @@ async function runLifecycleBookkeeping(
         outcome: degraded.outcomeValue,
         posted_review_pr_id: postedReviewPrId,
       });
+      recordLifecycleSetterSucceeded({ setter: "degraded" });
     } catch (e) {
       workflowLog.warn(
         `lifecycle setter failed (bookkeeping-only; review already posted): ` +
           `setter=record_delivery_degraded error=${String(e)} ` +
           `pr_id=${payload.pr_id} run_id=${payload.run_id}`,
       );
+      recordLifecycleSetterFailed({ setter: "degraded" });
     }
   }
 }

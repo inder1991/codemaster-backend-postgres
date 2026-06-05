@@ -124,6 +124,18 @@ import { FetchSuggestedReviewersActivity } from "#backend/activities/fetch_sugge
 import { updatePrDescriptionSummary } from "#backend/activities/update_pr_description_summary.activity.js";
 import { buildRetrievedEvidence } from "#backend/activities/build_retrieved_evidence.activity.js";
 
+// ── Stage-5 activities (arbitration apply + tool-run record + fix-prompt) ──
+// applyArbitrationActivity / recordToolRuns self-wire their repos from CODEMASTER_PG_CORE_DSN inside the
+// activity body (1-arg → registered bare). The FixPromptActivities bound-method holder is constructed here
+// with the shared ledger-wired LlmClientCache + the ported FixPromptRepo + a lazy issue-comment client
+// (deferred-Vault) + the shared clock.
+import { applyArbitrationActivity } from "#backend/activities/apply_arbitration.activity.js";
+import { recordToolRuns } from "#backend/activities/record_tool_runs.activity.js";
+import { FixPromptActivities } from "#backend/activities/generate_fix_prompt.activity.js";
+import { FixPromptRepo } from "#backend/domain/repos/fix_prompt_repo.js";
+import { GitHubApiClient } from "#backend/integrations/github/api_client.js";
+import { GitHubApiReviewClient } from "#backend/integrations/github/review_client.js";
+
 import { GitHubIssueClient } from "#backend/integrations/github/issue_client.js";
 import { PostgresLinkedIssuesRepo } from "#backend/domain/repos/pr_issue_links_repo.js";
 import { PostgresGithubIssuesCacheRepo } from "#backend/domain/repos/github_issues_cache_repo.js";
@@ -295,6 +307,56 @@ function makeLazyIssueClient(): GithubIssuePortShape {
   };
 }
 
+// ─── lazy GitHubApiReviewClient (the fix-prompt advisory-comment seam — deferred-Vault) ───────────
+
+/** The `createIssueComment` slice the FixPromptActivities consumes (1:1 with its FixPromptIssueCommentClient). */
+type FixPromptIssueCommentClientShape = {
+  createIssueComment(args: {
+    owner: string;
+    repo: string;
+    prNumber: number;
+    body: string;
+  }): Promise<number>;
+};
+
+/**
+ * Build the REAL {@link GitHubApiReviewClient} for `generateFixPrompt`'s advisory PR-comment seam — the SAME
+ * wiring `post_review_placeholder` / `post_review_results` use (Vault token provider → GitHubApiClient →
+ * wrapped client). The fix-prompt activity only ever calls `createIssueComment`, so the wrapped client
+ * satisfies its loose {@link FixPromptIssueCommentClientShape}. Deferred to the first comment post (async
+ * `fromEnv`-build) so worker boot stays off `VAULT_ADDR` / GitHub round-trips.
+ */
+async function buildFixPromptReviewClient(githubInstallationId: number): Promise<GitHubApiReviewClient> {
+  const clock = new WallClock();
+  const githubHttp = new FetchGitHubHttpClient({});
+  const vault = VaultHttpPort.fromEnv();
+  const tokenProvider = await GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
+  const api = new GitHubApiClient({
+    tokenProvider: tokenProvider.getToken.bind(tokenProvider),
+    http: githubHttp,
+    clock,
+  });
+  return new GitHubApiReviewClient({ api, installationId: githubInstallationId });
+}
+
+/**
+ * A {@link FixPromptIssueCommentClientShape} that builds the real {@link GitHubApiReviewClient} on first
+ * `createIssueComment` (the deferred-Vault pattern) and memoizes it. A faithful, fully-real client seam —
+ * construction is deferred to the moment a fix-prompt advisory comment actually posts.
+ */
+function makeLazyFixPromptIssueClient(githubInstallationId: number): FixPromptIssueCommentClientShape {
+  let memo: Promise<GitHubApiReviewClient> | undefined;
+  return {
+    createIssueComment: async (args) => {
+      if (memo === undefined) {
+        memo = buildFixPromptReviewClient(githubInstallationId);
+      }
+      const client = await memo;
+      return client.createIssueComment(args);
+    },
+  };
+}
+
 // ─── real LlmClientCache (ledger-wired client factory — ADR-0068) ────────────────────────────────
 
 /**
@@ -425,6 +487,19 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     clock,
   });
 
+  // ── Stage-5 fix-prompt bound-method holder (generate_fix_prompt) ──
+  // Shares the SAME lazy ledger-wired LlmClientCache the review-chunk + walkthrough activities use (the
+  // fix_prompt purpose resolves to sonnet via the central seed, inside the activity body). The repo is the
+  // ported FixPromptRepo over the shared ADR-0062 pool; the GitHub seam is the lazy deferred-Vault
+  // issue-comment client; the clock is the shared WallClock. `.generateFixPrompt` is an arrow property so it
+  // stays bound when destructured into the map.
+  const fixPromptActivities = new FixPromptActivities({
+    cache: llmCache,
+    repo: FixPromptRepo.fromDsn(dsn),
+    gh: makeLazyFixPromptIssueClient(githubInstallationId),
+    clock,
+  });
+
   return {
     // ── 1-arg activities, ready as-is ──
     persistReviewFindings,
@@ -495,5 +570,13 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     // bedrockReviewChunk(context, { cache }) — curry the real ledger-wired LlmClientCache.
     bedrockReviewChunk: (context: Parameters<typeof bedrockReviewChunk>[0]) =>
       bedrockReviewChunk(context, { cache: llmCache }),
+    // ── Stage-5 (arbitration apply + tool-run record + fix-prompt) ──
+    // applyArbitrationActivity / recordToolRuns self-wire their repos from CODEMASTER_PG_CORE_DSN (1-arg →
+    // registered bare). generateFixPrompt is the FixPromptActivities bound arrow property (shared LLM cache +
+    // repo + lazy GitHub client). The orchestrator dispatches all three under these registered names (Step
+    // 7.7 arbitration + tool-runs; posting.ts fix-prompt).
+    applyArbitrationActivity,
+    recordToolRuns,
+    generateFixPrompt: fixPromptActivities.generateFixPrompt,
   } as Record<string, (input: never) => Promise<unknown>>;
 }

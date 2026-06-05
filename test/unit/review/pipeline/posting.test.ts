@@ -84,9 +84,45 @@ function portsWith(postReview: ReviewActivityPorts["postReview"]): ReviewActivit
 }
 
 describe("renderWalkthroughForPost", () => {
-  it("returns the walkthrough tldr unchanged when no arbitration result (Stage-5 footer deferred)", () => {
+  it("returns the walkthrough tldr unchanged when no arbitration result was captured", () => {
     const state = new ReviewWorkflowState();
     expect(renderWalkthroughForPost(WALK, state)).toBe("all good");
+  });
+
+  it("returns the base markdown unchanged when the captured result yields an EMPTY footer", () => {
+    // A populated-but-empty result (no non-NONE decisions, no degraded tools) → the renderer returns "" so
+    // the base markdown is unchanged.
+    const state = new ReviewWorkflowState();
+    state.arbitration = { result: { decisions: [], rejected_intents: [] }, toolStatuses: [] };
+    expect(renderWalkthroughForPost(WALK, state)).toBe("all good");
+  });
+
+  it("folds the arbitration footer when a non-NONE decision is captured", () => {
+    const state = new ReviewWorkflowState();
+    state.arbitration = {
+      result: {
+        decisions: [
+          {
+            schema_version: 1,
+            finding_id: uuidFor(900),
+            suppression_state: "SUPPRESSED_BY_LLM",
+            suppression_confidence: "0.95",
+            suppression_reason: "false positive",
+            suppression_model: "anthropic.claude",
+            suppression_prompt_version: "v1",
+            suppressed_at: "2026-01-01T00:00:00.000Z",
+            suppressed_by_finding_id: null,
+          },
+        ],
+        rejected_intents: [],
+      },
+      toolStatuses: [],
+    };
+    const out = renderWalkthroughForPost(WALK, state);
+    expect(out.startsWith("all good\n\n---\n\n")).toBe(true);
+    expect(out).toContain("Suppressed findings (operator audit)");
+    expect(out).toContain("- SUPPRESSED_BY_LLM x 1");
+    expect(out.endsWith("\n")).toBe(true);
   });
 });
 

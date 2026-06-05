@@ -70,11 +70,18 @@ import {
   pathFiltersExcludedAllFinding,
   buildPolicyCitationContext,
 } from "./helpers.js";
-import { stageOutcome, type StageLogger } from "./degradation.js";
+import { stageOutcome, recordStage, type StageLogger } from "./degradation.js";
 import { postReviewResults, type PostingLifecycleDeps } from "./posting.js";
+
+import { postFilterFindingsWithMetadata } from "#backend/policy/trust_filter.js";
+import { mergePerChunkBundles } from "#backend/policy/citation_context_builder.js";
+import { recordInvariantViolationAttempted } from "#backend/observability/workflow_policy_metrics.js";
 
 import type { PrMetaV1 } from "#contracts/walkthrough.v1.js";
 import type { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
+import type { StaticAnalysisResultV1 } from "#contracts/static_analysis_result.v1.js";
+import type { ArbitrationIntentV1 } from "#contracts/arbitration_intent.v1.js";
+import type { ApplyArbitrationInputV1, Tier2Pair } from "#contracts/apply_arbitration_input.v1.js";
 import type { DiffChunkV1 } from "#contracts/diff_chunking.v1.js";
 import type { ChangedLineRanges } from "./activity_ports.js";
 import type { AggregatedFindingsV1 } from "#contracts/aggregated_findings.v1.js";
@@ -189,6 +196,14 @@ export type ReviewPipelineContext = {
    *  Best-effort by construction (the injected callback wraps the dispatch in stageOutcome + swallows). The
    *  body injects it; unit tests omit it (then it is a no-op). */
   readonly onPlaceholderTeardown?: () => Promise<void>;
+  /** The replay-safe instant the Step 7.7 arbitration apply writes onto SUPPRESSED_BY_LLM decisions'
+   *  `suppressed_at` column (the Python `now=workflow.now()` kwarg to ApplyArbitrationInput). The orchestrator
+   *  runs in the workflow sandbox where `Date.now()` / `new Date()` are clock-gate-banned, so the workflow
+   *  body resolves this from `workflowInfo().startTime.toISOString()` (a replay-deterministic SDK-provided
+   *  instant) and threads the RFC3339 string here. Default: an epoch-zero RFC3339 instant when omitted (unit
+   *  tests; the arbitration step is then either skipped — no applyArbitration port — or runs with a fixed
+   *  deterministic instant). */
+  readonly arbitrationNow?: string;
 };
 
 /** A no-op StageLogger for when `ctx.logger` is omitted. SANDBOX-SAFE: pure inert sink (no console binding,
@@ -500,15 +515,24 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
       await ctx.claimCheck();
     }
 
-    // Step 7 — aggregate. (`let`: Step 7.5's citation_validate reassigns `aggregated` to the surviving
-    // partition; the DEFERRED apply_policy_post_filter / apply_arbitration reassignments land in Stage 5.)
+    // Step 7 — aggregate. (`let`: Step 7.2's policy post-filter, Step 7.5's citation_validate, and the
+    // Step 7.7 arbitration-result derivation reassign `aggregated` as the pipeline narrows the findings.)
     let aggregated: AggregatedFindingsV1 = await ports.aggregate({
       findings: deduped.findings,
       policyRevision: pr.policyRevision,
     });
 
-    // DEFERRED Step 7.2 — apply_policy_post_filter (Stage 5). DEFERRED Step 7.7 — apply_arbitration /
-    // record_tool_runs (Stage 5). Skipped at this stage; aggregated flows downstream unchanged.
+    // Step 7.2 — inline policy post-filter (policy-post-filter-relocated collapse-on; the R-23 relocation).
+    // Runs HERE, AFTER aggregate and BEFORE every downstream consumer (citation_validate / persist /
+    // walkthrough / post), so the persisted row + the rendered walkthrough + the GitHub comment all see the
+    // SAME filtered findings (closing the persist/render divergence flagged in the 2026-05-21 head-of-eng
+    // review §1.1). The system-invariants severity floor (SI-001 / SI-005) is applied over the review-level
+    // union of the per-chunk policy bundles. No-op when state.policyBundles is empty (no rules apply). The
+    // per-finding metadata is stashed on state.inlinePostFilterMetadata so persist threads it as
+    // precomputed_metadata (the persisted core.review_findings.policy_metadata reflects the inline filter,
+    // NOT a re-filter — the TS persist activity does no post-filter of its own, so there is no double-filter
+    // to bypass; this purely back-fills the metadata column with the same fired-invariant provenance).
+    aggregated = applyPolicyPostFilter(ctx, aggregated);
 
     // Step 7.5 — citation validation (Stage 3). Drops findings whose `sources[]` cite a repo_path that
     // does NOT exist in the cloned workspace (GitHub silently 422s inline comments on phantom paths, so the
@@ -567,10 +591,31 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
           run_id: runId,
           review_id: pr.reviewId,
           policy_bundle: null,
-          precomputed_metadata: null,
+          // R-23: thread the Step-7.2 inline post-filter metadata so the persisted policy_metadata column
+          // carries the same fired-invariant provenance the inline filter computed (index-aligned with the
+          // filtered findings). Undefined → null (no post-filter ran / no invariant fired).
+          precomputed_metadata:
+            state.inlinePostFilterMetadata === undefined
+              ? null
+              : state.inlinePostFilterMetadata.map((m) => ({
+                  schema_version: 1,
+                  invariant_violation_attempted: m.invariant_violation_attempted,
+                  invariants_fired: [...m.invariants_fired],
+                })),
         }),
     );
     state.persistedFindingIds = persistedIds ?? [];
+
+    // Step 7.7 — Phase D Task D.8: arbitration apply + tool-run persistence (gated on sa != null). When the
+    // applyArbitration port is wired (Stage 5 collapse-on), run the Tier-1/Tier-2 arbitration apply BETWEEN
+    // persist (Step 7.6) and walkthrough (Step 8) so the post-review footer rendered in Step 9 can fold in
+    // the suppressed-finding counts + tool-degradation summary. Both dispatches are fail-open (stageOutcome
+    // swallows + appends a degradation note — NOT raise), so an arbitration failure never fails an
+    // already-persisted review. The arbitration result + tool statuses are captured on state.arbitration for
+    // the footer renderer (posting.ts::renderWalkthroughForPost). SKIPPED when ports.applyArbitration is
+    // omitted (unit tests; the Python `apply_arbitration is None` branch) OR when sa is null (no static
+    // analysis ran — the advisory path-filters-excluded-all early-exit already returned).
+    await applyArbitrationStep(ctx, sa, aggregated, arbitrationIntents);
 
     // Step 8 — walkthrough. Stage-4 walkthrough threading: the resolved linked-issues + suggested-reviewers
     // tuples (fetched fail-open by the workflow body, threaded onto the context — 1:1 with the Python
@@ -652,8 +697,11 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
       {
         reviewFindingIds: state.persistedFindingIds,
         arbitrationIntents,
-        // DEFERRED: arbitration_result stays null until Stage 5 wires apply_arbitration.
-        arbitrationResult: null,
+        // Step 7.7 (collapse-on): the arbitration result the Step-7.7 apply produced (null when the step was
+        // skipped — no applyArbitration port / sa null / the dispatch failed fail-open). The workflow body
+        // also reads state.arbitration.result for the footer; the result envelope carries it for downstream
+        // consumers (analytics, replay) as the Python ReviewPipelineResult.arbitration_result.
+        arbitrationResult: state.arbitration.result,
       },
     );
   } finally {
@@ -961,6 +1009,193 @@ async function selectCarryForwardWithFallback(
       to_review: [...chunks],
       parent_review_id: pr.parentReviewId,
     };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// applyPolicyPostFilter — Step 7.2 inline system-invariants post-filter (1:1 with the Python
+// _apply_policy_post_filter closure, review_pull_request.py:1347). Pure + synchronous (no activity boundary
+// — the SYSTEM_INVARIANTS enforcement is pure stdlib): runs the severity floor over the aggregated findings,
+// stashes the per-finding metadata on state for the persist step, and emits the per-(invariant, category)
+// observability counter for each fired invariant.
+//
+// No-op (returns `aggregated` unchanged) when state.policyBundles is empty — the Python `if not
+// policy_bundles: return aggregated` early-out (FF off / no rules apply). The merged review-level bundle is
+// the union of the per-chunk bundles (dedup by rule_id, deterministic sort) so the invariants run against
+// the same rule set every consumer sees. post_filter_findings_with_metadata is pure + handles per-invariant
+// enforcement exceptions internally (fail-CLOSED at finding level per ADR 0042), so no stage_outcome wrap is
+// needed (it does not raise on the happy path). SANDBOX-SAFE: no clock/random/network/DB.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+function applyPolicyPostFilter(
+  ctx: ReviewPipelineContext,
+  aggregated: AggregatedFindingsV1,
+): AggregatedFindingsV1 {
+  const { state } = ctx;
+  if (state.policyBundles.size === 0) {
+    // FF off / no rules apply — nothing to filter (the Python `if not policy_bundles` early-out).
+    return aggregated;
+  }
+  const merged = mergePerChunkBundles(state.policyBundles);
+  // post_filter_findings_with_metadata is pure (no I/O) AND handles per-invariant enforcement exceptions
+  // internally per ADR 0042 (fail-CLOSED at finding level — the original finding is preserved if an
+  // enforcement callable raises). The outer function does not raise on the happy path.
+  const [filtered, perFindingMetadata] = postFilterFindingsWithMetadata(aggregated.findings, merged);
+  recordStagePolicyPostFilter();
+  // R-23: stash the metadata on state so the persist step threads it as precomputed_metadata. (Pre-fix the
+  // persist re-filtered, which double-mutated and silently zeroed invariants_fired — in TS there is no
+  // persist-side filter, so this simply back-fills the metadata column faithfully.)
+  state.inlinePostFilterMetadata = perFindingMetadata;
+  if (findingsArrayEqual(filtered, aggregated.findings)) {
+    // No invariant fired; no-op result (object-identity preserved per finding through the no-op enforcement).
+    return aggregated;
+  }
+  // R-9 + T-3: at least one finding changed. Emit ONE per-(invariant_id, category) counter per finding x
+  // fired-invariant pair, using the REAL invariant_id from the metadata tuple.
+  for (let i = 0; i < filtered.length; i += 1) {
+    // eslint-disable-next-line security/detect-object-injection -- `i` is a bounded loop cursor into length-aligned local arrays
+    const post = filtered[i]!;
+    // eslint-disable-next-line security/detect-object-injection -- `i` is a bounded loop cursor into a length-aligned local array
+    const meta = perFindingMetadata[i]!;
+    for (const firedInvariantId of meta.invariants_fired) {
+      recordInvariantViolationAttempted({ invariantId: firedInvariantId, category: post.category });
+    }
+  }
+  // model_copy(update={"findings": filtered}) — a fresh AggregatedFindingsV1 carrying the floored findings.
+  return {
+    schema_version: aggregated.schema_version,
+    findings: [...filtered],
+    dedupe_stats: aggregated.dedupe_stats,
+    policy_revision: aggregated.policy_revision,
+  };
+}
+
+/** Reference-identity array compare (the Python `filtered == aggregated.findings` no-op detect). The
+ *  post-filter returns the SAME finding object on the no-op path (system_invariants.ts equality contract),
+ *  so a per-element reference compare is exactly the Python value-equality short-circuit. */
+function findingsArrayEqual(
+  a: ReadonlyArray<ReviewFindingV1>,
+  b: ReadonlyArray<ReviewFindingV1>,
+): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i += 1) {
+    // eslint-disable-next-line security/detect-object-injection -- `i` is a bounded loop cursor into length-equal local arrays
+    if (a[i] !== b[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Emit the policy_post_filter stage outcome=ok (the Python `_log_stage("policy_post_filter", outcome="ok")`
+ *  inside the post-filter closure). Factored so the (sync) post-filter records the stage without a
+ *  stageOutcome wrapper (which is for the swallow/re-raise async path). */
+function recordStagePolicyPostFilter(): void {
+  recordStage({ stage: "policy_post_filter", outcome: "ok" });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// applyArbitrationStep — Step 7.7 arbitration apply + tool-run record (1:1 with the orchestrator's Step 7.7
+// block, review_pipeline_orchestrator.py:861 + the workflow body's _apply_arbitration / _record_tool_runs
+// bridges, review_pull_request.py:3091/3185). Both dispatches are FAIL-OPEN (stageOutcome swallows + appends
+// a degradation note — NOT raise), so an arbitration/tool-run failure never fails an already-persisted
+// review. The result + tool statuses are captured on state.arbitration for the post-review footer renderer.
+//
+// The tier-2 mapping (arbitration finding_id → persisted review_finding_id) is built by zip-aligning the
+// persisted rfids (state.persistedFindingIds, input order preserved by the persist activity's bulk INSERT)
+// with aggregated.findings. The arbitration finding_id IS the persisted rfid — identity mapping for tier-2.
+//
+// SKIPPED when ports.applyArbitration is omitted (unit tests) OR sa is null (no static analysis ran).
+// record_tool_runs runs only when sa.tool_statuses is non-empty.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+async function applyArbitrationStep(
+  ctx: ReviewPipelineContext,
+  sa: StaticAnalysisResultV1 | null,
+  aggregated: AggregatedFindingsV1,
+  arbitrationIntents: ReadonlyArray<ArbitrationIntentV1>,
+): Promise<void> {
+  const { activities: ports, pr, state } = ctx;
+  if (ports.applyArbitration !== undefined && sa !== null) {
+    // Build the tier-2 pairs + id map by zip-aligning persisted rfids with aggregated findings (both share
+    // input order; the arbitration finding_id is the persisted rfid — identity mapping for tier-2).
+    const rfids = state.persistedFindingIds;
+    const tier2Pairs: Array<Tier2Pair> = [];
+    const tier2IdMap: Record<string, string> = {};
+    if (rfids.length > 0) {
+      const n = Math.min(rfids.length, aggregated.findings.length); // zip(strict=False) — stop at shorter.
+      for (let i = 0; i < n; i += 1) {
+        // eslint-disable-next-line security/detect-object-injection -- `i` is a bounded loop cursor into length-bounded local arrays
+        const rfid = rfids[i]!;
+        // eslint-disable-next-line security/detect-object-injection -- `i` is a bounded loop cursor into a length-bounded local array
+        const finding = aggregated.findings[i]!;
+        tier2Pairs.push([rfid, finding]);
+      }
+      for (const rfid of rfids) {
+        // eslint-disable-next-line security/detect-object-injection -- `rfid` is a workflow-local UUID string from the persisted-id tuple, not external input
+        tier2IdMap[rfid] = rfid;
+      }
+    }
+    const applyArbitration = ports.applyArbitration;
+    const input: ApplyArbitrationInputV1 = {
+      schema_version: 1,
+      installation_id: pr.prMeta.installation_id,
+      pr_id: pr.prMeta.pr_id,
+      run_id: pr.runId,
+      review_id: pr.reviewId,
+      tier1_findings: [...sa.tier1_findings],
+      tier2_findings: tier2Pairs,
+      tier2_review_finding_id_by_arbitration_id: tier2IdMap,
+      intents: [...arbitrationIntents],
+      // The arbitration model + prompt_version threaded into the persistence layer's audit columns
+      // (suppression_model, suppression_prompt_version). 1:1 with the Python placeholder values.
+      model: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+      prompt_version: "phase-d-2026-05-16",
+      // The replay-safe instant written onto SUPPRESSED_BY_LLM decisions' suppressed_at (the Python
+      // now=workflow.now()). Resolved by the workflow body; epoch-zero default for unit tests.
+      now: ctx.arbitrationNow ?? "1970-01-01T00:00:00.000Z",
+    };
+    const result = await stageOutcome(
+      "apply_arbitration",
+      {
+        logger: ctx.logger ?? NULL_LOGGER,
+        degradationNotes: degradationAdapter(state),
+        headSha: pr.headSha,
+        runId: pr.runId,
+      },
+      async (): Promise<ReturnType<NonNullable<ReviewActivityPorts["applyArbitration"]>>> =>
+        applyArbitration(input),
+    );
+    if (result !== undefined) {
+      // Capture the result so the post-review footer renderer (posting.ts) folds in the suppressed-finding
+      // counts. The Python _apply_arbitration_with_capture bridge sets arbitration_capture.result IFF the
+      // activity returned a result; the orchestrator's result envelope also carries it.
+      state.arbitration.result = result;
+    }
+  }
+  if (ports.recordToolRuns !== undefined && sa !== null && sa.tool_statuses.length > 0) {
+    // Capture the tool statuses for the footer renderer (the Python _record_tool_runs_with_capture bridge),
+    // then dispatch the record. Both fail-open.
+    state.arbitration.toolStatuses = [...sa.tool_statuses];
+    const recordToolRuns = ports.recordToolRuns;
+    const toolStatuses = sa.tool_statuses;
+    await stageOutcome(
+      "record_tool_runs",
+      {
+        logger: ctx.logger ?? NULL_LOGGER,
+        degradationNotes: degradationAdapter(state),
+        headSha: pr.headSha,
+        runId: pr.runId,
+      },
+      async (): Promise<void> =>
+        recordToolRuns({
+          schema_version: 1,
+          installation_id: pr.prMeta.installation_id,
+          run_id: pr.runId,
+          review_id: pr.reviewId,
+          tool_statuses: [...toolStatuses],
+        }),
+    );
   }
 }
 

@@ -25,6 +25,9 @@ import type { CodemasterConfigV1 } from "#contracts/codemaster_config.v1.js";
 import { CodemasterConfigV1 as CodemasterConfigV1Schema } from "#contracts/codemaster_config.v1.js";
 import type { DroppedClassificationV1 } from "#contracts/dropped_classification.v1.js";
 import type { PublicationOutcome } from "#contracts/posted_review.v1.js";
+import type { ArbitrationResultV1 } from "#contracts/arbitration_result.v1.js";
+import type { ToolStatusV1 } from "#contracts/tool_status.v1.js";
+import type { FindingPolicyMetadata } from "#backend/policy/trust_filter.js";
 
 import { composeOrchestratorDegradationNote } from "./helpers.js";
 
@@ -119,20 +122,20 @@ export function makePostReviewCapture(): PostReviewCapture {
 }
 
 /**
- * Port of _ArbitrationCapture (review_pull_request.py:350). Populated by the arbitration bridge (Stage 5).
- * When unset, the footer renderer produces "" so the walkthrough body is unchanged.
+ * Port of _ArbitrationCapture (review_pull_request.py:350). Populated by the Step 7.7 arbitration bridge.
+ * When unset (the arbitration step did not run / sa was null), the footer renderer produces "" so the
+ * walkthrough body is unchanged.
  *
  * Python field-shape mapping:
- *   result: object | None = None  (ArbitrationResult; typed in the arbitration layer — Stage 5) → unknown | null
- *   tool_statuses: tuple = ()      (tuple[ToolStatusV1, ...])                                    → ReadonlyArray<unknown>
+ *   result: object | None = None  (ArbitrationResult; the arbitration-layer value object) → ArbitrationResultV1 | null
+ *   tool_statuses: tuple = ()      (tuple[ToolStatusV1, ...])                              → ReadonlyArray<ToolStatusV1>
  *
- * NOTE: the element types stay `unknown` in Stage 0 — ArbitrationResult + ToolStatusV1 land in Stage 5.
- * Tightening these is a Stage 5 follow-up; using `unknown` (never `any`) keeps the eslint no-explicit-any
- * gate green while the precise contracts are still unported.
+ * Stage 5 tightened the element types from the placeholder `unknown` to the real ported contracts
+ * (ArbitrationResultV1 / ToolStatusV1), so renderWalkthroughForPost consumes the capture type-safely.
  */
 export type ArbitrationCapture = {
-  result: unknown | null;
-  toolStatuses: ReadonlyArray<unknown>;
+  result: ArbitrationResultV1 | null;
+  toolStatuses: ReadonlyArray<ToolStatusV1>;
 };
 
 /** A fresh _ArbitrationCapture() with the Python dataclass defaults (None/() → null/[]). */
@@ -142,16 +145,17 @@ export function makeArbitrationCapture(): ArbitrationCapture {
 
 /**
  * Port of the inline_post_filter_metadata box (review_pull_request.py:1199). R-23: when the policy
- * post-filter is relocated, the inline filter captures per_finding_metadata from
- * post_filter_findings_with_metadata and _persist_findings reads it here as precomputed_metadata so the
- * persist activity bypasses its own (double-)filter pass.
+ * post-filter runs inline at Step 7.2, it captures the per-finding metadata from
+ * postFilterFindingsWithMetadata; the persist step reads it here as `precomputed_metadata` so the persisted
+ * `core.review_findings.policy_metadata` reflects the SAME filter the walkthrough + GitHub comment saw
+ * (closing the persist/render divergence flagged in the 2026-05-21 head-of-eng review).
  *
- * Python type: list[tuple[dict, ...]] — one tuple of metadata dicts per finding. The precise per-finding
- * metadata dict (FindingPolicyMetadataV1) is threaded in Stage 5; in Stage 0 the element stays the opaque
- * record shape it has on the wire. ReadonlyArray<...> over the rows; each row is a tuple modelled as a
- * ReadonlyArray of records.
+ * Python type: list[tuple[dict, ...]] — a 1-element box holding the per-finding metadata tuple. The TS state
+ * holds the per-finding metadata array DIRECTLY (the box semantics are subsumed into the optional field:
+ * undefined = "post-filter did not run / no invariant fired", populated = the index-aligned per-finding rows
+ * the persist step threads as precomputed_metadata). Each row is the real {@link FindingPolicyMetadata}.
  */
-export type InlinePostFilterMetadata = ReadonlyArray<ReadonlyArray<Record<string, unknown>>>;
+export type InlinePostFilterMetadata = ReadonlyArray<FindingPolicyMetadata>;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // ReviewWorkflowState — the single typed state object (finding 4). Replaces the seven closure boxes with

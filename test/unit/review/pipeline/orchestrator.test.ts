@@ -58,6 +58,13 @@ import { RetrievedEvidenceV1 } from "#contracts/retrieved_evidence.v1.js";
 import type { BuildRetrievedEvidenceInputV1 } from "#contracts/build_retrieved_evidence_input.v1.js";
 import type { UpdatePrDescriptionInputV1 } from "#contracts/update_pr_description.v1.js";
 import type { GenerateWalkthroughInputV1 } from "#contracts/generate_walkthrough_input.v1.js";
+import type { AnalysisFindingV1 } from "#contracts/analysis_findings.v1.js";
+import { ToolStatusV1 } from "#contracts/tool_status.v1.js";
+import type { ArbitrationResultV1 } from "#contracts/arbitration_result.v1.js";
+import type { ApplyArbitrationInputV1 } from "#contracts/apply_arbitration_input.v1.js";
+import type { RecordToolRunsInputV1 } from "#contracts/record_tool_runs_input.v1.js";
+import type { GenerateFixPromptInputV1 } from "#contracts/generate_fix_prompt.v1.js";
+import type { FixPromptActivityResultV1 } from "#contracts/fix_prompt_activity_result.v1.js";
 import { LinkedIssueV1 } from "#contracts/walkthrough.v1.js";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -112,6 +119,28 @@ function findingFor(idx: number): ReviewFindingV1 {
   });
 }
 
+/** A SECURITY finding at severity 'nit' — below the SI-001 safety floor ('issue'), so the Step-7.2 policy
+ *  post-filter floors it to 'issue' (drives the invariant-fired path). */
+function securityNitFinding(idx: number): ReviewFindingV1 {
+  return ReviewFindingV1.parse({
+    file: `src/sec_${idx}.ts`,
+    start_line: 1,
+    end_line: 1,
+    severity: "nit",
+    category: "security",
+    title: `sec-finding-${idx}`,
+    body: `sec body ${idx}`,
+    confidence: 0.9,
+  });
+}
+
+/** A non-empty ResolvedGuidanceBundleV1 (empty applicable_rules is fine — the post-filter fires on the
+ *  presence of ANY bundle, since SYSTEM_INVARIANTS run regardless of the rule set). The bundle keyed by a
+ *  changed path makes state.policyBundles non-empty so applyPolicyPostFilter runs. */
+function emptyBundle(changedPath: string): ResolvedGuidanceBundleV1 {
+  return ResolvedGuidanceBundleV1.parse({ changed_path: changedPath });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // Recording stub ports — every call appends its name to `calls` (in dispatch order) and returns a valid
 // contract response. Per-call overrides let a test inject failures / branch inputs. Each method records
@@ -150,6 +179,27 @@ type StubOverrides = {
   withUpdatePrDescription?: boolean;
   /** When true, the injected updatePrDescriptionSummary port THROWS (asserts the posting fail-open wrap). */
   updatePrDescriptionThrows?: boolean;
+  // ── Stage-5 wiring overrides ──
+  /** When true, staticAnalysis returns these Tier-1 findings (threaded into apply_arbitration's tier1). */
+  tier1Findings?: ReadonlyArray<AnalysisFindingV1>;
+  /** When true, staticAnalysis returns these tool statuses (drives record_tool_runs + the footer). */
+  toolStatuses?: ReadonlyArray<ToolStatusV1>;
+  /** When set, the applyArbitration port is injected (orchestrator Step 7.7). */
+  withApplyArbitration?: boolean;
+  /** The ArbitrationResultV1 the injected applyArbitration port returns (default empty result). */
+  arbitrationResult?: ArbitrationResultV1;
+  /** When true, the injected applyArbitration port THROWS (asserts the Step-7.7 fail-open swallow). */
+  applyArbitrationThrows?: boolean;
+  /** When set, the recordToolRuns port is injected (orchestrator Step 7.7, fires on non-empty tool_statuses). */
+  withRecordToolRuns?: boolean;
+  /** When set, the generateFixPrompt port is injected (posting.ts, fires on non-empty findings). */
+  withGenerateFixPrompt?: boolean;
+  /** The FixPromptActivityResultV1 the injected generateFixPrompt port returns (default generated/llm). */
+  fixPromptResult?: { generated: boolean; generation_mode: string; comment_posted: boolean };
+  /** When true, the injected generateFixPrompt port THROWS (asserts the posting fail-open swallow). */
+  generateFixPromptThrows?: boolean;
+  /** When true, reviewChunk emits a SECURITY finding at severity 'nit' (drives the SI-001 severity floor). */
+  securityNitFinding?: boolean;
 };
 
 type RecordingStub = {
@@ -162,6 +212,9 @@ type RecordingStub = {
   buildEvidenceInputs: Array<BuildRetrievedEvidenceInputV1>;
   updatePrDescriptionInputs: Array<UpdatePrDescriptionInputV1>;
   walkthroughInputs: Array<GenerateWalkthroughInputV1>;
+  applyArbitrationInputs: Array<ApplyArbitrationInputV1>;
+  recordToolRunsInputs: Array<RecordToolRunsInputV1>;
+  generateFixPromptInputs: Array<GenerateFixPromptInputV1>;
   cleanupCalled: () => boolean;
 };
 
@@ -187,6 +240,9 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
   const buildEvidenceInputs: Array<BuildRetrievedEvidenceInputV1> = [];
   const updatePrDescriptionInputs: Array<UpdatePrDescriptionInputV1> = [];
   const walkthroughInputs: Array<GenerateWalkthroughInputV1> = [];
+  const applyArbitrationInputs: Array<ApplyArbitrationInputV1> = [];
+  const recordToolRunsInputs: Array<RecordToolRunsInputV1> = [];
+  const generateFixPromptInputs: Array<GenerateFixPromptInputV1> = [];
   let cleanupCalled = false;
 
   const reviewFiles = o.reviewFiles ?? ["src/a.ts", "src/b.ts"];
@@ -229,7 +285,10 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
     },
     staticAnalysis: async () => {
       calls.push("staticAnalysis");
-      return StaticAnalysisResultV1.parse({});
+      return StaticAnalysisResultV1.parse({
+        tier1_findings: [...(o.tier1Findings ?? [])],
+        tool_statuses: [...(o.toolStatuses ?? [])],
+      });
     },
     selectCarryForward: async (input) => {
       calls.push("selectCarryForward");
@@ -268,7 +327,7 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
         throw new Error("review-chunk boom");
       }
       return ReviewChunkResponseV1.parse({
-        findings: [findingFor(1)],
+        findings: [o.securityNitFinding ? securityNitFinding(1) : findingFor(1)],
         arbitration_intents: [],
         sanitization_event: o.chunkSanitizationEvent ? sanitizationEventFor("chunk") : null,
       });
@@ -381,6 +440,37 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
       }
     };
   }
+  // ── Stage-5 optional ports ──
+  if (o.withApplyArbitration) {
+    ports.applyArbitration = async (input: ApplyArbitrationInputV1) => {
+      calls.push("applyArbitration");
+      applyArbitrationInputs.push(input);
+      if (o.applyArbitrationThrows) {
+        throw new Error("apply-arbitration boom");
+      }
+      return o.arbitrationResult ?? { decisions: [], rejected_intents: [] };
+    };
+  }
+  if (o.withRecordToolRuns) {
+    ports.recordToolRuns = async (input: RecordToolRunsInputV1) => {
+      calls.push("recordToolRuns");
+      recordToolRunsInputs.push(input);
+    };
+  }
+  if (o.withGenerateFixPrompt) {
+    ports.generateFixPrompt = async (input: GenerateFixPromptInputV1) => {
+      calls.push("generateFixPrompt");
+      generateFixPromptInputs.push(input);
+      if (o.generateFixPromptThrows) {
+        throw new Error("generate-fix-prompt boom");
+      }
+      return (o.fixPromptResult ?? {
+        generated: true,
+        generation_mode: "llm",
+        comment_posted: true,
+      }) as FixPromptActivityResultV1;
+    };
+  }
 
   return {
     ports,
@@ -392,6 +482,9 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
     buildEvidenceInputs,
     updatePrDescriptionInputs,
     walkthroughInputs,
+    applyArbitrationInputs,
+    recordToolRunsInputs,
+    generateFixPromptInputs,
     cleanupCalled: () => cleanupCalled,
   };
 }
@@ -1007,5 +1100,157 @@ describe("filterReviewPaths — path_filters last-match-wins", () => {
 
   it("excludes EVERY file with a global exclude (the excluded-all trigger)", () => {
     expect(filterReviewPaths(["src/a.ts", "src/b.ts"], ["!**"])).toEqual([]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// Stage-5 — policy post-filter (Step 7.2) + arbitration (Step 7.7) + fix-prompt (post path).
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+describe("Step 7.2 — policy post-filter (SI-001 severity floor)", () => {
+  it("is a no-op when state.policyBundles is empty (no rules apply)", async () => {
+    const stub = makeStub({ chunkCount: 1, securityNitFinding: true });
+    const ctx = makeCtx(stub);
+    const result = await orchestrate(ctx);
+    // No bundles → no post-filter; the security-nit finding flows through unchanged (severity stays 'nit'),
+    // and no precomputed metadata is stashed.
+    expect(ctx.state.inlinePostFilterMetadata).toBeUndefined();
+    expect(result.aggregated?.findings[0]?.severity).toBe("nit");
+    expect(stub.calls).not.toContain("policy_post_filter"); // (record_stage is a no-op outside a workflow)
+  });
+
+  it("floors a below-floor SECURITY finding to 'issue' and stashes the per-finding metadata", async () => {
+    // A non-empty bundle keyed by the changed path makes state.policyBundles non-empty → the filter runs.
+    const stub = makeStub({
+      chunkCount: 1,
+      securityNitFinding: true,
+      bundles: { "src/a.ts": emptyBundle("src/a.ts") },
+    });
+    const ctx = makeCtx(stub);
+    const result = await orchestrate(ctx);
+    // SI-001 floors the security 'nit' to 'issue'; the surviving aggregated reflects the floored severity so
+    // walkthrough + post + persist all see it.
+    expect(result.aggregated?.findings[0]?.severity).toBe("issue");
+    expect(result.aggregated?.findings[0]?.category).toBe("security");
+    // The per-finding metadata is stashed for persist (precomputed_metadata) with the fired invariant id.
+    expect(ctx.state.inlinePostFilterMetadata).toBeDefined();
+    const meta = ctx.state.inlinePostFilterMetadata![0]!;
+    expect(meta.invariant_violation_attempted).toBe(true);
+    expect(meta.invariants_fired).toContain("SI-001-security-finding-non-suppressible");
+  });
+
+  it("leaves a non-security finding untouched and records no fired invariant", async () => {
+    const stub = makeStub({ chunkCount: 1, bundles: { "src/a.ts": emptyBundle("src/a.ts") } });
+    const ctx = makeCtx(stub);
+    const result = await orchestrate(ctx);
+    expect(result.aggregated?.findings[0]?.severity).toBe("issue"); // findingFor() is already 'issue'
+    // metadata is stashed (the filter ran) but no invariant fired for the bug-category finding.
+    const meta = ctx.state.inlinePostFilterMetadata![0]!;
+    expect(meta.invariant_violation_attempted).toBe(false);
+    expect(meta.invariants_fired).toEqual([]);
+  });
+});
+
+describe("Step 7.7 — arbitration apply + tool-run record", () => {
+  it("dispatches apply_arbitration after persist and captures the result", async () => {
+    const arbResult: ArbitrationResultV1 = { decisions: [], rejected_intents: [] };
+    const stub = makeStub({ chunkCount: 1, withApplyArbitration: true, arbitrationResult: arbResult });
+    const ctx = makeCtx(stub);
+    const result = await orchestrate(ctx);
+    expect(stub.calls).toContain("applyArbitration");
+    // ordering: applyArbitration runs AFTER persist + BEFORE walkthrough.
+    expect(stub.calls.indexOf("applyArbitration")).toBeGreaterThan(
+      stub.calls.indexOf("persistReviewFindings"),
+    );
+    expect(stub.calls.indexOf("applyArbitration")).toBeLessThan(
+      stub.calls.indexOf("generateWalkthrough"),
+    );
+    // the result is captured on state + surfaced on the pipeline result.
+    expect(ctx.state.arbitration.result).toEqual(arbResult);
+    expect(result.arbitrationResult).toEqual(arbResult);
+    // tier-2 pairs were built from the persisted rfid (1 finding → 1 pair); the id-map is the identity.
+    const input = stub.applyArbitrationInputs[0]!;
+    expect(input.tier2_findings.length).toBe(1);
+    const rfid = input.tier2_findings[0]![0];
+    expect(input.tier2_review_finding_id_by_arbitration_id[rfid]).toBe(rfid);
+  });
+
+  it("skips apply_arbitration when the port is not injected", async () => {
+    const stub = makeStub({ chunkCount: 1 });
+    const ctx = makeCtx(stub);
+    const result = await orchestrate(ctx);
+    expect(stub.calls).not.toContain("applyArbitration");
+    expect(result.arbitrationResult).toBeNull();
+  });
+
+  it("fail-open: an apply_arbitration failure is swallowed and the review still completes", async () => {
+    const stub = makeStub({
+      chunkCount: 1,
+      withApplyArbitration: true,
+      applyArbitrationThrows: true,
+    });
+    const ctx = makeCtx(stub);
+    const result = await orchestrate(ctx);
+    // the review posts despite the arbitration failure; result is null + a degradation note is appended.
+    expect(stub.calls).toContain("postReview");
+    expect(result.arbitrationResult).toBeNull();
+    expect(result.degradationNotes).toContain("apply_arbitration_failed");
+  });
+
+  it("dispatches record_tool_runs only when tool_statuses is non-empty + captures them for the footer", async () => {
+    const toolStatus = ToolStatusV1.parse({
+      tool_name: "eslint",
+      status: "timed_out",
+      files_scanned: 7,
+      files_total: 10,
+      started_at: "2026-01-01T00:00:00.000Z",
+      finished_at: null,
+      duration_ms: 1200,
+      error_class: "TimeoutError",
+    });
+    const stub = makeStub({
+      chunkCount: 1,
+      withApplyArbitration: true,
+      withRecordToolRuns: true,
+      toolStatuses: [toolStatus],
+    });
+    const ctx = makeCtx(stub);
+    await orchestrate(ctx);
+    expect(stub.calls).toContain("recordToolRuns");
+    expect(stub.recordToolRunsInputs[0]!.tool_statuses.length).toBe(1);
+    // tool statuses captured on state for the post-review footer renderer.
+    expect(ctx.state.arbitration.toolStatuses.length).toBe(1);
+  });
+
+  it("does NOT dispatch record_tool_runs when tool_statuses is empty", async () => {
+    const stub = makeStub({ chunkCount: 1, withApplyArbitration: true, withRecordToolRuns: true });
+    const ctx = makeCtx(stub);
+    await orchestrate(ctx);
+    expect(stub.calls).not.toContain("recordToolRuns");
+  });
+});
+
+describe("fix-prompt (post path)", () => {
+  it("dispatches generate_fix_prompt after the post when findings are non-empty", async () => {
+    const stub = makeStub({ chunkCount: 1, withGenerateFixPrompt: true });
+    const ctx = makeCtx(stub);
+    await orchestrate(ctx);
+    expect(stub.calls).toContain("generateFixPrompt");
+    expect(stub.calls.indexOf("generateFixPrompt")).toBeGreaterThan(stub.calls.indexOf("postReview"));
+    const input = stub.generateFixPromptInputs[0]!;
+    expect(input.aggregated.findings.length).toBe(1);
+    expect(input.owner).toBe("acme");
+  });
+
+  it("fail-open: a generate_fix_prompt failure is swallowed and the review still completes", async () => {
+    const stub = makeStub({
+      chunkCount: 1,
+      withGenerateFixPrompt: true,
+      generateFixPromptThrows: true,
+    });
+    const ctx = makeCtx(stub);
+    const result = await orchestrate(ctx);
+    expect(stub.calls).toContain("postReview");
+    expect(result.status).toBe("accepted");
   });
 });

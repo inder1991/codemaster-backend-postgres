@@ -79,6 +79,12 @@ const EXPECTED_ACTIVITY_NAMES = [
   "fetchSuggestedReviewers",
   "updatePrDescriptionSummary",
   "buildRetrievedEvidence",
+  // Stage-5: arbitration apply + tool-run record (orchestrator Step 7.7) + fix-prompt (posting). The two
+  // arbitration activities self-wire their repos from env (registered bare); generateFixPrompt is the
+  // FixPromptActivities bound arrow property (shared LLM cache + repo + lazy GitHub client).
+  "applyArbitrationActivity",
+  "recordToolRuns",
+  "generateFixPrompt",
 ] as const;
 
 describe("buildActivities() composition root", () => {

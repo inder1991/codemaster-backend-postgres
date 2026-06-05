@@ -21,11 +21,14 @@
 //   * Unknown stage name raises BEFORE the body runs (caller bug, not a degradation).
 //
 // SANDBOX SAFETY (ADR-0065/0066): NO node:crypto, NO uuid, NO clock reads, NO RNG, NO timers. record_stage
-// is a NO-OP SHIM in Stage 0 — the real Prometheus emit (via the workflow metric meter, which is sandbox +
-// replay-safe) is deferred to Stage 5 (gap inventory). The Python's traceback.format_exc() truncation +
-// 2KB error-message truncation are mirrored on the log line.
+// emits the REAL replay-safe counter via the Temporal workflow `metricMeter` (the sandbox-safe + replay-safe
+// analogue of the Python `workflow.metric_meter()`; Temporal suppresses the emit on history replay so a
+// worker restart never double-counts). The exporter wiring is the only deferred piece — until a MeterProvider
+// is installed the `.add()` calls are no-ops (safe). The Python's traceback.format_exc() truncation + 2KB
+// error-message truncation are mirrored on the log line.
 
 import { CancelledFailure } from "@temporalio/common";
+import { metricMeter, inWorkflowContext } from "@temporalio/workflow";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // STAGE_NAMES — the locked stage-name set. EXACT transcription of
@@ -73,16 +76,32 @@ const TRACEBACK_TRUNCATE = 8192;
 const ERROR_MSG_TRUNCATE = 2048;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-// record_stage — NO-OP SHIM (Stage 0).
+// record_stage — the REAL replay-safe per-stage counter (1:1 with pipeline_metrics.record_stage).
 //
-// The Python record_stage emits one Prometheus counter increment via workflow.metric_meter() (sandbox +
-// replay-safe) and raises ValueError on an out-of-allowlist `outcome`. Here it is a deliberate no-op until
-// Stage 5 wires the real metric meter. The outcome-allowlist check is preserved as a cheap correctness
-// guard (a typo'd outcome is a programming error worth surfacing even in the shim); the unknown-stage
-// SOFT-FAIL path of the Python (warn + unknown-stage counter) is irrelevant here because stageOutcome
-// validates the stage name up-front and never reaches record_stage with an unknown stage.
+// Emits `codemaster_review_stage_total{stage, outcome}` via the Temporal workflow `metricMeter` (sandbox +
+// replay-safe). Name copied VERBATIM from the Python `COUNTER_NAME` so the deferred name-parity gate +
+// existing dashboards/alerts map unchanged. The outcome-allowlist check is preserved (the Python still
+// raises on a typo'd outcome — Grafana panels filter by outcome label, so a bad value would silently drop
+// the metric; a crash is the louder signal). The unknown-stage SOFT-FAIL path of the Python (warn +
+// unknown-stage counter) is irrelevant here because stageOutcome validates the stage name up-front and never
+// reaches record_stage with an unknown stage.
+//
+// The instrument is created PER-EMIT inside `recordStage` (1:1 with the Python `meter.create_counter(...)`
+// per call) — NOT cached at module scope. Temporal's `metricMeter` can only be touched while a workflow
+// context is active; touching it outside one throws `IllegalStateError`. So `recordStage` GUARDS on
+// `inWorkflowContext()` and no-ops outside a workflow — this is faithful to the Python (whose
+// `workflow.metric_meter()` likewise requires a workflow loop) AND lets the orchestrator/posting unit tests
+// drive the pure pipeline directly (no sandbox) without the metric emit throwing. The Temporal
+// MetricMeter.createCounter is idempotent by name, so per-call creation inside the context is cheap.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 export const OUTCOMES = new Set<string>(["ok", "error", "fallback", "skipped"]);
+
+/** Counter NAME — copied VERBATIM from the Python `COUNTER_NAME` (Grafana-query-stable; ADR to rename). */
+export const REVIEW_STAGE_COUNTER_NAME = "codemaster_review_stage_total";
+
+const REVIEW_STAGE_COUNTER_DESCRIPTION =
+  "Number of review-pipeline stages completed, by stage name and outcome. Replay-safe: emitted via the " +
+  "Temporal workflow metricMeter.";
 
 export function recordStage(args: { stage: string; outcome: string }): void {
   if (!OUTCOMES.has(args.outcome)) {
@@ -91,7 +110,14 @@ export function recordStage(args: { stage: string; outcome: string }): void {
         "Grafana panels filter by outcome label — a typo'd outcome silently drops the metric.",
     );
   }
-  // Stage 0 SHIM: real Prometheus emit deferred to Stage 5. Intentionally a no-op.
+  // metricMeter is workflow-context-only; no-op outside a workflow (unit tests drive the pure pipeline
+  // directly). The outcome-allowlist guard above still runs regardless (a typo'd outcome is a caller bug).
+  if (!inWorkflowContext()) {
+    return;
+  }
+  metricMeter
+    .createCounter(REVIEW_STAGE_COUNTER_NAME, undefined, REVIEW_STAGE_COUNTER_DESCRIPTION)
+    .add(1, { stage: args.stage, outcome: args.outcome });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────

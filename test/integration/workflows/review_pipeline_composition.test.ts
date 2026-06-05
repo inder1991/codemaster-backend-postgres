@@ -251,6 +251,24 @@ function makeStubActivities(calls: Array<string>): Record<string, (input: never)
     updatePrDescriptionSummary: async (): Promise<void> => {
       calls.push("updatePrDescription");
     },
+    // ── Stage-5: arbitration apply (orchestrator Step 7.7, after persist; sa non-null so it fires). Returns
+    //    an empty ArbitrationResultV1 — no suppressed decisions → the footer renderer is a no-op. ──
+    applyArbitrationActivity: async (): Promise<unknown> => {
+      calls.push("applyArbitration");
+      return { decisions: [], rejected_intents: [] };
+    },
+    // ── Stage-5: record tool runs (orchestrator Step 7.7) — only fires when sa.tool_statuses is non-empty.
+    //    The happy-path staticAnalysis stub returns empty tool_statuses, so this never fires; registered so a
+    //    future fixture does not ActivityNotRegistered. ──
+    recordToolRuns: async (): Promise<void> => {
+      calls.push("recordToolRuns");
+    },
+    // ── Stage-5: fix-prompt (posting.ts, after the post lands; aggregated.findings non-empty so it fires).
+    //    Returns generated=true / mode=llm (→ fix_prompt stage outcome=ok); advisory, fail-open. ──
+    generateFixPrompt: async (): Promise<unknown> => {
+      calls.push("fixPrompt");
+      return { schema_version: 1, generated: true, generation_mode: "llm", comment_posted: true };
+    },
     cloneRepoIntoWorkspace: async (): Promise<unknown> => {
       calls.push("clone");
       return ClonedRepoV1.parse({
@@ -471,13 +489,14 @@ describeTemporal("review-pipeline composition (in-process TestWorkflowEnvironmen
     //     idempotent — both are dispatched to the same releaseWorkspace stub which pushes "cleanup").
     const PAIR1 = new Set(["chunkAndRedact", "staticAnalysis"]);
     const PAIR2 = new Set(["postReview", "postCheckRun"]);
-    // `updatePrDescription` is dispatched INSIDE postReviewResults (the postReview branch of the post
-    // Promise.all), so it interleaves non-deterministically with `postCheckRun` (the other pair member) and
-    // would break the consecutive-pair assumption collapsePairs relies on. Filter it out of the sequential
-    // trace (its membership + after-post ordering are asserted separately below) so the PAIR2 collapse stays
-    // valid. Everything else — including the Stage-4 body steps (enrichPrFiles, fetchLinkedIssues,
-    // fetchSuggestedReviewers) + the fan-out buildRetrievedEvidence — is strictly sequential.
-    const sequentialCalls = calls.filter((c) => c !== "updatePrDescription");
+    // `updatePrDescription` AND `fixPrompt` are dispatched INSIDE postReviewResults (the postReview branch of
+    // the post Promise.all), so they interleave non-deterministically with `postCheckRun` (the other pair
+    // member) and would break the consecutive-pair assumption collapsePairs relies on. Filter both out of the
+    // sequential trace (their membership + after-post ordering are asserted separately below) so the PAIR2
+    // collapse stays valid. Everything else — including the Stage-4 body steps (enrichPrFiles,
+    // fetchLinkedIssues, fetchSuggestedReviewers), the fan-out buildRetrievedEvidence, and the Stage-5
+    // applyArbitration (Step 7.7, strictly sequential between persist and walkthrough) — is sequential.
+    const sequentialCalls = calls.filter((c) => c !== "updatePrDescription" && c !== "fixPrompt");
     const sequential = collapsePairs(sequentialCalls, PAIR1, "PAIR1", PAIR2, "PAIR2");
     expect(sequential).toEqual([
       "gate",
@@ -504,6 +523,7 @@ describeTemporal("review-pipeline composition (in-process TestWorkflowEnvironmen
       "aggregate",
       "citationValidate", // Step 7.5 — between aggregate and persist
       "persistReviewFindings",
+      "applyArbitration", // Step 7.7 — between persist and walkthrough (sa non-null; tool_statuses empty)
       "generateWalkthrough",
       "persistReviewWalkthrough",
       "PAIR2", // {postReview, postCheckRun} (order-free within the pair)
@@ -537,6 +557,17 @@ describeTemporal("review-pipeline composition (in-process TestWorkflowEnvironmen
     expect(calls.indexOf("enrichPrFiles")).toBeLessThan(calls.indexOf("allocateWorkspace"));
     expect(calls.indexOf("fetchLinkedIssues")).toBeLessThan(calls.indexOf("clone"));
     expect(calls.indexOf("fetchSuggestedReviewers")).toBeLessThan(calls.indexOf("clone"));
+
+    // ── PROOF 2c: the Stage-5 arbitration + fix-prompt wiring composed end-to-end ──
+    // applyArbitration fired ONCE (Step 7.7, sa non-null) AFTER persist + BEFORE walkthrough. recordToolRuns
+    // did NOT fire (the happy-path staticAnalysis has empty tool_statuses). fixPrompt fired ONCE (findings
+    // non-empty) AFTER the post lands.
+    expect(calls.filter((c) => c === "applyArbitration").length).toBe(1);
+    expect(calls).not.toContain("recordToolRuns");
+    expect(calls.filter((c) => c === "fixPrompt").length).toBe(1);
+    expect(calls.indexOf("applyArbitration")).toBeGreaterThan(calls.indexOf("persistReviewFindings"));
+    expect(calls.indexOf("applyArbitration")).toBeLessThan(calls.indexOf("generateWalkthrough"));
+    expect(calls.indexOf("fixPrompt")).toBeGreaterThan(calls.indexOf("postReview"));
 
     // ── PROOF 3: the Stage-3 run-lifecycle milestones fired (ANALYSIS_STARTED → ANALYZED → COMPLETED) ──
     expect(calls.filter((c) => c === "analysisStarted").length).toBe(1);

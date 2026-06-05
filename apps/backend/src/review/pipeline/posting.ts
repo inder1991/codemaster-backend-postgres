@@ -13,20 +13,22 @@
 // NO fetch/http/DB. Every await is an activity-port dispatch (ports.*); the rest is pure string/array work.
 // The `@temporalio/common` failure types it reads (ActivityFailure / ApplicationFailure) are sandbox-safe.
 //
-// ── ARBITRATION FOOTER (Stage 5 — deferred) ──
+// ── ARBITRATION FOOTER (Stage 5 — collapse-on) ──
 // The Python `_post_review` folds `render_arbitration_footer_md(...)` onto the walkthrough markdown WHEN
-// `arbitration_capture.result is not None`. The arbitration layer is a Stage-5 surface; `state.arbitration`
-// stays at its `makeArbitrationCapture()` default (result=null) here, so the footer fold is a no-op (the
-// Python's "unpatched / no-result branch") and `renderWalkthroughForPost` returns the base markdown
-// unchanged. The hook is left in place so wiring the arbitration footer in Stage 5 is a single edit here.
+// `arbitration_capture.result is not None`. The orchestrator's Step 7.7 arbitration apply populates
+// `state.arbitration.result` (+ `.toolStatuses`) BEFORE the post stage runs, so `renderWalkthroughForPost`
+// folds the suppressed-finding + tool-degradation footer here. When the arbitration step was skipped
+// (no applyArbitration port / sa null / fail-open swallow) `state.arbitration.result` stays null and the
+// fold is a no-op — the base markdown is returned unchanged.
 
 import {
   ActivityFailure,
   ApplicationFailure,
 } from "@temporalio/common";
 
-import { stageOutcomeForPublication } from "./helpers.js";
-import { stageOutcome, type StageLogger } from "./degradation.js";
+import { stageOutcomeForPublication, fixPromptStageOutcome } from "./helpers.js";
+import { stageOutcome, recordStage, type StageLogger } from "./degradation.js";
+import { renderArbitrationFooterMd } from "#backend/review/arbitration/arbitration_footer.js";
 
 import type { ReviewActivityPorts, ChangedLineRanges } from "./activity_ports.js";
 import type { ReviewPipelinePrCtx } from "./orchestrator.js";
@@ -72,24 +74,33 @@ export type PostingLifecycleDeps = {
  * Render the walkthrough markdown the GitHub review body wraps (1:1 with the `_post_review` render step).
  *
  * The frozen Python calls `render_walkthrough(walkthrough)` (a structured-markdown renderer) then, when the
- * arbitration capture carries a result, appends `render_arbitration_footer_md(...)`. Both the renderer and
- * the footer are Stage-5 surfaces not yet ported; the spine currently posts the walkthrough's `tldr` as the
- * body markdown (the same value the orchestrator's pre-split post helper used). The arbitration footer fold
- * is a no-op while `state.arbitration.result` is null (the deferred Stage-5 capture default). Pure: no
- * activity dispatch, no I/O.
+ * arbitration capture carries a result, appends `render_arbitration_footer_md(...)`. The structured-markdown
+ * renderer is not yet ported; the spine posts the walkthrough's `tldr` as the base body markdown. The
+ * arbitration footer fold IS wired (Stage 5 collapse-on): when `state.arbitration.result` is populated (the
+ * Step 7.7 apply ran), the footer renderer appends the suppressed-finding + tool-degradation block (rstrip
+ * the base + footer + trailing newline, 1:1 with the Python `walkthrough_md.rstrip() + footer_md + "\n"`).
+ * When the result is null (arbitration skipped) the base markdown is returned unchanged. Pure: no activity
+ * dispatch, no I/O.
  */
 export function renderWalkthroughForPost(
   walkthrough: WalkthroughV1,
   state: ReviewWorkflowState,
 ): string {
   const walkthroughMd = walkthrough.tldr;
-  // Arbitration footer fold (Stage 5) — when apply_arbitration populates state.arbitration.result, the
-  // footer renderer appends to walkthroughMd HERE (the Python `if arbitration_capture.result is not None:`
-  // branch). In THIS stage state.arbitration.result is always null (the deferred Stage-5 capture default),
-  // so the base markdown is returned unchanged. The explicit branch reads the capture so the consumer site
-  // is visible (and so this never silently drops the footer once the capture is wired).
+  // Arbitration footer fold — when Step 7.7's apply_arbitration populated state.arbitration.result, append
+  // the footer HERE (the Python `if arbitration_capture.result is not None:` branch). The renderer returns
+  // "" when there are no non-NONE decisions AND all tools completed, so even a populated (but empty) result
+  // leaves the base markdown unchanged.
   if (state.arbitration.result !== null) {
-    // Stage-5: return walkthroughMd.replace(/\s+$/, "") + renderArbitrationFooterMd(...) + "\n";
+    const footerMd = renderArbitrationFooterMd({
+      result: state.arbitration.result,
+      toolStatuses: state.arbitration.toolStatuses,
+    });
+    if (footerMd !== "") {
+      // rstrip the base + append the footer + a trailing newline (1:1 with the Python
+      // `walkthrough_md.rstrip() + footer_md + "\n"`).
+      return walkthroughMd.replace(/\s+$/, "") + footerMd + "\n";
+    }
   }
   return walkthroughMd;
 }
@@ -324,6 +335,43 @@ export async function postReviewResults(
           repo: repoNameOf(pr.prMeta.repo),
           pr_number: pr.prNumber,
           aggregated,
+        });
+      },
+    );
+  }
+
+  // fix-prompt (fix-prompt-v1 collapse-on) — after the review is posted (+ the PR-description appendage),
+  // generate the aggregated copy-pasteable Claude Code fix prompt (persisted to core.fix_prompts + posted as
+  // a collapsed advisory PR comment). UNCONDITIONAL when aggregated.findings is non-empty (the Python
+  // `if aggregated.findings and workflow.patched("fix-prompt-v1")` — the patched gate collapses on).
+  // Advisory: a failure here NEVER fails the already-posted review (the stageOutcome wrap, raiseAfterLog
+  // defaults false, swallows + records outcome=error). skipOutcome() defers to the explicit recordStage so
+  // the ok/fallback/skipped outcome (NOT the wrap's auto-ok) is the canonical emit — 1:1 with the Python
+  // `_fix_prompt_handle.skip_outcome()` + `_log_stage("fix_prompt", outcome=_fix_prompt_stage_outcome(...))`.
+  // SKIPPED when ports.generateFixPrompt is omitted (unit tests; the wiring-not-injected analogue). The
+  // advisory path-filters-excluded-all post has zero findings, so this never fires there.
+  if (aggregated.findings.length > 0 && ports.generateFixPrompt !== undefined) {
+    const generateFixPrompt = ports.generateFixPrompt;
+    await stageOutcome(
+      "fix_prompt",
+      { logger: deps.logger ?? NULL_POSTING_LOGGER, headSha: pr.headSha, runId: pr.runId },
+      async (handle): Promise<void> => {
+        handle.skipOutcome();
+        const fpResult = await generateFixPrompt({
+          schema_version: 1,
+          review_id: pr.reviewId,
+          installation_id: pr.prMeta.installation_id,
+          pr_number: pr.prNumber,
+          owner: ownerOf(pr.prMeta.repo),
+          repo: repoNameOf(pr.prMeta.repo),
+          aggregated,
+        });
+        recordStage({
+          stage: "fix_prompt",
+          outcome: fixPromptStageOutcome({
+            generated: fpResult.generated,
+            generationMode: fpResult.generation_mode,
+          }),
         });
       },
     );

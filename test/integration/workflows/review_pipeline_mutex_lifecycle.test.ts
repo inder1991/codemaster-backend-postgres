@@ -268,6 +268,20 @@ function makeStubActivities(
     updatePrDescriptionSummary: async (): Promise<void> => {
       calls.push("updatePrDescription");
     },
+    // ── Stage-5: arbitration apply + tool-run record + fix-prompt. Neither mutex-lifecycle test completes
+    //    through post (both abort before persist / during clone), so these never fire — registered so a
+    //    future happy-path fixture here does not ActivityNotRegistered. ──
+    applyArbitrationActivity: async (): Promise<unknown> => {
+      calls.push("applyArbitration");
+      return { decisions: [], rejected_intents: [] };
+    },
+    recordToolRuns: async (): Promise<void> => {
+      calls.push("recordToolRuns");
+    },
+    generateFixPrompt: async (): Promise<unknown> => {
+      calls.push("fixPrompt");
+      return { schema_version: 1, generated: true, generation_mode: "llm", comment_posted: true };
+    },
     cloneRepoIntoWorkspace: async (): Promise<unknown> => {
       calls.push("clone");
       // The cancellation test wires cloneStarted + cloneBlock so it can cancel WHILE clone is in flight: the

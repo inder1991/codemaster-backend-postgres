@@ -33,10 +33,9 @@
 // tuple[uuid.UUID, ...] — the UUIDs are minted in an activity (the sandbox has no uuid oracle), so the
 // envelope only ever holds their already-stringified form.
 //
-// Lint discipline: type-alias (not interface); ReadonlyArray<T> generic form; no `any`
-// (ArbitrationResult is `unknown` until Stage 5 ports the arbitration layer); exactOptionalPropertyTypes
-// honoured — every field is always present (the three Python-defaulted fields map to explicit []/null in
-// the factory, never `undefined`/absent).
+// Lint discipline: type-alias (not interface); ReadonlyArray<T> generic form; no `any`;
+// exactOptionalPropertyTypes honoured — every field is always present (the three Python-defaulted fields map
+// to explicit []/null in the factory, never `undefined`/absent).
 
 import type { WalkthroughV1 } from "#contracts/walkthrough.v1.js";
 import type { AggregatedFindingsV1 } from "#contracts/aggregated_findings.v1.js";
@@ -44,19 +43,17 @@ import type { FileRoutingV1 } from "#contracts/file_routing.v1.js";
 import type { StaticAnalysisResultV1 } from "#contracts/static_analysis_result.v1.js";
 import type { CarryForwardSelectionV1 } from "#contracts/carry_forward.v1.js";
 import type { ArbitrationIntentV1 } from "#contracts/arbitration_intent.v1.js";
+import type { ArbitrationResultV1 } from "#contracts/arbitration_result.v1.js";
 
 /**
- * Forward declaration of the Python `ArbitrationResult` envelope
- * (vendor/codemaster-py/codemaster/review/arbitration_layer.py:108 — frozen dataclass with
- * `decisions: tuple[ArbitrationDecisionV1, ...]` + `rejected_intents: tuple[RejectedIntent, ...]`).
- *
- * It lives in the arbitration LAYER, not a `contracts/` module, and is ported in Stage 5. Until then it
- * stays `unknown` (never `any`, to keep the no-explicit-any gate green) — the orchestrator only ever
- * stashes it through to the workflow body's walkthrough-footer renderer, which treats `null` as equivalent
- * to `ArbitrationResult(decisions=(), rejected_intents=())`. Tightening this to the precise type is a
- * Stage 5 follow-up.
+ * The Python `ArbitrationResult` envelope (vendor/codemaster-py/codemaster/review/arbitration_layer.py:108
+ * — frozen dataclass with `decisions: tuple[ArbitrationDecisionV1, ...]` + `rejected_intents:
+ * tuple[RejectedIntent, ...]`). Stage 5 ported it as the {@link ArbitrationResultV1} Zod contract (it
+ * crosses the Temporal boundary as the apply_arbitration activity's return value), so the alias tightens
+ * from the placeholder `unknown` to the real type. The orchestrator stashes it through to the workflow
+ * body's walkthrough-footer renderer, which treats `null` as equivalent to an empty result.
  */
-export type ArbitrationResult = unknown;
+export type ArbitrationResult = ArbitrationResultV1;
 
 /**
  * Outcome of one full review-pipeline pass — the orchestrate() return envelope.

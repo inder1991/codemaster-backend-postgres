@@ -74,6 +74,11 @@ import type { SkippedInputV1 } from "#contracts/finding_lifecycle_inputs.v1.js";
 import type { BuildRetrievedEvidenceInputV1 } from "#contracts/build_retrieved_evidence_input.v1.js";
 import type { RetrievedEvidenceV1 } from "#contracts/retrieved_evidence.v1.js";
 import type { UpdatePrDescriptionInputV1 } from "#contracts/update_pr_description.v1.js";
+import type { ApplyArbitrationInputV1 } from "#contracts/apply_arbitration_input.v1.js";
+import type { ArbitrationResultV1 } from "#contracts/arbitration_result.v1.js";
+import type { RecordToolRunsInputV1 } from "#contracts/record_tool_runs_input.v1.js";
+import type { GenerateFixPromptInputV1 } from "#contracts/generate_fix_prompt.v1.js";
+import type { FixPromptActivityResultV1 } from "#contracts/fix_prompt_activity_result.v1.js";
 import type {
   ClassifyInput,
   ChunkAndRedactInput,
@@ -248,6 +253,26 @@ export function makeActivityPorts(): ReviewActivityPorts {
     updatePrDescriptionSummary(input: UpdatePrDescriptionInputV1): Promise<void>;
   }>(toActivityOptions(RETRY_POLICIES.updatePrDescriptionSummary));
 
+  // ── Stage-5 ports (arbitration layer + fix-prompt) ──
+  // apply_arbitration_activity — Step 7.7 Tier-1/Tier-2 arbitration apply (pure arbitrate() core +
+  // persistence). Returns the ArbitrationResultV1 the post-review footer renderer folds into the walkthrough
+  // body. Registered name `applyArbitrationActivity`.
+  const { applyArbitrationActivity } = proxyActivities<{
+    applyArbitrationActivity(input: ApplyArbitrationInputV1): Promise<ArbitrationResultV1>;
+  }>(toActivityOptions(RETRY_POLICIES.applyArbitration));
+  // record_tool_runs_activity — Step 7.7 per-tool review_tool_runs persistence. Registered name
+  // `recordToolRuns`.
+  const { recordToolRuns } = proxyActivities<{
+    recordToolRuns(input: RecordToolRunsInputV1): Promise<void>;
+  }>(toActivityOptions(RETRY_POLICIES.recordToolRuns));
+  // generate_fix_prompt_activity — the post-path fix-prompt dispatch (dispatched by posting.ts after the
+  // post lands, when aggregated.findings non-empty). Registered name `generateFixPrompt`. The result is read
+  // as the typed FixPromptActivityResultV1 (the contract carries `generated` / `generation_mode` for the
+  // fix-prompt stage-outcome mapping).
+  const { generateFixPrompt } = proxyActivities<{
+    generateFixPrompt(input: GenerateFixPromptInputV1): Promise<FixPromptActivityResultV1>;
+  }>(toActivityOptions(RETRY_POLICIES.generateFixPrompt));
+
   return {
     clone: cloneRepoIntoWorkspace,
     loadRepoConfig: loadRepoConfigActivity,
@@ -274,5 +299,9 @@ export function makeActivityPorts(): ReviewActivityPorts {
     // Stage-4 ports — per-chunk evidence manifest (buildChunkContext) + PR-description summary (posting.ts).
     buildRetrievedEvidence,
     updatePrDescriptionSummary,
+    // Stage-5 ports — arbitration apply + tool-run record (orchestrator Step 7.7) + fix-prompt (posting.ts).
+    applyArbitration: applyArbitrationActivity,
+    recordToolRuns,
+    generateFixPrompt,
   };
 }

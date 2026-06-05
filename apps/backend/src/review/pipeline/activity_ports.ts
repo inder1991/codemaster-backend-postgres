@@ -59,6 +59,11 @@ import type { SkippedInputV1 } from "#contracts/finding_lifecycle_inputs.v1.js";
 import type { BuildRetrievedEvidenceInputV1 } from "#contracts/build_retrieved_evidence_input.v1.js";
 import type { RetrievedEvidenceV1 } from "#contracts/retrieved_evidence.v1.js";
 import type { UpdatePrDescriptionInputV1 } from "#contracts/update_pr_description.v1.js";
+import type { ApplyArbitrationInputV1 } from "#contracts/apply_arbitration_input.v1.js";
+import type { ArbitrationResultV1 } from "#contracts/arbitration_result.v1.js";
+import type { RecordToolRunsInputV1 } from "#contracts/record_tool_runs_input.v1.js";
+import type { GenerateFixPromptInputV1 } from "#contracts/generate_fix_prompt.v1.js";
+import type { FixPromptActivityResultV1 } from "#contracts/fix_prompt_activity_result.v1.js";
 
 /** changed_line_ranges wire shape: dict[str, tuple[tuple[int,int], ...]] → keyed by relative path,
  *  ChangedLineRange is the [start, end] tuple ported in chunk_and_redact.v1.ts. Matches the existing TS
@@ -156,6 +161,18 @@ export type ReviewActivityPorts = {
   //     PATCH).
   buildRetrievedEvidence?(input: BuildRetrievedEvidenceInputV1): Promise<ReadonlyArray<RetrievedEvidenceV1>>;
   updatePrDescriptionSummary?(input: UpdatePrDescriptionInputV1): Promise<void>;
+  // ── Stage-5 ports (arbitration layer + fix-prompt) ──
+  // OPTIONAL: when omitted, the orchestrator/posting SKIPS the corresponding step (the Python `is None`
+  // branch). Stage-5 wires all three in the composition root.
+  //   * applyArbitration  — Step 7.7 Tier-1/Tier-2 arbitration apply (after persist, gated on sa != null).
+  //     Runs the pure arbitrate() core + persists decisions/rejections; returns the ArbitrationResultV1 the
+  //     post-review footer renderer folds in.
+  //   * recordToolRuns    — Step 7.7 per-tool review_tool_runs persistence (when sa.tool_statuses non-empty).
+  //   * generateFixPrompt — the post-path fix-prompt dispatch (UNCONDITIONAL when aggregated.findings
+  //     non-empty; fix-prompt-v1 collapse-on). Builds + persists + posts the advisory copy-pasteable prompt.
+  applyArbitration?(input: ApplyArbitrationInputV1): Promise<ArbitrationResultV1>;
+  recordToolRuns?(input: RecordToolRunsInputV1): Promise<void>;
+  generateFixPrompt?(input: GenerateFixPromptInputV1): Promise<FixPromptActivityResultV1>;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -459,5 +476,35 @@ export const RETRY_POLICIES = {
       maximumAttempts: 3,
       nonRetryableErrorTypes: ["StateDrift", "ValueError"],
     },
+  },
+
+  // ── Stage-5 (arbitration layer + fix-prompt) ──
+
+  // apply_arbitration_activity (review_pull_request.py:3133-3138): start_to_close 30s, retry
+  // initial_interval=2s, max_attempts=3, non_retryable=[StaleWriteError] (a stale-write guard violation is a
+  // terminal data-integrity error, never retried). Step 7.7 — dispatched after persist when sa != null.
+  applyArbitration: {
+    startToCloseTimeout: "30s",
+    retry: {
+      initialInterval: "2s",
+      maximumAttempts: 3,
+      nonRetryableErrorTypes: ["StaleWriteError"],
+    },
+  },
+
+  // record_tool_runs_activity (review_pull_request.py:3200-3204): start_to_close 30s, retry
+  // initial_interval=2s, max_attempts=3. Step 7.7 — dispatched after persist when sa.tool_statuses non-empty.
+  recordToolRuns: {
+    startToCloseTimeout: "30s",
+    retry: { initialInterval: "2s", maximumAttempts: 3 },
+  },
+
+  // generate_fix_prompt_activity (review_pull_request.py:2789-2790): start_to_close 60s, retry
+  // max_attempts=3 (NO explicit initial_interval — the Python omitted it, so the SDK default 1s applies; we
+  // omit it here too rather than silently encode a different curve, per the module header). Post-path
+  // fix-prompt dispatch (UNCONDITIONAL when aggregated.findings non-empty; fix-prompt-v1 collapse-on).
+  generateFixPrompt: {
+    startToCloseTimeout: "60s",
+    retry: { maximumAttempts: 3 },
   },
 } as const satisfies Record<string, RetryActivityOptions>;
