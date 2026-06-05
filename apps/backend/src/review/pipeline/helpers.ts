@@ -1,0 +1,216 @@
+// Pure pipeline helpers — 1:1 ports of the workflow-sandbox-safe pure functions in the frozen Python.
+//
+// Sources:
+//   vendor/codemaster-py/codemaster/workflows/review_pull_request.py
+//     * _stage_outcome_for_publication      (~155)
+//     * _fix_prompt_stage_outcome           (~169)
+//     * _resolve_degraded_payload           (~192)
+//     * _config_change_notice_finding       (~225)
+//     * _compose_orchestrator_degradation_note (~356)
+//   vendor/codemaster-py/codemaster/workflows/review_pipeline_orchestrator.py
+//     * _path_filters_excluded_all_finding  (~365)
+//     * _infer_pr_topology_kind             (~394)
+//
+// All seven are pure functions over their inputs — NO clock reads, NO random, NO uuid mint, NO env-var
+// access, NO I/O — so they are workflow-sandbox-safe (ADR-0065/0066) and replay-deterministic. The
+// Tier-1 parity check (test/parity/pipeline_helpers_oracle.ts) drives the frozen Python and byte-compares
+// canonical JSON (bare-float `confidence` is stripped before the compare per the established gotcha — the
+// canonicalizer rejects bare floats).
+//
+// DEFERRED to Stage 1: _build_analyzed_payload (review_pull_request.py:269) depends on
+// ReviewPipelineResult, which is a Stage 1 build item (the orchestrator's typed return) and is NOT yet
+// ported under #contracts. Per the task's "verify each helper's deps exist before porting" rule, it is
+// left for Stage 1. _maybe_append_config_notice (review_pull_request.py:246) depends on
+// AggregatedFindingsV1 mutation + the workflow.patched gate; it is the wrapping caller of
+// _config_change_notice_finding and is wired in the orchestrator/aggregate path (Stage 1/5), so only the
+// pure leaf (_config_change_notice_finding) is ported here.
+
+import { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
+import { PublicationOutcome } from "#contracts/posted_review.v1.js";
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// _stage_outcome_for_publication (review_pull_request.py:155)
+//
+// Map a PublicationOutcome to the workflow's stage-outcome vocabulary (pipeline_metrics.OUTCOMES).
+//   INLINE_POSTED                          → 'ok'        (happy path)
+//   BODY_ONLY_POSTED, DEGRADED_UNPOSTED    → 'fallback'  (reduced fidelity)
+//   None (capture never populated)         → 'ok'        (defensive default)
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+export function stageOutcomeForPublication(outcome: PublicationOutcome | null): string {
+  if (outcome === null || outcome === PublicationOutcome.enum.inline_posted) {
+    return "ok";
+  }
+  return "fallback";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// _fix_prompt_stage_outcome (review_pull_request.py:169)
+//
+// Map a generate_fix_prompt_activity result to a pipeline stage outcome.
+//   not generated                → 'skipped'
+//   generation_mode === 'llm'    → 'ok'
+//   otherwise (deterministic)    → 'fallback'
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+export function fixPromptStageOutcome(args: {
+  generated: boolean;
+  generationMode: string;
+}): string {
+  if (!args.generated) {
+    return "skipped";
+  }
+  return args.generationMode === "llm" ? "ok" : "fallback";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// _resolve_degraded_payload (review_pull_request.py:192)
+//
+// Decide which rfids to flip to a degraded outcome.
+//   BODY_ONLY_POSTED  → (keptRfids, 'body_only_fallback')
+//   DEGRADED_UNPOSTED → (keptRfids, 'failed')
+//   INLINE_POSTED / None → ([], null)
+//
+// The Python returns a 2-tuple (rfids_to_flip, outcome_value); TS returns a typed object. rfids are UUID
+// strings on the wire (no uuid mint in the sandbox).
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+export type ResolvedDegradedPayload = {
+  rfidsToFlip: ReadonlyArray<string>;
+  outcomeValue: string | null;
+};
+
+export function resolveDegradedPayload(
+  outcome: PublicationOutcome | null,
+  keptRfids: ReadonlyArray<string>,
+): ResolvedDegradedPayload {
+  if (outcome === PublicationOutcome.enum.body_only_posted) {
+    return { rfidsToFlip: keptRfids, outcomeValue: "body_only_fallback" };
+  }
+  if (outcome === PublicationOutcome.enum.degraded_unposted) {
+    return { rfidsToFlip: keptRfids, outcomeValue: "failed" };
+  }
+  return { rfidsToFlip: [], outcomeValue: null };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// _config_change_notice_finding (review_pull_request.py:225)
+//
+// spec §7 — informational finding when a PR edits .codemaster.yaml. Returns a validated ReviewFindingV1.
+// Bare-float `confidence` (0.99) is a contract field; the parity oracle strips it before the canonical
+// compare (the canonicalizer rejects bare floats) and asserts it structurally + by range.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+export function configChangeNoticeFinding(): ReviewFindingV1 {
+  return ReviewFindingV1.parse({
+    file: ".codemaster.yaml",
+    start_line: 1,
+    end_line: 1,
+    severity: "suggestion",
+    category: "config",
+    title: "codemaster: this PR modifies .codemaster.yaml",
+    body:
+      "This PR modifies `.codemaster.yaml` (review settings). Confirm " +
+      "the change is intended; settings in this file affect how " +
+      "codemaster reviews this and future PRs.",
+    suggestion: null,
+    confidence: 0.99,
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// _path_filters_excluded_all_finding (review_pipeline_orchestrator.py:365)
+//
+// spec §6.4 — informational finding when path_filters excludes every changed file. Mirrors
+// _config_warning_finding field-for-field so it renders through the same category="config" surface.
+// Bare-float `confidence` (0.99) handled by the oracle exactly as configChangeNoticeFinding above.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+export function pathFiltersExcludedAllFinding(): ReviewFindingV1 {
+  return ReviewFindingV1.parse({
+    file: ".codemaster.yaml",
+    start_line: 1,
+    end_line: 1,
+    severity: "suggestion",
+    category: "config",
+    title: "codemaster: 0 files reviewed (path_filters)",
+    body:
+      "codemaster reviewed 0 files: `path_filters` in .codemaster.yaml " +
+      "excluded all changed files. Adjust path_filters if this is " +
+      "unintended.",
+    suggestion: null,
+    confidence: 0.99,
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// _infer_pr_topology_kind (review_pipeline_orchestrator.py:394)
+//
+// Map a chunk path to the PRTopologyKind Literal value for the LLM-prompt inventory tagging. Heuristic
+// extension + path matching; the LLM uses `kind` for narrative context only, not scope decisions.
+//
+// ORDER IS LOAD-BEARING — the test check runs BEFORE the doc check, so e.g. "TESTING.md" → "test" (it
+// startsWith "test"), not "doc". Preserve the exact branch order from the Python.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+const _DOC_SUFFIXES: ReadonlyArray<string> = [".md", ".rst", ".txt"];
+const _CONFIG_SUFFIXES: ReadonlyArray<string> = [".yaml", ".yml", ".toml", ".json", ".ini", ".cfg"];
+const _CODE_SUFFIXES: ReadonlyArray<string> = [
+  ".py",
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".go",
+  ".rs",
+  ".java",
+];
+
+export function inferPrTopologyKind(path: string): string {
+  const lower = path.toLowerCase();
+  if (lower.includes("/test") || lower.startsWith("test") || lower.includes("test_")) {
+    return "test";
+  }
+  if (_DOC_SUFFIXES.some((s) => lower.endsWith(s))) {
+    return "doc";
+  }
+  if (
+    _CONFIG_SUFFIXES.some((s) => lower.endsWith(s)) ||
+    lower.startsWith(".") ||
+    lower.endsWith(".dockerfile")
+  ) {
+    return "config";
+  }
+  if (_CODE_SUFFIXES.some((s) => lower.endsWith(s))) {
+    return "code";
+  }
+  return "other";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// _compose_orchestrator_degradation_note (review_pull_request.py:356)
+//
+// Compose a single WalkthroughV1.degradation_note string from the orchestrator's degradation_notes tuple.
+//   * Empty (after strip+dedup) notes → returns priorNote unchanged.
+//   * Non-empty → joins the deduped, non-empty, stripped entries with ", " and prefixes
+//     "pipeline degraded: "; when priorNote is non-empty, appends with a "; " separator.
+//
+// Dedup uses a seen-set over the STRIPPED value (n.strip()); empty-after-strip entries are dropped.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+export function composeOrchestratorDegradationNote(args: {
+  notes: ReadonlyArray<string>;
+  priorNote: string | null;
+}): string | null {
+  const deduped: Array<string> = [];
+  const seen = new Set<string>();
+  for (const n of args.notes) {
+    const nClean = n.trim();
+    if (nClean === "" || seen.has(nClean)) {
+      continue;
+    }
+    seen.add(nClean);
+    deduped.push(nClean);
+  }
+  if (deduped.length === 0) {
+    return args.priorNote;
+  }
+  const composed = `pipeline degraded: ${deduped.join(", ")}`;
+  if (args.priorNote !== null && args.priorNote !== "") {
+    return `${args.priorNote}; ${composed}`;
+  }
+  return composed;
+}
