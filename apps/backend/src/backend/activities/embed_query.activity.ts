@@ -1,0 +1,77 @@
+// EmbedQueryActivity — port of the frozen Python
+// vendor/codemaster-py/codemaster/activities/embed_query.py (Sprint 26 / R-11 multi-lens audit follow-up).
+//
+// Bound-method holder for the Temporal-registered `embed_query_activity`. Computes ONE 1024-dim
+// embedding for a caller-supplied query string. The workflow body memoizes results per unique chunk
+// path so a 100-chunk PR spread across 5 files issues 5 embed RPCs instead of 100.
+//
+// Idempotent on input: same query → same vector (modulo embed-service non-determinism, which the
+// embed service itself controls). Temporal retries are safe; double-emit just produces duplicate OTel
+// histogram records, no state change.
+//
+// ── 1024-dim guard (FAITHFUL to the Python) ──
+// The platform-model contract is EMBEDDING_DIM = 1024 (the pgvector `core.knowledge_chunks.vector`
+// column width). This activity defensively rejects a wrong-shape vector — a contract violation from the
+// embed service — rather than returning it and poisoning the downstream ANN cosine search.
+//
+// ── Purpose alignment ──
+// `purpose="in_repo_doc"` is aligned with AnnRetriever's per-chunk fallback so the embed service routes
+// both calls (per-PR memoized + legacy per-chunk fallback) through the same metering / quota bucket.
+
+import {
+  type EmbeddingsPort,
+  EMBEDDING_DIM,
+} from "#backend/adapters/embeddings_port.js";
+
+import type { EmbedQueryInputV1, EmbedQueryResultV1 } from "#contracts/embed_query.v1.js";
+
+// Aligned with AnnRetriever's per-chunk fallback purpose so the embed service routes both calls
+// (per-PR memoized + legacy per-chunk fallback) through the same metering / quota bucket. The Python
+// module uses `_QUERY_PURPOSE = "in_repo_doc"` here.
+const QUERY_PURPOSE = "in_repo_doc";
+
+export type EmbedQueryActivityOptions = {
+  embeddings: EmbeddingsPort;
+  modelName: string;
+};
+
+/** Bound-method holder for `embed_query_activity` (1:1 with the Python `EmbedQueryActivity`). */
+export class EmbedQueryActivity {
+  private readonly embeddings: EmbeddingsPort;
+  private readonly modelName: string;
+
+  public constructor({ embeddings, modelName }: EmbedQueryActivityOptions) {
+    this.embeddings = embeddings;
+    this.modelName = modelName;
+  }
+
+  /**
+   * Embed `input.query`; return the 1024-dim vector wrapped in an {@link EmbedQueryResultV1}.
+   *
+   * Propagates whatever the embed port raises (connectivity / rate-limit / validation). The workflow
+   * body wraps this call in `stage_outcome` so failures fail-open to legacy per-chunk embedding inside
+   * AnnRetriever.
+   *
+   * Throws on a vector-dim mismatch (embed-service contract violation) — surfaced rather than returning
+   * a wrong-shape vector that would poison the ANN cosine search downstream.
+   */
+  public async embedQuery(input: EmbedQueryInputV1): Promise<EmbedQueryResultV1> {
+    const result = await this.embeddings.embed({
+      texts: [input.query],
+      model_name: this.modelName,
+      purpose: QUERY_PURPOSE,
+    });
+    const first = result.vectors[0];
+    // The port invariant is `vectors.length === texts.length` (one input → one vector); guard the
+    // index access for noUncheckedIndexedAccess rather than assuming it.
+    const vector = first === undefined ? [] : [...first];
+    if (vector.length !== EMBEDDING_DIM) {
+      // Defensive: embed-service contract violation. Surface rather than returning a wrong-shape vector
+      // that would poison the ANN cosine search downstream.
+      throw new Error(
+        `embed_query: vector dim mismatch (got=${vector.length} expected=${EMBEDDING_DIM})`,
+      );
+    }
+    return { schema_version: input.schema_version, vector };
+  }
+}
