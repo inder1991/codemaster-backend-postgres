@@ -17,15 +17,15 @@
 These override naive line-by-line transliteration. Each cites the owner finding / analysis it derives from.
 
 1. **Module decomposition (finding 1).** Do NOT recreate the 4171-line body. New code:
-   - `apps/backend/src/backend/workflows/review_pull_request.workflow.ts` — Temporal `@workflow` **entry only** (in the workflow bundle; webpack-bundled into the sandbox; `worker/main.ts` `workflowsPath` points here; replaces `review_skeleton.workflow.ts`).
-   - `apps/backend/src/backend/review/pipeline/orchestrator.ts` — the deterministic `orchestrate()` helper (port of `orchestrate_review_pipeline`).
-   - `apps/backend/src/backend/review/pipeline/gates.ts` — the collapsed-gate **ledger** (documentation constant; see §6).
+   - `apps/backend/src/workflows/review_pull_request.workflow.ts` — Temporal `@workflow` **entry only** (in the workflow bundle; webpack-bundled into the sandbox; `worker/main.ts` `workflowsPath` points here; replaces `review_skeleton.workflow.ts`).
+   - `apps/backend/src/review/pipeline/orchestrator.ts` — the deterministic `orchestrate()` helper (port of `orchestrate_review_pipeline`).
+   - `apps/backend/src/review/pipeline/gates.ts` — the collapsed-gate **ledger** (documentation constant; see §6).
    - `.../pipeline/state.ts` — `ReviewWorkflowState` (typed replacement for the mutable closure boxes).
    - `.../pipeline/activity_ports.ts` — typed `proxyActivities` stubs + the retry-policy constants (one typed envelope per activity).
    - `.../pipeline/degradation.ts` — `stageOutcome()` + `DegradationCollector` + `STAGE_NAMES`.
    - `.../pipeline/posting.ts` — the extracted post-review sub-functions (finding 8).
    - `.../pipeline/lifecycle.ts` — run-state + delivery bookkeeping (ANALYSIS_STARTED/ANALYZED/finalize/skipped/degraded/failed/cancelled).
-   - All of `review/pipeline/*` runs **in the workflow sandbox** (no `node:crypto`, no DB, no clock/uuid — see decision 7). Activity *implementations* live under `apps/backend/src/backend/activities/` + `review/`.
+   - All of `review/pipeline/*` runs **in the workflow sandbox** (no `node:crypto`, no DB, no clock/uuid — see decision 7). Activity *implementations* live under `apps/backend/src/activities/` + `review/`.
 
 2. **Typed `ReviewPipelineContext` (finding 2).** The ~35-kwarg `orchestrate_review_pipeline` signature becomes ONE typed parameter object (§6). No positional/callback explosion.
 
@@ -83,7 +83,7 @@ From the gate ledger — collapsing one without its partners breaks dataflow/qua
 ## 4. Target module layout
 
 ```
-apps/backend/src/backend/
+apps/backend/src/
   workflows/
     review_pull_request.workflow.ts     # @workflow entry (sandbox); replaces review_skeleton
   review/pipeline/

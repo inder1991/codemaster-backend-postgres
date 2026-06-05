@@ -42,7 +42,7 @@ work out to activities and fans results in. The TS port must preserve that bound
 ## Decision
 
 **The Temporal workflow bundle — every module reachable from a `workflowsPath` entry — AND the payload
-converter module (`apps/backend/src/backend/worker/data_converter.ts`, loaded into both the main thread
+converter module (`apps/backend/src/worker/data_converter.ts`, loaded into both the main thread
 and the sandbox via `dataConverter.payloadConverterPath`) MUST NOT (transitively) import `node:crypto`
 or any other sandbox-illegal module.**
 

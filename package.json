@@ -8,7 +8,7 @@
   "imports": {
     "#contracts/*": "./libs/contracts/src/*",
     "#platform/*": "./libs/platform/src/*",
-    "#backend/*": "./apps/backend/src/backend/*"
+    "#backend/*": "./apps/backend/src/*"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/build_copy_grammars.mjs",

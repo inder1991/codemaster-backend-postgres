@@ -9,7 +9,7 @@
 // Postgres on a rolling deploy (the `TooManyConnectionsError` 500s the ADR exists to kill).
 //
 // This is a STRUCTURAL guard (eliminate-over-detect): it fails the build the moment ANY repo under
-// `apps/backend/src/backend/domain/repos/` regresses by (a) constructing its own `new Pool(...)`,
+// `apps/backend/src/domain/repos/` regresses by (a) constructing its own `new Pool(...)`,
 // (b) constructing its own `new Kysely(...)` instance, or (c) holding its own per-DSN pool/kysely
 // `Map` (the memoization cache the central seam now owns). Repos MUST instead import the pool/kysely
 // from `#platform/db/database.js` (`tenantKysely` / `getPool`). The shared DbContext file is the ONLY
@@ -34,7 +34,7 @@ import { describe, expect, it } from "vitest";
 /** Absolute path to the repo layer this guard scans. */
 const REPOS_DIR = path.resolve(
   __dirname,
-  "../../apps/backend/src/backend/domain/repos",
+  "../../apps/backend/src/domain/repos",
 );
 
 /** A single static violation: which repo file, which line, and a human-readable reason. */

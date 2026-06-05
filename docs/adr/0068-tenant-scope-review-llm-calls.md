@@ -6,9 +6,9 @@
 - Related: ADR-0060 (purpose→model selection; `installation_id` deprecated on the role axis), ADR-0062
   (Postgres connection-pool lifecycle / shared-pool Kysely seam), frozen
   `vendor/codemaster-py/codemaster/integrations/llm/client.py::LlmClient.invoke_model`,
-  `apps/backend/src/backend/integrations/llm/client.ts`,
-  `apps/backend/src/backend/review/review_activity.ts`,
-  `apps/backend/src/backend/cost/postgres_enforcer.ts` (the `ZERO_UUID` global-scope sentinel),
+  `apps/backend/src/integrations/llm/client.ts`,
+  `apps/backend/src/review/review_activity.ts`,
+  `apps/backend/src/cost/postgres_enforcer.ts` (the `ZERO_UUID` global-scope sentinel),
   `telemetry.llm_calls` (TENANT_SCOPED_TABLES)
 
 ## Context
@@ -117,9 +117,9 @@ ledger records (the real tenant id, not the platform sentinel) for review calls.
 
 - Related: `core.llm_invocation_ledger` (TENANT_SCOPED_TABLES), migration
   `migrations/0003_llm_invocation_ledger.sql`,
-  `apps/backend/src/backend/integrations/llm/invocation_ledger.ts`,
-  `apps/backend/src/backend/integrations/llm/client.ts` (the `idempotency` arg + `ledger` collaborator),
-  `apps/backend/src/backend/review/review_activity.ts` (the `REVIEW_TOOL_SCHEMA_VERSION` + idempotency
+  `apps/backend/src/integrations/llm/invocation_ledger.ts`,
+  `apps/backend/src/integrations/llm/client.ts` (the `idempotency` arg + `ledger` collaborator),
+  `apps/backend/src/review/review_activity.ts` (the `REVIEW_TOOL_SCHEMA_VERSION` + idempotency
   context), `test/integration/llm/llm_invocation_ledger.integration.test.ts`.
 
 ### Context

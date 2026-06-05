@@ -1,5 +1,5 @@
 // Unit test for the review-response parser primitive parseToolUse + ReviewFindingParseError
-// (apps/backend/src/backend/review/tool_schema.ts). The byte-for-byte (blocks → findings/intents)
+// (apps/backend/src/review/tool_schema.ts). The byte-for-byte (blocks → findings/intents)
 // behavior is proven against the frozen Python in test/parity/review_parser.parity.test.ts (which drives
 // the higher-level _parse_with_skip_malformed that wraps parseToolUse); THIS file pins the
 // parseToolUse-level contract directly: the malformed-detection TRIGGERS (which raise vs which silently

@@ -1,5 +1,5 @@
 /**
- * Unit test for the custom Temporal payload converter (`apps/backend/src/backend/worker/data_converter.ts`).
+ * Unit test for the custom Temporal payload converter (`apps/backend/src/worker/data_converter.ts`).
  *
  * Proves the converter preserves the wire contract end-to-end: a representative
  * `PersistReviewFindingsInputV1` value round-trips through `payloadConverter.toPayload(x)` →

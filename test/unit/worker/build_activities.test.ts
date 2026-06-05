@@ -1,5 +1,5 @@
 /**
- * Coverage test for the Temporal worker composition root (`apps/backend/src/backend/worker/build_activities.ts`).
+ * Coverage test for the Temporal worker composition root (`apps/backend/src/worker/build_activities.ts`).
  *
  * This is the regression guard for two defect classes the composition root closes:
  *

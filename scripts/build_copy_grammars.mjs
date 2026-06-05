@@ -1,6 +1,6 @@
 // Build asset step: tsc emits ONLY .js — it does NOT copy the vendored tree-sitter grammar .wasm (or
 // their manifest.json) into dist. The chunker's loader resolves `./grammars` relative to its compiled
-// import.meta.url (dist/apps/backend/src/backend/chunking/), so without this copy a production worker
+// import.meta.url (dist/apps/backend/src/chunking/), so without this copy a production worker
 // throws at chunk time / startupSelfCheck time. ADR-0067. Run after `tsc -p tsconfig.build.json`.
 //
 // Pure Node (cross-platform: darwin dev + the OpenShift linux runtime image). Idempotent.
@@ -11,7 +11,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-const REL = "apps/backend/src/backend/chunking/grammars";
+const REL = "apps/backend/src/chunking/grammars";
 const src = join(repoRoot, REL);
 const dst = join(repoRoot, "dist", REL);
 

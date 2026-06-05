@@ -1,5 +1,5 @@
 // Gate (ADR-0067): the production worker loads the tree-sitter grammar .wasm from `./grammars` relative
-// to the COMPILED loader (dist/apps/backend/src/backend/chunking/). tsc emits only .js, so the build
+// to the COMPILED loader (dist/apps/backend/src/chunking/). tsc emits only .js, so the build
 // must copy the vendored .wasm + manifest.json into dist or the worker throws at chunk/startup time.
 // This gate proves (a) the build script wires the copy, and (b) the copy lands every pinned .wasm in
 // dist with its manifest SHA-256 intact. Fast: runs only the copy step (no full tsc build).
@@ -13,8 +13,8 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const grammarsSrc = join(repoRoot, "apps", "backend", "src", "backend", "chunking", "grammars");
-const grammarsDist = join(repoRoot, "dist", "apps", "backend", "src", "backend", "chunking", "grammars");
+const grammarsSrc = join(repoRoot, "apps", "backend", "src", "chunking", "grammars");
+const grammarsDist = join(repoRoot, "dist", "apps", "backend", "src", "chunking", "grammars");
 
 type Manifest = { grammars: Record<string, { wasm: string; sha256: string }> };
 

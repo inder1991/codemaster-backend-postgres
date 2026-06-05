@@ -7,7 +7,7 @@ import { findTenancyViolations, isProductionSource } from "../../scripts/gates/c
 // Mirrors the frozen Python gate's tests (test_check_tenant_scoped_raw_sql.py) but for Kysely's
 // raw `sql\`...\`` tagged templates (the TS equivalent of SQLAlchemy `session.execute(text(...))`).
 // The file lives under a production `apps/<app>/src/` path so the gate's production-only scope sees it.
-function violations(code: string, path = "apps/backend/src/backend/domain/repos/x.ts") {
+function violations(code: string, path = "apps/backend/src/domain/repos/x.ts") {
   const p = new Project({
     useInMemoryFileSystem: true,
     compilerOptions: { experimentalDecorators: true },
@@ -83,11 +83,11 @@ describe("tenant-scoped raw-SQL gate", () => {
       expect(violations(unfiltered, "scripts/gates/x.ts")).toHaveLength(0);
     });
     it("DOES scan production repo source under apps/<app>/src and libs/<pkg>/src", () => {
-      expect(violations(unfiltered, "apps/backend/src/backend/domain/repos/x.ts")).toHaveLength(1);
+      expect(violations(unfiltered, "apps/backend/src/domain/repos/x.ts")).toHaveLength(1);
       expect(violations(unfiltered, "libs/platform/src/db/x.ts")).toHaveLength(1);
     });
     it("isProductionSource: {libs,apps}/<pkg>/src non-test → true; test/tools/*.test.ts → false", () => {
-      expect(isProductionSource("/r/apps/backend/src/backend/x.ts")).toBe(true);
+      expect(isProductionSource("/r/apps/backend/src/x.ts")).toBe(true);
       expect(isProductionSource("/r/libs/platform/src/db/x.ts")).toBe(true);
       expect(isProductionSource("/r/apps/backend/src/x.test.ts")).toBe(false);
       expect(isProductionSource("/r/test/integration/x.ts")).toBe(false);

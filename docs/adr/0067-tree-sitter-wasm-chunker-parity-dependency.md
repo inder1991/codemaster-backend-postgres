@@ -41,7 +41,7 @@ WASM/JS (no native build).
 
 **Grammar artifacts:** the exact-version grammar `.wasm` ship **prebuilt inside the npm grammar
 tarballs** (`tree-sitter-python@0.25.0` → `tree-sitter-python.wasm`, etc.), so no emscripten build is
-needed. They are **vendored into the repo** at `apps/backend/src/backend/chunking/grammars/` with a
+needed. They are **vendored into the repo** at `apps/backend/src/chunking/grammars/` with a
 pinned manifest (`manifest.json`: source npm version + SHA-256) and loaded from that directory at
 startup. They are **never fetched at runtime**. `web-tree-sitter` itself is added to
 `package.json` dependencies (`^0.25`, ABI-15 compatible).
@@ -91,7 +91,7 @@ Conditions on this dependency (all required):
    grammar is marked non-parity in code + tests (it is a best-effort path, not a byte-parity guarantee).
 7. **Dep-health note.** `web-tree-sitter` is pure WASM/JS (no `node-gyp`, no native ABI). The grammar
    `.wasm` are binary artifacts in git (~2.3 MB total) — the build/deploy must copy
-   `apps/backend/src/backend/chunking/grammars/*.wasm` into the runtime image alongside the compiled JS
+   `apps/backend/src/chunking/grammars/*.wasm` into the runtime image alongside the compiled JS
    (they are NOT emitted by `tsc`). The startup self-check (condition 3) is the guard against a deploy
    that drops them.
 

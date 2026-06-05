@@ -38,7 +38,7 @@ LABEL-AGREEMENT RATE of ≥95% across a curated representative corpus, NOT byte-
 
 Concretely:
 
-1. The TS classifier (`apps/backend/src/backend/files/magika_classifier.ts`) wraps npm `magika`,
+1. The TS classifier (`apps/backend/src/files/magika_classifier.ts`) wraps npm `magika`,
    memoizes the model at module scope (load once per process — model load is expensive), and derives
    `language` / `is_binary` / `is_generated` from the model label via the SAME tables and path regexes
    as the frozen Python (`_LANGUAGE_LABELS`, `_BINARY_LABELS`, `_GENERATED_PATH_PATTERNS`), ported
@@ -103,7 +103,7 @@ respects architecture invariant 2). This ADR is that justification of record.
 
 ## Acceptance test reference
 
-- Production wrapper: `apps/backend/src/backend/files/magika_classifier.ts`
+- Production wrapper: `apps/backend/src/files/magika_classifier.ts`
 - Agreement test: `test/parity/magika_agreement.parity.test.ts` (threshold 0.95)
 - Frozen-Python reference driver: `tools/parity/run_magika_ref.py`
 - TS↔Python oracle bridge: `test/parity/magika_oracle.ts`

@@ -30,5 +30,5 @@
       "sha256": "79e5da75ea62855a0cd67177685f0164eac87d5f630b3cbe1e0a099751ad30f8"
     }
   },
-  "reproduce": "For each grammar at the pinned version: `npm pack <source_npm>` → `tar xzf <pkg>-<ver>.tgz` → `cp package/<wasm> apps/backend/src/backend/chunking/grammars/` → verify `shasum -a 256` matches the sha256 above. The .wasm ships prebuilt inside the npm tarball; no emscripten build is required."
+  "reproduce": "For each grammar at the pinned version: `npm pack <source_npm>` → `tar xzf <pkg>-<ver>.tgz` → `cp package/<wasm> apps/backend/src/chunking/grammars/` → verify `shasum -a 256` matches the sha256 above. The .wasm ships prebuilt inside the npm tarball; no emscripten build is required."
 }

@@ -34,7 +34,7 @@ not deep relative paths — resolved natively by `tsc`, `tsx`, and `vitest`:
 ```ts
 import { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
 import { WallClock }       from "#platform/clock.js";
-// #backend/* is reserved for apps/backend/src/backend/* (Phase 1+).
+// #backend/* maps to apps/backend/src/* (app-internal imports).
 ```
 
 Same-directory imports stay relative (`./clock.js`). When the production build (`dist/`) and the

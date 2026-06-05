@@ -26,7 +26,6 @@ const GRAMMARS_DIR = join(
   "apps",
   "backend",
   "src",
-  "backend",
   "chunking",
   "grammars",
 );

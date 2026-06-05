@@ -115,7 +115,7 @@ describe("verifyGithubSignature parity (TS ↔ frozen Python verify_github_signa
     // crypto.timingSafeEqual (timing-safe), never to a JS `===`/`!==` that early-exits on the first
     // differing byte and leaks a per-byte timing channel.
     const here = dirname(fileURLToPath(import.meta.url)); // <repo>/test/parity
-    const modPath = join(here, "..", "..", "apps", "backend", "src", "backend", "api", "github_webhook.ts");
+    const modPath = join(here, "..", "..", "apps", "backend", "src", "api", "github_webhook.ts");
     const src = readFileSync(modPath, "utf8");
     // Strip line comments + block comments so prose mentioning `===` or `provided` doesn't false-match.
     const code = src.replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");

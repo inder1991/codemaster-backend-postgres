@@ -18,7 +18,7 @@
  *
  * The package is `"type": "module"`; there is no ambient `require`. We reconstruct it via
  * `createRequire(import.meta.url)` (bound to THIS script's URL) and resolve the workflow module relative
- * to `scripts/` → `../apps/backend/src/backend/workflows/...`.
+ * to `scripts/` → `../apps/backend/src/workflows/...`.
  */
 
 import { createRequire } from "node:module";
@@ -30,7 +30,7 @@ const require_ = createRequire(import.meta.url);
 
 /** Bundle the skeleton workflow; exit 0 on success, non-zero (printing the error) on any bundler failure. */
 async function main(): Promise<number> {
-  const workflowsPath = require_.resolve("../apps/backend/src/backend/workflows/review_skeleton.workflow");
+  const workflowsPath = require_.resolve("../apps/backend/src/workflows/review_skeleton.workflow");
   try {
     const bundle = await bundleWorkflowCode({ workflowsPath });
     process.stdout.write(

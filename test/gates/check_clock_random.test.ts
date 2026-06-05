@@ -40,11 +40,11 @@ describe("clock/random seam gate", () => {
 
     it("should flag Date.now() in an apps source file (apps/<app>/src/** is in scope)", () => {
       const v = violationsFor({
-        "apps/backend/src/backend/redact/secret_detector.ts": "const t = Date.now();",
+        "apps/backend/src/redact/secret_detector.ts": "const t = Date.now();",
       });
       expect(v).toHaveLength(1);
       expect(v[0]!.construct).toBe("Date.now()");
-      expect(v[0]!.file).toBe("apps/backend/src/backend/redact/secret_detector.ts");
+      expect(v[0]!.file).toBe("apps/backend/src/redact/secret_detector.ts");
     });
 
     it("should flag new Date() with zero arguments", () => {
@@ -129,7 +129,7 @@ describe("clock/random seam gate", () => {
   describe("transport-timeout timers (setTimeout / setInterval / AbortSignal.timeout)", () => {
     it("should flag a raw setTimeout() outside the transport-timeout seam", () => {
       expect(
-        constructsFor({ "apps/backend/src/backend/integrations/github/api_client.ts": "setTimeout(() => {}, 5);" }),
+        constructsFor({ "apps/backend/src/integrations/github/api_client.ts": "setTimeout(() => {}, 5);" }),
       ).toEqual(["setTimeout()"]);
     });
 
@@ -141,7 +141,7 @@ describe("clock/random seam gate", () => {
 
     it("should flag AbortSignal.timeout()", () => {
       expect(
-        constructsFor({ "apps/backend/src/backend/adapters/vault_http.ts": "const s = AbortSignal.timeout(5000);" }),
+        constructsFor({ "apps/backend/src/adapters/vault_http.ts": "const s = AbortSignal.timeout(5000);" }),
       ).toEqual(["AbortSignal.timeout()"]);
     });
 
