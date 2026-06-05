@@ -42,6 +42,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@temporalio/testing": "^1.17.2",
     "@types/js-yaml": "^4.0.0",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.11.0",

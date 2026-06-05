@@ -36,11 +36,22 @@ import type {
 import type { ReviewContextV1 } from "#contracts/review_context.v1.js";
 import type { ReviewChunkResponseV1 } from "#contracts/review_chunk_response.v1.js";
 import type { AggregatedFindingsV1 } from "#contracts/aggregated_findings.v1.js";
-import type { WalkthroughV1, PrMetaV1, LinkedIssueV1 } from "#contracts/walkthrough.v1.js";
+import type { WalkthroughV1, PrMetaV1 } from "#contracts/walkthrough.v1.js";
 import type { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
 import type { PostReviewInputV1 } from "#contracts/post_review_input.v1.js";
 import type { PostedReviewV1 } from "#contracts/posted_review.v1.js";
 import type { ReleaseWorkspaceInput } from "#contracts/release_workspace_input.v1.js";
+import type { GenerateWalkthroughInputV1 } from "#contracts/generate_walkthrough_input.v1.js";
+import type { PostCheckRunInputV1, PostedCheckRunV1 } from "#contracts/posted_check_run.v1.js";
+import type { DedupFindingsInputV1, DedupedFindingsV1 } from "#contracts/dedup_findings.v1.js";
+import type { LoadRepoConfigInputV1 } from "#contracts/load_repo_config.v1.js";
+import type { CodemasterConfigV1 } from "#contracts/codemaster_config.v1.js";
+import type {
+  ComputePolicyRulesInputV1,
+  ComputedPolicyRulesV1,
+} from "#contracts/policy_compute.v1.js";
+import type { PersistReviewFindingsInputV1 } from "#contracts/persist_review_findings.v1.js";
+import type { PersistReviewWalkthroughInputV1 } from "#contracts/persist_review_walkthrough.v1.js";
 
 /** changed_line_ranges wire shape: dict[str, tuple[tuple[int,int], ...]] → keyed by relative path,
  *  ChangedLineRange is the [start, end] tuple ported in chunk_and_redact.v1.ts. Matches the existing TS
@@ -86,18 +97,11 @@ export type AggregateInput = {
   policyRevision: number;
 };
 
-export type GenerateWalkthroughInput = {
-  prMeta: PrMetaV1;
-  aggregated: AggregatedFindingsV1;
-  linkedIssues: ReadonlyArray<LinkedIssueV1>;
-  suggestedReviewers: ReadonlyArray<string>;
-};
-
-export type PostCheckRunInput = {
-  prMeta: PrMetaV1;
-  headSha: string;
-  summary: string;
-};
+// `generateWalkthrough` + `postCheckRun` dispatch the REAL ported activity contracts
+// (GenerateWalkthroughInputV1 / PostCheckRunInputV1) rather than a hand-rolled envelope — the orchestrator
+// (orchestrator.ts) constructs the typed contract directly. The earlier Stage-0 placeholder envelopes
+// (GenerateWalkthroughInput / PostCheckRunInput) were superseded once the real activities landed
+// (generate_walkthrough_input.v1 / posted_check_run.v1) with single-positional invariant-11 inputs.
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // ReviewActivityPorts — the typed spine activity surface. Stage 1 wires these to proxyActivities(); Stage
@@ -106,6 +110,8 @@ export type PostCheckRunInput = {
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 export type ReviewActivityPorts = {
   clone(input: CloneRepoIntoWorkspaceInput): Promise<ClonedRepoV1>;
+  loadRepoConfig(input: LoadRepoConfigInputV1): Promise<CodemasterConfigV1>;
+  computePolicyRules(input: ComputePolicyRulesInputV1): Promise<ComputedPolicyRulesV1>;
   classify(input: ClassifyInput): Promise<FileRoutingV1>;
   chunkAndRedact(input: ChunkAndRedactInput): Promise<ReadonlyArray<DiffChunkV1>>;
   staticAnalysis(input: StaticAnalysisInput): Promise<StaticAnalysisResultV1>;
@@ -113,10 +119,13 @@ export type ReviewActivityPorts = {
   embedQuery(input: EmbedQueryInputV1): Promise<EmbedQueryResultV1>;
   retrieveKnowledge(input: RetrieveKnowledgeInputV1): Promise<RetrieveKnowledgeResultV1>;
   reviewChunk(input: ReviewContextV1): Promise<ReviewChunkResponseV1>;
+  dedupFindings(input: DedupFindingsInputV1): Promise<DedupedFindingsV1>;
   aggregate(input: AggregateInput): Promise<AggregatedFindingsV1>;
-  generateWalkthrough(input: GenerateWalkthroughInput): Promise<WalkthroughV1>;
+  persistReviewFindings(input: PersistReviewFindingsInputV1): Promise<ReadonlyArray<string>>;
+  generateWalkthrough(input: GenerateWalkthroughInputV1): Promise<WalkthroughV1>;
+  persistReviewWalkthrough(input: PersistReviewWalkthroughInputV1): Promise<void>;
   postReview(input: PostReviewInputV1): Promise<PostedReviewV1>;
-  postCheckRun(input: PostCheckRunInput): Promise<unknown>;
+  postCheckRun(input: PostCheckRunInputV1): Promise<PostedCheckRunV1>;
   cleanup(input: ReleaseWorkspaceInput): Promise<void>;
 };
 
@@ -151,6 +160,22 @@ export const RETRY_POLICIES = {
     startToCloseTimeout: "60s",
     heartbeatTimeout: "30s",
     retry: { initialInterval: "2s", maximumAttempts: 3 },
+  },
+
+  // load_repo_config_activity (review_pull_request.py:1221-1234): start_to_close 10s,
+  // retry initial_interval=2s, max_attempts=1 (fail-open by design — the stage_outcome wrapper handles
+  // failure → review proceeds with default config). repo-config-wiring collapse-on stage.
+  loadRepoConfig: {
+    startToCloseTimeout: "10s",
+    retry: { initialInterval: "2s", maximumAttempts: 1 },
+  },
+
+  // compute_policy_rules_activity (review_pull_request.py:1297-1324): start_to_close 5s
+  // (_POLICY_COMPUTE_TIMEOUT, review_pull_request.py:89), retry initial_interval=2s, max_attempts=1
+  // (A-3-parse-timeout — fail-open by design; retries against pathological inputs just burn budget).
+  computePolicyRules: {
+    startToCloseTimeout: "5s",
+    retry: { initialInterval: "2s", maximumAttempts: 1 },
   },
 
   // classify_files (review_pull_request.py:1105-1108): start_to_close 30s,
@@ -228,6 +253,37 @@ export const RETRY_POLICIES = {
   aggregate: {
     startToCloseTimeout: "30s",
     retry: { initialInterval: "2s", maximumAttempts: 3 },
+  },
+
+  // dedup_findings — NEW activity introduced DURING the port (the Temporal-activity port of the frozen
+  // Python `dedup_linter_with_llm`, which ran INLINE in the orchestrator — not an @activity.defn — so it
+  // has no Python dispatch-site retry policy to transcribe). The semantic stage embeds over the network
+  // (the platform Qwen consumer) and is FAIL-OPEN by design (DedupedFindingsV1.semantic_skipped on
+  // embedder outage), so it mirrors its sibling embed-bearing stage's budget: start_to_close 30s (same as
+  // aggregate, the stage it sits beside), retry initial_interval=2s, max_attempts=3.
+  dedupFindings: {
+    startToCloseTimeout: "30s",
+    retry: { initialInterval: "2s", maximumAttempts: 3 },
+  },
+
+  // persist_review_findings_activity (review_pull_request.py:3056-3063): start_to_close 30s,
+  // retry initial_interval=2s, max_attempts=3, non_retryable=[StaleWriteError] (the stale-write guard
+  // violation is a terminal data-integrity error, never retried).
+  persistReviewFindings: {
+    startToCloseTimeout: "30s",
+    retry: {
+      initialInterval: "2s",
+      maximumAttempts: 3,
+      nonRetryableErrorTypes: ["StaleWriteError"],
+    },
+  },
+
+  // persist_review_walkthrough_activity (review_pull_request.py:2421-2422): start_to_close 30s,
+  // retry max_attempts=3 (NO explicit initial_interval — the Python omitted it, so the SDK default 1s
+  // applies; we omit it here too rather than silently encode a different curve, per the module header).
+  persistReviewWalkthrough: {
+    startToCloseTimeout: "30s",
+    retry: { maximumAttempts: 3 },
   },
 
   // generate_walkthrough (review_pull_request.py:2227-2228): start_to_close 60s,

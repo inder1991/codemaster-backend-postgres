@@ -34,6 +34,7 @@ const EXPECTED_ACTIVITY_NAMES = [
   "persistReviewFindings",
   "persistReviewWalkthrough",
   "aggregateFindings",
+  "dedupFindings",
   "classifyFiles",
   "cloneRepoIntoWorkspace",
   "loadRepoConfigActivity",

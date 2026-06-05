@@ -68,6 +68,7 @@ import {
   type CloneRepoIntoWorkspaceDeps,
 } from "#backend/activities/clone_repo_into_workspace.activity.js";
 import { computePolicyRules } from "#backend/activities/compute_policy_rules.activity.js";
+import { DedupFindingsActivity } from "#backend/activities/dedup_findings.activity.js";
 import { EmbedQueryActivity } from "#backend/activities/embed_query.activity.js";
 import { loadRepoConfigActivity } from "#backend/activities/load_repo_config.activity.js";
 import { persistReviewFindings } from "#backend/activities/persist_review_findings.activity.js";
@@ -283,6 +284,12 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
   const aggregateActivity = new AggregateFindingsActivity({ embedder });
   const embedQueryActivity = new EmbedQueryActivity({ embeddings: embedder, modelName: "qwen3-embed-0.6b" });
   const retrieveKnowledgeActivity = buildRetrieveKnowledgeActivity({ embedder });
+  // dedup_findings — the Temporal-activity port of the frozen Python `dedup_linter_with_llm` (the
+  // semantic dedup stage embeds over the network, so it CANNOT run in the workflow sandbox; ADR-0065/0066).
+  // Shares the same real embedder as the aggregate stage. FOLLOW-UP-dedup-findings-orchestrator-wiring:
+  // the Workflow phase dispatches this between fan-out (Step 5) and aggregate (Step 7), replacing the
+  // Python's inline `dedup_linter_with_llm` call. Registered here so the surface is dispatch-ready.
+  const dedupFindingsActivity = new DedupFindingsActivity({ embedder });
 
   // The lazy real cloner-deps + LLM cache (deferred-Vault pattern; constructed on first dispatch).
   const resolveClonerDeps = makeClonerDepsResolver(githubInstallationId);
@@ -315,6 +322,8 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     releaseWorkspace,
     // ── bound-method activities (real embedder) ──
     aggregateFindings: aggregateActivity.aggregateFindings,
+    // dedup_findings — bound arrow property holding the shared real embedder (semantic dedup stage).
+    dedupFindings: dedupFindingsActivity.dedupFindings,
     embedQuery: embedQueryActivity.embedQuery.bind(embedQueryActivity),
     retrieveKnowledge: retrieveKnowledgeActivity.retrieveKnowledge.bind(retrieveKnowledgeActivity),
     // generate_walkthrough — bound arrow property holding the shared ledger-wired LlmClientCache.
