@@ -74,7 +74,7 @@ async function assertParity(
   // `ReviewFindingV1(**dict)`, applying the contract defaults (sources / scope / evidence_refs) before
   // the pipeline consumes them.
   const parsed = findings.map((d) => ReviewFindingV1.parse(d));
-  const ts = doAggregate(parsed, policyRevision) as unknown as Record<string, unknown>;
+  const ts = (await doAggregate(parsed, policyRevision)) as unknown as Record<string, unknown>;
   const py = (await pyDoAggregate(findings, policyRevision)) as Record<string, unknown>;
 
   // Byte-equal envelope (confidence stripped). canonicalize key-sorts recursively + normalizes scalars.

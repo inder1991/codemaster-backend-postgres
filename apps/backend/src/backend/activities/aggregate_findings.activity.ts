@@ -20,13 +20,14 @@
  * construction, which is why this activity touches no Postgres (the aggregate stage operates entirely on
  * the in-memory findings tuple) and registers no clock/random seam.
  *
- * ## Semantic stage — deferred Qwen merge (skip path only)
+ * ## Semantic stage — real Qwen cosine-merge (injected embedder)
  *
- * The activity constructs the pipeline with NO embedder, so `aggregateSemantic` always takes the
- * fail-open skip path: `after_semantic = after_exact`, `semantic_merged = 0`, and `semantic_skipped`
- * mirrors the frozen Python's `len < 2 ? false : true` flag exactly. The real Qwen cosine-merge is
- * deferred (needs the Qwen EmbeddingsPort adapter — a separate sub-project, FOLLOW-UP-aggregate-semantic-
- * qwen). See aggregation_semantic.ts for the seam.
+ * The pipeline threads an injected {@link EmbeddingsPort} into `aggregateSemantic`. Production wires the
+ * resolved platform embedder (Qwen / OpenAI-compat adapter); tests inject a deterministic double. With a
+ * real embedder the semantic stage embeds every finding body and greedily merges same-file near-duplicates
+ * (cosine ≥ 0.92), so `semantic_merged` is now non-zero. When NO embedder is provided the stage takes the
+ * fail-open skip path (`after_semantic = after_exact`, `semantic_merged = 0`), with `semantic_skipped`
+ * mirroring the frozen Python's `len < 2 ? false : true` flag. See aggregation_semantic.ts for the merge.
  */
 
 import {
@@ -36,6 +37,7 @@ import {
 } from "#backend/review/aggregation.js";
 import { aggregateSemantic } from "#backend/review/aggregation_semantic.js";
 
+import type { EmbeddingsPort } from "#backend/adapters/embeddings_port.js";
 import type { AggregateFindingsInputV1 } from "#contracts/aggregate_findings.v1.js";
 import type { AggregatedFindingsV1 } from "#contracts/aggregated_findings.v1.js";
 import type { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
@@ -47,18 +49,21 @@ import type { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
  *   [after_scope]  = assertFindingScopeConsistency(findings)            (drops non-chunk_observed)
  *   after_exact    = aggregateExact(after_scope)
  *   exact_dropped  = after_scope.length - after_exact.length
- *   [after_sem, semantic_skipped] = aggregateSemantic(after_exact)      (no embedder → skip path)
- *   semantic_merged = after_exact.length - after_sem.length             (always 0 on the skip path)
+ *   [after_sem, semantic_skipped] = await aggregateSemantic(after_exact, embedder)
+ *   semantic_merged = after_exact.length - after_sem.length             (non-zero when a real merge fires)
  *   [after_cap, capped] = rankAndCap(after_sem)
  *
- * Returns the `AggregatedFindingsV1` envelope. Exported so the Tier-1 parity oracle can drive the same
- * pipeline the activity runs (mirrors the frozen Python exporting `_do_aggregate` from the activity
- * module). No embedder is threaded — the semantic stage takes the skip path by construction.
+ * Returns the `AggregatedFindingsV1` envelope. Async because the semantic stage embeds over the network
+ * (the Python `_do_aggregate` is likewise `async`). Exported so the Tier-1 parity oracle can drive the
+ * same pipeline the activity runs (mirrors the frozen Python exporting `_do_aggregate`). The optional
+ * `embedder` is the merge collaborator: a real {@link EmbeddingsPort} runs the cosine-merge; `undefined`
+ * takes the fail-open skip path (semantic_merged = 0).
  */
-export function doAggregate(
+export async function doAggregate(
   findings: ReadonlyArray<ReviewFindingV1>,
   policyRevision: number,
-): AggregatedFindingsV1 {
+  embedder?: EmbeddingsPort,
+): Promise<AggregatedFindingsV1> {
   const inputCount = findings.length;
 
   // v9-MINIMAL R-3 structural scope-consistency check (drops findings whose scope != chunk_observed).
@@ -67,8 +72,8 @@ export function doAggregate(
   const afterExact = aggregateExact(afterScope);
   const exactDropped = afterScope.length - afterExact.length;
 
-  // No embedder → fail-open skip path (deferred Qwen merge). semantic_merged is always 0 here.
-  const [afterSemantic, semanticSkipped] = aggregateSemantic(afterExact, undefined);
+  // Real embedder → greedy cosine-merge of same-file near-duplicates; no embedder → fail-open skip path.
+  const [afterSemantic, semanticSkipped] = await aggregateSemantic(afterExact, embedder);
   const semanticMerged = afterExact.length - afterSemantic.length;
 
   const [afterCap, capped] = rankAndCap(afterSemantic);
@@ -88,13 +93,40 @@ export function doAggregate(
 }
 
 /**
- * The registered activity. Takes the single typed {@link AggregateFindingsInputV1} envelope (invariant
- * 11) and runs {@link doAggregate} over its findings + policy_revision. Async to match the Temporal
- * activity signature (`Promise<AggregatedFindingsV1>`) and the sibling persist activity, even though the
- * pure aggregation core is synchronous (no I/O, no embedder).
+ * The registered activity (no-embedder default). Takes the single typed {@link AggregateFindingsInputV1}
+ * envelope (invariant 11) and runs {@link doAggregate} over its findings + policy_revision with NO
+ * embedder — the fail-open skip path. This is the back-compat module-level registration the worker
+ * registry wires today; production threads a real embedder via {@link AggregateFindingsActivity} (the
+ * 1:1 analogue of the frozen Python bound-method holder).
  */
 export async function aggregateFindings(
   input: AggregateFindingsInputV1,
 ): Promise<AggregatedFindingsV1> {
   return doAggregate(input.findings, input.policy_revision);
+}
+
+/**
+ * Bound-method holder for the aggregate_findings activity — 1:1 with the frozen Python
+ * `AggregateFindingsActivity(embedder=...)`. The worker bootstrap constructs it with the resolved
+ * platform {@link EmbeddingsPort} and registers its `aggregateFindings` bound method, so the semantic
+ * stage runs the REAL Qwen cosine-merge:
+ *
+ *     const agg = new AggregateFindingsActivity({ embedder: resolveEmbeddingsConsumer(...) });
+ *     const activities = { ...others, aggregateFindings: agg.aggregateFindings };
+ *
+ * The method is an arrow property so it stays bound when destructured into the activities map (Temporal
+ * registers the function value directly, losing `this`).
+ */
+export class AggregateFindingsActivity {
+  private readonly embedder: EmbeddingsPort;
+
+  public constructor({ embedder }: { embedder: EmbeddingsPort }) {
+    this.embedder = embedder;
+  }
+
+  public readonly aggregateFindings = async (
+    input: AggregateFindingsInputV1,
+  ): Promise<AggregatedFindingsV1> => {
+    return doAggregate(input.findings, input.policy_revision, this.embedder);
+  };
 }
