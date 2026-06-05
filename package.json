@@ -15,7 +15,7 @@
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint .",
     "test": "vitest run",
-    "test:integration": "vitest run test/integration",
+    "test:integration": "vitest run test/integration --no-file-parallelism",
     "test:magika": "CODEMASTER_TEST_MAGIKA=1 vitest run test/parity/magika_agreement.parity.test.ts",
     "gates": "tsx scripts/gates/run_all.ts",
     "validate-fast": "npm run gates && npm run lint && npm run typecheck && npm run test",
@@ -23,7 +23,7 @@
     "migrate:down": "node -e \"console.error('migrate:down is disabled: codemaster migrations are up-only (the squashed baseline is irreversible by design). Recreate a throwaway database and re-run migrate:up. NEVER migrate a shared/cluster DB.'); process.exit(1)\""
   },
   "dependencies": {
-    "@anthropic-ai/bedrock-sdk": "^0.12.0",
+    "@anthropic-ai/bedrock-sdk": "^0.29.2",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/sdk-node": "^0.54.0",
     "@temporalio/activity": "^1.11.0",

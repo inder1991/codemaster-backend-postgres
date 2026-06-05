@@ -78,6 +78,25 @@ export class LlmRoleDisabledError extends LlmInvocationError {
   }
 }
 
+/**
+ * Port of `credentials_provider.py::LlmCredentialsExpiredError` (frozen Python). Raised when the
+ * credentials provider has been unable to refresh credentials (e.g. a Vault decrypt failure) for
+ * longer than its `hard_stale_seconds` budget. The worker activity catches it, lets Temporal retry,
+ * and the exception-rate alert fires. Activity-level retry: YES.
+ *
+ * NOTE: the `PostgresLlmProviderSettingsRepo` in `./llm_provider_settings_repo.ts` does NOT raise
+ * this — it returns `null` for an absent/disabled row and lets a Vault decrypt failure surface as the
+ * Vault adapter's own error. The error lives here so the LlmCredentialsProvider seam (a separate
+ * de-stub task) can `instanceof`-dispatch the whole family from one import, mirroring the Python
+ * hierarchy where it is re-exported from `integrations/llm/__init__.py`.
+ */
+export class LlmCredentialsExpiredError extends LlmInvocationError {
+  public constructor(message?: string) {
+    super(message);
+    this.name = "LlmCredentialsExpiredError";
+  }
+}
+
 // ─── client.py:86-120 — LlmOutputUnsafeError ──────────────────────────────────────────────────────
 
 /**
