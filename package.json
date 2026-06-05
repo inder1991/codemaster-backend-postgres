@@ -37,6 +37,7 @@
     "node-pg-migrate": "^7.7.0",
     "pg": "^8.13.0",
     "pgvector": "^0.2.0",
+    "web-tree-sitter": "^0.25.10",
     "zod": "^3.23.0"
   },
   "devDependencies": {

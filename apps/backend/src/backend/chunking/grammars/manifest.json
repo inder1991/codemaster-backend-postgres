@@ -1,0 +1,27 @@
+{
+  "_comment": "Pinned tree-sitter grammar WASM artifacts for the chunker. Parity-critical: the chunk boundaries these grammars produce ARE the per-chunk LLM input, so the versions MUST match the frozen Python reference (vendor/codemaster-py) exactly. See docs/adr/0067-tree-sitter-wasm-chunker-parity-dependency.md.",
+  "tree_sitter_core_reference": "0.25.2 (frozen Python `tree-sitter`; grammars compiled at ABI 15). The TS runtime uses `web-tree-sitter` ^0.25 which loads ABI-15 grammar .wasm.",
+  "no_runtime_fetch": "These .wasm are vendored into the repo and loaded from this directory at startup. They are NEVER fetched at runtime (per the dep adoption conditions).",
+  "grammars": {
+    "python": {
+      "wasm": "tree-sitter-python.wasm",
+      "source_npm": "tree-sitter-python@0.25.0",
+      "matches_python_pkg": "tree-sitter-python==0.25.0",
+      "sha256": "16108b50df4ee9a30168794252ab55e7c93bfc5765d7fa0aa3e335752c515f47"
+    },
+    "javascript": {
+      "wasm": "tree-sitter-javascript.wasm",
+      "source_npm": "tree-sitter-javascript@0.25.0",
+      "matches_python_pkg": "tree-sitter-javascript==0.25.0",
+      "sha256": "5fb488d0cabb4775a594bab85682de5ad6ce83c0d6ac997a9f82dd084d571240"
+    },
+    "typescript": {
+      "wasm": "tree-sitter-typescript.wasm",
+      "source_npm": "tree-sitter-typescript@0.23.2",
+      "matches_python_pkg": "tree-sitter-typescript==0.23.2",
+      "note": "language_typescript() variant (NOT tsx). The tarball also ships tree-sitter-tsx.wasm; vendor it too if/when .tsx chunking is added.",
+      "sha256": "778025db5a8be0e70f8ccc3671e486dfeddd048c25d9e8a70c26de2e1bf6f97d"
+    }
+  },
+  "reproduce": "For each grammar at the pinned version: `npm pack <source_npm>` → `tar xzf <pkg>-<ver>.tgz` → `cp package/<wasm> apps/backend/src/backend/chunking/grammars/` → verify `shasum -a 256` matches the sha256 above. The .wasm ships prebuilt inside the npm tarball; no emscripten build is required."
+}
