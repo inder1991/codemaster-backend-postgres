@@ -274,6 +274,8 @@ describeChain("LLM real chain — SETTINGS→CREDS→SDK→CACHE dual-run", () =
         { role: "user", content: "Review this diff." },
       ],
       maxTokens: 1024,
+      // ADR-0068: invokeModel requires installationId — a fixed test id for this wiring proof.
+      installationId: "11111111-2222-3333-4444-555555555555",
     });
 
     expect(sdkBuiltWithApiKey).toBe("sk-real-chain-token"); // decrypted creds reached the SDK.

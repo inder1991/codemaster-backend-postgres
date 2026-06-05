@@ -45,8 +45,16 @@ const MESSAGES: Array<LlmMessage> = [
   { role: "user", content: "review this" },
 ];
 
+// ADR-0068: invokeModel now REQUIRES installationId — these transform-only tests pass a fixed test id.
+const TEST_INSTALLATION_ID = "11111111-2222-3333-4444-555555555555";
+
 async function invoke(client: LlmClient) {
-  return client.invokeModel({ role: "primary", model: "claude-sonnet-4-6", messages: MESSAGES });
+  return client.invokeModel({
+    role: "primary",
+    model: "claude-sonnet-4-6",
+    messages: MESSAGES,
+    installationId: TEST_INSTALLATION_ID,
+  });
 }
 
 describe("LlmClient.invokeModel — pure transform", () => {
@@ -132,7 +140,12 @@ describe("LlmClient.invokeModel — pure transform", () => {
   it("requires an explicit model (ADR-0060: no in-client routing fallback)", async () => {
     const client = newClient({ content: [{ type: "text", text: "x" }] });
     await expect(
-      client.invokeModel({ role: "primary", model: null, messages: MESSAGES }),
+      client.invokeModel({
+        role: "primary",
+        model: null,
+        messages: MESSAGES,
+        installationId: TEST_INSTALLATION_ID,
+      }),
     ).rejects.toBeInstanceOf(TypeError);
   });
 

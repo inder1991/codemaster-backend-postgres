@@ -72,6 +72,7 @@ import { redactPii } from "#backend/redact/pii_redactor.js";
 import { OutputSafetyValidator } from "#backend/security/output_safety.js";
 
 import { LlmInvocationError, LlmOutputUnsafeError, LlmTimeoutError } from "./errors.js";
+import { hashMessagesForLedger, type LlmInvocationLedger } from "./invocation_ledger.js";
 
 import type { BlobRef } from "#contracts/blob_ref.v1.js";
 import { LlmInvokeResultV1 } from "#contracts/llm_invoke_result.v1.js";
@@ -292,6 +293,12 @@ export class LlmClient {
   private readonly langfuse: LangfuseExporterPort;
   private readonly clock: Clock;
   private readonly random: SystemRandom;
+  // TS hardening divergence (ADR-0068) — OPTIONAL LLM-invocation idempotency ledger. The frozen Python
+  // has no ledger; absent here means "behave exactly as Python" (invoke, no replay). When present AND an
+  // `idempotency` context is passed to invokeModel, a HIT replays the stored provider response and SKIPS
+  // the paid SDK call; a MISS stores the raw response BEFORE returning. Platform jobs / unit tests leave
+  // it undefined.
+  private readonly ledger: LlmInvocationLedger | undefined;
 
   public constructor(args: {
     sdk: LlmSdk;
@@ -307,6 +314,9 @@ export class LlmClient {
     // are set). Fire-and-forget; never affects the return / raise.
     langfuse?: LangfuseExporterPort;
     clock?: Clock;
+    // TS hardening divergence (ADR-0068) — OPTIONAL idempotency ledger. Absent → exactly-as-Python (no
+    // replay). Production review wiring injects the REAL Postgres-backed ledger; platform jobs omit it.
+    ledger?: LlmInvocationLedger;
   }) {
     this.clock = args.clock ?? new WallClock();
     this.sdk = args.sdk;
@@ -317,6 +327,7 @@ export class LlmClient {
     this.outputSafety = args.outputSafety ?? new OutputSafetyValidator();
     this.langfuse = args.langfuse ?? DISABLED_LANGFUSE_EXPORTER;
     this.random = new SystemRandom();
+    this.ledger = args.ledger;
   }
 
   /**
@@ -337,16 +348,36 @@ export class LlmClient {
     maxTokens?: number;
     purpose?: string;
     tools?: Array<Record<string, unknown>> | null;
-    // deprecated; ignored; platform-scope. Kept for deploy-ordering compatibility (mirrors Python).
-    installationId?: string | null;
+    // TS hardening divergence (ADR-0068) — Python keeps `installation_id` an OPTIONAL deprecated/ignored
+    // param and substitutes a fixed all-ones sentinel (platform-scope) when omitted. TS makes it a
+    // REQUIRED arg so a caller CANNOT silently omit it: the real id flows to the cost-cap (per-org
+    // isolation), the blob put (correct attribution), and the telemetry.llm_calls + Langfuse rows
+    // (incident-response / billing / SLO attribution). Genuine internal/platform jobs pass
+    // {@link PLATFORM_INVOCATION_INSTALLATION_ID} (ZERO_UUID) EXPLICITLY — there is no implicit fallback
+    // to the platform sentinel. See the owner rationale captured in ADR-0068.
+    installationId: string;
+    // TS hardening divergence (ADR-0068) — OPTIONAL idempotency context. When present AND the client
+    // was constructed with a `ledger`, the paid SDK call is made idempotent: the key is derived from
+    // reviewId + chunkId + role + model + prompt hash + toolSchemaVersion; a HIT replays the stored
+    // provider response (the SDK is NOT called again); a MISS calls the SDK then stores the raw response
+    // BEFORE returning. When absent (platform jobs / unit tests) the client behaves exactly as the
+    // frozen Python (invoke, no ledger). The SDK call is the only non-repeatable, paid edge.
+    idempotency?: {
+      reviewId: string;
+      chunkId: string;
+      toolSchemaVersion: string;
+    };
   }): Promise<LlmInvokeResultV1> {
     const maxTokens = args.maxTokens ?? 1024;
     const purpose = args.purpose ?? "review";
     const tools = args.tools ?? null;
-    // installation_id is kept as an optional deprecated param; not forwarded to credentials. Telemetry
-    // uses it as a placeholder. The Python TELEMETRY_MISSING_INSTALLATION_ID sentinel substitutes a
-    // fixed all-ones UUID; here it only labels the archive key, off the observable path.
-    const telemetryIid = args.installationId ?? TELEMETRY_MISSING_INSTALLATION_ID;
+    // TS hardening divergence (ADR-0068) — Python falls back to TELEMETRY_MISSING_INSTALLATION_ID (the
+    // all-ones sentinel) when `installation_id` is None; the required-arg contract above means production
+    // never reaches that fallback. The sentinel is retained ONLY as a last-ditch defensive normalization
+    // for an empty string (a wiring bug, not a normal path) so a malformed empty value never silently
+    // charges spend / archives under an empty key. Genuine platform jobs pass
+    // PLATFORM_INVOCATION_INSTALLATION_ID (ZERO_UUID) explicitly — they do NOT hit this branch.
+    const telemetryIid = args.installationId === "" ? TELEMETRY_MISSING_INSTALLATION_ID : args.installationId;
 
     // ADR-0060 A: model selection is resolved upstream and passed explicitly. The client requires one;
     // there is no in-client routing fallback.
@@ -418,48 +449,100 @@ export class LlmClient {
       contentType: "application/json",
     });
 
+    // TS hardening divergence (ADR-0068) — Python has NO invocation ledger: it ALWAYS calls the SDK, so
+    // a post-call persistence failure + a Temporal retry buys a SECOND paid completion. When this client
+    // has a `ledger` AND the caller passed an `idempotency` context, compute the stable key from the
+    // deterministic activity inputs (reviewId + chunkId + role + model + prompt hash + toolSchemaVersion)
+    // and probe the ledger FIRST. On a HIT we REPLAY the stored provider response and SKIP the paid SDK
+    // call entirely (the only non-repeatable, paid edge); the post-call transform + output-safety +
+    // telemetry/Langfuse below run UNCHANGED against the replayed response (owner decision: keep
+    // telemetry/Langfuse as replayable side effects against the stored result). When `ledger` /
+    // `idempotency` are absent (platform jobs / unit tests) `idempotencyKey` is null and the path below
+    // is identical to the frozen Python (invoke, no ledger).
+    const idempotencyKey =
+      this.ledger !== undefined && args.idempotency !== undefined
+        ? this.ledger.computeKey({
+            reviewId: args.idempotency.reviewId,
+            chunkId: args.idempotency.chunkId,
+            role: args.role,
+            model,
+            promptSha256: hashMessages(args.messages),
+            toolSchemaVersion: args.idempotency.toolSchemaVersion,
+          })
+        : null;
+
     const started = this.clock.monotonic();
     let response: Record<string, unknown>;
-    try {
-      response = await this.sdk.createMessage({
-        model,
-        messages: args.messages.map((m) => ({ role: m.role, content: m.content })),
-        maxTokens,
-        tools,
-        role: args.role,
-      });
-    } catch (e) {
-      // The Python distinguishes TimeoutError (status='timeout') from any other exception
-      // (status='failed') for the telemetry / Langfuse status label; BOTH map to LlmInvocationError on
-      // the observable path. The failure-row write (so cost telemetry stays accurate even on failure),
-      // the cost-cap reservation release, AND the fire-and-forget Langfuse export ARE on the always-on
-      // production path and are reproduced here. Mirrors client.py:421-476 (the two except arms, unified
-      // here because the status label is the only thing that differs between them).
-      const failedLatencyMs = Math.trunc((this.clock.monotonic() - started) * 1000);
-      const failureStatus: "failed" | "timeout" = isTimeoutError(e) ? "timeout" : "failed";
-      await this.recordFailure({
-        installationId: telemetryIid,
-        requestId,
-        model,
-        latencyMs: failedLatencyMs,
-        status: failureStatus,
-      });
-      await this.releaseCostCapReservation({ installationId: telemetryIid, estimated });
-      await this.maybeExportLangfuseTrace({
-        requestId,
-        installationId: telemetryIid,
-        model,
-        promptTokens: 0,
-        completionTokens: 0,
-        latencyMs: failedLatencyMs,
-        costUsdCents: 0,
-        status: failureStatus,
-        promptText: firstMessageContent(args.messages),
-        completionText: "",
-        routingReason: ROUTING_REASON,
-        policyRevision: POLICY_REVISION,
-      });
-      throw new LlmInvocationError(`bedrock invocation failed: ${formatErr(e)}`);
+
+    const replayed =
+      this.ledger !== undefined && idempotencyKey !== null
+        ? await this.ledger.lookup({ key: idempotencyKey, installationId: telemetryIid })
+        : null;
+
+    if (replayed !== null) {
+      // HIT — replay the stored provider response; the paid SDK call is SKIPPED. No store (the row
+      // already exists). The transform + telemetry/Langfuse below run against this replayed response.
+      response = replayed;
+    } else {
+      try {
+        response = await this.sdk.createMessage({
+          model,
+          messages: args.messages.map((m) => ({ role: m.role, content: m.content })),
+          maxTokens,
+          tools,
+          role: args.role,
+        });
+      } catch (e) {
+        // The Python distinguishes TimeoutError (status='timeout') from any other exception
+        // (status='failed') for the telemetry / Langfuse status label; BOTH map to LlmInvocationError on
+        // the observable path. The failure-row write (so cost telemetry stays accurate even on failure),
+        // the cost-cap reservation release, AND the fire-and-forget Langfuse export ARE on the always-on
+        // production path and are reproduced here. Mirrors client.py:421-476 (the two except arms, unified
+        // here because the status label is the only thing that differs between them).
+        const failedLatencyMs = Math.trunc((this.clock.monotonic() - started) * 1000);
+        const failureStatus: "failed" | "timeout" = isTimeoutError(e) ? "timeout" : "failed";
+        await this.recordFailure({
+          installationId: telemetryIid,
+          requestId,
+          model,
+          latencyMs: failedLatencyMs,
+          status: failureStatus,
+        });
+        await this.releaseCostCapReservation({ installationId: telemetryIid, estimated });
+        await this.maybeExportLangfuseTrace({
+          requestId,
+          installationId: telemetryIid,
+          model,
+          promptTokens: 0,
+          completionTokens: 0,
+          latencyMs: failedLatencyMs,
+          costUsdCents: 0,
+          status: failureStatus,
+          promptText: firstMessageContent(args.messages),
+          completionText: "",
+          routingReason: ROUTING_REASON,
+          policyRevision: POLICY_REVISION,
+        });
+        throw new LlmInvocationError(`bedrock invocation failed: ${formatErr(e)}`);
+      }
+      // MISS — the paid SDK call succeeded: persist the RAW provider response BEFORE returning, so a
+      // future retry replays it instead of buying a second completion. ON CONFLICT DO NOTHING in the
+      // ledger makes a racing retry a safe no-op (the key is content-addressable). Guarded so a ledger
+      // write failure never masks a successful invocation — but then a retry WOULD re-pay, which is the
+      // pre-ADR-0068 (Python) behavior, strictly no worse than before.
+      if (this.ledger !== undefined && idempotencyKey !== null && args.idempotency !== undefined) {
+        await this.storeInvocation({
+          key: idempotencyKey,
+          installationId: telemetryIid,
+          reviewId: args.idempotency.reviewId,
+          chunkId: args.idempotency.chunkId,
+          role: args.role,
+          model,
+          promptSha256: hashMessages(args.messages),
+          toolSchemaVersion: args.idempotency.toolSchemaVersion,
+          providerResponse: response,
+        });
+      }
     }
     const latencyMs = Math.trunc((this.clock.monotonic() - started) * 1000);
 
@@ -649,6 +732,47 @@ export class LlmClient {
   }
 
   /**
+   * TS hardening divergence (ADR-0068) — persist the raw provider response to the idempotency ledger
+   * AFTER a successful (MISS) SDK call and BEFORE returning, so a future Temporal retry replays it
+   * instead of buying a second paid completion. Guarded so a ledger write failure NEVER masks a
+   * successful invocation — but then a retry would re-pay (the pre-ADR-0068 Python behavior, strictly no
+   * worse). No-op when the client has no ledger (platform jobs / unit tests). Python has no analogue.
+   */
+  private async storeInvocation(args: {
+    key: string;
+    installationId: string;
+    reviewId: string;
+    chunkId: string;
+    role: string;
+    model: string;
+    promptSha256: string;
+    toolSchemaVersion: string;
+    providerResponse: Record<string, unknown>;
+  }): Promise<void> {
+    if (this.ledger === undefined) {
+      return;
+    }
+    try {
+      await this.ledger.store({
+        key: args.key,
+        entry: {
+          installationId: args.installationId,
+          reviewId: args.reviewId,
+          chunkId: args.chunkId,
+          role: args.role,
+          model: args.model,
+          promptSha256: args.promptSha256,
+          toolSchemaVersion: args.toolSchemaVersion,
+          providerResponse: args.providerResponse,
+        },
+      });
+    } catch {
+      // Defense in depth — a ledger write failure must not mask a successful invocation. A subsequent
+      // retry would then re-pay (the pre-ADR-0068 Python behavior), which is strictly no worse.
+    }
+  }
+
+  /**
    * Build a {@link BedrockTraceV1} from the call params + redacted snippets and hand it to the injected
    * Langfuse exporter. 1:1 with the Python `_maybe_export_langfuse_trace`.
    *
@@ -727,6 +851,16 @@ function firstMessageContent(messages: Array<LlmMessage>): string {
 }
 
 /**
+ * TS hardening divergence (ADR-0068) — SHA-256 hex of the serialized request messages: the prompt-hash
+ * component of the idempotency key. Delegates to {@link hashMessagesForLedger} so the hash is
+ * single-sourced with the ledger module. Stable across retries because the messages are a deterministic
+ * transform of the activity input. Python has no analogue (no ledger, no prompt hash).
+ */
+function hashMessages(messages: ReadonlyArray<LlmMessage>): string {
+  return hashMessagesForLedger(messages.map((m) => ({ role: m.role, content: m.content })));
+}
+
+/**
  * True iff `e` should be recorded as a `timeout` (vs `failed`) telemetry status — the Python
  * `except TimeoutError` branch. The SDK adapter maps a Bedrock timeout to {@link LlmTimeoutError}; we
  * also match an error whose `name` is `TimeoutError` (a raw transport abort) for robustness. Everything
@@ -736,8 +870,23 @@ function isTimeoutError(e: unknown): boolean {
   return e instanceof LlmTimeoutError || (e instanceof Error && e.name === "TimeoutError");
 }
 
-// The all-ones UUID placeholder the Python TELEMETRY_MISSING_INSTALLATION_ID sentinel mints. Off the
-// observable path (labels the archive key only). Re-export-free local constant.
+/**
+ * The explicit platform-scope sentinel for genuine internal / platform jobs (housekeeping, walkthrough,
+ * eval, any non-tenant review-LLM call). Equal to the cost-cap's global-scope sentinel
+ * (`ZERO_UUID = "00000000-0000-0000-0000-000000000000"`, `postgres_enforcer.ts`), which routes spend to
+ * the global cap and skips the per-org row.
+ *
+ * TS hardening divergence (ADR-0068) — Python lets NORMAL review calls omit `installation_id` and fall
+ * back to a platform/all-ones sentinel implicitly. TS forbids that: a platform job must OPT IN to
+ * platform-scope by passing THIS constant explicitly, so normal per-installation review calls can never
+ * accidentally charge their spend / blob / telemetry / Langfuse attribution to the platform sentinel.
+ */
+export const PLATFORM_INVOCATION_INSTALLATION_ID = "00000000-0000-0000-0000-000000000000";
+
+// The all-ones UUID placeholder the Python TELEMETRY_MISSING_INSTALLATION_ID sentinel mints. Retained
+// ONLY as a defensive last-resort normalization for an empty-string installationId (a wiring bug) so a
+// malformed empty value never charges spend / archives under an empty key — production never hits it
+// (invokeModel requires a non-empty id, and platform jobs pass PLATFORM_INVOCATION_INSTALLATION_ID).
 const TELEMETRY_MISSING_INSTALLATION_ID = "ffffffff-ffff-ffff-ffff-ffffffffffff";
 
 // ─── small helpers (no external deps) ──────────────────────────────────────────────────────────────

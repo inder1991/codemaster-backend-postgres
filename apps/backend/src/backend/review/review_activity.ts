@@ -15,6 +15,8 @@
 // The TS analogue is `ApplicationFailure.create({ message, type, nonRetryable })` from @temporalio/common
 // (the same class the Python ApplicationError serializes to over the wire).
 
+import { createHash } from "node:crypto";
+
 import { ApplicationFailure } from "@temporalio/common";
 
 import { BedrockBudgetExceededError } from "#backend/cost/enforcer.js";
@@ -41,6 +43,19 @@ import type { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
 export type LlmClientCacheLike = {
   forRole(role: string): Promise<LlmClient>;
 };
+
+/**
+ * TS hardening divergence (ADR-0068) — the tool-schema version component of the LLM-invocation
+ * idempotency key. Derived as a content-addressable digest of REVIEW_TOOL_SCHEMA (+ the arbitration
+ * tool), so when the tool schema changes — which changes the SHAPE of the LLM's structured output and
+ * therefore the parse — the key changes and a stale stored response is NOT replayed. A constant string
+ * would NOT invalidate on a schema change; this digest does. Stable across processes (pure hash of the
+ * frozen schema literal). Python has no analogue (no ledger, no idempotency key).
+ */
+export const REVIEW_TOOL_SCHEMA_VERSION = `rfs-${createHash("sha256")
+  .update(Buffer.from(JSON.stringify([REVIEW_TOOL_SCHEMA, ARBITRATION_INTENT_TOOL_SCHEMA]), "utf-8"))
+  .digest("hex")
+  .slice(0, 16)}`;
 
 /**
  * `_evidence_ids_from_context` (Python ~840-862): the allowed-evidence-id set the parser enforces.
@@ -115,6 +130,27 @@ export async function doReview(
       purpose: "review_finding",
       // R-W1 (2026-05-22): 2048 covers ~3 findings cleanly (2× the prior 1024 default).
       maxTokens: 2048,
+      // TS hardening divergence (ADR-0068) — Python platform-scopes the review LLM call (it omits
+      // installation_id, which the frozen client treats as deprecated/ignored and substitutes a
+      // platform sentinel). TS tenant-scopes it: the REAL context.installation_id flows to the
+      // cost-cap (per-org isolation), blob put, telemetry.llm_calls + Langfuse rows. Per-org cost caps
+      // cannot protect a noisy installation if all review spend is charged to the platform sentinel,
+      // and blob/telemetry/Langfuse attribution under the all-ones UUID makes incident response /
+      // billing / SLOs worse. Genuine platform jobs pass PLATFORM_INVOCATION_INSTALLATION_ID instead.
+      installationId: context.installation_id,
+      // TS hardening divergence (ADR-0068) — pass the idempotency context so review invocations are
+      // ledgered: a post-call persistence failure + a Temporal retry replays the stored provider response
+      // instead of buying a second paid Bedrock completion. The stable key is derived from
+      // review_id + chunk_id + role + model + prompt hash + toolSchemaVersion; ReviewContextV1 carries
+      // pr_id (the PR/review identity — there is no separate review_id field) and chunk.chunk_id (the
+      // deterministic per-chunk id). The client only acts on this when it was constructed with a ledger;
+      // when no ledger is wired (platform jobs / unit tests) the call behaves exactly as the frozen
+      // Python (invoke, no replay). Python has no analogue.
+      idempotency: {
+        reviewId: context.pr_id,
+        chunkId: context.chunk.chunk_id,
+        toolSchemaVersion: REVIEW_TOOL_SCHEMA_VERSION,
+      },
     });
   } catch (e) {
     // (a) Budget exceeded → non-retryable.

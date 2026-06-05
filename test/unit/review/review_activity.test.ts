@@ -2,8 +2,18 @@ import { describe, expect, it } from "vitest";
 
 import { FakeClock } from "#platform/clock.js";
 
-import { InMemoryCostCapEnforcer } from "#backend/cost/enforcer.js";
-import { LlmClient, type LlmSdk } from "#backend/integrations/llm/client.js";
+import {
+  InMemoryCostCapEnforcer,
+  type CostCapDecision,
+  type CostCapEnforcer,
+} from "#backend/cost/enforcer.js";
+import {
+  LlmClient,
+  PLATFORM_INVOCATION_INSTALLATION_ID,
+  type BlobStore,
+  type LlmCallsTelemetryWriter,
+  type LlmSdk,
+} from "#backend/integrations/llm/client.js";
 import {
   LlmInvocationError,
   LlmRoleNotConfiguredError,
@@ -16,6 +26,7 @@ import {
 
 import { InMemoryBlobStoreAdapter } from "../../support/llm/cassette_sdk.js";
 
+import type { BlobRef } from "#contracts/blob_ref.v1.js";
 import { computeChunkId } from "#contracts/diff_chunking.v1.js";
 import { ReviewContextV1 } from "#contracts/review_context.v1.js";
 
@@ -248,5 +259,128 @@ describe("doReview — output-safety sanitize-and-continue", () => {
       type: "BedrockOutputUnsafeError",
       nonRetryable: true,
     });
+  });
+});
+
+// ─── ADR-0068: TENANT-SCOPE the review LLM calls (intentional divergence from the platform-scoped
+// frozen Python). doReview MUST thread context.installation_id all the way to the injected cost-cap,
+// blob store, and telemetry writer — the per-org isolation + correct attribution the owner mandated.
+// The id under test is DISTINCT from both sentinels (platform ZERO_UUID, all-ones TELEMETRY_MISSING) so
+// a regression to the platform-scope fallback would flip the asserted id and fail loudly. ──────────────
+
+/** A cost-cap double recording every installationId that reached checkOrRaise / recordCallCost. */
+class RecordingCostCap implements CostCapEnforcer {
+  public readonly checkIds: Array<string> = [];
+  public readonly recordIds: Array<string> = [];
+  private readonly inner = new InMemoryCostCapEnforcer({
+    globalCapCents: 500_000,
+    perOrgCapCents: 100_000,
+  });
+  public async checkOrRaise(args: {
+    installationId: string;
+    estimatedCents: number;
+    today: string;
+  }): Promise<CostCapDecision> {
+    this.checkIds.push(args.installationId);
+    return this.inner.checkOrRaise(args);
+  }
+  public async recordCallCost(args: {
+    installationId: string;
+    costCents: number;
+    today: string;
+    estimatedCents?: number;
+  }): Promise<void> {
+    this.recordIds.push(args.installationId);
+    return this.inner.recordCallCost(args);
+  }
+}
+
+/** A blob-store double recording every installationId that reached put. */
+class RecordingBlobStore implements BlobStore {
+  public readonly putIds: Array<string> = [];
+  private readonly inner = new InMemoryBlobStoreAdapter();
+  public async put(args: {
+    installationId: string;
+    key: string;
+    body: Uint8Array;
+    contentType: string;
+  }): Promise<BlobRef> {
+    this.putIds.push(args.installationId);
+    return this.inner.put(args);
+  }
+}
+
+/** A telemetry-writer double recording every installationId that reached recordCall. */
+class RecordingTelemetry implements LlmCallsTelemetryWriter {
+  public readonly callIds: Array<string> = [];
+  public async recordCall(args: { installationId: string }): Promise<void> {
+    this.callIds.push(args.installationId);
+  }
+}
+
+describe("doReview — ADR-0068 tenant-scoping: context.installation_id flows to every collaborator", () => {
+  // A UUID distinct from BOTH the platform sentinel and the all-ones TELEMETRY_MISSING sentinel.
+  const TENANT_INSTALLATION_ID = "abcdef01-2345-6789-abcd-ef0123456789";
+
+  function tenantContext(): ReviewContextV1 {
+    const chunkId = computeChunkId({
+      path: "src/foo.py",
+      start_line: 1,
+      end_line: 20,
+      body: "def foo():\n    return 1\n",
+    });
+    return ReviewContextV1.parse({
+      pr_id: UUID,
+      installation_id: TENANT_INSTALLATION_ID,
+      repo: "acme/widget",
+      pr_title: "Tenant-scoped review",
+      pr_description: "## Summary\n\nReplay this cassette.",
+      chunk: {
+        chunk_id: chunkId,
+        path: "src/foo.py",
+        language: "python",
+        start_line: 1,
+        end_line: 20,
+        body: "def foo():\n    return 1\n",
+        chunk_kind: "function",
+        token_estimate: 20,
+      },
+      policy_revision: 1,
+    });
+  }
+
+  it("threads the REAL installation_id (NOT the platform sentinel) to cost-cap, blob, AND telemetry", async () => {
+    const costCap = new RecordingCostCap();
+    const blobStore = new RecordingBlobStore();
+    const telemetry = new RecordingTelemetry();
+    const sdk: LlmSdk = {
+      async createMessage(): Promise<Record<string, unknown>> {
+        return {
+          content: [{ type: "text", text: "No issues identified." }],
+          usage: { input_tokens: 80, output_tokens: 12 },
+          stop_reason: "end_turn",
+        };
+      },
+    };
+    const client = new LlmClient({ sdk, costCap, blobStore, telemetry, clock: new FakeClock() });
+    const cache: LlmClientCacheLike = {
+      async forRole(): Promise<LlmClient> {
+        return client;
+      },
+    };
+
+    await doReview(tenantContext(), { cache });
+
+    // Every collaborator received EXACTLY the context's installation_id — never the platform sentinel
+    // and never the all-ones TELEMETRY_MISSING sentinel.
+    expect(costCap.checkIds).toEqual([TENANT_INSTALLATION_ID]);
+    expect(costCap.recordIds).toEqual([TENANT_INSTALLATION_ID]);
+    expect(blobStore.putIds).toEqual([TENANT_INSTALLATION_ID, TENANT_INSTALLATION_ID]); // request + response
+    expect(telemetry.callIds).toEqual([TENANT_INSTALLATION_ID]);
+
+    // Defensive: the id is NOT the platform-scope sentinel (the divergence the owner forbade for reviews).
+    expect(costCap.checkIds).not.toContain(PLATFORM_INVOCATION_INSTALLATION_ID);
+    expect(blobStore.putIds).not.toContain(PLATFORM_INVOCATION_INSTALLATION_ID);
+    expect(telemetry.callIds).not.toContain(PLATFORM_INVOCATION_INSTALLATION_ID);
   });
 });

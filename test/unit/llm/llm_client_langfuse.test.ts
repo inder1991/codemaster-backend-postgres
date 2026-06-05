@@ -29,6 +29,9 @@ const MESSAGES: Array<LlmMessage> = [
   { role: "user", content: "review this please" },
 ];
 
+// ADR-0068: invokeModel now REQUIRES installationId — these trace-wiring tests pass a fixed test id.
+const TEST_INSTALLATION_ID = "11111111-2222-3333-4444-555555555555";
+
 function newClient(args: {
   sdk: LlmSdk;
   langfuse: LangfuseExporterPort;
@@ -59,7 +62,12 @@ function throwingSdk(err: Error): LlmSdk {
 }
 
 async function invoke(client: LlmClient): Promise<unknown> {
-  return client.invokeModel({ role: "primary", model: "claude-sonnet-4-6", messages: MESSAGES });
+  return client.invokeModel({
+    role: "primary",
+    model: "claude-sonnet-4-6",
+    messages: MESSAGES,
+    installationId: TEST_INSTALLATION_ID,
+  });
 }
 
 describe("LlmClient Langfuse export wiring", () => {
@@ -155,7 +163,12 @@ describe("LlmClient Langfuse export wiring", () => {
       langfuse: exporter,
       clock: new FakeClock(),
     });
-    await client.invokeModel({ role: "primary", model: "claude-sonnet-4-6", messages });
+    await client.invokeModel({
+      role: "primary",
+      model: "claude-sonnet-4-6",
+      messages,
+      installationId: TEST_INSTALLATION_ID,
+    });
 
     const t = exporter.traces[0]!;
     expect(t.prompt_redacted_snippet).toContain("[REDACTED:email]");
@@ -195,6 +208,7 @@ describe("LlmClient Langfuse export wiring", () => {
       role: "primary",
       model: "claude-sonnet-4-6",
       messages: MESSAGES,
+      installationId: TEST_INSTALLATION_ID,
     });
     expect((result as { content: string }).content).toBe("default ok");
   });

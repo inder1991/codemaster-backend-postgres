@@ -34,7 +34,7 @@
  */
 
 /**
- * The 46 schema-qualified tables that carry `installation_id` (or are tenancy-enforced
+ * The schema-qualified tables that carry `installation_id` (or are tenancy-enforced
  * transitively) and therefore MUST be filtered on it in every SELECT/UPDATE/DELETE.
  *
  * Re-exported by `scripts/gates/_registry.ts` — do not duplicate this Set elsewhere.
@@ -63,6 +63,9 @@ export const TENANT_SCOPED_TABLES: ReadonlySet<string> = new Set<string>([
   "core.learning_proposals",
   "core.learnings",
   "core.learnings_revisions",
+  // TS hardening divergence (ADR-0068) — NEW table absent from the frozen Python. The LLM-invocation
+  // idempotency ledger carries installation_id NOT NULL; every query (insert + lookup) filters on it.
+  "core.llm_invocation_ledger",
   "core.local_users",
   "core.org_configs",
   "core.outbox",
