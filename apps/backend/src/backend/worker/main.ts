@@ -34,6 +34,7 @@ import { createRequire } from "node:module";
 
 import { NativeConnection, Worker } from "@temporalio/worker";
 
+import { startupSelfCheck } from "../chunking/treesitter_loader.js";
 import { activities } from "./registry.js";
 
 /** ESM→CJS bridge: a `require` bound to THIS module's URL, so `require.resolve` works under ESM. */
@@ -50,6 +51,11 @@ const require_ = createRequire(import.meta.url);
  * conditionally rather than passing `undefined`.
  */
 export async function runWorker(): Promise<void> {
+  // Fail LOUD at worker boot if the vendored tree-sitter grammars are missing/corrupt (ADR-0067 cond 3,
+  // SHA-256-verified). Without this, a missing .wasm would surface as a degraded review mid-flight (the
+  // chunker falling back to hunk-mode) instead of a clear startup failure.
+  await startupSelfCheck();
+
   const address = process.env.TEMPORAL_ADDRESS ?? "localhost:7233";
   const connection = await NativeConnection.connect(
     process.env.TEMPORAL_TLS === "1" ? { address, tls: {} } : { address },

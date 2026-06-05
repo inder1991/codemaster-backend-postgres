@@ -2,7 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import { FakeClock } from "#platform/clock.js";
 
-import { InMemoryCostCapEnforcer } from "#backend/cost/enforcer.js";
+import {
+  BedrockBudgetExceededError,
+  CostCapLockTimeoutError,
+  InMemoryCostCapEnforcer,
+  type CostCapDecision,
+  type CostCapEnforcer,
+} from "#backend/cost/enforcer.js";
 import { LlmClient, type LlmSdk } from "#backend/integrations/llm/client.js";
 import { LlmInvocationError, LlmOutputUnsafeError } from "#backend/integrations/llm/errors.js";
 
@@ -142,5 +148,63 @@ describe("LlmClient.invokeModel — pure transform", () => {
       clock: new FakeClock(),
     });
     await expect(invoke(client)).rejects.toBeInstanceOf(LlmInvocationError);
+  });
+});
+
+/** A cost-cap that raises CostCapLockTimeoutError on its first `timeoutTimes` calls, then delegates to a
+ *  real in-memory enforcer — exercises the invoke_model retry-once-on-lock-timeout path (S14.D). */
+class FlakyLockTimeoutCostCap implements CostCapEnforcer {
+  public calls = 0;
+  private readonly inner = new InMemoryCostCapEnforcer({ globalCapCents: 500_000, perOrgCapCents: 100_000 });
+  public constructor(private readonly timeoutTimes: number) {}
+  public async checkOrRaise(args: {
+    installationId: string;
+    estimatedCents: number;
+    today: string;
+  }): Promise<CostCapDecision> {
+    this.calls += 1;
+    if (this.calls <= this.timeoutTimes) {
+      throw new CostCapLockTimeoutError("simulated cost_daily row-lock timeout");
+    }
+    return this.inner.checkOrRaise(args);
+  }
+  public async recordCallCost(args: {
+    installationId: string;
+    costCents: number;
+    today: string;
+    estimatedCents?: number;
+  }): Promise<void> {
+    return this.inner.recordCallCost(args);
+  }
+}
+
+describe("LlmClient.invokeModel — cost-cap lock-timeout retry (S14.D, 1:1 with Python)", () => {
+  it("retries the cost-cap check ONCE on lock-timeout, then proceeds", async () => {
+    const costCap = new FlakyLockTimeoutCostCap(1);
+    const client = new LlmClient({
+      sdk: stubSdk({
+        content: [{ type: "text", text: "ok" }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+        stop_reason: "end_turn",
+      }),
+      costCap,
+      blobStore: new InMemoryBlobStoreAdapter(),
+      clock: new FakeClock(),
+    });
+    const result = await invoke(client);
+    expect(costCap.calls).toBe(2); // first timed out, retry succeeded
+    expect(result.content).toBe("ok");
+  });
+
+  it("fails closed with BedrockBudgetExceededError when the lock times out twice", async () => {
+    const costCap = new FlakyLockTimeoutCostCap(2);
+    const client = new LlmClient({
+      sdk: stubSdk({ content: [{ type: "text", text: "never" }] }),
+      costCap,
+      blobStore: new InMemoryBlobStoreAdapter(),
+      clock: new FakeClock(),
+    });
+    await expect(invoke(client)).rejects.toBeInstanceOf(BedrockBudgetExceededError);
+    expect(costCap.calls).toBe(2);
   });
 });

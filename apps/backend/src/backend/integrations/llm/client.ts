@@ -62,7 +62,7 @@ import { type Clock, WallClock } from "#platform/clock.js";
 import { tenantKysely } from "#platform/db/database.js";
 import { SystemRandom } from "#platform/randomness.js";
 
-import { BedrockBudgetExceededError, type CostCapEnforcer } from "#backend/cost/enforcer.js";
+import { BedrockBudgetExceededError, CostCapLockTimeoutError, type CostCapEnforcer } from "#backend/cost/enforcer.js";
 import {
   type LangfuseExporterPort,
   DISABLED_LANGFUSE_EXPORTER,
@@ -365,16 +365,38 @@ export class LlmClient {
     const promptChars = args.messages.reduce((acc, m) => acc + m.content.length, 0);
     const estimated = estimateCentsPreCall(model, promptChars);
 
-    // Cost-cap pre-call check (FAIL-CLOSED). The retry-once-on-lock-timeout path is a property of the
-    // PostgresCostCapEnforcer; the allow-all / in-memory defaults never raise CostCapLockTimeoutError,
-    // so a single check suffices for the cassette dual-run. (The full retry-then-fail-closed branch is
-    // a deferred follow-up wired with the production enforcer.)
+    // Cost-cap pre-call check (FAIL-CLOSED). Retry ONCE on lock-timeout (S14.D edge case 5: the
+    // telemetry.cost_daily row lock is contended under `SET LOCAL lock_timeout='2s'` →
+    // CostCapLockTimeoutError); a second timeout fails closed via BedrockBudgetExceededError so no LLM
+    // invocation proceeds without an atomic cost record. 1:1 with the frozen Python invoke_model.
     const todayForCheck = isoDate(this.clock.now());
-    await this.costCap.checkOrRaise({
-      installationId: telemetryIid,
-      estimatedCents: estimated,
-      today: todayForCheck,
-    });
+    try {
+      await this.costCap.checkOrRaise({
+        installationId: telemetryIid,
+        estimatedCents: estimated,
+        today: todayForCheck,
+      });
+    } catch (e) {
+      if (!(e instanceof CostCapLockTimeoutError)) {
+        throw e;
+      }
+      try {
+        await this.costCap.checkOrRaise({
+          installationId: telemetryIid,
+          estimatedCents: estimated,
+          today: todayForCheck,
+        });
+      } catch (retryErr) {
+        if (retryErr instanceof CostCapLockTimeoutError) {
+          throw new BedrockBudgetExceededError({
+            reason:
+              "cost-cap row lock timed out twice; failing closed to preserve daily-budget invariant",
+            scope: "kill_switch",
+          });
+        }
+        throw retryErr;
+      }
+    }
 
     // Archive request payload BEFORE invocation (forensics even if the SDK raises). Off the observable
     // path; the BlobRef is discarded (the result carries the RESPONSE blob ref).

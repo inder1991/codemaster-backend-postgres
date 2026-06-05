@@ -162,20 +162,25 @@ export class TreeSitterPythonChunker {
       return [];
     }
 
-    let root: TsNode;
+    let candidates: Array<DiffChunkV1>;
+    // web-tree-sitter Trees hold WASM-heap memory that JS GC does NOT reclaim (the Python bindings free
+    // it automatically). Extract the plain DiffChunkV1 candidate data, then delete() the tree in
+    // `finally` so a long-lived worker processing many PRs does not leak WASM memory.
+    let tree: { rootNode: unknown; delete(): void } | null = null;
     try {
       const parser = await getParser("python");
-      const tree = parser.parse(decoded);
+      tree = parser.parse(decoded) as { rootNode: unknown; delete(): void } | null;
       if (tree === null) {
         return this.fallbackModule({ path, body: decoded, hunkRanges });
       }
-      root = tree.rootNode as unknown as TsNode;
+      const root = tree.rootNode as unknown as TsNode;
+      candidates = this.extractCandidates({ root, body: decoded, path });
     } catch {
       // Defensive: tree-sitter parse failed → module fallback (the chunker never raises on input).
       return this.fallbackModule({ path, body: decoded, hunkRanges });
+    } finally {
+      tree?.delete();
     }
-
-    const candidates = this.extractCandidates({ root, body: decoded, path });
 
     if (candidates.length === 0) {
       return this.fallbackModule({ path, body: decoded, hunkRanges });
