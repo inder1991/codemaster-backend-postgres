@@ -71,9 +71,12 @@ import { computePolicyRules } from "#backend/activities/compute_policy_rules.act
 import { EmbedQueryActivity } from "#backend/activities/embed_query.activity.js";
 import { loadRepoConfigActivity } from "#backend/activities/load_repo_config.activity.js";
 import { persistReviewFindings } from "#backend/activities/persist_review_findings.activity.js";
+import { persistReviewWalkthrough } from "#backend/activities/persist_review_walkthrough.activity.js";
 import { postCheckRun } from "#backend/activities/post_check_run.activity.js";
 import { postReviewResults } from "#backend/activities/post_review_results.activity.js";
 import { releaseWorkspace } from "#backend/activities/release_workspace.activity.js";
+import { selectCarryForward } from "#backend/activities/select_carry_forward.activity.js";
+import { staticAnalysis } from "#backend/activities/static_analysis.activity.js";
 
 import { resolveEmbeddingsConsumer } from "#backend/adapters/resolve_embeddings.js";
 import { VaultHttpPort } from "#backend/adapters/vault_http.js";
@@ -96,6 +99,8 @@ import {
   type LlmClientCacheLike,
   bedrockReviewChunk,
 } from "#backend/review/review_activity.js";
+
+import { WalkthroughActivities } from "#backend/review/walkthrough_activity.js";
 
 import { buildRetrieveKnowledgeActivity } from "#backend/wiring/retrievers.js";
 
@@ -283,9 +288,17 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
   const resolveClonerDeps = makeClonerDepsResolver(githubInstallationId);
   const llmCache = makeLazyLlmClientCache(dsn);
 
+  // generate_walkthrough bound-method holder — 1:1 with the frozen Python `WalkthroughActivities(cache=…)`.
+  // It SHARES the same lazy ledger-wired LlmClientCache the review-chunk activity uses (the cache is
+  // role-keyed; the walkthrough resolves `forRole("primary")` then selects `modelForPurpose("walkthrough")`
+  // — claude-opus, distinct from the review role's sonnet — inside the activity body, exactly like
+  // bedrockReviewChunk). `.generateWalkthrough` is an arrow property so it stays bound when destructured.
+  const walkthroughActivities = new WalkthroughActivities({ cache: llmCache });
+
   return {
     // ── 1-arg activities, ready as-is ──
     persistReviewFindings,
+    persistReviewWalkthrough,
     classifyFiles,
     loadRepoConfigActivity,
     computePolicyRules,
@@ -293,6 +306,10 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     postReviewResults,
     chunkAndRedact,
     redactChunks,
+    // selectCarryForward(input) — pure deterministic 1-arg activity (no collaborators); registered bare.
+    selectCarryForward,
+    // staticAnalysis(input) — Stage-1 empty-valid 1-arg activity (no collaborators yet); registered bare.
+    staticAnalysis,
     // ── self-defaulting (optional 2nd `deps` arg → fn.length === 1) — registered bare ──
     allocateWorkspace,
     releaseWorkspace,
@@ -300,6 +317,8 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     aggregateFindings: aggregateActivity.aggregateFindings,
     embedQuery: embedQueryActivity.embedQuery.bind(embedQueryActivity),
     retrieveKnowledge: retrieveKnowledgeActivity.retrieveKnowledge.bind(retrieveKnowledgeActivity),
+    // generate_walkthrough — bound arrow property holding the shared ledger-wired LlmClientCache.
+    generateWalkthrough: walkthroughActivities.generateWalkthrough,
     // ── curried 2-arg activities (real collaborators threaded as the 2nd arg) ──
     // cloneRepoIntoWorkspace(req, deps) — curry the real GitSubprocessCloner deps so the registered
     // activity is genuinely 1-arg (the latent 2-arg-crash fix). Deps resolve lazily on first dispatch.

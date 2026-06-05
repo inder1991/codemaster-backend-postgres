@@ -32,6 +32,7 @@ import { buildActivities } from "#backend/worker/build_activities.js";
 // function names Temporal resolves activities by (matching the workflow `proxyActivities<{…}>` surface).
 const EXPECTED_ACTIVITY_NAMES = [
   "persistReviewFindings",
+  "persistReviewWalkthrough",
   "aggregateFindings",
   "classifyFiles",
   "cloneRepoIntoWorkspace",
@@ -41,11 +42,14 @@ const EXPECTED_ACTIVITY_NAMES = [
   "postReviewResults",
   "chunkAndRedact",
   "redactChunks",
+  "selectCarryForward",
+  "staticAnalysis",
   "allocateWorkspace",
   "releaseWorkspace",
   "embedQuery",
   "retrieveKnowledge",
   "bedrockReviewChunk",
+  "generateWalkthrough",
 ] as const;
 
 describe("buildActivities() composition root", () => {
