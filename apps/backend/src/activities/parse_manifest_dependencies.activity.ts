@@ -170,7 +170,21 @@ export function parseOne(manifest: ManifestSnapshot, options: ParseOneOptions = 
 
   // `time.monotonic()` is seconds; the Python multiplies the delta by 1000 to get ms.
   const start = clock.monotonic();
-  const outcome = dispatch(manifest);
+  let outcome: ParseOutcome | null;
+  try {
+    outcome = dispatch(manifest);
+  } catch (err) {
+    // Per-manifest failure isolation (EXCEEDS Python — Python's `_parse_one` lets the throw propagate and
+    // aborts the whole `tuple(...)` batch). A parser may throw mid-iteration on a malformed body — e.g. a
+    // non-string dependency spec → TypeError (faithful to Python's AttributeError). Mark THIS manifest
+    // FAILED, log the parser exception, and let the caller continue with the rest; one bad manifest must
+    // never abort the parse stage, which is what this activity's fail-open enrichment contract promises.
+    logParserException(manifest, err);
+    return ManifestSnapshot.parse({
+      ...manifest,
+      dependency_parsing_state: "failed" satisfies ManifestDependencyParsingState,
+    });
+  }
   const durationMs = (clock.monotonic() - start) * 1000.0;
 
   // UNSUPPORTED_FORMAT — matched the matcher but no parser.
@@ -240,6 +254,25 @@ function logRejections(manifest: ManifestSnapshot, outcome: ParseOutcome): void 
       }),
     );
   }
+}
+
+/**
+ * Emit one structured `console.warn` when a parser THROWS on a manifest body (per-manifest isolation —
+ * the throwing manifest is marked FAILED and the batch continues). Distinct event name from
+ * `manifest_parser_entry_rejected` so operators can grep parser crashes separately from per-entry
+ * rejections. `error_msg` is truncated to bound the log payload.
+ */
+function logParserException(manifest: ManifestSnapshot, err: unknown): void {
+  const ecosystem = manifest.detected_ecosystem ?? "other";
+  console.warn(
+    JSON.stringify({
+      event: "manifest_parser_threw",
+      source_manifest: manifest.path,
+      ecosystem,
+      error_class: err instanceof Error ? err.constructor.name : typeof err,
+      error_msg: (err instanceof Error ? err.message : String(err)).slice(0, 256),
+    }),
+  );
 }
 
 // ─── Activity class ─────────────────────────────────────────────────────────────────────────────────────

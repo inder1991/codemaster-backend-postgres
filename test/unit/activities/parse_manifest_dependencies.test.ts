@@ -417,6 +417,25 @@ describe("ParseManifestDependenciesActivity end-to-end", () => {
     expect(byPath.get("pyproject.toml")).toBe("failed");
   });
 
+  it("per-manifest isolation: a parser THROW on one manifest does not abort the others (exceeds Python)", async () => {
+    // A Pipfile [packages] written as an ARRAY with a non-string element makes parsePipfile's emit()
+    // throw a TypeError mid-iteration (faithful to Python's AttributeError). Python ALSO aborts the whole
+    // batch on this throw; the TS activity isolates it — the throwing manifest → FAILED, the rest parse.
+    const activity = new ParseManifestDependenciesActivity({ clock: frozenClock() });
+    const result = await activity.parseManifestDependencies(
+      ParseManifestDependenciesInputV1.parse({
+        manifests: [
+          snap({ path: "Pipfile", body: 'packages = ["x", 123, "y"]\n', ecosystem: "python" }),
+          snap({ path: "package.json", body: JSON.stringify({ dependencies: { react: "^18" } }), ecosystem: "npm" }),
+        ],
+      }),
+    );
+    expect(result.parsed_manifests).toHaveLength(2);
+    const byPath = new Map(result.parsed_manifests.map((m) => [m.path, m.dependency_parsing_state]));
+    expect(byPath.get("Pipfile")).toBe("failed");
+    expect(byPath.get("package.json")).toBe("parsed");
+  });
+
   it("mixed ecosystems: pyproject(parsed) + Cargo(parsed) + Dockerfile(unsupported)", async () => {
     const activity = new ParseManifestDependenciesActivity({ clock: frozenClock() });
     const result = await activity.parseManifestDependencies(
