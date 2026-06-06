@@ -990,7 +990,12 @@ async function buildChunkContext(
     retrieved_knowledge: [...retrievedKnowledge],
     retrieval_degraded: retrievalDegraded,
     retrieval_degradation_reason: retrievalDegradationReason,
-    budget_enforcement: false,
+    // prompt-budget-enforcement-v1 collapse-on: the assemble_prompt budget subsystem is now ported
+    // (apps/backend/src/review/prompt_assembler.ts — byte-exact, Tier-1 parity-tested), so the prompt
+    // builder honors this flag. The true branch (rank-then-wholesale-drop) is the live one — it caps
+    // the per-chunk prompt at total_budget_tokens (4000) / policy_max_tokens (3000), force-including
+    // forbid/security rules over the cap rather than dropping them silently.
+    budget_enforcement: true,
     applicable_policy: applicablePolicy,
     removed_or_changed_symbols: [],
     consumer_hits: [],

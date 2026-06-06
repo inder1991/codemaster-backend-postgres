@@ -410,6 +410,114 @@ describe("buildUserMessage — char-for-char vs frozen _build_user_message", () 
     expect(tsOut).toBe(pyOut);
   });
 
+  // ── budget_enforcement=true (prompt-budget-enforcement-v1 collapse-on) ──────────────────────────
+  // These exercise the now-ported assemble_prompt budget subsystem THROUGH buildUserMessage: the same
+  // _apply_budget chain runs on the frozen Python side (the oracle drives _build_user_message, which
+  // calls _apply_budget), so a budgeted prompt on both sides must be char-for-char identical. Also
+  // proves budget_enforcement=true NO LONGER THROWS (the old stub raised).
+  it("budget_enforcement=true: droppable style rule dropped, security/forbid force-included", async () => {
+    // A tight per-chunk budget: the policy_max default (3000) is generous, so make the droppable rule
+    // huge enough to drop AND a security rule that force-includes. With the default 3000 cap, two
+    // ~3900-char bodies can't both fit; the style/recommend one drops, the security/forbid one is
+    // force-included over the cap. resolution_explanation projects to the kept rule_ids.
+    const securityRule = budgetRule({
+      ruleId: "SEC-1",
+      scopeDir: "src/app",
+      body: "Never call eval() on untrusted input. " + "s".repeat(3800),
+      headingPath: ["Security"],
+      category: "security",
+      intent: "forbid",
+      priority: 100,
+    });
+    const styleRule = budgetRule({
+      ruleId: "STY-1",
+      scopeDir: "src",
+      body: "Prefer composition over inheritance. " + "t".repeat(3800),
+      headingPath: ["Style"],
+      category: "style",
+      intent: "recommend",
+      priority: 20,
+    });
+    const ctx = wire({
+      pr_id: PR_ID,
+      installation_id: INST_ID,
+      repo: "acme/widgets",
+      pr_title: "Budgeted policy",
+      pr_description: "Two large rules; one drops under budget.",
+      chunk: chunk({ path: "src/app/handler.ts" }),
+      policy_revision: 5,
+      budget_enforcement: true,
+      applicable_policy: {
+        changed_path: "src/app/handler.ts",
+        applicable_rules: [
+          { rule: securityRule, sources: [securityRule] },
+          { rule: styleRule, sources: [styleRule] },
+        ],
+        resolution_explanation: ["SEC-1 nearest-ancestor", "STY-1 ancestor"],
+      },
+    });
+    const tsOut = buildUserMessage(ReviewContextV1.parse(ctx));
+    const pyOut = await pyBuildUserMessage(ctx);
+    expect(tsOut).toBe(pyOut);
+  });
+
+  it("budget_enforcement=true: knowledge starvation (huge policy fills the budget, chunks drop)", async () => {
+    // One ~3900-char security/forbid rule (~975 tokens) sits well under the 3000 policy cap, but the
+    // knowledge chunks compete for the residual 4000-3000-policy_used budget; large chunks drop.
+    const bigRule = budgetRule({
+      ruleId: "SEC-FILL",
+      scopeDir: "src/app",
+      body: "Forbid raw SQL. " + "q".repeat(3800),
+      headingPath: ["Security"],
+      category: "security",
+      intent: "forbid",
+      priority: 100,
+    });
+    const ctx = wire({
+      pr_id: PR_ID,
+      installation_id: INST_ID,
+      repo: "acme/widgets",
+      pr_title: "Budgeted knowledge",
+      pr_description: "Large knowledge chunks compete for residual budget.",
+      chunk: chunk({ path: "src/app/handler.ts" }),
+      policy_revision: 6,
+      budget_enforcement: true,
+      applicable_policy: {
+        changed_path: "src/app/handler.ts",
+        applicable_rules: [{ rule: bigRule, sources: [bigRule] }],
+        resolution_explanation: ["SEC-FILL nearest-ancestor"],
+      },
+      retrieved_knowledge: [
+        knowledgeChunk("docs/a.md", ["A"], "a".repeat(5000)),
+        knowledgeChunk("docs/b.md", ["B"], "b".repeat(5000)),
+        knowledgeChunk("docs/c.md", ["C"], "small chunk that fits"),
+      ],
+    });
+    const tsOut = buildUserMessage(ReviewContextV1.parse(ctx));
+    const pyOut = await pyBuildUserMessage(ctx);
+    expect(tsOut).toBe(pyOut);
+  });
+
+  it("budget_enforcement=true with null policy + knowledge (assembler runs, no policy blocks)", async () => {
+    const ctx = wire({
+      pr_id: PR_ID,
+      installation_id: INST_ID,
+      repo: "acme/widgets",
+      pr_title: "Budget no policy",
+      pr_description: "Null policy; knowledge fills the budget.",
+      chunk: chunk(),
+      policy_revision: 0,
+      budget_enforcement: true,
+      retrieved_knowledge: [
+        knowledgeChunk("docs/x.md", [], "knowledge body one"),
+        knowledgeChunk("docs/y.md", [], "knowledge body two"),
+      ],
+    });
+    const tsOut = buildUserMessage(ReviewContextV1.parse(ctx));
+    const pyOut = await pyBuildUserMessage(ctx);
+    expect(tsOut).toBe(pyOut);
+  });
+
   it("non-ASCII body + excerpt (token estimate safety factor + ensure_ascii JSON)", async () => {
     const ctx = wire({
       pr_id: PR_ID,
@@ -523,6 +631,33 @@ function rule(
     category: "security",
     intent: "forbid",
     priority: 100,
+  };
+}
+
+// Parametrizable rule builder for the budget cases — `rule()` above hardcodes security/forbid (always
+// never-drop), so a droppable rule needs explicit category/intent/priority.
+function budgetRule(args: {
+  ruleId: string;
+  scopeDir: string;
+  body: string;
+  headingPath: ReadonlyArray<string>;
+  category: string;
+  intent: string;
+  priority: number;
+}): Record<string, unknown> {
+  return {
+    rule_id: args.ruleId,
+    normalized_hash: SHA64,
+    source_file: `${args.scopeDir || "."}/CLAUDE.md`,
+    source_file_sha256: SHA64,
+    scope_dir: args.scopeDir,
+    heading_path: args.headingPath,
+    rule_index: 0,
+    title: `${args.ruleId} title`,
+    body: args.body,
+    category: args.category,
+    intent: args.intent,
+    priority: args.priority,
   };
 }
 
