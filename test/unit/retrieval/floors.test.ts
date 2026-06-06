@@ -109,4 +109,25 @@ describe("reservePriorityFloors", () => {
     expect(result.selected).toEqual([wrapped]);
     expect(result.budgetRemaining).toBe(970);
   });
+
+  it("treats a missing token_count as 0 (real KnowledgeChunkV1 carries no token_count) — never NaN", () => {
+    // The real KnowledgeChunkV1 contract has NO token_count field (confirmed: neither the Python nor the
+    // TS contract carries it). So `normalize(pick).token_count` is undefined for a real wrapped chunk.
+    // Pre-fix: `budget -= undefined` → NaN, which silently corrupts every later floor's budget check (and
+    // in Python the equivalent raises AttributeError). The fix treats a missing token_count as 0.
+    const innerNoTokenCount = {
+      labels: ["topic:security_policy"],
+      source: "confluence",
+      doc_kind: "other",
+      match_specificity_score: 0,
+      age_days: 0,
+      // NOTE: no token_count — mirrors the real KnowledgeChunkV1 contract (which omits the field).
+    };
+    const wrapped = { chunk: innerNoTokenCount, score: 0.5, stage: "ann" };
+    const result = reservePriorityFloors([wrapped], { tokenBudget: 1000 });
+    expect(Number.isNaN(result.budgetRemaining)).toBe(false);
+    // token_count treated as 0 → the floor is reserved, nothing deducted.
+    expect(result.selected).toEqual([wrapped]);
+    expect(result.budgetRemaining).toBe(1000);
+  });
 });

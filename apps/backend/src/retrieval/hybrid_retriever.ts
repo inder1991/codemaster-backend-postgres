@@ -40,7 +40,11 @@
 // ── Degradation ───────────────────────────────────────────────────────────────────────────────────
 // If the ANN side returns degraded=true (embed service down) RRF still emits results from BM25; the
 // rerank pass receives degraded=true and propagates it. Confluence retrieval is best-effort — if it
-// returns empty, the BM25+ANN path produces results as usual.
+// returns empty OR FAILS, the BM25+ANN path produces results as usual and `degraded=true` is surfaced
+// with reason `confluence_retrieval_failed`. NOTE: this is a deliberate DIVERGENCE from frozen Python,
+// whose bare `asyncio.gather(bm25, ann, confluence)` propagates a confluence exception and fails the
+// whole retrieval — the Python docstring claims best-effort-on-failure but the reference code never
+// delivered it. See the `.catch` isolation in `retrieve`.
 //
 // ── OTel span ─────────────────────────────────────────────────────────────────────────────────────
 // The Python wraps the whole call in the locked `retrieval.hybrid_retrieve` span. That observability
@@ -181,14 +185,35 @@ export class HybridRetriever {
       throw new Error("confluence gating invariant violated");
     }
 
-    const [bm25Result, annResult, confluenceResult] = await Promise.all([
-      this.bm25.retrieve(wideQuery),
-      this.ann.retrieve(wideQuery),
-      confluencePort.search({
+    // Confluence is best-effort: isolate its failure so a Confluence outage degrades to repo-only context
+    // instead of failing the whole retrieval. DIVERGENCE from frozen Python, whose bare
+    // `asyncio.gather(bm25, ann, confluence)` fails-ALL on a Confluence exception — the docstring's
+    // "best-effort … if it fails … BM25+ANN produces results as usual" intent was never delivered in the
+    // reference code. bm25/ann stay core (their failures still propagate via Promise.all); only the
+    // confluence task is caught (the `.catch` converts a rejection into [] + a degraded flag).
+    let confluenceDegraded = false;
+    const confluencePromise = confluencePort
+      .search({
         queryEmbedding: queryVec,
         topK: PRE_RERANK_TOP_K,
         effectiveLabels: new Set(query.effective_labels),
-      }),
+      })
+      .catch((e: unknown): ReadonlyArray<ConfluenceRetrievedChunk> => {
+        confluenceDegraded = true;
+        console.warn(
+          JSON.stringify({
+            event: "confluence_retrieval_failed",
+            reason: e instanceof Error ? e.message : String(e),
+            installation_id: query.installation_id,
+          }),
+        );
+        return [];
+      });
+
+    const [bm25Result, annResult, confluenceResult] = await Promise.all([
+      this.bm25.retrieve(wideQuery),
+      this.ann.retrieve(wideQuery),
+      confluencePromise,
     ]);
 
     const fused = rrfCombine([bm25Result, annResult], { topK: PRE_RERANK_TOP_K });
@@ -240,11 +265,21 @@ export class HybridRetriever {
       query.top_k,
     );
 
+    // Fold the confluence-outage signal into the degraded surface so the prompt builder's "retrieval may
+    // be partial" note fires when Confluence failed even though BM25/ANN succeeded.
+    const degradationReasons: Array<string> = [];
+    if (reranked.degraded && reranked.degradation_reason !== "") {
+      degradationReasons.push(reranked.degradation_reason);
+    }
+    if (confluenceDegraded) {
+      degradationReasons.push("confluence_retrieval_failed");
+    }
+
     return {
       schema_version: 1,
       items: finalItems,
-      degraded: reranked.degraded,
-      degradation_reason: reranked.degradation_reason,
+      degraded: reranked.degraded || confluenceDegraded,
+      degradation_reason: degradationReasons.join("; ").slice(0, 200),
       starvation_tiers: floor.starvationTiers.map((t) => PRIORITY_TIER_NAME[t]),
       source_counts: {
         repo: sourceCounts.repo,

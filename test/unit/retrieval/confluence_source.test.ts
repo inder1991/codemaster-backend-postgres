@@ -133,6 +133,36 @@ describe("mergeSources (cross-source near-dup dedup)", () => {
     expect(kept.length).toBe(2);
     expect(counters.deduped).toBe(0);
   });
+
+  it("dedups near-duplicate WRAPPED chunks whose text is at .chunk.body (not .chunk_text)", () => {
+    // The HybridRetriever feeds ScoredKnowledgeChunkV1 envelopes (text at `.chunk.body`) into
+    // mergeSources, NOT raw rows (text at `.chunk_text`). Pre-fix getText only read `chunk_text` → "" for
+    // every wrapped envelope, so dedup was INERT for the entire hybrid path (faithful to frozen Python's
+    // same latent gap). After teaching getText the wrapped shape, identical wrapped chunks dedup.
+    const body =
+      "The quick brown fox jumps over the lazy dog and runs away fast across the open field at dawn";
+    const wrappedKnowledge = {
+      schema_version: 1,
+      chunk: { body, source: "repo_knowledge" },
+      score: 0.9,
+      stage: "bm25",
+    };
+    const wrappedConfluence = {
+      schema_version: 1,
+      chunk: { body, source: "confluence" },
+      score: 0.8,
+      stage: "ann",
+    };
+    const [kept, counters] = mergeSources({
+      repoChunks: [],
+      knowledgeChunks: [wrappedKnowledge],
+      confluenceChunks: [wrappedConfluence] as unknown as ReadonlyArray<ConfluenceRetrievedChunk>,
+    });
+    // knowledge seeds the dedup set; the identical wrapped confluence chunk is dropped.
+    expect(kept).toEqual([wrappedKnowledge]);
+    expect(counters.deduped).toBe(1);
+    expect(counters.confluence).toBe(0);
+  });
 });
 
 describe("sourceBreakdown", () => {

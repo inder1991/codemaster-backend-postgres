@@ -404,6 +404,43 @@ describe("HybridRetriever floors reserved before rerank", () => {
 
 // ─── confluenceToScored wrapper helper ─────────────────────────────────────────────────────────────
 
+// ─── Confluence outage isolation (divergence from frozen Python's fail-all gather) ──────────────────
+
+describe("HybridRetriever confluence outage isolation", () => {
+  class ThrowingConfluence implements ConfluenceRetrievalPort {
+    public async search(): Promise<ReadonlyArray<ConfluenceRetrievedChunk>> {
+      throw new Error("confluence DB unreachable");
+    }
+  }
+
+  it("a Confluence failure degrades gracefully — BM25/ANN results survive, degraded=true", async () => {
+    // Frozen Python's bare `asyncio.gather(bm25, ann, confluence)` fails the WHOLE retrieval if confluence
+    // throws (its docstring claims best-effort on failure, but the code doesn't deliver). This port
+    // isolates the confluence failure so repo BM25/ANN context survives, and surfaces degraded=true.
+    const repoChunk = knowledgeChunk({ rel: "docs/repo.md", body: "unique repo body content here" });
+    const retriever = new HybridRetriever({
+      bm25: asBm25(new StubRetriever([scored(repoChunk)])),
+      ann: asAnn(new StubRetriever([scored(repoChunk)])),
+      rerank: new LlmRerank({ port: new IdentityRerankPort() }),
+      confluence: new ThrowingConfluence(),
+    });
+    const out = await retriever.retrieve(
+      query({
+        includeConfluence: true,
+        effectiveLabels: ["default", "lang:python"],
+        queryVectorOverride: Array(1024).fill(0.1),
+      }),
+    );
+    // repo context survived the confluence outage...
+    expect(out.items.some((i) => i.chunk.source === "repo_knowledge")).toBe(true);
+    // ...no confluence items (that source failed)...
+    expect(out.items.some((i) => i.chunk.source === "confluence")).toBe(false);
+    // ...and the degradation is surfaced (not a thrown error).
+    expect(out.degraded).toBe(true);
+    expect(out.degradation_reason).toContain("confluence");
+  });
+});
+
 describe("confluenceToScored", () => {
   it("wraps a confluence chunk into a ScoredKnowledgeChunkV1 with source='confluence'", () => {
     const c = confluenceChunk({ pageId: "p1", labels: ["default", "lang:python"] });

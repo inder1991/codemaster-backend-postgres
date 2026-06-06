@@ -165,17 +165,35 @@ export function mergeSources(
   return [kept, counters] as const;
 }
 
-/** Read `chunk[attr]` as a string, falling back to "" (1:1 with the Python `_get_text`). */
+/**
+ * Read the chunk's text, falling back to "" when absent.
+ *
+ * Reads `chunk[attr]` (default `chunk_text`) for RAW rows. DIVERGENCE from the frozen Python `_get_text`
+ * (which only read `chunk_text`): the HybridRetriever feeds WRAPPED `ScoredKnowledgeChunkV1` envelopes —
+ * whose text lives at `.chunk.body`, NOT `.chunk_text` — into mergeSources for EVERY source (repo,
+ * knowledge, and wrapped confluence). With only the `chunk_text` read, getText returned "" for every
+ * wrapped envelope, so the near-duplicate protection was entirely INERT on the hybrid path (a latent gap
+ * faithfully reproduced from Python). The `.chunk.body` fallback activates dedup on the shapes the
+ * retriever actually passes, honoring the documented near-duplicate-protection intent.
+ */
 function getText(chunk: unknown, attr: string): string {
   if (chunk === null || typeof chunk !== "object") {
     return "";
   }
   // `Reflect.get` reads the named property without a computed-member-access object-injection sink.
   const value: unknown = Reflect.get(chunk, attr);
-  if (typeof value !== "string") {
-    return "";
+  if (typeof value === "string") {
+    return value;
   }
-  return value;
+  // Wrapped ScoredKnowledgeChunkV1 — the text is on the inner `.chunk.body`.
+  const inner: unknown = Reflect.get(chunk, "chunk");
+  if (inner !== null && typeof inner === "object") {
+    const body: unknown = Reflect.get(inner, "body");
+    if (typeof body === "string") {
+      return body;
+    }
+  }
+  return "";
 }
 
 // ─── Lightweight simhash (stdlib only) ─────────────────────────────────────────────────────────────

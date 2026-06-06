@@ -37,7 +37,11 @@ export type FloorClassifiable = {
   doc_kind?: string | null;
   match_specificity_score: number;
   age_days: number;
-  token_count: number;
+  // OPTIONAL: the real KnowledgeChunkV1 contract carries NO token_count field (confirmed: neither the
+  // Python nor TS contract has it), so a wrapped repo/knowledge/confluence chunk reaches floors without
+  // it. Missing → treated as 0 by reservePriorityFloors (see below). Pre-fix the bare read produced
+  // `budget -= undefined` → NaN (and the equivalent Python read raises AttributeError).
+  token_count?: number;
 };
 
 /** Tiers that get the minimum-reserved-slots treatment, in priority order (highest-authority first). */
@@ -121,7 +125,10 @@ export function reservePriorityFloors(
     });
 
     const pick = tierCandidates[0]!;
-    const pickTokens = normalize(pick).token_count;
+    // `?? 0`: the real KnowledgeChunkV1 contract omits token_count, so a wrapped chunk normalizes without
+    // it. Treat missing as 0-cost (a single ~512-800-tok floor pick never starves a 32k budget anyway) —
+    // this eliminates the `budget -= undefined → NaN` corruption that silently broke every later floor.
+    const pickTokens = normalize(pick).token_count ?? 0;
     if (pickTokens > budget) {
       starvation.push(tier);
       // Structured-log substitute for the deferred starvation counter (Python `_LOG.warning`).
