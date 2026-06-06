@@ -95,7 +95,8 @@ describe("extractPrMetadata", () => {
     expect(m!.authorLogin).toBe("octocat");
     expect(m!.baseRef).toBe("main");
     expect(m!.headRef).toBe("feat/x");
-    expect(m!.openedAt).toBe("2026-01-01T00:00:00Z");
+    // opened_at normalized Z → +00:00 to byte-match Python's datetime.isoformat() wire shape.
+    expect(m!.openedAt).toBe("2026-01-01T00:00:00+00:00");
   });
 
   it("maps github_pull_request_id 0 → null and truncates an over-long title", () => {

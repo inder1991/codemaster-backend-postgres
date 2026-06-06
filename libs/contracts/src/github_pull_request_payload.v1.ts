@@ -30,7 +30,13 @@ export const GitHubRepositoryRefV1 = z.object({
 });
 export type GitHubRepositoryRefV1 = z.infer<typeof GitHubRepositoryRefV1>;
 
-/** A `head` / `base` commit ref. `sha` accepts SHA-1 (40) or SHA-256 (64), hex-only. */
+/**
+ * A `head` / `base` commit ref. `sha` accepts SHA-1 (40) or SHA-256 (64), hex-only (GitHub's SHA-256
+ * migration forward-compat). KNOWN LATENT GAP, shared verbatim with the frozen Python:
+ * ReviewPullRequestPayloadV1.head_sha is exactly-40, so a 64-char SHA-256 head_sha would pass intake here
+ * but dead-letter at the v2 workflow boundary. GitHub sends 40-char SHA-1 today; when the SHA-256
+ * migration lands, widen the v2 head_sha + this bound in lockstep (on both the TS + Python contracts).
+ */
 export const GitHubCommitRefV1 = z.object({
   sha: z
     .string()

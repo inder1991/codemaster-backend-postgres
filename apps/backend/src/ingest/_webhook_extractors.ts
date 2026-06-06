@@ -10,6 +10,17 @@ import { GitHubPullRequestPayloadV1 } from "#contracts/github_pull_request_paylo
 const PR_TITLE_MAX_CHARS = 500;
 const PR_DESCRIPTION_MAX_CHARS = 10_000;
 
+/**
+ * Normalize a GitHub ISO timestamp to byte-match the Python wire shape. Python's `created_at` is a Pydantic
+ * `datetime` emitted via `.isoformat()`, which renders UTC as `+00:00` (NOT `Z`). GitHub sends
+ * second-precision `...Z`; rewriting a trailing `Z` → `+00:00` yields the exact Python form. An explicit
+ * offset (or null) passes through unchanged. Same instant either way; this only closes a byte-level
+ * parity drift against the frozen Python at the outbox seam.
+ */
+function normalizeOpenedAt(createdAt: string | null): string | null {
+  return createdAt !== null && createdAt.endsWith("Z") ? `${createdAt.slice(0, -1)}+00:00` : createdAt;
+}
+
 /** Parse the raw body to a plain object, or null on malformed JSON / non-object. */
 function parseJsonObject(body: Uint8Array): Record<string, unknown> | null {
   let parsed: unknown;
@@ -158,6 +169,6 @@ export function extractPrMetadata(body: Uint8Array): PrMetadata | null {
     headRef: p.pull_request.head.ref,
     draft: p.pull_request.draft,
     merged: p.pull_request.merged,
-    openedAt: p.pull_request.created_at,
+    openedAt: normalizeOpenedAt(p.pull_request.created_at),
   };
 }

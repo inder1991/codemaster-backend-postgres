@@ -223,7 +223,10 @@ export async function persistWebhook(args: {
       // Atomic idempotency: a returning row means we're the first writer; zero rows = a concurrent /
       // prior delivery already claimed this key (no SELECT-before-INSERT — closes the race). value = the
       // UTF-8 bytes of the webhook_event_id UUID string; 24h TTL computed in SQL (no new Date()).
-      const cacheKey = `github-webhook:${githubIid ?? "unknown"}:${deliveryId}`;
+      // Mirror Python's `{github_iid or 'unknown'}` truthiness: installation.id 0 (falsy in Python)
+      // also falls back to "unknown" — `??` alone would keep the literal "0" and diverge.
+      const iidPart = githubIid ? String(githubIid) : "unknown";
+      const cacheKey = `github-webhook:${iidPart}:${deliveryId}`;
       const ins = await sql<{ cache_key: string }>`
         INSERT INTO cache.cache_idempotency (cache_key, value, expires_at, created_at)
         VALUES (${cacheKey}, ${Buffer.from(webhookEventId, "utf-8")},
