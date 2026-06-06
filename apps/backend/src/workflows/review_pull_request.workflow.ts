@@ -605,6 +605,16 @@ export async function reviewPullRequest(
       // fail-open above) flow into BOTH the orchestrator's generateWalkthrough sites.
       linkedIssues,
       suggestedReviewers,
+      // Sub-spec B T17 confluence-context: thread the enrich_pr_files_activity_v2 result so the
+      // orchestrator's per-chunk buildChunkContext can construct the full-PR PRContext (build_pr_context_full)
+      // for the hybrid/confluence retrieval path. `null` when github_installation_id is null OR the v2 fetch
+      // errored + stageOutcome swallowed (the Python `enrichment is None` fail-open) — the orchestrator then
+      // builds the MVP per-chunk PRContext. The retrieve_knowledge ACTIVITY composes BM25+ANN+Confluence
+      // (gated on `_shouldUseHybrid`). manifestSnapshots stays [] — the fetch_manifest_snapshots /
+      // parse_manifest_dependencies activities are NOT yet ported (FOLLOW-UP-confluence-pr-context-manifests),
+      // exactly the Python `_manifest_snapshots=()` fail-open fallback when those markers are unsatisfied.
+      enrichment: enrichment ?? null,
+      manifestSnapshots: [],
       // Stage-5 arbitration `now` (the Python `now=workflow.now()` kwarg). The orchestrator runs in the
       // workflow sandbox where Date.now()/new Date() are clock-gate-banned, so the body resolves the instant
       // HERE from the SDK-provided, replay-deterministic workflow start time and threads the RFC3339 string.

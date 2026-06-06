@@ -27,10 +27,15 @@
 //     holds the RetrievedEvidenceV1 TYPE (type-only import; erased at emit) so the bundle stays crypto-free.
 //     When the port is omitted (unit tests) retrieved_evidence stays [] (the legacy default).
 //
+// ── CONFLUENCE / HYBRID RETRIEVAL (Stage 4 — confluence cluster; collapse-on) ──
+//   buildChunkContext builds the Sub-spec B T17 confluence-context (pickPrContext over ctx.enrichment +
+//   ctx.manifestSnapshots + PLATFORM_EXPOSED_LABELS) and threads include_confluence=true + pr_context +
+//   yaml_config (state.repoConfig) + platform_exposed_labels onto the retrieveKnowledge dispatch. The
+//   ORCHESTRATOR always passes the gated values (collapse-on); the ACTIVITY's `_shouldUseHybrid` gate
+//   decides legacy-vs-hybrid per chunk (it needs a non-null query_vector_override too). The hybrid retriever
+//   (BM25+ANN+Confluence+floors+rerank) is wired in build_activities → wiring/retrievers.ts.
+//
 // ── DEFERRED (tracked; pass empty/None per the task) ──
-//   * confluence pr_context + label routing (Stage 4 — confluence cluster, FOLLOW-UP-confluence-cluster).
-//     retrieveKnowledge dispatched WITHOUT pr_context / yaml_config / platform_exposed_labels (the legacy
-//     BM25+ANN+RRF fast path).
 //   * citation_validate (Stage 3 — its own activity boundary; Path.resolve syscalls). Step 7.5 skipped.
 //   * apply_policy_post_filter (Stage 5 — policy post-filter relocation). Step 7.2 skipped.
 //   * apply_arbitration / record_tool_runs (Stage 5 — arbitration layer). Step 7.7 skipped.
@@ -91,6 +96,14 @@ import { postFilterFindingsWithMetadata } from "#backend/policy/trust_filter.js"
 import { mergePerChunkBundles } from "#backend/policy/citation_context_builder.js";
 import { recordInvariantViolationAttempted } from "#backend/observability/workflow_policy_metrics.js";
 
+// Sub-spec B T17 confluence-context build (collapse-on of confluence-label-routing +
+// confluence-pr-context-full-pr). BOTH are pure + sandbox-safe (no node:crypto / clock / RNG / network /
+// DB): pr_context_builder is pure data construction over the enrichment result; PLATFORM_EXPOSED_LABELS
+// is a frozen const computed at module load over static detector tables. The confluence retrieval itself
+// runs in the retrieve_knowledge ACTIVITY (Node, DB OK) — the orchestrator only builds the gated INPUT.
+import { pickPrContext } from "#backend/retrieval/pr_context_builder.js";
+import { PLATFORM_EXPOSED_LABELS } from "#backend/retrieval/platform_labels.js";
+
 import type { PrMetaV1, WalkthroughV1 } from "#contracts/walkthrough.v1.js";
 import type { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
 import type { StaticAnalysisResultV1 } from "#contracts/static_analysis_result.v1.js";
@@ -110,6 +123,10 @@ import type { LinkedIssueV1 } from "#contracts/walkthrough.v1.js";
 // minting). The `import type` is ERASED at emit under verbatimModuleSyntax, so NO runtime edge to the
 // crypto-importing contract is created — the workflow bundle stays crypto-free (check_workflow_bundle).
 import type { RetrievedEvidenceV1 } from "#contracts/retrieved_evidence.v1.js";
+// Sub-spec B T17 confluence-context inputs (the enrichment result + manifest snapshots the pr_context
+// builder consumes). TYPE-ONLY — both contracts are pure zod (no crypto edge into the workflow bundle).
+import type { PrFilesEnrichmentResultV1 } from "#contracts/pr_files_enrichment.v1.js";
+import type { ManifestSnapshot } from "#contracts/pr_context.v1.js";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // ReviewPipelineContext (finding 2) — the single typed orchestrate() argument.
@@ -224,6 +241,27 @@ export type ReviewPipelineContext = {
    *  tests; the arbitration step is then either skipped — no applyArbitration port — or runs with a fixed
    *  deterministic instant). */
   readonly arbitrationNow?: string;
+  /** The `enrich_pr_files_activity_v2` result the workflow body captured at the top of the body (Stage-4
+   *  enrichment; review_pull_request.py:830-917). The Sub-spec B T17 confluence-context build reads it to
+   *  construct ONE full-PR PRContext (every changed file in the diff) per chunk fan-out via
+   *  `build_pr_context_full`. `null`/undefined (github_installation_id null, or the v2 fetch errored +
+   *  stageOutcome swallowed) makes the confluence gate fail-CLOSED for THIS PR — the per-chunk
+   *  `pickPrContext` falls back to the MVP single-file context, and `_shouldUseHybrid` in the activity is
+   *  still satisfiable, but the Python's `enrichment is None` fail-open path is preserved (the legacy MVP
+   *  context still routes labels). Optional to honour exactOptionalPropertyTypes. */
+  readonly enrichment?: PrFilesEnrichmentResultV1 | null;
+  /** The manifest snapshots the workflow body fetched (`fetch_manifest_snapshots_activity` →
+   *  `parse_manifest_dependencies_activity`; review_pull_request.py:919-1010) — threaded into the full-PR
+   *  PRContext's `manifests` so the FrameworkDetector can route `framework:*` labels. DEFAULT []: the two
+   *  fetch/parse activities are NOT yet ported (FOLLOW-UP-confluence-pr-context-manifests), so the workflow
+   *  body threads [] — exactly the Python `_manifest_snapshots=()` fail-open fallback. Optional to honour
+   *  exactOptionalPropertyTypes. */
+  readonly manifestSnapshots?: ReadonlyArray<ManifestSnapshot>;
+  /** The platform-exposed-labels ceiling (Sub-spec B T17; review_pull_request.py:1763). DEFAULT (when
+   *  omitted): the canonical {@link PLATFORM_EXPOSED_LABELS} const. Injectable so tests can narrow the
+   *  ceiling without re-importing the const. The confluence gate requires this be NON-EMPTY (it always is,
+   *  for the const). */
+  readonly platformExposedLabels?: ReadonlySet<string>;
 };
 
 /** A no-op StageLogger for when `ctx.logger` is omitted. SANDBOX-SAFE: pure inert sink (no console binding,
@@ -897,14 +935,40 @@ async function buildChunkContext(
     // embedResult === undefined: the embed activity raised, stageOutcome swallowed it; override stays null.
   }
 
-  // Retrieve-knowledge: fail-open via stageOutcome. On the activity raising, stageOutcome swallows and the
-  // local marker tuple flips retrievalDegraded. DEFERRED: confluence pr_context / yaml_config /
-  // platform_exposed_labels (Stage 4) — dispatched WITHOUT them (the legacy BM25+ANN+RRF fast path).
+  // Retrieve-knowledge: fail-open via stageOutcome. On the activity raising — OR the in-block confluence-
+  // context build raising — stageOutcome swallows and the local marker flips retrievalDegraded.
+  //
+  // CONFLUENCE collapse-on (Sub-spec B T17; review_pull_request.py:1710-1799): the confluence-supporting
+  // fields are built INSIDE the stage_outcome block (exactly as the Python `pick_pr_context(...)` +
+  // `RetrieveKnowledgeInputV1(...)` construction sits inside the `async with stage_outcome(...)`), so a
+  // PRContext validation failure (e.g. a malformed head_sha) is fail-open — the review proceeds with empty
+  // retrieved_knowledge + retrieval_degraded, never crashing the chunk. The ORCHESTRATOR ALWAYS passes the
+  // gated values (collapse-on — the Python workflow body's `if patched(...)` branch is straight-line in the
+  // historyless TS port); the ACTIVITY's `_shouldUseHybrid` gate decides legacy-vs-hybrid per chunk (it
+  // falls through to BM25+ANN+RRF unless ALL five fields are present, including a non-null
+  // query_vector_override). So a chunk whose query embed failed (queryVectorOverride === null) still routes
+  // through the activity, which takes the legacy path for THAT chunk — exactly the Python behaviour.
   const retrieveResult = await stageOutcome(
     "retrieve_knowledge",
     { logger: ctx.logger ?? NULL_LOGGER, headSha, runId },
-    async () =>
-      ports.retrieveKnowledge({
+    async () => {
+      // pr_context: pick_pr_context(use_full=true, ...) — the full-PR context (every changed file in the
+      // diff) from the enrichment result; falls back to the MVP per-chunk single-file context when
+      // enrichment is null/undefined (the Python fail-open). repo_default_branch="main" (1:1 with the
+      // hardcoded Python kwarg; FOLLOW-UP-confluence-repo-default-branch to thread the real default branch).
+      const confluencePrContext = pickPrContext({
+        useFull: true,
+        prId: pr.prMeta.pr_id,
+        headSha,
+        repoDefaultBranch: "main",
+        enrichment: ctx.enrichment,
+        chunkPath: chunk.path,
+        manifestSnapshots: [...(ctx.manifestSnapshots ?? [])],
+      });
+      const confluencePlatformLabels: ReadonlyArray<string> = [
+        ...(ctx.platformExposedLabels ?? PLATFORM_EXPOSED_LABELS),
+      ];
+      return ports.retrieveKnowledge({
         schema_version: 1,
         installation_id: pr.prMeta.installation_id,
         // FIX #2 (part 2) — repo_id is the internal repository UUID sourced from the workflow payload's
@@ -917,11 +981,13 @@ async function buildChunkContext(
         query: queryText,
         top_k: 5,
         query_vector_override: queryVectorOverride === null ? null : [...queryVectorOverride],
-        include_confluence: false,
-        pr_context: null,
-        yaml_config: null,
-        platform_exposed_labels: [],
-      }),
+        // CONFLUENCE collapse-on: include_confluence flips false → true; the supporting fields are threaded.
+        include_confluence: true,
+        pr_context: confluencePrContext,
+        yaml_config: state.repoConfig,
+        platform_exposed_labels: [...confluencePlatformLabels],
+      });
+    },
   );
   if (retrieveResult !== undefined) {
     retrievedKnowledge = retrieveResult.items;

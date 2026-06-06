@@ -329,7 +329,9 @@ function makeCtx(stub: RecordingStub, logger?: { warning(msg: string): void }): 
     },
     pr: {
       prMeta: PR_META,
-      headSha: "abc1234",
+      // 40-char git SHA — the Sub-spec B T17 confluence-context build (pickPrContext → PRContext.parse)
+      // validates head_sha min/max_length=40, so the per-chunk PRContext requires a real-shaped SHA.
+      headSha: "abcdef0123456789abcdef0123456789abcdef01",
       runId: uuidFor(4),
       reviewId: uuidFor(5),
       repositoryId: uuidFor(6),

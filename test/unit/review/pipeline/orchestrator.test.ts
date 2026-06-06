@@ -528,7 +528,10 @@ function makeCtx(
     },
     pr: {
       prMeta: PR_META,
-      headSha: "abc1234",
+      // 40-char git SHA — the confluence-context build (pickPrContext → PRContext.parse) validates
+      // head_sha min_length=40/max_length=40 (Sub-spec B T17), so the per-chunk PRContext requires a
+      // real-shaped SHA. Production always supplies one (typed_payload.head_sha).
+      headSha: "abcdef0123456789abcdef0123456789abcdef01",
       runId: uuidFor(4),
       reviewId: uuidFor(5),
       repositoryId: uuidFor(6),
@@ -562,7 +565,7 @@ describe("orchestrate — happy-path stage order", () => {
     const result = await orchestrate(makeCtx(stub));
 
     expect(result.status).toBe("accepted");
-    expect(result.headSha).toBe("abc1234");
+    expect(result.headSha).toBe("abcdef0123456789abcdef0123456789abcdef01");
     // findingsCount = 1 finding flows through dedup → aggregate.
     expect(result.findingsCount).toBe(1);
 
