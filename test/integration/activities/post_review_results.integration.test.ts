@@ -4,11 +4,14 @@ import { Kysely, PostgresDialect } from "kysely";
 import { Pool } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
 
+import { ActivityFailure, ApplicationFailure } from "@temporalio/common";
+
 import {
   doPost,
   markerFor,
   PostReviewTransientError,
 } from "#backend/activities/post_review_results.activity.js";
+import { extractDroppedStateFromPostFailure } from "#backend/review/pipeline/posting.js";
 
 import {
   type CreatedReviewV1,
@@ -236,9 +239,19 @@ function makeInput(args: {
 
 // ─── scripted stub GhReviewClient ────────────────────────────────────────────────────────────────
 
+/** A scripted non-422 publication-ladder failure (5xx / network / auth) — the doPost H-2 wrap path. */
+class StubLadderError extends Error {
+  constructor() {
+    super("simulated non-422 GitHub publication-ladder failure (5xx/network)");
+    this.name = "StubLadderError";
+  }
+}
+
 type StubScript = {
-  /** Sequential outcomes for create_review calls: a CreatedReviewV1, or a 422 sentinel. */
-  createReview?: Array<CreatedReviewV1 | "422">;
+  /** Sequential outcomes for create_review calls: a CreatedReviewV1, a 422 sentinel, or a non-422 sentinel. */
+  createReview?: Array<CreatedReviewV1 | "422" | "non422">;
+  /** Optional override: make update_review throw a non-422 ladder failure (the lost-claim update path). */
+  updateReviewThrowsNon422?: boolean;
 };
 
 type StubCalls = {
@@ -264,10 +277,16 @@ function makeStub(script: StubScript): { client: GhReviewClient; calls: StubCall
       if (next === "422") {
         throw new GitHubUnprocessableError("simulated 422 inline-comment-position rejection");
       }
+      if (next === "non422") {
+        throw new StubLadderError();
+      }
       return next;
     },
     async updateReview({ reviewId, body }) {
       calls.updateReview.push({ reviewId, body });
+      if (script.updateReviewThrowsNon422 === true) {
+        throw new StubLadderError();
+      }
     },
     async createIssueComment() {
       throw new Error("not used in this test");
@@ -469,6 +488,137 @@ describeDb("post_review_results doPost (integration, disposable PG)", () => {
     // The Phase-1 claim transaction rolled back on the guard violation → NO posted_reviews row exists.
     const row = await readPostedRow(seed.prId);
     expect(row).toBeUndefined();
+  });
+
+  it("WON ladder failure (non-422 create): raises PostReviewFailedWithDroppedState carrying classifier state", async () => {
+    // Two findings: one in-window (kept) + one out-of-window (dropped). The classifier partitions them
+    // BEFORE the atomic claim; the won-claim ladder then fails with a non-422 (5xx/network) error → the
+    // activity wraps it in the typed ApplicationFailure preserving { dropped, kept, posted_review_pr_id }.
+    // A non-422 on the inline create propagates immediately (the body-only retry is for 422 ONLY), so a
+    // single scripted non-422 outcome suffices to drive the ladder's throw → the doPost H-2 wrap.
+    const { client, calls } = makeStub({ createReview: ["non422"] });
+    const input = makeInput({
+      seed,
+      findings: [
+        finding({ start_line: 10, end_line: 10 }), // in-window → kept (index 0)
+        finding({ file: "not/in/diff.ts" }), // out-of-window → dropped (index 1)
+      ],
+      changedLineRanges: { [FILE_IN_DIFF]: [[1, 100]] },
+    });
+
+    let thrown: unknown;
+    try {
+      await doPost(input, { ghClient: client, dsn: INTEGRATION_DSN!, clock: FIXED_CLOCK });
+      throw new Error("expected doPost to raise the dropped-state ApplicationFailure");
+    } catch (e) {
+      thrown = e;
+    }
+
+    // The raised failure is an ApplicationFailure with the contract type the workflow handler reads.
+    expect(thrown).toBeInstanceOf(ApplicationFailure);
+    expect(thrown).not.toBeInstanceOf(ActivityFailure);
+    const appErr = thrown as ApplicationFailure;
+    expect(appErr.type).toBe("PostReviewFailedWithDroppedState");
+    // nonRetryable LEFT DEFAULT (false) — the workflow's retry policy controls the retry decision.
+    expect(appErr.nonRetryable).toBe(false);
+
+    // The activity↔handler contract: the handler's extractor narrows the SAME failure and returns the
+    // populated details (proving the type + details[0] shape match what posting.ts reads end-to-end).
+    const details = extractDroppedStateFromPostFailure(thrown);
+    expect(details).not.toBeNull();
+    expect(details!.posted_review_pr_id).toBe(seed.prId);
+    expect(details!.kept_finding_indices).toEqual([0]);
+    expect(Array.isArray(details!.dropped_classifications)).toBe(true);
+    expect(details!.dropped_classifications!.length).toBe(1);
+    expect(details!.dropped_classifications![0]).toMatchObject({
+      index: 1,
+      eligibility_reason: "file_not_in_diff",
+    });
+
+    // The non-422 inline create threw immediately (no body-only retry on a non-422) → exactly 1 create.
+    expect(calls.createReview.length).toBe(1);
+    expect(calls.updateReview.length).toBe(0);
+    // The claim row was won (Phase-1 INSERT committed) but Phase-2 never ran → placeholder preserved.
+    const row = await readPostedRow(seed.prId);
+    expect(row).toBeDefined();
+    expect(row!.github_review_id).toBeNull();
+    expect(row!.publication_outcome).toBe("degraded_unposted");
+  });
+
+  it("WON ladder failure (422 then non-422 on body-only rung): also raises the dropped-state failure", async () => {
+    // 422 on the inline create → body-only retry → that retry fails non-422 (the SECOND ladder rung). The
+    // wrap must fire there too (the try wraps the WHOLE attemptCreateWithBodyOnlyFallback call, not just
+    // its first rung), proving the boundary is the ladder call — not a single create attempt.
+    const { client, calls } = makeStub({ createReview: ["422", "non422"] });
+    const input = makeInput({ seed, findings: [finding({ start_line: 10, end_line: 10 })] });
+
+    let thrown: unknown;
+    try {
+      await doPost(input, { ghClient: client, dsn: INTEGRATION_DSN!, clock: FIXED_CLOCK });
+      throw new Error("expected doPost to raise on the body-only rung non-422");
+    } catch (e) {
+      thrown = e;
+    }
+
+    expect(thrown).toBeInstanceOf(ApplicationFailure);
+    expect((thrown as ApplicationFailure).type).toBe("PostReviewFailedWithDroppedState");
+    const details = extractDroppedStateFromPostFailure(thrown);
+    expect(details).not.toBeNull();
+    expect(details!.kept_finding_indices).toEqual([0]);
+    // Two create calls: the 422 inline rung + the non-422 body-only rung (which threw the wrapped error).
+    expect(calls.createReview.length).toBe(2);
+    expect(calls.updateReview.length).toBe(0);
+  });
+
+  it("LOST update failure (non-422 update): raises PostReviewFailedWithDroppedState (update path)", async () => {
+    // Pre-seed a winning row so doPost takes the lost-claim update path; the update_review then fails
+    // non-422 → the activity wraps it in the SAME typed ApplicationFailure (the "(update path)" variant).
+    await pool.query(
+      `INSERT INTO core.posted_reviews (pr_id, marker, github_review_id, publication_outcome, posted_at)
+       VALUES ($1, $2, $3, 'inline_posted', now())`,
+      [seed.prId, markerFor(seed.prId), 9999],
+    );
+    const { client, calls } = makeStub({ updateReviewThrowsNon422: true });
+    const input = makeInput({
+      seed,
+      findings: [
+        finding({ start_line: 10, end_line: 10 }), // in-window → kept (index 0)
+        finding({ file: "not/in/diff.ts" }), // out-of-window → dropped (index 1)
+      ],
+      changedLineRanges: { [FILE_IN_DIFF]: [[1, 100]] },
+    });
+
+    let thrown: unknown;
+    try {
+      await doPost(input, { ghClient: client, dsn: INTEGRATION_DSN!, clock: FIXED_CLOCK });
+      throw new Error("expected doPost to raise the dropped-state ApplicationFailure on the update path");
+    } catch (e) {
+      thrown = e;
+    }
+
+    expect(thrown).toBeInstanceOf(ApplicationFailure);
+    const appErr = thrown as ApplicationFailure;
+    expect(appErr.type).toBe("PostReviewFailedWithDroppedState");
+    expect(appErr.message).toContain("(update path)");
+    expect(appErr.nonRetryable).toBe(false);
+
+    const details = extractDroppedStateFromPostFailure(thrown);
+    expect(details).not.toBeNull();
+    expect(details!.posted_review_pr_id).toBe(seed.prId);
+    expect(details!.kept_finding_indices).toEqual([0]);
+    expect(details!.dropped_classifications!.length).toBe(1);
+    expect(details!.dropped_classifications![0]).toMatchObject({
+      index: 1,
+      eligibility_reason: "file_not_in_diff",
+    });
+
+    // Lost the claim → no create; one update attempt (which failed).
+    expect(calls.createReview.length).toBe(0);
+    expect(calls.updateReview.length).toBe(1);
+    // The pre-seeded row is untouched by the failed update path.
+    const row = await readPostedRow(seed.prId);
+    expect(Number(row!.github_review_id)).toBe(9999);
+    expect(row!.publication_outcome).toBe("inline_posted");
   });
 
   it("findings outside the diff are dropped: a single out-of-window finding → 0 inline comments", async () => {
