@@ -175,6 +175,30 @@ function escapeNonAscii(s: string): string {
 }
 
 /**
+ * Marker prefix for the UNENCRYPTED `plain:v1:` audit-payload format.
+ *
+ * ⚠️ DELIBERATE DEVIATION from the encrypt-at-rest invariant (ADR-0070, project-owner decision
+ * 2026-06-06). Used ONLY by the output-safety audit emit so it needs NO field-encryption key / Vault:
+ * the payload — including the pre-redaction `original_text`, which CONTAINS the detected secret — is
+ * stored in CLEARTEXT in `audit.audit_events.before`. All OTHER audit columns keep AES-256-GCM. The
+ * read path ({@link decryptAuditJsonBytea}) detects this prefix and parses the JSON tail with no key.
+ */
+const PLAINTEXT_FORMAT_PREFIX = "plain:v1:";
+
+/**
+ * UNENCRYPTED bind path for the output-safety audit `before` payload (ADR-0070). Serialize `value` to
+ * canonical JSON and prepend the `plain:v1:` marker — NO key, NO AAD, NO encryption. `null`/`undefined`
+ * → DB-NULL. The canonical JSON is ASCII (non-ASCII escaped to `\uXXXX`), so the envelope is ASCII bytes
+ * just like the encrypted shape. See {@link PLAINTEXT_FORMAT_PREFIX} for the security trade-off.
+ */
+export function encodeAuditJsonPlaintext(value: unknown): Buffer | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  return Buffer.from(PLAINTEXT_FORMAT_PREFIX + canonicalAuditJson(value), "ascii");
+}
+
+/**
  * Bind path — `EncryptedJSONByteaWithAAD.process_bind_param`. Serialize `value` to canonical JSON,
  * encrypt with the per-column `aad`, and return the `kms2:vN:` envelope as ASCII bytes (the bytea
  * column shape). `null` → DB-NULL (returns `null`).
@@ -201,8 +225,14 @@ export function decryptAuditJsonBytea(
   if (value === null || value === undefined) {
     return null;
   }
+  const raw = Buffer.from(value).toString("ascii");
+  // `plain:v1:` — UNENCRYPTED payload written by {@link encodeAuditJsonPlaintext} (ADR-0070). No key /
+  // AAD needed; parse the JSON tail directly. This keeps the dual-format read scheme coherent (a new
+  // format in the documented set) rather than choking on bare JSON bytes.
+  if (raw.startsWith(PLAINTEXT_FORMAT_PREFIX)) {
+    return JSON.parse(raw.slice(PLAINTEXT_FORMAT_PREFIX.length)) as unknown;
+  }
   const reg = requireRegistry();
-  const ciphertext = Buffer.from(value).toString("ascii");
-  const plaintext = decryptField({ ciphertext, registry: reg, aad });
+  const plaintext = decryptField({ ciphertext: raw, registry: reg, aad });
   return JSON.parse(Buffer.from(plaintext).toString("utf-8")) as unknown;
 }

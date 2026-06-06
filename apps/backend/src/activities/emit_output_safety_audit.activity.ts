@@ -25,19 +25,22 @@
  * The canonical {@link emitAuditEvent} helper mints a FRESH uuid4 per call — correct for actor-driven
  * audit (the row's identity IS the event) but it defeats deterministic-id idempotency: a Temporal retry
  * would observe the pre-INSERT SELECT MISS (the prior row's id was random, not our derived uuid5) and
- * write a duplicate. So this activity composes the same INSERT shape directly, re-using the per-column
- * AAD codec ({@link encryptAuditJsonBytea} with {@link AUDIT_BEFORE_AAD}) so the AAD binding matches the
- * canonical path byte-for-byte. (1:1 with the Python module's "Why a direct INSERT" rationale — it
- * re-uses `_ENCRYPTED_BEFORE` from `audit/emit.py`; we re-use the same codec + AAD constant.)
+ * write a duplicate. So this activity composes the same INSERT shape directly.
+ *
+ * ## `before` is stored UNENCRYPTED (ADR-0070 — project-owner decision 2026-06-06)
+ *
+ * The `before` payload is written via the `plain:v1:` codec ({@link encodeAuditJsonPlaintext}), NOT the
+ * AAD-bound encrypted codec — a DELIBERATE deviation from the encrypt-at-rest invariant, scoped to THIS
+ * audit emit only. Consequence: this emit needs NO field-encryption key / Vault and therefore never
+ * fails closed mid-review, but the pre-redaction `original_text` (which CONTAINS the detected secret) is
+ * stored in CLEARTEXT in `audit.audit_events.before`. The read path ({@link decryptAuditJsonBytea})
+ * detects the `plain:v1:` prefix and parses it with no key. All OTHER audit columns keep AES-256-GCM.
  *
  * ## Runtime context
  *
- * Runs in the NORMAL Node runtime — NOT the workflow V8-isolate sandbox — so `node:crypto` (the uuid5 +
- * AES-256-GCM) and real I/O (`pg.Pool`) are available. The DSN is read from `CODEMASTER_PG_CORE_DSN` and
- * routed through the ADR-0062 process-shared single pool (`getPool`); the activity does NOT open its own
- * pool. The encryption key comes from the audit field-encryption registry seam
- * ({@link getAuditKeyRegistry}) — populated at startup by the dev env loader or the Vault loader
- * (FOLLOW-UP-audit-vault-key-loader). Encrypt fails closed if no key is installed.
+ * Runs in the NORMAL Node runtime — NOT the workflow V8-isolate sandbox — so `node:crypto` (the uuid5)
+ * and real I/O (`pg.Pool`) are available. The DSN is read from `CODEMASTER_PG_CORE_DSN` and routed
+ * through the ADR-0062 process-shared single pool (`getPool`); the activity does NOT open its own pool.
  */
 
 import { createHash } from "node:crypto";
@@ -47,10 +50,7 @@ import { WallClock } from "#platform/clock.js";
 
 import { EmitOutputSafetyAuditEventInput } from "#contracts/emit_output_safety_audit.v1.js";
 
-import {
-  AUDIT_BEFORE_AAD,
-  encryptAuditJsonBytea,
-} from "#backend/security/audit_field_codec.js";
+import { encodeAuditJsonPlaintext } from "#backend/security/audit_field_codec.js";
 
 /**
  * Stable namespace for the deterministic `audit_event_id` derivation. FROZEN: changing it would break
@@ -133,9 +133,12 @@ export async function emitOutputSafetyAuditEvent(input: unknown): Promise<void> 
       stage: event.stage,
       audit_event_id_basis: auditEventId,
     };
-    // Encrypt via the AAD-bound codec so the AAD `audit.audit_events.before` matches the ORM/canonical
-    // read path byte-for-byte (kms2: ASCII bytes into the bytea column).
-    const encBefore = encryptAuditJsonBytea(beforePayload, AUDIT_BEFORE_AAD);
+    // ADR-0070 (project-owner decision 2026-06-06): store the `before` payload UNENCRYPTED via the
+    // `plain:v1:` codec — NO key / Vault needed, so this emit never fails closed mid-review. The
+    // pre-redaction `original_text` (which CONTAINS the detected secret) is therefore written in
+    // CLEARTEXT into audit.audit_events.before. Deliberate deviation from the encrypt-at-rest invariant,
+    // scoped to THIS audit emit only; the read path detects `plain:v1:` and parses it with no key.
+    const encBefore = encodeAuditJsonPlaintext(beforePayload);
 
     await client.query(
       "INSERT INTO audit.audit_events " +

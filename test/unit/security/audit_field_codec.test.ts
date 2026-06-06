@@ -17,6 +17,7 @@ import {
   AUDIT_BEFORE_AAD,
   canonicalAuditJson,
   decryptAuditJsonBytea,
+  encodeAuditJsonPlaintext,
   encryptAuditJsonBytea,
   getAuditKeyRegistry,
   loadAuditKeysFromEnvForDev,
@@ -168,5 +169,36 @@ describe("loadAuditKeysFromEnvForDev (dev/test key source — FOLLOW-UP-audit-va
   it("throws when the decoded key is not 32 bytes", () => {
     process.env[ENV_KEY] = Buffer.alloc(16, 0x01).toString("base64");
     expect(() => loadAuditKeysFromEnvForDev()).toThrow();
+  });
+});
+
+describe("plain:v1: UNENCRYPTED format (ADR-0070 — owner decision: no key/Vault for output-safety audit)", () => {
+  it("encodes WITHOUT a key registry and round-trips via decryptAuditJsonBytea", () => {
+    // No setAuditKeyRegistry — the registry is null (the dev / dual-run state). The whole point of
+    // plain:v1: is that the output-safety audit emit needs NO key / Vault and never fails closed.
+    expect(getAuditKeyRegistry()).toBeNull();
+    const payload = { schema_version: 1, original_text: "sk-SECRET", redacted_text: "sk-[REDACTED]" };
+    const enc = encodeAuditJsonPlaintext(payload);
+    expect(enc).not.toBeNull();
+    expect(Buffer.from(enc!).toString("ascii").startsWith("plain:v1:")).toBe(true);
+    expect(decryptAuditJsonBytea(enc, AUDIT_BEFORE_AAD)).toEqual(payload);
+  });
+
+  it("stores the payload in CLEARTEXT (the detected secret is readable in the bytea) — the deliberate C trade-off", () => {
+    const enc = encodeAuditJsonPlaintext({ original_text: "sk-SECRET" })!;
+    expect(Buffer.from(enc).toString("ascii")).toContain("sk-SECRET");
+  });
+
+  it("returns null for a null/undefined value (DB-NULL)", () => {
+    expect(encodeAuditJsonPlaintext(null)).toBeNull();
+    expect(encodeAuditJsonPlaintext(undefined)).toBeNull();
+  });
+
+  it("reads back a plain:v1: payload with NO key installed (decrypt short-circuits the registry)", () => {
+    const enc = encodeAuditJsonPlaintext({ a: 1, b: "café" })!;
+    resetAuditKeyRegistryForTesting();
+    expect(getAuditKeyRegistry()).toBeNull();
+    // non-ASCII round-trips (canonicalAuditJson escapes to \uXXXX; JSON.parse restores).
+    expect(decryptAuditJsonBytea(enc, AUDIT_BEFORE_AAD)).toEqual({ a: 1, b: "café" });
   });
 });
