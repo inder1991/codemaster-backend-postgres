@@ -100,7 +100,9 @@ const THE_FINDING = ReviewFindingV1.parse({
   confidence: 0.9,
 });
 
-/** A seeded, fully-formed v2 payload (parsed through the Zod schema so every default is materialized). */
+/** A seeded, fully-formed v2 payload (parsed through the Zod schema so every default is materialized).
+ *  `github_installation_id` defaults to null → the body SKIPS enrich/issues/reviewers (the FIX #1 + claim-lost
+ *  + cancellation tests don't need them). */
 const PAYLOAD = ReviewPullRequestPayloadV1.parse({
   schema_version: 2,
   installation_id: uuidFor(2),
@@ -116,6 +118,26 @@ const PAYLOAD = ReviewPullRequestPayloadV1.parse({
   policy_revision: 3,
   run_id: uuidFor(4),
   review_id: uuidFor(5),
+});
+
+/** FIX #3 payload variant — same shape but `github_installation_id` SET (non-null), so the enrich branch
+ *  actually dispatches `enrich_pr_files_activity_v2`. The enrich-degraded test scripts that activity to throw. */
+const PAYLOAD_WITH_GH_INSTALL = ReviewPullRequestPayloadV1.parse({
+  schema_version: 2,
+  installation_id: uuidFor(2),
+  repository_id: uuidFor(6),
+  pr_id: uuidFor(1),
+  pr_number: 42,
+  head_sha: HEAD_SHA,
+  gh_owner: "acme",
+  gh_repo_name: "widgets",
+  pr_title: "Add widget",
+  pr_description: "A widget.",
+  delivery_id: "delivery-abc",
+  policy_revision: 3,
+  run_id: uuidFor(4),
+  review_id: uuidFor(5),
+  github_installation_id: 123456,
 });
 
 // ─── a deferred promise primitive (caller-controlled release for the cancellation test's clone block) ──
@@ -148,6 +170,17 @@ type StubConfig = {
   readonly cloneStarted?: Deferred;
   /** Awaited by the clone stub before it returns (lets the cancellation test cancel while clone blocks). */
   readonly cloneBlock?: Deferred;
+  /** FIX #1 — make `allocateWorkspace` THROW (proves: mutex released, NO orchestrate, NO workspace release). */
+  readonly failAllocateWorkspace?: boolean;
+  /** FIX #1 — make `recordReviewLifecycleEvent(ANALYSIS_STARTED)` THROW (proves: mutex AND workspace released). */
+  readonly failAnalysisStarted?: boolean;
+  /** FIX #3 — make `enrichPrFilesV2` THROW (the activity raises → the body's stageOutcome swallows → the
+   *  body marks the run DEGRADED with `pr_file_enrichment_failed`). Requires a payload whose
+   *  `github_installation_id` is non-null so the enrich branch actually dispatches. */
+  readonly failEnrich?: boolean;
+  /** FIX #3 — captures the ANALYZED milestone payload (`pipeline_degradation_notes` is the degraded-state
+   *  provenance the posted check-run inherits) so the test can assert the degradation flowed through. */
+  readonly analyzedPayloads?: Array<Record<string, unknown>>;
 };
 
 function makeStubActivities(
@@ -172,6 +205,11 @@ function makeStubActivities(
     // ── Stage-2 lifecycle: allocate the REAL workspace handle ──
     allocateWorkspace: async (): Promise<unknown> => {
       calls.push("allocateWorkspace");
+      // FIX #1: when scripted to fail, throw BEFORE returning a handle. The body's outer try/finally must
+      // still release the mutex; the workspace release must NOT fire (no handle was ever minted).
+      if (config.failAllocateWorkspace === true) {
+        throw new Error("allocate_workspace boom (FIX #1 leak-window proof)");
+      }
       return WorkspaceHandle.parse({
         workspace_id: uuidFor(901),
         installation_id: PAYLOAD.installation_id,
@@ -181,8 +219,23 @@ function makeStubActivities(
       });
     },
     // ── Stage-3 run-lifecycle (milestones + terminal transitions) ──
-    recordReviewLifecycleEvent: async (input: { event_type?: string }): Promise<void> => {
-      calls.push(input.event_type === "ANALYZED" ? "analyzed" : "analysisStarted");
+    recordReviewLifecycleEvent: async (input: {
+      event_type?: string;
+      payload?: Record<string, unknown>;
+    }): Promise<void> => {
+      if (input.event_type === "ANALYZED") {
+        calls.push("analyzed");
+        // FIX #3: capture the ANALYZED milestone payload — `pipeline_degradation_notes` carries the
+        // degraded-state provenance the posted check-run inherits.
+        config.analyzedPayloads?.push(input.payload ?? {});
+        return;
+      }
+      calls.push("analysisStarted");
+      // FIX #1: when scripted to fail ANALYSIS_STARTED, throw AFTER allocate already minted the handle. The
+      // body's outer try/finally must release BOTH the mutex AND the workspace.
+      if (config.failAnalysisStarted === true) {
+        throw new Error("record ANALYSIS_STARTED boom (FIX #1 leak-window proof)");
+      }
     },
     finalizeReviewRun: async (): Promise<void> => {
       calls.push("finalizeReviewRun");
@@ -239,6 +292,12 @@ function makeStubActivities(
     //    the workflow dies with ActivityNotRegistered before reaching the before-aggregate claim-check. ──
     enrichPrFilesV2: async (): Promise<unknown> => {
       calls.push("enrichPrFiles");
+      // FIX #3: when scripted to fail, throw — the body's stageOutcome swallows it (fail-open on the DATA),
+      // then the body marks the run DEGRADED (`pr_file_enrichment_failed`). A genuinely-empty SUCCESSFUL
+      // enrichment (the default below) is NOT flagged.
+      if (config.failEnrich === true) {
+        throw new Error("enrich_pr_files boom (FIX #3 degraded-on-error proof)");
+      }
       return PrFilesEnrichmentResultV1.parse({
         files: [],
         changed_line_ranges: {},
@@ -575,5 +634,226 @@ describeTemporal("review-pipeline mutex + workspace lifecycle (in-process TestWo
     expect(calls).toContain("recordRunCancelled");
     expect(calls).not.toContain("recordRunFailed");
     expect(calls).not.toContain("finalizeReviewRun");
+  }, 120_000);
+
+  // ── PROPERTY 3 — FIX #1: allocate_workspace failure releases the MUTEX (no orchestrate, no workspace release) ──
+  // The leak window FIX #1 closes: in the pre-fix body, allocate_workspace ran OUTSIDE the mutex-release
+  // try/finally, so an allocate failure leaked the held mutex until lease-expiry. After the restructure the
+  // OUTER try/finally opens the instant the gate hands over `mutexId`, so an allocate failure ALWAYS releases
+  // the mutex. The workspace release MUST NOT fire — no handle was ever minted. orchestrate (clone, …) never
+  // runs (allocate precedes it). The run flips RUNNING → FAILED (BF-5; allocate failure is a non-cancellation
+  // exception).
+  it("FIX #1: allocate_workspace failure releases the mutex, runs NO orchestrate, releases NO workspace", async () => {
+    const calls: Array<string> = [];
+    const stubs = makeStubActivities(calls, {
+      renewSequence: [true, true, true],
+      failAllocateWorkspace: true,
+    });
+
+    const worker = await Worker.create({
+      connection: skipEnv.nativeConnection,
+      namespace: skipEnv.namespace ?? "default",
+      taskQueue: "mutex-lifecycle-allocate-fail",
+      workflowsPath: WORKFLOWS_PATH,
+      dataConverter: { payloadConverterPath: DATA_CONVERTER_PATH },
+      activities: stubs,
+    });
+
+    let caught: unknown;
+    try {
+      await worker.runUntil(
+        skipEnv.client.workflow.execute("reviewPullRequest", {
+          taskQueue: "mutex-lifecycle-allocate-fail",
+          workflowId: `mutex-allocate-fail-${PAYLOAD.run_id}`,
+          args: [PAYLOAD],
+        }),
+      );
+    } catch (err) {
+      caught = err;
+    }
+
+    // ── (a) the workflow FAILS (the allocate error propagates out of the body) ──
+    expect(caught).toBeInstanceOf(WorkflowFailedError);
+
+    // ── (b) the mutex WAS released (the core FIX #1 property — no leak on the allocate-failure path) ──
+    expect(calls).toContain("allocateWorkspace");
+    expect(calls).toContain("releasePrReviewMutexActivity");
+
+    // ── (c) NO workspace release (no handle was minted — the guarded `if (workspaceHandle !== null)` skips it) ──
+    expect(calls).not.toContain("releaseWorkspace");
+
+    // ── (d) orchestrate NEVER ran — allocate precedes clone, so no pipeline stage fired ──
+    expect(calls).not.toContain("clone");
+    expect(calls).not.toContain("classify");
+    expect(calls).not.toContain("aggregate");
+    expect(calls).not.toContain("postReview");
+    expect(calls).not.toContain("postCheckRun");
+
+    // ── (e) BF-5: RUNNING → FAILED (allocate failure is a non-cancellation exception), cleanup ran first ──
+    expect(calls).toContain("recordRunFailed");
+    expect(calls).not.toContain("recordRunCancelled");
+    expect(calls).not.toContain("finalizeReviewRun");
+    expect(calls).not.toContain("analyzed");
+  }, 120_000);
+
+  // ── PROPERTY 4 — FIX #1: ANALYSIS_STARTED failure releases BOTH the mutex AND the workspace ──
+  // The OTHER half of the leak window: ANALYSIS_STARTED ran AFTER allocate but still OUTSIDE the pre-fix
+  // mutex-release try/finally, so a failure there leaked BOTH the held mutex AND the just-allocated workspace.
+  // After the restructure both are released by the outer try/finally — the workspace release fires because the
+  // handle WAS minted (allocate succeeded before ANALYSIS_STARTED). orchestrate never runs (ANALYSIS_STARTED
+  // precedes it). The run flips RUNNING → FAILED.
+  it("FIX #1: ANALYSIS_STARTED failure releases BOTH the mutex and the workspace, runs NO orchestrate", async () => {
+    const calls: Array<string> = [];
+    const stubs = makeStubActivities(calls, {
+      renewSequence: [true, true, true],
+      failAnalysisStarted: true,
+    });
+
+    const worker = await Worker.create({
+      connection: skipEnv.nativeConnection,
+      namespace: skipEnv.namespace ?? "default",
+      taskQueue: "mutex-lifecycle-analysis-started-fail",
+      workflowsPath: WORKFLOWS_PATH,
+      dataConverter: { payloadConverterPath: DATA_CONVERTER_PATH },
+      activities: stubs,
+    });
+
+    let caught: unknown;
+    try {
+      await worker.runUntil(
+        skipEnv.client.workflow.execute("reviewPullRequest", {
+          taskQueue: "mutex-lifecycle-analysis-started-fail",
+          workflowId: `mutex-analysis-started-fail-${PAYLOAD.run_id}`,
+          args: [PAYLOAD],
+        }),
+      );
+    } catch (err) {
+      caught = err;
+    }
+
+    // ── (a) the workflow FAILS (the ANALYSIS_STARTED error propagates out of the body) ──
+    expect(caught).toBeInstanceOf(WorkflowFailedError);
+
+    // ── (b) allocate succeeded + ANALYSIS_STARTED was attempted (positive cross-check of where we failed) ──
+    expect(calls).toContain("allocateWorkspace");
+    expect(calls).toContain("analysisStarted");
+
+    // ── (c) BOTH the mutex AND the workspace were released (the handle WAS minted → workspace release fires) ──
+    expect(calls).toContain("releasePrReviewMutexActivity");
+    expect(calls).toContain("releaseWorkspace");
+
+    // ── (d) orchestrate NEVER ran — ANALYSIS_STARTED precedes clone ──
+    expect(calls).not.toContain("clone");
+    expect(calls).not.toContain("aggregate");
+    expect(calls).not.toContain("postReview");
+
+    // ── (e) BF-5: RUNNING → FAILED, cleanup ran first ──
+    expect(calls).toContain("recordRunFailed");
+    expect(calls).not.toContain("recordRunCancelled");
+    expect(calls).not.toContain("finalizeReviewRun");
+    expect(calls).not.toContain("analyzed");
+  }, 120_000);
+
+  // ── PROPERTY 5 — FIX #3: enrich-ERROR marks the run DEGRADED (not a silent clean pass) ──
+  // The frozen Python fail-OPENs on an enrich failure: empty changed_paths, INDISTINGUISHABLE from a
+  // genuinely-empty PR → a silent CLEAN "no findings" review. FIX #3 DISTINGUISHES enrich-ERROR from
+  // genuinely-empty and marks the run DEGRADED: `pr_file_enrichment_failed` is added to state.degradation
+  // BEFORE orchestrate, so it flows into ReviewPipelineResult.degradation_notes → the ANALYZED milestone's
+  // `pipeline_degradation_notes` (the degraded-state provenance the posted check-run inherits). The data path
+  // still fail-OPENs (the pipeline completes + posts) — the divergence is the DEGRADED MARK, not a hard fail.
+  it("FIX #3: enrich-ERROR marks the run DEGRADED (pipeline_degradation_notes carries pr_file_enrichment_failed)", async () => {
+    const calls: Array<string> = [];
+    const analyzedPayloads: Array<Record<string, unknown>> = [];
+    const stubs = makeStubActivities(calls, {
+      renewSequence: [true, true, true],
+      failEnrich: true,
+      analyzedPayloads,
+    });
+
+    const worker = await Worker.create({
+      connection: skipEnv.nativeConnection,
+      namespace: skipEnv.namespace ?? "default",
+      taskQueue: "mutex-lifecycle-enrich-degraded",
+      workflowsPath: WORKFLOWS_PATH,
+      dataConverter: { payloadConverterPath: DATA_CONVERTER_PATH },
+      activities: stubs,
+    });
+
+    // The pipeline COMPLETES (enrich fail-opens on the data) → status accepted. The degradation surfaces in the
+    // ANALYZED milestone provenance, not as a hard failure.
+    const out = (await worker.runUntil(
+      skipEnv.client.workflow.execute("reviewPullRequest", {
+        taskQueue: "mutex-lifecycle-enrich-degraded",
+        workflowId: `mutex-enrich-degraded-${PAYLOAD_WITH_GH_INSTALL.run_id}`,
+        args: [PAYLOAD_WITH_GH_INSTALL],
+      }),
+    )) as { status?: string };
+
+    // ── (a) the workflow COMPLETED accepted (data fail-open — the enrich error did NOT hard-fail the run) ──
+    expect(out.status).toBe("accepted");
+
+    // ── (b) the enrich activity was DISPATCHED then threw (github_installation_id non-null → enrich branch) ──
+    expect(calls).toContain("enrichPrFiles");
+
+    // ── (c) the pipeline still ran to completion + posted (data fail-open) ──
+    expect(calls).toContain("clone");
+    expect(calls).toContain("aggregate");
+    expect(calls).toContain("postReview");
+    expect(calls).toContain("postCheckRun");
+
+    // ── (d) the run was marked DEGRADED: the ANALYZED milestone's pipeline_degradation_notes carries
+    // `pr_file_enrichment_failed` — the degraded-state provenance the posted check-run inherits (NOT a clean
+    // "no findings" pass). This is the load-bearing FIX #3 assertion. ──
+    expect(calls).toContain("analyzed");
+    expect(analyzedPayloads.length).toBe(1);
+    const pipelineDegradationNotes = analyzedPayloads[0]?.["pipeline_degradation_notes"];
+    expect(Array.isArray(pipelineDegradationNotes)).toBe(true);
+    expect(pipelineDegradationNotes as Array<string>).toContain("pr_file_enrichment_failed");
+
+    // ── (e) the mutex + workspace were released on the (successful) exit path; the run finalized COMPLETED ──
+    expect(calls).toContain("releasePrReviewMutexActivity");
+    expect(calls).toContain("releaseWorkspace");
+    expect(calls).toContain("finalizeReviewRun");
+    expect(calls).not.toContain("recordRunFailed");
+  }, 120_000);
+
+  // ── PROPERTY 6 — FIX #3 negative: a genuinely-empty SUCCESSFUL enrichment is NOT flagged degraded ──
+  // The counterpart to PROPERTY 5: when enrich SUCCEEDS with an empty file list (a real empty PR), the run is
+  // NOT marked degraded — `pr_file_enrichment_failed` is absent from the ANALYZED provenance. This proves the
+  // error-vs-empty distinction the FIX #3 divergence hinges on (a successful empty enrichment ≠ an enrich error).
+  it("FIX #3 negative: a genuinely-empty SUCCESSFUL enrichment is NOT flagged pr_file_enrichment_failed", async () => {
+    const calls: Array<string> = [];
+    const analyzedPayloads: Array<Record<string, unknown>> = [];
+    const stubs = makeStubActivities(calls, {
+      renewSequence: [true, true, true],
+      // failEnrich omitted → the enrich stub returns a SUCCESSFUL empty PrFilesEnrichmentResultV1 (files: []).
+      analyzedPayloads,
+    });
+
+    const worker = await Worker.create({
+      connection: skipEnv.nativeConnection,
+      namespace: skipEnv.namespace ?? "default",
+      taskQueue: "mutex-lifecycle-enrich-empty-ok",
+      workflowsPath: WORKFLOWS_PATH,
+      dataConverter: { payloadConverterPath: DATA_CONVERTER_PATH },
+      activities: stubs,
+    });
+
+    const out = (await worker.runUntil(
+      skipEnv.client.workflow.execute("reviewPullRequest", {
+        taskQueue: "mutex-lifecycle-enrich-empty-ok",
+        workflowId: `mutex-enrich-empty-ok-${PAYLOAD_WITH_GH_INSTALL.run_id}`,
+        args: [PAYLOAD_WITH_GH_INSTALL],
+      }),
+    )) as { status?: string };
+
+    expect(out.status).toBe("accepted");
+    expect(calls).toContain("enrichPrFiles");
+    expect(calls).toContain("analyzed");
+    expect(analyzedPayloads.length).toBe(1);
+    // The SUCCESSFUL-empty enrichment must NOT add the degradation note.
+    const pipelineDegradationNotes = analyzedPayloads[0]?.["pipeline_degradation_notes"];
+    expect(Array.isArray(pipelineDegradationNotes)).toBe(true);
+    expect(pipelineDegradationNotes as Array<string>).not.toContain("pr_file_enrichment_failed");
   }, 120_000);
 });

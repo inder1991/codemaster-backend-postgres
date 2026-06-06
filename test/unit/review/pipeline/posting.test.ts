@@ -42,6 +42,7 @@ const PR: ReviewPipelinePrCtx = {
   headSha: "a".repeat(40),
   runId: uuidFor(4),
   reviewId: uuidFor(5),
+  repositoryId: uuidFor(6),
   policyRevision: 3,
   prNumber: 42,
   changedLineRanges: { "src/a.ts": [[1, 10]] },

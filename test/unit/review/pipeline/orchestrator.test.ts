@@ -20,11 +20,12 @@
 //   * CLEANUP runs in the finally even when a mid-pipeline stage throws.
 import { describe, it, expect } from "vitest";
 
-import {
-  orchestrate,
-  filterReviewPaths,
-  type ReviewPipelineContext,
-} from "#backend/review/pipeline/orchestrator.js";
+import { orchestrate, type ReviewPipelineContext } from "#backend/review/pipeline/orchestrator.js";
+// FIX #6+#9 — the orchestrator no longer ships its own "minimal glob" filterReviewPaths; it delegates to the
+// ONE ported gitignore matcher (apps/backend/src/config/path_match.ts), whose byte-parity against the frozen
+// Python is proven in test/parity/path_match.parity.test.ts. The describe block below re-imports the matcher
+// from its canonical home to assert the orchestrator's path-filters narrowing still uses the real engine.
+import { filterReviewPaths, matchPathInstructions } from "#backend/config/path_match.js";
 import { ReviewWorkflowState } from "#backend/review/pipeline/state.js";
 import { PER_FILE_CAP, PER_REVIEW_CAP } from "#backend/review/aggregation.js";
 
@@ -33,7 +34,7 @@ import type { ReviewContextV1 } from "#contracts/review_context.v1.js";
 import { PrMetaV1 } from "#contracts/walkthrough.v1.js";
 import { WorkspaceHandle } from "#contracts/workspace_handle.v1.js";
 import { ClonedRepoV1 } from "#contracts/cloned_repo.v1.js";
-import { CodemasterConfigV1 } from "#contracts/codemaster_config.v1.js";
+import { CodemasterConfigV1, PathInstructionV1 } from "#contracts/codemaster_config.v1.js";
 import { ComputedPolicyRulesV1 } from "#contracts/policy_compute.v1.js";
 import { FileRoutingV1 } from "#contracts/file_routing.v1.js";
 import { DiffChunkV1 } from "#contracts/diff_chunking.v1.js";
@@ -153,7 +154,16 @@ type StubOverrides = {
   sandboxFiles?: ReadonlyArray<string>;
   classifierFailures?: ReadonlyArray<string>;
   pathFilters?: ReadonlyArray<string>;
+  /** FIX #6+#9 — the repo_config.path_instructions the loadRepoConfig stub returns (drives the per-chunk
+   *  matched_path_instructions wiring). Default [] (no per-glob instructions). */
+  pathInstructions?: ReadonlyArray<PathInstructionV1>;
   bundles?: Record<string, ResolvedGuidanceBundleV1>;
+  /** FIX #12 — when true, computePolicyRules THROWS (asserts the policy-compute fail-open wrap). */
+  computePolicyThrows?: boolean;
+  /** FIX #7 — when true, postCheckRun THROWS (asserts the placeholder teardown is decoupled from it). */
+  postCheckRunThrows?: boolean;
+  /** FIX #7 — when true, postReview (postReviewResults) THROWS (asserts the placeholder is NOT torn down). */
+  postReviewThrows?: boolean;
   selectCarryForwardThrows?: boolean;
   embedThrows?: boolean;
   retrieveThrows?: boolean;
@@ -265,10 +275,16 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
     },
     loadRepoConfig: async () => {
       calls.push("loadRepoConfig");
-      return CodemasterConfigV1.parse({ path_filters: o.pathFilters ?? [] });
+      return CodemasterConfigV1.parse({
+        path_filters: o.pathFilters ?? [],
+        path_instructions: o.pathInstructions ?? [],
+      });
     },
     computePolicyRules: async () => {
       calls.push("computePolicyRules");
+      if (o.computePolicyThrows) {
+        throw new Error("policy-compute boom");
+      }
       return ComputedPolicyRulesV1.parse({ bundles: o.bundles ?? {} });
     },
     classify: async () => {
@@ -375,6 +391,9 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
     },
     postReview: async () => {
       calls.push("postReview");
+      if (o.postReviewThrows) {
+        throw new Error("post-review boom");
+      }
       return PostedReviewV1.parse({
         review_id: 7,
         inline_comment_count: 0,
@@ -385,6 +404,9 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
     },
     postCheckRun: async () => {
       calls.push("postCheckRun");
+      if (o.postCheckRunThrows) {
+        throw new Error("post-check-run boom");
+      }
       return PostedCheckRunV1.parse({ check_run_id: 9, was_update: false });
     },
     cleanup: async () => {
@@ -509,6 +531,7 @@ function makeCtx(
       headSha: "abc1234",
       runId: uuidFor(4),
       reviewId: uuidFor(5),
+      repositoryId: uuidFor(6),
       policyRevision: 3,
       prNumber: 42,
       changedLineRanges: CHANGED_LINE_RANGES,
@@ -741,10 +764,12 @@ describe("orchestrate — cleanup is finally-guaranteed", () => {
 });
 
 describe("orchestrate — Stage-2 claim-check + placeholder-teardown hooks", () => {
-  it("invokes ctx.claimCheck exactly three times at the Python boundaries (clone/classify/aggregate)", async () => {
+  it("invokes ctx.claimCheck at the FOUR boundaries (clone/classify/aggregate + the FIX #10 before-post)", async () => {
     // The claim-check records the LAST stage dispatched at each invocation, so we can assert it fires
-    // BEFORE clone (empty trace), BEFORE classify (after computePolicyRules), and BEFORE aggregate
-    // (after dedupFindings) — the three `_abort_if_claim_lost` sites.
+    // BEFORE clone (empty trace), BEFORE classify (after computePolicyRules), BEFORE aggregate (after
+    // dedupFindings) — the three Python `_abort_if_claim_lost` sites — AND BEFORE post (after
+    // persistReviewWalkthrough), the FIX #10 owner-hardening 4th boundary that closes the
+    // aggregate→post supersession window.
     const stub = makeStub({ chunkCount: 1 });
     const ctx = makeCtx(stub);
     const checkPositions: Array<string> = [];
@@ -755,7 +780,12 @@ describe("orchestrate — Stage-2 claim-check + placeholder-teardown hooks", () 
       },
     };
     await orchestrate(ctxWithCheck);
-    expect(checkPositions).toEqual(["<before-clone>", "computePolicyRules", "dedupFindings"]);
+    expect(checkPositions).toEqual([
+      "<before-clone>",
+      "computePolicyRules",
+      "dedupFindings",
+      "persistReviewWalkthrough",
+    ]);
   });
 
   it("fires claimCheck immediately before classify (right after computePolicyRules)", async () => {
@@ -1080,7 +1110,14 @@ describe("orchestrate — Stage-4 enrichment wiring (evidence + walkthrough thre
   });
 });
 
-describe("filterReviewPaths — path_filters last-match-wins", () => {
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// FIX #6+#9 — the orchestrator delegates BOTH path-config surfaces to the ONE ported gitignore matcher
+// (apps/backend/src/config/path_match.ts). These tests assert the orchestrator's USE of it (the matcher's
+// own byte-parity-against-Python is proven in test/parity/path_match.parity.test.ts). The filterReviewPaths
+// describe below re-exercises the canonical matcher (now imported from path_match.js, NOT the deleted
+// orchestrator-local "minimal glob") so the path-filters narrowing contract stays asserted.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describe("filterReviewPaths — path_filters last-match-wins (canonical path_match matcher)", () => {
   it("is the identity over its input when there are no filters", () => {
     expect(filterReviewPaths(["a.ts", "b.ts"], [])).toEqual(["a.ts", "b.ts"]);
   });
@@ -1101,6 +1138,205 @@ describe("filterReviewPaths — path_filters last-match-wins", () => {
 
   it("excludes EVERY file with a global exclude (the excluded-all trigger)", () => {
     expect(filterReviewPaths(["src/a.ts", "src/b.ts"], ["!**"])).toEqual([]);
+  });
+});
+
+describe("FIX #6+#9 — orchestrator wires matchPathInstructions into ReviewContextV1", () => {
+  it("populates matched_path_instructions for a chunk path that matches a path_instructions rule", async () => {
+    // repo_config.path_instructions with a glob that matches the chunk's path → the per-chunk ReviewContextV1
+    // carries the matched rule (replacing the Stage-1 `matched_path_instructions: []` placeholder).
+    const rule = PathInstructionV1.parse({
+      path: "src/**/*.ts",
+      instructions: "be strict in src",
+    });
+    const stub = makeStub({
+      reviewFiles: ["src/a.ts"],
+      chunkCount: 1,
+      pathInstructions: [rule],
+    });
+    await orchestrate(makeCtx(stub));
+    const ctxBuilt = stub.reviewChunkInputs[0]!;
+    // chunk path is "src/a.ts" (chunkFor uses the review file); the rule's "src/**/*.ts" glob matches it.
+    expect(ctxBuilt.matched_path_instructions.length).toBe(1);
+    expect(ctxBuilt.matched_path_instructions[0]!.path).toBe("src/**/*.ts");
+    expect(ctxBuilt.matched_path_instructions[0]!.instructions).toBe("be strict in src");
+    // Sanity: the same matcher the orchestrator uses agrees on this chunk path.
+    expect(matchPathInstructions([rule], "src/a.ts").length).toBe(1);
+  });
+
+  it("leaves matched_path_instructions EMPTY when no rule matches the chunk path", async () => {
+    const rule = PathInstructionV1.parse({ path: "docs/**", instructions: "docs only" });
+    const stub = makeStub({
+      reviewFiles: ["src/a.ts"],
+      chunkCount: 1,
+      pathInstructions: [rule],
+    });
+    await orchestrate(makeCtx(stub));
+    // "docs/**" does NOT match "src/a.ts" → empty.
+    expect(stub.reviewChunkInputs[0]!.matched_path_instructions).toEqual([]);
+  });
+
+  it("leaves matched_path_instructions EMPTY when the config carries no path_instructions (default)", async () => {
+    const stub = makeStub({ reviewFiles: ["src/a.ts"], chunkCount: 1 });
+    await orchestrate(makeCtx(stub));
+    expect(stub.reviewChunkInputs[0]!.matched_path_instructions).toEqual([]);
+  });
+
+  it("returns ALL matching rules in declaration order (ADR-0001)", async () => {
+    const ruleA = PathInstructionV1.parse({ path: "**/*.ts", instructions: "all ts" });
+    const ruleB = PathInstructionV1.parse({ path: "src/**", instructions: "all src" });
+    const stub = makeStub({
+      reviewFiles: ["src/a.ts"],
+      chunkCount: 1,
+      pathInstructions: [ruleA, ruleB],
+    });
+    await orchestrate(makeCtx(stub));
+    const matched = stub.reviewChunkInputs[0]!.matched_path_instructions;
+    // Both globs match "src/a.ts"; declaration order preserved.
+    expect(matched.map((m) => m.instructions)).toEqual(["all ts", "all src"]);
+  });
+});
+
+describe("FIX #2 (part 2) — retrieveKnowledge receives payload.repository_id, NOT pr_id", () => {
+  it("threads ctx.pr.repositoryId as repo_id (not pr_id) into the retrieve_knowledge dispatch", async () => {
+    // Record the retrieveKnowledge input so we can assert repo_id. The repositoryId fixture is uuidFor(6);
+    // the pr_id is uuidFor(1) — they are DISTINCT, so a regression to the pr_id stand-in is observable.
+    const retrieveInputs: Array<{ repo_id: string }> = [];
+    const stub = makeStub({ reviewFiles: ["src/a.ts"], chunkCount: 1 });
+    const original = stub.ports.retrieveKnowledge;
+    stub.ports.retrieveKnowledge = async (input) => {
+      retrieveInputs.push({ repo_id: input.repo_id });
+      return original(input);
+    };
+    const ctx = makeCtx(stub);
+    await orchestrate(ctx);
+    expect(retrieveInputs.length).toBe(1);
+    // repo_id is the threaded repository UUID, NOT the pr_id.
+    expect(retrieveInputs[0]!.repo_id).toBe(ctx.pr.repositoryId);
+    expect(retrieveInputs[0]!.repo_id).not.toBe(ctx.pr.prMeta.pr_id);
+  });
+});
+
+describe("FIX #12 — policy-compute fail-open (stage_outcome wrap)", () => {
+  it("continues the review with EMPTY policy bundles + a degradation note when computePolicyRules throws", async () => {
+    const stub = makeStub({ chunkCount: 1, computePolicyThrows: true });
+    const ctx = makeCtx(stub);
+    const result = await orchestrate(ctx);
+    // The review still completes (the policy step is fail-open).
+    expect(result.status).toBe("accepted");
+    // The chain proceeded past the failed policy compute (classify → … → post all ran).
+    expect(stub.calls).toContain("classify");
+    expect(stub.calls).toContain("postReview");
+    // No policy bundles populated (the fail-open path left state.policyBundles empty).
+    expect(ctx.state.policyBundles.size).toBe(0);
+    // The degradation note surfaces the degraded-policy state.
+    expect(result.degradationNotes).toContain("policy_compute_failed");
+  });
+
+  it("emits the stage_outcome WARN line for the policy_compute failure on the injected logger", async () => {
+    const warnings: Array<string> = [];
+    const stub = makeStub({ chunkCount: 1, computePolicyThrows: true });
+    await orchestrate(makeCtx(stub, { warning: (m) => warnings.push(m) }));
+    expect(warnings.some((w) => w.includes("policy_compute failed"))).toBe(true);
+  });
+
+  it("does NOT append the policy_compute_failed note on the happy path", async () => {
+    const stub = makeStub({ chunkCount: 1 });
+    const result = await orchestrate(makeCtx(stub));
+    expect(result.degradationNotes).not.toContain("policy_compute_failed");
+  });
+});
+
+describe("FIX #7 — placeholder teardown decoupled from post_check_run", () => {
+  it("tears the placeholder down AND delivers the review when post_check_run throws but post_review succeeds", async () => {
+    const stub = makeStub({ chunkCount: 1, postCheckRunThrows: true });
+    const ctx = makeCtx(stub);
+    let teardowns = 0;
+    const ctxWithTeardown: ReviewPipelineContext = {
+      ...ctx,
+      onPlaceholderTeardown: async () => {
+        teardowns += 1;
+      },
+    };
+    const result = await orchestrate(ctxWithTeardown);
+    // The review WAS delivered (postReview ran + the run is accepted).
+    expect(stub.calls).toContain("postReview");
+    expect(result.status).toBe("accepted");
+    // The placeholder WAS torn down exactly once despite the check-run failure (the bug: Promise.all rejected
+    // before the teardown line and stranded the placeholder).
+    expect(teardowns).toBe(1);
+    // The check-run failure degrades (not fatal): a degradation note surfaces, the review still posts.
+    expect(result.degradationNotes).toContain("post_check_run_failed");
+    // cleanup still ran (finally).
+    expect(stub.cleanupCalled()).toBe(true);
+  });
+
+  it("does NOT tear the placeholder down when post_review itself throws (review failed to deliver)", async () => {
+    const stub = makeStub({ chunkCount: 1, postReviewThrows: true });
+    const ctx = makeCtx(stub);
+    let teardowns = 0;
+    const ctxWithTeardown: ReviewPipelineContext = {
+      ...ctx,
+      onPlaceholderTeardown: async () => {
+        teardowns += 1;
+      },
+    };
+    // The review failed to deliver → orchestrate rejects (BF-5/BF-13 terminal path), placeholder NOT torn
+    // down (the "reviewing…" notice is still accurate).
+    await expect(orchestrate(ctxWithTeardown)).rejects.toThrow(/post-review boom/);
+    expect(teardowns).toBe(0);
+    // cleanup still ran (the finally is armed once clone returned).
+    expect(stub.cleanupCalled()).toBe(true);
+  });
+
+  it("post_check_run failure does NOT fail the pipeline even without a teardown hook (degraded-after-delivery)", async () => {
+    const stub = makeStub({ chunkCount: 1, postCheckRunThrows: true });
+    const result = await orchestrate(makeCtx(stub));
+    expect(result.status).toBe("accepted");
+    expect(result.degradationNotes).toContain("post_check_run_failed");
+  });
+});
+
+describe("FIX #10 — final claim-check immediately before the post stage", () => {
+  it("fires a FOURTH claim-check just before post (after persist_walkthrough, before postReview)", async () => {
+    const stub = makeStub({ chunkCount: 1 });
+    const ctx = makeCtx(stub);
+    const before: Array<string> = [];
+    const ctxWithCheck: ReviewPipelineContext = {
+      ...ctx,
+      claimCheck: async () => {
+        before.push([...stub.calls].join(","));
+      },
+    };
+    await orchestrate(ctxWithCheck);
+    // FOUR claim-checks now (was three): before-clone, before-classify, before-aggregate, before-post.
+    expect(before.length).toBe(4);
+    // The 4th (index 3) is the before-post one: persistReviewWalkthrough has run, postReview has NOT.
+    expect(before[3]?.endsWith("persistReviewWalkthrough")).toBe(true);
+    expect(before[3]?.includes("postReview")).toBe(false);
+  });
+
+  it("a superseded review (lease lost just before post) does NOT post — PrMutexLostClaim, no postReview/postCheckRun", async () => {
+    const stub = makeStub({ chunkCount: 1 });
+    const ctx = makeCtx(stub);
+    let calls = 0;
+    const ctxWithCheck: ReviewPipelineContext = {
+      ...ctx,
+      claimCheck: async () => {
+        calls += 1;
+        // The first THREE checks (before clone/classify/aggregate) pass; the FOURTH (before post) aborts.
+        if (calls >= 4) {
+          throw new Error("PrMutexLostClaim");
+        }
+      },
+    };
+    await expect(orchestrate(ctxWithCheck)).rejects.toThrow(/PrMutexLostClaim/);
+    // The abort fired BEFORE the post stage → no GitHub round-trip.
+    expect(stub.calls).not.toContain("postReview");
+    expect(stub.calls).not.toContain("postCheckRun");
+    // persist + walkthrough already ran (the abort is between persist_walkthrough and post); cleanup still runs.
+    expect(stub.calls).toContain("persistReviewWalkthrough");
+    expect(stub.cleanupCalled()).toBe(true);
   });
 });
 

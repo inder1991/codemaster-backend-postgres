@@ -481,8 +481,10 @@ describeTemporal("review-pipeline composition (in-process TestWorkflowEnvironmen
     // Stage-2 lifecycle threading (vs the Stage-1 thin body):
     //   * `gate` runs FIRST (start_review_for_webhook → accepted, mints mutex_id).
     //   * `postPlaceholder` then `allocateWorkspace` precede the orchestrator.
-    //   * `renewLease` fires THREE times — the claim-check at the before-clone, before-classify, and
-    //     before-aggregate boundaries (the orchestrator's ctx.claimCheck seam → renew activity).
+    //   * `renewLease` fires FOUR times — the claim-check at the before-clone, before-classify,
+    //     before-aggregate, AND (FIX #10) the before-post boundaries (the orchestrator's ctx.claimCheck
+    //     seam → renew activity). The 4th closes the aggregate→post supersession window so a stolen-lease
+    //     review never publishes.
     //   * `deletePlaceholder` fires after the post pair (the onPlaceholderTeardown seam).
     //   * `cleanup` (releaseWorkspace) fires once from the orchestrator's finally; then the body's
     //     non-cancellable finally fires `releaseMutex` + a backstop `cleanup` (releaseWorkspace again,
@@ -526,8 +528,9 @@ describeTemporal("review-pipeline composition (in-process TestWorkflowEnvironmen
       "applyArbitration", // Step 7.7 — between persist and walkthrough (sa non-null; tool_statuses empty)
       "generateWalkthrough",
       "persistReviewWalkthrough",
+      "renewLease", // FIX #10 — 4th claim-check before the post stage (closes the aggregate→post window)
       "PAIR2", // {postReview, postCheckRun} (order-free within the pair)
-      "deletePlaceholder", // onPlaceholderTeardown after the post pair
+      "deletePlaceholder", // onPlaceholderTeardown after the post pair (decoupled from post_check_run — FIX #7)
       "cleanup", // orchestrator finally (releaseWorkspace)
       "analyzed", // ANALYZED milestone (after orchestrate + bookkeeping, inside the BF-5 try)
       "finalizeReviewRun", // RUNNING → COMPLETED
@@ -541,8 +544,8 @@ describeTemporal("review-pipeline composition (in-process TestWorkflowEnvironmen
     expect(calls).toContain("postCheckRun");
     // The mutex was released by the body's finally.
     expect(calls).toContain("releaseMutex");
-    // The lease was renewed at all three claim-check boundaries.
-    expect(calls.filter((c) => c === "renewLease").length).toBe(3);
+    // The lease was renewed at all FOUR claim-check boundaries (clone/classify/aggregate + FIX #10 post).
+    expect(calls.filter((c) => c === "renewLease").length).toBe(4);
     // ── PROOF 2b: the Stage-4 enrichment wiring composed end-to-end ──
     // enrich fired ONCE before allocate; linked-issues + suggested-reviewers fired ONCE each before clone;
     // buildRetrievedEvidence fired ONCE per chunk (1 chunk); updatePrDescription fired ONCE after the post.

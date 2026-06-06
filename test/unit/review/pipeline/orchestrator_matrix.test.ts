@@ -332,6 +332,7 @@ function makeCtx(stub: RecordingStub, logger?: { warning(msg: string): void }): 
       headSha: "abc1234",
       runId: uuidFor(4),
       reviewId: uuidFor(5),
+      repositoryId: uuidFor(6),
       policyRevision: 3,
       prNumber: 42,
       changedLineRanges: CHANGED_LINE_RANGES,

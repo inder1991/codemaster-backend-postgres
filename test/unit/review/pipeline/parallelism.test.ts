@@ -338,3 +338,114 @@ describe("fanOutReview — error propagation", () => {
     );
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// FIX #11 (owner-requested HARDENING DIVERGENCE) — cancel-peers on first hard failure.
+//
+// Parity target: Python's `anyio.create_task_group()` CANCELS all peer tasks the instant one task
+// raises. Tasks still parked at `async with semaphore` (i.e. that have not yet called `invoke`) are
+// cancelled before they ever dispatch — so on a hard failure the task-group never schedules the
+// not-yet-started chunks.
+//
+// The original TS worker-pool had NO such cancellation: `Promise.all` rejects on the first worker
+// throwing, but the OTHER in-flight workers keep pulling the shared cursor and dispatching `invoke`
+// for later chunks (wasted LLM spend + larger Temporal history). This suite pins the corrected
+// contract: once any worker observes a rejection, NO worker dispatches a chunk pulled AFTER that
+// point — while preserving first-error-propagation and success-path ordering.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describe("fanOutReview — cancel-peers on first hard failure (anyio task-group parity)", () => {
+  it("stops dispatching new chunks once a rejection is observed (fewer than n invoke calls)", async () => {
+    // 5 chunks, concurrency 2. Chunk index 1 rejects. With the cursor model, the two initial
+    // workers pull idx 0 and idx 1. We park idx 0 on a gate so its worker stays in-flight, let
+    // idx 1 reject, then release idx 0. The abort flag must stop BOTH workers from pulling idx 2/3/4.
+    const n = 5;
+    const chunks = Array.from({ length: n }, (_, i) => chunk(i));
+
+    const dispatched: Array<number> = [];
+    let releaseChunk0!: () => void;
+    const chunk0Gate = new Promise<void>((res) => {
+      releaseChunk0 = res;
+    });
+
+    const invoke: InvokeChunkFn = async (c) => {
+      const idx = Number(c.path.replace(/\D/g, ""));
+      dispatched.push(idx);
+      if (idx === 0) {
+        // Park the first worker so it is genuinely in-flight when the peer rejects.
+        await chunk0Gate;
+        return envelope(0);
+      }
+      if (idx === 1) {
+        // Reject synchronously-ish on the second worker → sets the shared abort flag.
+        throw new Error("chunk-1 dispatch failed");
+      }
+      return envelope(idx);
+    };
+
+    const promise = fanOutReview(chunks, invoke, { concurrency: 2 });
+    // Yield so chunk 1's rejection is observed (abort flag set) before we release chunk 0. Then
+    // chunk 0's worker, on its next loop turn, must SEE the abort flag and NOT pull idx 2/3/4.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    releaseChunk0();
+
+    await expect(promise).rejects.toThrow("chunk-1 dispatch failed");
+
+    // The core fix assertion: peers stopped scheduling. Without cancel-peers, all 5 chunks would
+    // have been pulled+dispatched (or 4 of them — every index except the rejected one's successors
+    // up to the cursor). With it, only the chunks pulled BEFORE the abort flag was set ran.
+    expect(dispatched.length).toBeLessThan(n);
+    // idx 2/3/4 must never have been dispatched after the failure was observed.
+    expect(dispatched).not.toContain(3);
+    expect(dispatched).not.toContain(4);
+  });
+
+  it("propagates the FIRST rejection even when a later peer would also reject", async () => {
+    // Two failing chunks; the first one observed must be the propagated error.
+    const n = 4;
+    const chunks = Array.from({ length: n }, (_, i) => chunk(i));
+    const invoke: InvokeChunkFn = async (c) => {
+      const idx = Number(c.path.replace(/\D/g, ""));
+      if (idx === 1) {
+        throw new Error("first-failure");
+      }
+      if (idx === 3) {
+        throw new Error("second-failure");
+      }
+      return envelope(idx);
+    };
+    await expect(fanOutReview(chunks, invoke, { concurrency: 2 })).rejects.toThrow("first-failure");
+  });
+
+  it("does NOT alter the success path — full dispatch + input-ordered fan-in (control)", async () => {
+    // Cancel-peers must be inert when nothing fails: all chunks dispatch and ordering is preserved.
+    const n = 5;
+    const chunks = Array.from({ length: n }, (_, i) => chunk(i));
+    const dispatched: Array<number> = [];
+    const invoke: InvokeChunkFn = async (c) => {
+      const idx = Number(c.path.replace(/\D/g, ""));
+      dispatched.push(idx);
+      // Yield to interleave workers — output ordering must still be input order.
+      await Promise.resolve();
+      await Promise.resolve();
+      return envelope(idx, { withIntent: true });
+    };
+    const [findings, intents] = await fanOutReview(chunks, invoke, { concurrency: 2 });
+    expect(dispatched).toHaveLength(n); // every chunk dispatched on the success path
+    expect(findings.map((f) => f.title)).toEqual([
+      "finding-from-chunk-0",
+      "finding-from-chunk-1",
+      "finding-from-chunk-2",
+      "finding-from-chunk-3",
+      "finding-from-chunk-4",
+    ]);
+    expect(intents.map((i) => i.reason)).toEqual([
+      "intent-from-chunk-0",
+      "intent-from-chunk-1",
+      "intent-from-chunk-2",
+      "intent-from-chunk-3",
+      "intent-from-chunk-4",
+    ]);
+  });
+});

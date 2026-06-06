@@ -356,306 +356,366 @@ export async function reviewPullRequest(
     }
   };
 
-  // ─── Step 2.25: placeholder PR comment (best-effort) ──────────────────────────────────────────────
-  // Post a "reviewing this PR..." comment so engineers see life on the PR before the pipeline completes.
-  // stageOutcome with skipOutcome() (the Python `_log_stage` is the canonical success emitter; the helper
-  // handles WARN + record_stage(error) on failure) — a placeholder failure does NOT fail the workflow.
-  await stageOutcome(
-    "post_review_placeholder",
-    { logger, headSha: payload.head_sha, runId: payload.run_id },
-    async (handle): Promise<void> => {
-      handle.skipOutcome();
-      await postReviewPlaceholder({
-        schema_version: 1,
-        pr_id: payload.pr_id,
-        run_id: payload.run_id,
-        review_id: payload.review_id,
-        installation_id: payload.installation_id,
-        owner: payload.gh_owner,
-        repo_name: payload.gh_repo_name,
-        pr_number: payload.pr_number,
-      });
-    },
-  );
-
-  // ─── Step 3.5: enrich PR files → REAL changed_paths / changed_line_ranges (review_pull_request.py:776-917) ──
-  // ENRICH BEFORE ALLOCATE: fetch the PR's changed files from GitHub (paginated) BEFORE allocate_workspace,
-  // so the orchestrator reviews the REAL changed files (replacing the Stage-1 changed_paths=[] /
-  // changed_line_ranges={} stubs). GATE COLLAPSE: enrich-pr-files-v2 is collapse-on — only the v2
-  // PrFilesEnrichmentResultV1 path is dispatched (no workflow.patched(), no v1 legacy branch).
-  //
-  // Gated on `github_installation_id != null` (the numeric GitHub-API id the files-fetch needs; pre-T1
-  // outbox rows where it's null skip with a "skipped" stage outcome — fail-open). FAIL-OPEN: the
-  // stageOutcome wrap (raiseAfterLog defaults false) swallows a fetch failure → `enrichment` stays null →
-  // the derivation below falls back to the empty tuple/dict (the Python `enrichment is None` branch).
-  // skipOutcome() defers to the canonical `_log_stage("enrich_pr_files")` success emit (the activity owns it).
-  let enrichment: PrFilesEnrichmentResultV1 | undefined;
-  if (payload.github_installation_id !== null) {
-    const githubInstallationId = payload.github_installation_id;
-    enrichment = await stageOutcome(
-      "enrich_pr_files",
+  // ─── FIX #1 — MUTEX/WORKSPACE LEAK-WINDOW CLOSURE (owner hardening DIVERGENCE) ─────────────────────
+  // In the frozen Python the per-PR mutex is released ONLY inside the orchestrate-finally (the `_post_review`
+  // cleanup): everything BETWEEN the gate accepting the mutex and that finally — placeholder, enrich,
+  // allocate_workspace, ANALYSIS_STARTED, the up-front issue/reviewer fetches — runs UNGUARDED. If
+  // `allocate_workspace` or `record_review_lifecycle_event(ANALYSIS_STARTED)` raises before orchestrate is
+  // reached, the Python leaks the held mutex (and, post-allocate, the workspace lease) until lease-expiry +
+  // the janitor sweep self-heal it. That self-heal still applies here (the lease+janitor backstop is ported),
+  // but IMMEDIATE release is strictly better — so this is a deliberate HARDENING DIVERGENCE from Python: the
+  // OUTER try/finally below opens the instant the gate's `mutexId` is in hand and brackets EVERYTHING after it
+  // (placeholder, enrich, allocate, ANALYSIS_STARTED, issue/reviewer fetch, ctx build, orchestrate,
+  // bookkeeping, ANALYZED, finalize). The `CancellationScope.nonCancellable` cleanup-finally ALWAYS releases
+  // the mutex, and releases the workspace IFF a handle was actually allocated (`workspaceHandle !== null`) —
+  // so an allocate failure releases the mutex but does NOT dispatch a workspace release against a handle that
+  // was never minted. `workspaceHandle` is declared nullable BEFORE the try so the finally can read it on
+  // every exit path (including a failure that fired before allocate assigned it).
+  let workspaceHandle: WorkspaceHandle | null = null;
+  let result: ReviewPipelineResult;
+  // `state` is hoisted to the function-body scope (NOT block-scoped in the inner try) because the Step 6
+  // return below reads `state.postedReview` AFTER the try/catch — the orchestrator's posting.ts populates it
+  // during orchestrate(). Constructed (not just declared) here so it is always a usable instance on the
+  // success path the return reaches. FIX #3 adds the enrich-error degradation note onto it before orchestrate.
+  const state = new ReviewWorkflowState();
+  // OUTER try = BF-5/BF-13 run-transition. INNER try/finally = the NON-CANCELLABLE mutex + workspace cleanup.
+  // The inner-finally runs BEFORE the outer-catch (the Python "mutex release is the more critical action; the
+  // run-transition is best-effort" ordering — the cleanup has already released both resources by the time the
+  // BF-5/BF-13 record fires). releaseMutex runs even if releaseWorkspace fails (and vice-versa).
+  try {
+    try {
+    // ─── Step 2.25: placeholder PR comment (best-effort) ────────────────────────────────────────────
+    // Post a "reviewing this PR..." comment so engineers see life on the PR before the pipeline completes.
+    // stageOutcome with skipOutcome() (the Python `_log_stage` is the canonical success emitter; the helper
+    // handles WARN + record_stage(error) on failure) — a placeholder failure does NOT fail the workflow.
+    await stageOutcome(
+      "post_review_placeholder",
       { logger, headSha: payload.head_sha, runId: payload.run_id },
-      async (handle): Promise<PrFilesEnrichmentResultV1> => {
+      async (handle): Promise<void> => {
         handle.skipOutcome();
-        return enrichPrFilesV2({
+        await postReviewPlaceholder({
           schema_version: 1,
-          installation_id: payload.installation_id,
-          github_installation_id: githubInstallationId,
-          repository_id: payload.repository_id,
           pr_id: payload.pr_id,
-          gh_owner: payload.gh_owner,
-          gh_repo_name: payload.gh_repo_name,
+          run_id: payload.run_id,
+          review_id: payload.review_id,
+          installation_id: payload.installation_id,
+          owner: payload.gh_owner,
+          repo_name: payload.gh_repo_name,
           pr_number: payload.pr_number,
         });
       },
     );
-  }
-  // Derive the orchestrator inputs from the enrichment result (review_pull_request.py:897-917). Fail-open
-  // (enrichment undefined — github_installation_id null, or the v2 fetch errored + stageOutcome swallowed)
-  // preserves the Stage-1 behaviour: empty changed_paths + empty changed_line_ranges. A truncation marker
-  // surfaces a WARN (the PR has more files than MAX_FILES_PER_ENRICHMENT).
-  let changedPathsForOrchestrator: ReadonlyArray<string> = [];
-  let changedLineRangesForOrchestrator: ChangedLineRanges = {};
-  if (enrichment !== undefined) {
-    changedPathsForOrchestrator = enrichment.files.map((pf) => pf.file_path);
-    changedLineRangesForOrchestrator = enrichment.changed_line_ranges;
-    if (enrichment.truncated_at !== null) {
-      workflowLog.warn(
-        `review_pipeline.enrichment_truncated: files capped at ${enrichment.truncated_at} ` +
-          `(PR has more files than MAX_FILES_PER_ENRICHMENT)`,
-      );
-    }
-  }
 
-  // ─── Step 4a: allocate the REAL workspace (replaces the Stage-1 deterministic stub) ────────────────
-  // The returned WorkspaceHandle carries the workspace identity + lease key; the clone activity targets it
-  // and the finally releases by its workspace_id. A failure here propagates past orchestrate entirely, but
-  // the mutex-release finally still runs (it brackets this allocate too). 1:1 with review_pull_request.py
-  // :1033-1061. Allocate runs OUTSIDE the orchestrate try so a failed allocation never enters the workspace-
-  // release path with a handle that was never minted (mutex release still happens via the finally below).
-  const workspaceHandle: WorkspaceHandle = await allocateWorkspace({
-    schema_version: 1,
-    run_id: payload.run_id,
-    review_id: payload.review_id,
-    installation_id: payload.installation_id,
-    // ReviewPullRequestPayloadV1 carries the internal UUID repository_id; the numeric GitHub-side repo_id
-    // (diagnostic _meta only, AD-13) is not on the payload — pass null (1:1 with the Python `repo_id=None`).
-    repo_id: null,
-    workflow_id: payload.run_id,
-  });
-
-  // ─── Step 2.5: emit ANALYSIS_STARTED (review_pull_request.py:651-684) ──────────────────────────────
-  // The granular analysis-stage milestone, emitted AFTER the gate accepted + the placeholder/allocate ran
-  // and BEFORE the orchestrator invokes any analysis-stage activity. Idempotent under Temporal at-least-once
-  // retry (the activity checks for an existing event of this type before INSERT). A FAILURE here propagates
-  // — but it is dispatched OUTSIDE the BF-5 try (the run is not yet "in flight" until ANALYSIS_STARTED has
-  // landed), so the mutex/workspace finally below still releases on that failure path (it brackets this
-  // dispatch too). This is the boundary marker that proves the run is in flight for BF-5's FAILED transition.
-  await recordReviewLifecycleEvent({
-    schema_version: 2,
-    installation_id: payload.installation_id,
-    run_id: payload.run_id,
-    review_id: payload.review_id,
-    provider: "github",
-    event_type: "ANALYSIS_STARTED",
-    payload: {
-      pr_id: payload.pr_id,
-      head_sha: payload.head_sha,
-      policy_revision: payload.policy_revision,
-    },
-  });
-
-  // ─── Step 8.5 + S23.AR.3: fetch linked issues + suggested reviewers (review_pull_request.py:2086-2220) ──
-  // The Python fetched these INSIDE the `_walkthrough` closure right before `generate_walkthrough`. The TS
-  // port pulled `generateWalkthrough` into the orchestrator, so the body resolves them up-front (their
-  // inputs are payload-only) and threads the RESOLVED tuples onto the context — both walkthrough sites (the
-  // normal Step 8 + the advisory path-filters-excluded-all Step 2a.1) read them, exactly like the Python
-  // closure that fed both. Both gated on `github_installation_id != null` + FAIL-OPEN (the stageOutcome wrap
-  // swallows → the empty tuple stays → the renderer drops the section). skipOutcome() defers to the
-  // canonical `_log_stage(...)` success emit. suggested_reviewers is additionally flag-gated INSIDE its
-  // activity on `code_owners_v1` (returns [] when off; default-off in the composition root).
-  let linkedIssues: ReadonlyArray<LinkedIssueV1> = [];
-  let suggestedReviewers: ReadonlyArray<string> = [];
-  if (payload.github_installation_id !== null) {
-    const githubInstallationId = payload.github_installation_id;
-    const resolvedLinked = await stageOutcome(
-      "fetch_linked_issues",
-      { logger, headSha: payload.head_sha, runId: payload.run_id },
-      async (handle): Promise<ReadonlyArray<LinkedIssueV1>> => {
-        handle.skipOutcome();
-        return fetchLinkedIssues({
-          schema_version: 1,
-          installation_id_uuid: payload.installation_id,
-          installation_id_int: githubInstallationId,
-          repository_id: payload.repository_id,
-          pr_id: payload.pr_id,
-          owner: payload.gh_owner,
-          repo: payload.gh_repo_name,
-        });
-      },
-    );
-    if (resolvedLinked !== undefined) {
-      linkedIssues = resolvedLinked;
-    }
-
-    const resolvedSuggested = await stageOutcome(
-      "fetch_suggested_reviewers",
-      { logger, headSha: payload.head_sha, runId: payload.run_id },
-      async (handle): Promise<ReadonlyArray<string>> => {
-        handle.skipOutcome();
-        return fetchSuggestedReviewers({
-          schema_version: 1,
-          installation_id: payload.installation_id,
-          repository_id: payload.repository_id,
-          pr_id: payload.pr_id,
-        });
-      },
-    );
-    if (resolvedSuggested !== undefined) {
-      suggestedReviewers = resolvedSuggested;
-    }
-  }
-
-  // ─── build the ReviewPipelineContext with the Stage-2 lifecycle callbacks ─────────────────────────
-  const state = new ReviewWorkflowState();
-  const ctx: ReviewPipelineContext = {
-    repo: {
-      repoUrl: `https://github.com/${payload.gh_owner}/${payload.gh_repo_name}.git`,
-      // Stage-4 enrichment: the REAL changed paths the PR-files fetch resolved (replaces the Stage-1 []).
-      changedPaths: [...changedPathsForOrchestrator],
-      workspaceHandle,
-    },
-    pr: {
-      prMeta: buildPrMeta(payload),
-      headSha: payload.head_sha,
-      runId: payload.run_id,
-      reviewId: payload.review_id,
-      policyRevision: payload.policy_revision,
-      prNumber: payload.pr_number,
-      // Stage-4 enrichment: the REAL per-file post-image hunk ranges (replaces the Stage-1 {}).
-      changedLineRanges: changedLineRangesForOrchestrator,
-      parentFindings: [],
-      parentReviewId: null,
-    },
-    activities: makeActivityPorts(),
-    limits: { chunkConcurrency: CHUNK_CONCURRENCY_DEFAULT },
-    state,
-    logger,
-    // Stage-4 walkthrough threading: the resolved linked-issues + suggested-reviewers tuples (fetched
-    // fail-open above) flow into BOTH the orchestrator's generateWalkthrough sites.
-    linkedIssues,
-    suggestedReviewers,
-    // Stage-5 arbitration `now` (the Python `now=workflow.now()` kwarg). The orchestrator runs in the
-    // workflow sandbox where Date.now()/new Date() are clock-gate-banned, so the body resolves the instant
-    // HERE from the SDK-provided, replay-deterministic workflow start time and threads the RFC3339 string.
-    // Written onto SUPPRESSED_BY_LLM decisions' suppressed_at by the apply_arbitration activity.
-    arbitrationNow: workflowInfo().startTime.toISOString(),
-    // CLAIM-CHECK seam: the renewal-backed lease check, fired by the orchestrator before clone, classify,
-    // aggregate (the three Python `_abort_if_claim_lost` boundaries). A lost lease raises a non-retryable
-    // ApplicationFailure that propagates out of orchestrate (the finally still releases the mutex/workspace).
-    claimCheck: abortIfClaimLost,
-    // PLACEHOLDER-TEARDOWN seam: the delete_review_placeholder dispatch, fired by the orchestrator after the
-    // real post lands. Best-effort (stageOutcome-wrapped + skipOutcome); a teardown failure never fails the
-    // pipeline. 1:1 with the Python `delete_review_placeholder` inside `_post_review`.
-    onPlaceholderTeardown: async (): Promise<void> => {
-      await stageOutcome(
-        "delete_review_placeholder",
+    // ─── Step 3.5: enrich PR files → REAL changed_paths / changed_line_ranges (review_pull_request.py:776-917) ──
+    // ENRICH BEFORE ALLOCATE: fetch the PR's changed files from GitHub (paginated) BEFORE allocate_workspace,
+    // so the orchestrator reviews the REAL changed files (replacing the Stage-1 changed_paths=[] /
+    // changed_line_ranges={} stubs). GATE COLLAPSE: enrich-pr-files-v2 is collapse-on — only the v2
+    // PrFilesEnrichmentResultV1 path is dispatched (no workflow.patched(), no v1 legacy branch).
+    //
+    // Gated on `github_installation_id != null` (the numeric GitHub-API id the files-fetch needs; pre-T1
+    // outbox rows where it's null skip with a "skipped" stage outcome — fail-open). The stageOutcome wrap
+    // (raiseAfterLog defaults false) swallows a fetch failure → `enrichment` stays undefined → the derivation
+    // below falls back to the empty tuple/dict. skipOutcome() defers to the canonical `_log_stage(
+    // "enrich_pr_files")` success emit (the activity owns it).
+    //
+    // ── FIX #3 — ENRICH FAIL-CLOSED/DEGRADED ON ERROR (owner hardening DIVERGENCE) ──
+    // The frozen Python is fully FAIL-OPEN here: a swallowed enrich failure leaves `enrichment = None` and the
+    // derivation falls back to empty changed_paths — INDISTINGUISHABLE from a genuinely-empty PR, so a
+    // transient GitHub files-API blip produces a silent CLEAN "no findings" review. This is a hardening
+    // DIVERGENCE from Python: we DISTINGUISH enrich-ERROR (github_installation_id non-null AND the activity
+    // threw + stageOutcome swallowed → `enrichment === undefined` on the non-null branch) from a
+    // genuinely-empty SUCCESSFUL enrichment (`enrichment !== undefined` with `files: []` — NOT flagged). On
+    // enrich-ERROR we still fail-OPEN on the data (empty changed_paths, the pipeline proceeds) but mark the run
+    // DEGRADED: the `pr_file_enrichment_failed` note is added to `state.degradation` below (after state is
+    // constructed), so the orchestrator folds it into `ReviewPipelineResult.degradation_notes` (orchestrator.ts
+    // :763) → the walkthrough's degradation-state + the posted check-run reflect a DEGRADED outcome instead of
+    // a clean pass. `stageOutcome` returns `undefined` ONLY on the swallowed-error path; on the success path it
+    // returns the value — so `enrichErrored` captures the error-vs-empty distinction precisely.
+    let enrichment: PrFilesEnrichmentResultV1 | undefined;
+    let enrichErrored = false;
+    if (payload.github_installation_id !== null) {
+      const githubInstallationId = payload.github_installation_id;
+      enrichment = await stageOutcome(
+        "enrich_pr_files",
         { logger, headSha: payload.head_sha, runId: payload.run_id },
-        async (handle): Promise<void> => {
+        async (handle): Promise<PrFilesEnrichmentResultV1> => {
           handle.skipOutcome();
-          await deleteReviewPlaceholder({
+          return enrichPrFilesV2({
             schema_version: 1,
-            pr_id: payload.pr_id,
-            run_id: payload.run_id,
-            review_id: payload.review_id,
             installation_id: payload.installation_id,
-            owner: payload.gh_owner,
-            repo_name: payload.gh_repo_name,
+            github_installation_id: githubInstallationId,
+            repository_id: payload.repository_id,
+            pr_id: payload.pr_id,
+            gh_owner: payload.gh_owner,
+            gh_repo_name: payload.gh_repo_name,
             pr_number: payload.pr_number,
           });
         },
       );
-    },
-  };
+      // FIX #3: on the non-null branch, `enrichment === undefined` means the activity threw and stageOutcome
+      // swallowed it (a SUCCESSFUL enrichment — even an empty one — is always a defined PrFilesEnrichmentResultV1).
+      // That is the enrich-ERROR case the degradation note below flags.
+      enrichErrored = enrichment === undefined;
+    }
+    // Derive the orchestrator inputs from the enrichment result (review_pull_request.py:897-917). Fail-open
+    // (enrichment undefined — github_installation_id null, or the v2 fetch errored + stageOutcome swallowed)
+    // preserves the Stage-1 behaviour: empty changed_paths + empty changed_line_ranges. A truncation marker
+    // surfaces a WARN (the PR has more files than MAX_FILES_PER_ENRICHMENT).
+    let changedPathsForOrchestrator: ReadonlyArray<string> = [];
+    let changedLineRangesForOrchestrator: ChangedLineRanges = {};
+    if (enrichment !== undefined) {
+      changedPathsForOrchestrator = enrichment.files.map((pf) => pf.file_path);
+      changedLineRangesForOrchestrator = enrichment.changed_line_ranges;
+      if (enrichment.truncated_at !== null) {
+        workflowLog.warn(
+          `review_pipeline.enrichment_truncated: files capped at ${enrichment.truncated_at} ` +
+            `(PR has more files than MAX_FILES_PER_ENRICHMENT)`,
+        );
+      }
+    }
 
-  // ─── Step 5: orchestrate, wrapped in (outer) BF-5/BF-13 run-transition + (inner) NON-CANCELLABLE cleanup ──
-  //
-  // Nesting matches the frozen Python ordering (review_pull_request.py:685-4153):
-  //   * The INNER try/finally owns the mutex + workspace release: they run on EVERY exit path (success,
-  //     error, cancellation), dispatched inside CancellationScope.nonCancellable so a Temporal cancellation
-  //     still executes them BEFORE the cancellation re-propagates. releaseMutex runs even if releaseWorkspace
-  //     fails (and vice-versa) — leaking the mutex blocks every future review of this PR.
-  //   * The OUTER try/catch is BF-5/BF-13: on ANY uncaught exception the run row flips RUNNING → FAILED
-  //     (BF-5) — UNLESS the exception is a Temporal cancellation, which flips RUNNING → CANCELLED (BF-13).
-  //     The cleanup inner-finally has ALREADY run by the time the catch fires (the Python "mutex release is
-  //     the more critical action; the run-transition is best-effort" ordering). recordRunFailed /
-  //     recordRunCancelled are best-effort: a failure to record the transition is logged + swallowed so the
-  //     ORIGINAL exception still propagates (Temporal still marks the workflow failed; the retention janitor
-  //     sweeps any orphan run). The lifecycle bookkeeping + ANALYZED + finalize all run INSIDE this scope so
-  //     a failure in any of them also reaches the FAILED transition.
-  let result: ReviewPipelineResult;
-  try {
-    try {
-      result = await orchestrate(ctx);
+    // ─── Step 4a: allocate the REAL workspace (replaces the Stage-1 deterministic stub) ──────────────
+    // The returned WorkspaceHandle carries the workspace identity + lease key; the clone activity targets it
+    // and the cleanup-finally releases it by its workspace_id. FIX #1: the allocate result is assigned to the
+    // outer-scope nullable `workspaceHandle` so the cleanup-finally below releases it on EVERY subsequent exit
+    // path. A failure HERE (allocate itself throws) leaves `workspaceHandle` null → the cleanup-finally
+    // releases the mutex but does NOT dispatch a workspace release against a handle that was never minted.
+    // 1:1 with review_pull_request.py:1033-1061 for the activity dispatch shape. The local `const handle`
+    // gives the ctx build a NON-NULL reference (the assignment narrows here, not in the closures below).
+    const handle: WorkspaceHandle = await allocateWorkspace({
+      schema_version: 1,
+      run_id: payload.run_id,
+      review_id: payload.review_id,
+      installation_id: payload.installation_id,
+      // ReviewPullRequestPayloadV1 carries the internal UUID repository_id; the numeric GitHub-side repo_id
+      // (diagnostic _meta only, AD-13) is not on the payload — pass null (1:1 with the Python `repo_id=None`).
+      repo_id: null,
+      workflow_id: payload.run_id,
+    });
+    workspaceHandle = handle;
 
-      // ─── Step 5.4: finding-delivery lifecycle bookkeeping (review_pull_request.py:3554-4027) ─────────
-      // After orchestrate returns cleanly, flip the persisted findings to their delivery outcome based on
-      // the post-review capture (state.postedReview) + the pipeline result. Bookkeeping-ONLY: every setter
-      // dispatch is individually try/caught so a failure NEVER fails the workflow (the review is already
-      // posted). Runs BEFORE the ANALYZED emit (the Python ordering).
-      await runLifecycleBookkeeping(payload, state, result);
+    // ─── Step 2.5: emit ANALYSIS_STARTED (review_pull_request.py:651-684) ────────────────────────────
+    // The granular analysis-stage milestone, emitted AFTER the gate accepted + the placeholder/allocate ran
+    // and BEFORE the orchestrator invokes any analysis-stage activity. Idempotent under Temporal at-least-once
+    // retry (the activity checks for an existing event of this type before INSERT). FIX #1: a FAILURE here is
+    // now INSIDE the outer try, so the cleanup-finally releases BOTH the mutex AND the workspace (the handle
+    // was already allocated + assigned above) — closing the leak window the Python left between
+    // ANALYSIS_STARTED and the orchestrate-finally. The BF-5 catch flips the run RUNNING → FAILED on this path.
+    await recordReviewLifecycleEvent({
+      schema_version: 2,
+      installation_id: payload.installation_id,
+      run_id: payload.run_id,
+      review_id: payload.review_id,
+      provider: "github",
+      event_type: "ANALYSIS_STARTED",
+      payload: {
+        pr_id: payload.pr_id,
+        head_sha: payload.head_sha,
+        policy_revision: payload.policy_revision,
+      },
+    });
 
-      // ─── Step 5.5: ANALYZED + finalize COMPLETED (review_pull_request.py:3960-4027) ──────────────────
-      // Reaching here means the orchestrator + bookkeeping completed. Emit the ANALYZED milestone carrying
-      // the final findings_count + publication/degradation provenance (buildAnalyzedPayload), then advance
-      // the run RUNNING → COMPLETED. Both idempotent under Temporal at-least-once retry.
-      await recordReviewLifecycleEvent({
-        schema_version: 2,
-        installation_id: payload.installation_id,
-        run_id: payload.run_id,
-        review_id: payload.review_id,
-        provider: "github",
-        event_type: "ANALYZED",
-        payload: buildAnalyzedPayload({
-          findingsCount: result.findingsCount,
-          headSha: payload.head_sha,
-          postedReviewCapture: state.postedReview,
-          pipelineResult: result,
-        }),
-      });
-      await finalizeReviewRun({
-        run_id: payload.run_id,
-        review_id: payload.review_id,
-        attempt: 1,
-        duration_ms: null,
-        worker_id: null,
-      });
+    // ─── Step 8.5 + S23.AR.3: fetch linked issues + suggested reviewers (review_pull_request.py:2086-2220) ──
+    // The Python fetched these INSIDE the `_walkthrough` closure right before `generate_walkthrough`. The TS
+    // port pulled `generateWalkthrough` into the orchestrator, so the body resolves them up-front (their
+    // inputs are payload-only) and threads the RESOLVED tuples onto the context — both walkthrough sites (the
+    // normal Step 8 + the advisory path-filters-excluded-all Step 2a.1) read them, exactly like the Python
+    // closure that fed both. Both gated on `github_installation_id != null` + FAIL-OPEN (the stageOutcome wrap
+    // swallows → the empty tuple stays → the renderer drops the section). skipOutcome() defers to the
+    // canonical `_log_stage(...)` success emit. suggested_reviewers is additionally flag-gated INSIDE its
+    // activity on `code_owners_v1` (returns [] when off; default-off in the composition root).
+    let linkedIssues: ReadonlyArray<LinkedIssueV1> = [];
+    let suggestedReviewers: ReadonlyArray<string> = [];
+    if (payload.github_installation_id !== null) {
+      const githubInstallationId = payload.github_installation_id;
+      const resolvedLinked = await stageOutcome(
+        "fetch_linked_issues",
+        { logger, headSha: payload.head_sha, runId: payload.run_id },
+        async (handle2): Promise<ReadonlyArray<LinkedIssueV1>> => {
+          handle2.skipOutcome();
+          return fetchLinkedIssues({
+            schema_version: 1,
+            installation_id_uuid: payload.installation_id,
+            installation_id_int: githubInstallationId,
+            repository_id: payload.repository_id,
+            pr_id: payload.pr_id,
+            owner: payload.gh_owner,
+            repo: payload.gh_repo_name,
+          });
+        },
+      );
+      if (resolvedLinked !== undefined) {
+        linkedIssues = resolvedLinked;
+      }
+
+      const resolvedSuggested = await stageOutcome(
+        "fetch_suggested_reviewers",
+        { logger, headSha: payload.head_sha, runId: payload.run_id },
+        async (handle2): Promise<ReadonlyArray<string>> => {
+          handle2.skipOutcome();
+          return fetchSuggestedReviewers({
+            schema_version: 1,
+            installation_id: payload.installation_id,
+            repository_id: payload.repository_id,
+            pr_id: payload.pr_id,
+          });
+        },
+      );
+      if (resolvedSuggested !== undefined) {
+        suggestedReviewers = resolvedSuggested;
+      }
+    }
+
+    // ─── build the ReviewPipelineContext with the Stage-2 lifecycle callbacks ───────────────────────
+    // `state` is the function-body-scoped instance hoisted above (read by the Step 6 return after the catch).
+    // FIX #3 — on enrich-ERROR, mark the run DEGRADED. Adding the note to `state.degradation` BEFORE
+    // orchestrate folds it into `ReviewPipelineResult.degradation_notes` (orchestrator.ts:763) → the
+    // walkthrough degradation-state + posted check-run reflect a DEGRADED outcome (NOT a clean pass). A
+    // genuinely-empty successful enrichment never sets `enrichErrored`, so it is NOT flagged.
+    if (enrichErrored) {
+      state.degradation.add("pr_file_enrichment_failed");
+    }
+    const ctx: ReviewPipelineContext = {
+      repo: {
+        repoUrl: `https://github.com/${payload.gh_owner}/${payload.gh_repo_name}.git`,
+        // Stage-4 enrichment: the REAL changed paths the PR-files fetch resolved (replaces the Stage-1 []).
+        changedPaths: [...changedPathsForOrchestrator],
+        workspaceHandle: handle,
+      },
+      pr: {
+        prMeta: buildPrMeta(payload),
+        headSha: payload.head_sha,
+        runId: payload.run_id,
+        reviewId: payload.review_id,
+        // FIX #2 (part 1): thread the internal UUID repository_id onto the PR ctx so the Orchestrator phase
+        // can pass it to retrieveKnowledge (`repo_id` is sourced from typed_payload.repository_id in Python).
+        repositoryId: payload.repository_id,
+        policyRevision: payload.policy_revision,
+        prNumber: payload.pr_number,
+        // Stage-4 enrichment: the REAL per-file post-image hunk ranges (replaces the Stage-1 {}).
+        changedLineRanges: changedLineRangesForOrchestrator,
+        parentFindings: [],
+        parentReviewId: null,
+      },
+      activities: makeActivityPorts(),
+      limits: { chunkConcurrency: CHUNK_CONCURRENCY_DEFAULT },
+      state,
+      logger,
+      // Stage-4 walkthrough threading: the resolved linked-issues + suggested-reviewers tuples (fetched
+      // fail-open above) flow into BOTH the orchestrator's generateWalkthrough sites.
+      linkedIssues,
+      suggestedReviewers,
+      // Stage-5 arbitration `now` (the Python `now=workflow.now()` kwarg). The orchestrator runs in the
+      // workflow sandbox where Date.now()/new Date() are clock-gate-banned, so the body resolves the instant
+      // HERE from the SDK-provided, replay-deterministic workflow start time and threads the RFC3339 string.
+      // Written onto SUPPRESSED_BY_LLM decisions' suppressed_at by the apply_arbitration activity.
+      arbitrationNow: workflowInfo().startTime.toISOString(),
+      // CLAIM-CHECK seam: the renewal-backed lease check, fired by the orchestrator before clone, classify,
+      // aggregate (the three Python `_abort_if_claim_lost` boundaries). A lost lease raises a non-retryable
+      // ApplicationFailure that propagates out of orchestrate (the cleanup-finally still releases mutex/workspace).
+      claimCheck: abortIfClaimLost,
+      // PLACEHOLDER-TEARDOWN seam: the delete_review_placeholder dispatch, fired by the orchestrator after the
+      // real post lands. Best-effort (stageOutcome-wrapped + skipOutcome); a teardown failure never fails the
+      // pipeline. 1:1 with the Python `delete_review_placeholder` inside `_post_review`.
+      onPlaceholderTeardown: async (): Promise<void> => {
+        await stageOutcome(
+          "delete_review_placeholder",
+          { logger, headSha: payload.head_sha, runId: payload.run_id },
+          async (handle2): Promise<void> => {
+            handle2.skipOutcome();
+            await deleteReviewPlaceholder({
+              schema_version: 1,
+              pr_id: payload.pr_id,
+              run_id: payload.run_id,
+              review_id: payload.review_id,
+              installation_id: payload.installation_id,
+              owner: payload.gh_owner,
+              repo_name: payload.gh_repo_name,
+              pr_number: payload.pr_number,
+            });
+          },
+        );
+      },
+    };
+
+    // ─── Step 5: orchestrate, then bookkeeping + ANALYZED + finalize (review_pull_request.py:685-4153) ──
+    // FIX #1 restructure: this is now the BODY of the SINGLE outer try opened above (right after the gate
+    // handed over `mutexId`). The cleanup-finally below releases the mutex + (conditionally) the workspace on
+    // EVERY exit path; the BF-5/BF-13 catch flips the run terminal state. The lifecycle bookkeeping + ANALYZED
+    // + finalize all run inside this same scope, so a failure in any of them also reaches the FAILED transition.
+    result = await orchestrate(ctx);
+
+    // ─── Step 5.4: finding-delivery lifecycle bookkeeping (review_pull_request.py:3554-4027) ─────────
+    // After orchestrate returns cleanly, flip the persisted findings to their delivery outcome based on
+    // the post-review capture (state.postedReview) + the pipeline result. Bookkeeping-ONLY: every setter
+    // dispatch is individually try/caught so a failure NEVER fails the workflow (the review is already
+    // posted). Runs BEFORE the ANALYZED emit (the Python ordering).
+    await runLifecycleBookkeeping(payload, state, result);
+
+    // ─── Step 5.5: ANALYZED + finalize COMPLETED (review_pull_request.py:3960-4027) ──────────────────
+    // Reaching here means the orchestrator + bookkeeping completed. Emit the ANALYZED milestone carrying
+    // the final findings_count + publication/degradation provenance (buildAnalyzedPayload), then advance
+    // the run RUNNING → COMPLETED. Both idempotent under Temporal at-least-once retry.
+    await recordReviewLifecycleEvent({
+      schema_version: 2,
+      installation_id: payload.installation_id,
+      run_id: payload.run_id,
+      review_id: payload.review_id,
+      provider: "github",
+      event_type: "ANALYZED",
+      payload: buildAnalyzedPayload({
+        findingsCount: result.findingsCount,
+        headSha: payload.head_sha,
+        postedReviewCapture: state.postedReview,
+        pipelineResult: result,
+      }),
+    });
+    await finalizeReviewRun({
+      run_id: payload.run_id,
+      review_id: payload.review_id,
+      attempt: 1,
+      duration_ms: null,
+      worker_id: null,
+    });
     } finally {
+      // ─── FIX #1 — NON-CANCELLABLE mutex + workspace cleanup (runs on EVERY exit path) ───────────────
+      // Brackets EVERYTHING in the inner try (placeholder → finalize) — closing the Python leak window where
+      // an allocate / ANALYSIS_STARTED failure between the gate and the orchestrate-finally leaked the held
+      // mutex (and post-allocate workspace) until lease-expiry. Dispatched inside CancellationScope.
+      // nonCancellable so a Temporal cancellation still executes the release activities BEFORE the
+      // CancelledFailure re-propagates.
       await CancellationScope.nonCancellable(async () => {
-        // Release the mutex (B-A1 — critical: 5 attempts). Independent of the workspace release: a workspace-
-        // release failure must NOT skip the mutex release. stageOutcome swallows so a release failure is
-        // logged but never masks the original exit error (success/orig-error/cancellation propagates).
+        // Release the mutex (B-A1 — critical: 5 attempts). ALWAYS runs — the gate held it the instant it
+        // accepted, so it must be released regardless of how far the body got. Independent of the workspace
+        // release: a workspace-release failure must NOT skip the mutex release. stageOutcome swallows so a
+        // release failure is logged but never masks the original exit error (success/orig-error/cancellation).
         await stageOutcome(
           "cleanup",
           { logger, headSha: payload.head_sha, runId: payload.run_id },
-          async (handle): Promise<void> => {
-            handle.skipOutcome();
+          async (handle2): Promise<void> => {
+            handle2.skipOutcome();
             await releasePrReviewMutexActivity(mutexId);
           },
         );
-        // Release the workspace by its lease key (workspace_id). The orchestrator's own cleanup() already
-        // released the LEASE via the releaseWorkspace activity port on the success path; this body-level
-        // release is the lifecycle backstop the Python workflow body owns (it releases by workspace_id
-        // regardless of how orchestrate exited). Idempotent: a second release of an already-released lease is
-        // a no-op. stageOutcome swallows so a failure never masks the exit path.
-        await stageOutcome(
-          "cleanup",
-          { logger, headSha: payload.head_sha, runId: payload.run_id },
-          async (handle): Promise<void> => {
-            handle.skipOutcome();
-            await releaseWorkspace({ schema_version: 1, workspace_id: workspaceHandle.workspace_id });
-          },
-        );
+        // Release the workspace by its lease key (workspace_id) — FIX #1: ONLY when a handle was actually
+        // allocated (`workspaceHandle !== null`). An allocate failure (or any failure before allocate)
+        // releases the mutex above but does NOT dispatch a workspace release against a handle that was never
+        // minted. On the success/post-allocate paths the orchestrator's own cleanup() already released the
+        // LEASE via the releaseWorkspace port; this body-level release is the lifecycle backstop the Python
+        // workflow body owns (release by workspace_id regardless of how orchestrate exited). Idempotent: a
+        // second release of an already-released lease is a no-op. stageOutcome swallows so a failure never
+        // masks the exit path.
+        if (workspaceHandle !== null) {
+          const allocated = workspaceHandle;
+          await stageOutcome(
+            "cleanup",
+            { logger, headSha: payload.head_sha, runId: payload.run_id },
+            async (handle2): Promise<void> => {
+              handle2.skipOutcome();
+              await releaseWorkspace({ schema_version: 1, workspace_id: allocated.workspace_id });
+            },
+          );
+        }
       });
     }
   } catch (exc) {

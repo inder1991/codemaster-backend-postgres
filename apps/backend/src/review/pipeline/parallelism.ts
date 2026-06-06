@@ -100,6 +100,27 @@ export function coerceChunkResult(raw: ReviewChunkResponseV1): CoercedChunkResul
 // Temporal replay determinism. On the first dispatch rejecting, the rejection propagates and the
 // fan-in result is discarded (the externally-observable "first error re-raised, success ordering
 // preserved" contract of the Python task-group).
+//
+// FIX #11 — CANCEL-PEERS HARDENING DIVERGENCE (owner-requested; NOT a 1:1 port detail).
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+// Python's `anyio.create_task_group()` CANCELS every peer task the instant one task raises — tasks
+// still parked at `async with semaphore` (not yet inside `invoke`) are cancelled before they ever
+// dispatch, so the task-group never schedules the not-yet-started chunks on a hard failure.
+//
+// The original worker-pool port did NOT reproduce that: `Promise.all` rejects when the first worker
+// throws, but the OTHER in-flight workers keep pulling the shared cursor and dispatching `invoke`
+// for later chunks (wasted LLM spend + larger Temporal history). JS has no task-cancellation
+// primitive, so we model it cooperatively: a shared `aborted` boolean flag (set when ANY worker's
+// `invoke()` rejects). Every worker checks the flag BEFORE pulling/dispatching its next chunk and
+// stops as soon as it is set. This is the closest faithful analog of anyio's "cancel peers on first
+// exception" — bounded to a check-before-the-next-dispatch (we cannot interrupt the one `invoke`
+// already awaiting, exactly as anyio cannot un-issue an in-flight syscall).
+//
+// SANDBOX / REPLAY SAFETY: the abort flag is a plain boolean mutated by ordinary control flow — NO
+// new clock/RNG/network/crypto and NO new non-determinism. The flag only suppresses *additional*
+// dispatches on a path that was already going to throw, so the success path (and its deterministic
+// slot-ordered fan-in) is byte-for-byte unchanged. The first rejection still propagates: each worker
+// rethrows after setting the flag, so `Promise.all` surfaces the first-observed error verbatim.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 export async function fanOutReview(
   chunks: ReadonlyArray<DiffChunkV1>,
@@ -141,12 +162,29 @@ export async function fanOutReview(
     return idx;
   };
 
+  // FIX #11: shared cooperative-cancellation flag (anyio task-group "cancel peers on first
+  // exception" analog). Set when any worker's `invoke()` rejects; every worker checks it BEFORE
+  // pulling/dispatching its next chunk and stops. Plain boolean → replay-safe, no non-determinism.
+  let aborted = false;
+
   const worker = async (): Promise<void> => {
     for (let idx = next(); idx < chunks.length; idx = next()) {
-      // eslint-disable-next-line security/detect-object-injection -- `idx` is a bounded numeric cursor into local arrays, not user input
-      const raw = await invoke(chunks[idx]!, threading);
-      // eslint-disable-next-line security/detect-object-injection -- `idx` is a bounded numeric cursor into a local array, not user input
-      slots[idx] = coerceChunkResult(raw);
+      // Stop scheduling the moment a peer has failed — do NOT pull/dispatch this (or any further)
+      // chunk. Mirrors anyio cancelling tasks still parked at `async with semaphore`.
+      if (aborted) {
+        return;
+      }
+      try {
+        // eslint-disable-next-line security/detect-object-injection -- `idx` is a bounded numeric cursor into local arrays, not user input
+        const raw = await invoke(chunks[idx]!, threading);
+        // eslint-disable-next-line security/detect-object-injection -- `idx` is a bounded numeric cursor into a local array, not user input
+        slots[idx] = coerceChunkResult(raw);
+      } catch (err) {
+        // Signal peers to stop before re-raising. The first-observed error still propagates through
+        // `Promise.all` (each worker rethrows verbatim), preserving the first-error-wins contract.
+        aborted = true;
+        throw err;
+      }
     }
   };
 

@@ -74,11 +74,24 @@ import {
 import { stageOutcome, recordStage, type StageLogger } from "./degradation.js";
 import { postReviewResults, type PostingLifecycleDeps } from "./posting.js";
 
+// FIX #6+#9 — the ONE ported gitignore-style glob matcher (apps/backend/src/config/path_match.ts) backs BOTH
+// path-config consumers, replacing the two Stage-1 placeholder implementations that used to live in this
+// module (the inline `filterReviewPaths` "minimal glob" AND the deferred `matched_path_instructions: []`):
+//   * filterReviewPaths(paths, pathFilters) — the `.codemaster.yaml::path_filters` review-set selector
+//     (gitignore last-match-wins, root-anchored, '!'-negation). Byte-parity-proven against the frozen Python
+//     `filter_review_paths` (test/parity/path_match.parity.test.ts).
+//   * matchPathInstructions(rules, chunkPath) — the ADR-0001 per-glob `path_instructions` matcher that
+//     populates ReviewContextV1.matched_path_instructions (port of the Python workflow body's
+//     `match_path_instructions(path=..., rules=repo_config.path_instructions)` call in `_review_chunk`).
+// Both are pure + sandbox-safe (no clock/RNG/network/DB); the same engine drives both so widening glob
+// semantics never diverges between the two surfaces.
+import { filterReviewPaths, matchPathInstructions } from "#backend/config/path_match.js";
+
 import { postFilterFindingsWithMetadata } from "#backend/policy/trust_filter.js";
 import { mergePerChunkBundles } from "#backend/policy/citation_context_builder.js";
 import { recordInvariantViolationAttempted } from "#backend/observability/workflow_policy_metrics.js";
 
-import type { PrMetaV1 } from "#contracts/walkthrough.v1.js";
+import type { PrMetaV1, WalkthroughV1 } from "#contracts/walkthrough.v1.js";
 import type { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
 import type { StaticAnalysisResultV1 } from "#contracts/static_analysis_result.v1.js";
 import type { ArbitrationIntentV1 } from "#contracts/arbitration_intent.v1.js";
@@ -138,6 +151,12 @@ export type ReviewPipelinePrCtx = {
   readonly runId: string;
   /** review_id — the persistent review id (persist findings + persist walkthrough). UUID wire string. */
   readonly reviewId: string;
+  /** repository_id — the internal UUID of the repo under review (the workflow payload's `repository_id`).
+   *  FIX #2 (part 1): threaded onto the PR ctx so the Orchestrator phase can pass it to retrieveKnowledge
+   *  (`repo_id` is sourced from `typed_payload.repository_id` in the frozen Python — review_pull_request.py
+   *  :1756/:1768). Stage-1 stood `pr.prMeta.pr_id` in for `repo_id` until this field landed; the
+   *  retrieveKnowledge call rewire is the Orchestrator phase (NOT this fix). UUID wire string. */
+  readonly repositoryId: string;
   /** policy_revision — the routing-policy revision the aggregate stage stamps onto AggregatedFindingsV1. */
   readonly policyRevision: number;
   /** pr_number — the GitHub PR number (post_review + post_check_run target it; PostReviewInputV1.pr_number
@@ -314,17 +333,43 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
     // policyBundles.get(chunk.path) to each ReviewContextV1.applicable_policy. The Python published into a
     // closure-captured dict from inside the await; here the typed activity RETURNS the bundles and the
     // orchestrator writes them into state — same visibility-before-fan-out ordering, no shared mutable box.
-    const computed = await ports.computePolicyRules({
-      schema_version: 1,
-      workspace_path: workspaceRoot,
-      // Python: custom_patterns=repo_config.knowledge.file_patterns;
-      // knowledge_enabled=repo_config.knowledge.enabled (review_pull_request.py:1308-1309).
-      custom_patterns: [...state.repoConfig.knowledge.file_patterns],
-      knowledge_enabled: state.repoConfig.knowledge.enabled,
-      changed_paths: [...repo.changedPaths],
-    });
-    for (const [path, bundle] of Object.entries(computed.bundles)) {
-      state.policyBundles.set(path, bundle);
+    //
+    // FIX #12 — policy fail-open. The Python `_compute_policy_rules` closure (review_pull_request.py:1288)
+    // wraps the activity dispatch in `stage_outcome("policy_compute", ...)`: the policy step is fail-open by
+    // design (A-3-parse-timeout; maximum_attempts=1) — a compute failure (pathological input, parse timeout,
+    // FS error) must NOT fail the review. With no fail-open wrap the Stage-1 port let a policy-compute throw
+    // propagate out of orchestrate and crash an otherwise-deliverable review. stageOutcome restores the
+    // Python contract: on a caught error it logs `policy_compute` outcome=error, swallows, and leaves
+    // state.policyBundles EMPTY, so every downstream policy consumer (per-chunk applicable_policy, the
+    // Step-7.2 post-filter, the citation policy-context) cleanly no-ops on the empty bundle map and the review
+    // proceeds. The `computed === undefined` branch below is the swallowed-failure path. The
+    // degradationNotes adapter appends `policy_compute_failed` (the TS port surfaces the degraded-policy state
+    // as a degradation note — the Python's `degradation_notes=None` dropped the note, but the task wires it so
+    // the walkthrough renderer can reflect the partial-policy review; the bundles-empty fail-open behaviour
+    // itself is 1:1).
+    const computed = await stageOutcome(
+      "policy_compute",
+      {
+        logger: ctx.logger ?? NULL_LOGGER,
+        degradationNotes: degradationAdapter(state),
+        headSha,
+        runId,
+      },
+      async () =>
+        ports.computePolicyRules({
+          schema_version: 1,
+          workspace_path: workspaceRoot,
+          // Python: custom_patterns=repo_config.knowledge.file_patterns;
+          // knowledge_enabled=repo_config.knowledge.enabled (review_pull_request.py:1308-1309).
+          custom_patterns: [...state.repoConfig.knowledge.file_patterns],
+          knowledge_enabled: state.repoConfig.knowledge.enabled,
+          changed_paths: [...repo.changedPaths],
+        }),
+    );
+    if (computed !== undefined) {
+      for (const [path, bundle] of Object.entries(computed.bundles)) {
+        state.policyBundles.set(path, bundle);
+      }
     }
 
     // Claim-check BEFORE classify (Python `_classify` boundary: `await _abort_if_claim_lost()` at the top of
@@ -386,7 +431,10 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
 
       // The advisory post also runs through posting.ts::postReviewResults so it populates state.postedReview
       // (the Python advisory post goes through `_post_review` too). The advisory path has no persisted
-      // findings (chunk/persist were skipped), so the dropped-state skip dispatch is inert.
+      // findings (chunk/persist were skipped), so the dropped-state skip dispatch is inert. FIX #7: the
+      // advisory post goes through the SAME runPostStage seam as the normal path, so the advisory placeholder
+      // teardown is likewise decoupled from post_check_run (a check-run failure here degrades, never strands
+      // the placeholder against a delivered advisory review).
       const advisoryPostingDeps: PostingLifecycleDeps =
         ports.recordDeliverySkipped !== undefined
           ? {
@@ -395,16 +443,7 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
               logger: ctx.logger ?? NULL_LOGGER,
             }
           : { persistedFindingIds: state.persistedFindingIds, logger: ctx.logger ?? NULL_LOGGER };
-      await Promise.all([
-        postReviewResults(ports, state, walkthroughEmpty, aggregatedEmpty, pr, advisoryPostingDeps),
-        postCheckRun(ports, pr, headSha, walkthroughEmpty.tldr),
-      ]);
-
-      // Placeholder teardown AFTER the advisory review post (Python places `delete_review_placeholder`
-      // inside `_post_review`, so it fires for this advisory post too). No-op when omitted.
-      if (ctx.onPlaceholderTeardown !== undefined) {
-        await ctx.onPlaceholderTeardown();
-      }
+      await runPostStage(ctx, walkthroughEmpty, aggregatedEmpty, advisoryPostingDeps);
 
       state.degradation.add("path_filters_excluded_all");
       return makeReviewPipelineResult({
@@ -722,10 +761,25 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
         }),
     );
 
-    // Step 9 — post (review + check-run, in parallel). postReviewResults (posting.ts) renders the
-    // walkthrough markdown, dispatches the post activity, populates state.postedReview from the result (the
-    // capture the workflow body's lifecycle bookkeeping reads after orchestrate returns), and on the H-2
-    // dropped-state failure dispatches record_delivery_skipped inline before re-raising.
+    // FIX #10 (owner-requested HARDENING DIVERGENCE) — final claim-check IMMEDIATELY before the post stage.
+    // The frozen Python guards only THREE boundaries (before clone, before classify, before aggregate); it
+    // has NO claim-check between aggregate and post. That leaves a window: a superseding review can reclaim
+    // the lease AFTER the before-aggregate check but BEFORE this review publishes, so two reviews race to
+    // post to the same PR and the loser overwrites the winner. This 4th check closes that window — a review
+    // whose lease was stolen aborts non-retryably (the injected callback raises PrMutexLostClaim) BEFORE any
+    // GitHub round-trip (no postReview, no postCheckRun), so a superseded review NEVER posts. INSIDE the try
+    // → the finally-block cleanup still releases the workspace; the abort propagates to the body's BF-5/BF-13
+    // terminal-transition path exactly like the other three claim-check aborts. No-op when ctx.claimCheck is
+    // omitted (unit tests). DIVERGENCE from the strict 1:1 port — documented per the owner-hardening contract.
+    if (ctx.claimCheck !== undefined) {
+      await ctx.claimCheck();
+    }
+
+    // Step 9 — post (review + check-run). postReviewResults (posting.ts) renders the walkthrough markdown,
+    // dispatches the post activity, populates state.postedReview from the result (the capture the workflow
+    // body's lifecycle bookkeeping reads after orchestrate returns), and on the H-2 dropped-state failure
+    // dispatches record_delivery_skipped inline before re-raising. The placeholder teardown is sequenced
+    // through Step 9a, decoupled from post_check_run (FIX #7).
     const postingDeps: PostingLifecycleDeps =
       ports.recordDeliverySkipped !== undefined
         ? {
@@ -734,20 +788,7 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
             logger: ctx.logger ?? NULL_LOGGER,
           }
         : { persistedFindingIds: state.persistedFindingIds, logger: ctx.logger ?? NULL_LOGGER };
-    await Promise.all([
-      postReviewResults(ports, state, walkthrough, aggregated, pr, postingDeps),
-      postCheckRun(ports, pr, headSha, walkthrough.tldr),
-    ]);
-
-    // Step 9a — placeholder teardown (Stage 2). The Python invokes `delete_review_placeholder` INSIDE
-    // `_post_review`, AFTER the real `post_review_results` activity lands the review (review_pull_request.py
-    // :2809-2853). The TS port surfaces it as a context callback invoked ONCE here, right after the post
-    // pair resolves, so the "reviewing this PR..." placeholder comment is torn down only once the real
-    // review is on GitHub. Best-effort: the injected callback swallows (stageOutcome) — it never fails the
-    // pipeline. No-op when ctx.onPlaceholderTeardown is omitted (unit tests).
-    if (ctx.onPlaceholderTeardown !== undefined) {
-      await ctx.onPlaceholderTeardown();
-    }
+    await runPostStage(ctx, walkthrough, aggregated, postingDeps);
 
     return makeReviewPipelineResult(
       {
@@ -866,8 +907,13 @@ async function buildChunkContext(
       ports.retrieveKnowledge({
         schema_version: 1,
         installation_id: pr.prMeta.installation_id,
-        repo_id: pr.prMeta.pr_id, // repo_id is sourced from the workflow payload in Python; pr_id stands in
-        // until the repository_id is threaded onto ReviewPipelinePrCtx (FOLLOW-UP-thread-repository-id).
+        // FIX #2 (part 2) — repo_id is the internal repository UUID sourced from the workflow payload's
+        // `repository_id` (1:1 with the frozen Python `repo_id=typed_payload.repository_id`,
+        // review_pull_request.py:1756/1768). The WorkflowBody phase threaded it onto ReviewPipelinePrCtx as
+        // `repositoryId`; this rewires the dispatch off the `pr_id` stand-in the Stage-1 port used (the
+        // FOLLOW-UP-thread-repository-id marker is now closed). RetrieveKnowledgeInputV1.repo_id is a UUID
+        // wire string, which `repositoryId` already is.
+        repo_id: pr.repositoryId,
         query: queryText,
         top_k: 5,
         query_vector_override: queryVectorOverride === null ? null : [...queryVectorOverride],
@@ -930,8 +976,16 @@ async function buildChunkContext(
     chunk,
     policy_revision: pr.policyRevision,
     prior_findings: [],
-    // DEFERRED: match_path_instructions (codemaster/config/path_match.py not yet ported) → [].
-    matched_path_instructions: [],
+    // FIX #6+#9 — ADR-0001 per-glob path_instructions: every rule whose `path` glob matches THIS chunk's
+    // path, in declaration order. 1:1 with the Python `_review_chunk` closure's
+    // `match_path_instructions(path=chunk.path, rules=repo_config.path_instructions)` call. Driven by the
+    // SAME ported matcher (apps/backend/src/config/path_match.ts) that backs filterReviewPaths, so the two
+    // path-config surfaces never diverge. Empty when the config carries no path_instructions (the common
+    // case) — a clean no-op the activity reads declaratively.
+    matched_path_instructions: matchPathInstructions(
+      state.repoConfig.path_instructions,
+      chunk.path,
+    ),
     repo_config: state.repoConfig,
     retrieved_knowledge: [...retrievedKnowledge],
     retrieval_degraded: retrievalDegraded,
@@ -950,86 +1004,6 @@ async function buildChunkContext(
     pr_topology_manifest: [...threading.prTopologyManifest],
     manifests: [],
   };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────────────
-// filterReviewPaths — port of the workflow body's path_filters review-set narrowing (the
-// filter_review_paths_cb closure). LAST-MATCH-WINS over the config's path_filters: a leading '!' is an
-// exclude marker; a bare pattern is an include. With no path_filters the function is the identity over its
-// input (the collapse-on identity-when-no-filters path). Pure + synchronous (no activity boundary).
-//
-// The matcher is a minimal glob: '*' matches any run of non-'/' chars, '**' matches across '/' boundaries,
-// '?' matches one non-'/' char. This mirrors the Python config-side fnmatch-ish semantics for the spine
-// happy path; the full glob engine (codemaster/config/path_match.py) lands with the path-match port.
-// ─────────────────────────────────────────────────────────────────────────────────────────────────
-export function filterReviewPaths(
-  reviewFiles: ReadonlyArray<string>,
-  pathFilters: ReadonlyArray<string>,
-): ReadonlyArray<string> {
-  if (pathFilters.length === 0) {
-    return [...reviewFiles];
-  }
-  const kept: Array<string> = [];
-  for (const file of reviewFiles) {
-    // Default-include when the first matching rule is an include OR no rule matches AND the filter set is
-    // all-excludes (so an exclude-only filter prunes named paths and keeps the rest). Last-match-wins: the
-    // last rule whose pattern matches `file` decides; if none matches, keep iff there is no include rule
-    // at all (exclude-only filters are subtractive).
-    let decision: boolean | null = null;
-    let sawInclude = false;
-    for (const raw of pathFilters) {
-      const isExclude = raw.startsWith("!");
-      if (!isExclude) {
-        sawInclude = true;
-      }
-      const pattern = isExclude ? raw.slice(1) : raw;
-      if (globMatch(pattern, file)) {
-        decision = !isExclude;
-      }
-    }
-    const keep = decision ?? !sawInclude;
-    if (keep) {
-      kept.push(file);
-    }
-  }
-  return kept;
-}
-
-/** Minimal glob matcher (sandbox-safe; pure). '**' → any (incl. '/'); '*' → any run of non-'/'; '?' → one
- *  non-'/'. Anchored full-string match. */
-function globMatch(pattern: string, path: string): boolean {
-  let re = "^";
-  let i = 0;
-  while (i < pattern.length) {
-    // eslint-disable-next-line security/detect-object-injection -- `i` is a bounded loop cursor into a local string, not user input
-    const ch = pattern[i]!;
-    if (ch === "*") {
-      if (pattern[i + 1] === "*") {
-        re += ".*";
-        i += 2;
-        // swallow a trailing '/' after '**' so '**/x' matches 'x' too
-        // eslint-disable-next-line security/detect-object-injection -- `i` is a bounded loop cursor into a local string
-        if (pattern[i] === "/") {
-          i += 1;
-        }
-        continue;
-      }
-      re += "[^/]*";
-      i += 1;
-      continue;
-    }
-    if (ch === "?") {
-      re += "[^/]";
-      i += 1;
-      continue;
-    }
-    // escape regex metacharacters in the literal run
-    re += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
-    i += 1;
-  }
-  re += "$";
-  // eslint-disable-next-line security/detect-non-literal-regexp -- `re` is built solely from `pattern` (config-sourced glob) with all metachars escaped; no injection surface
-  return new RegExp(re).test(path);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -1286,6 +1260,88 @@ async function postCheckRun(
     owner: ownerOf(pr.prMeta.repo),
     repo_name: repoNameOf(pr.prMeta.repo),
   });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// runPostStage — Step 9 post (review + check-run) with the placeholder teardown DECOUPLED from the
+// check-run (FIX #7).
+//
+// THE BUG IT FIXES: the prior shape was `await Promise.all([postReviewResults(...), postCheckRun(...)])`
+// FOLLOWED BY the placeholder teardown. Promise.all REJECTS the instant `postCheckRun` rejects — so when
+// post_check_run failed (a transient GitHub Checks-API hiccup) the await threw BEFORE the teardown line ran,
+// and the "reviewing this PR…" placeholder comment was STRANDED on a PR whose real review had ALREADY been
+// delivered by `postReviewResults`. The teardown is logically part of the review-delivery path, NOT the
+// check-run path.
+//
+// THE PYTHON PARITY: the frozen Python places `delete_review_placeholder` INSIDE the `_post_review` closure,
+// sequenced AFTER `post_review_results` lands (review_pull_request.py:2809-2853) — i.e. coupled to the
+// review post, INDEPENDENT of `_post_check`. The two run as separate anyio task-group tasks; the placeholder
+// teardown belongs to the review task. This restructure restores that coupling in the TS port.
+//
+// THE STRUCTURE:
+//   * Both posts are still issued concurrently (the Promise.all parallelism + the consecutive-pair dispatch
+//     order the composition test asserts are preserved — neither member awaits the other before dispatch).
+//   * We settle them via Promise.allSettled so a post_check_run rejection does NOT short-circuit the review
+//     branch.
+//   * If postReviewResults SUCCEEDED, tear down the placeholder NOW — independent of post_check_run's
+//     outcome — so a delivered review never strands its placeholder.
+//   * A post_check_run-only failure becomes a DEGRADED-AFTER-REVIEW-DELIVERY outcome: a `post_check_run`
+//     stage-outcome=error + a degradation note, then the pipeline continues (the review is the value; the
+//     check-run is advisory polish). It does NOT re-raise (that would fail an already-delivered review).
+//   * If postReviewResults REJECTED, the review genuinely failed to deliver: the placeholder stays (the
+//     "reviewing…" notice is still accurate), and we re-raise its error so the body's BF-5/BF-13 terminal
+//     path marks the run FAILED. The H-2 dropped-state skip-dispatch already ran INSIDE postReviewResults
+//     before it rejected.
+//
+// SANDBOX-SAFE: pure control flow over the activity-port dispatches + the injected teardown callback — no
+// new clock/RNG/network/crypto.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+async function runPostStage(
+  ctx: ReviewPipelineContext,
+  walkthrough: WalkthroughV1,
+  aggregated: AggregatedFindingsV1,
+  postingDeps: PostingLifecycleDeps,
+): Promise<void> {
+  const { activities: ports, pr, state } = ctx;
+  const headSha = pr.headSha;
+
+  // Issue BOTH posts concurrently, then settle (so post_check_run failure cannot short-circuit the review
+  // branch before its placeholder teardown). The two dispatches start back-to-back with no await between
+  // them — the parallelism + the consecutive-pair dispatch order are unchanged.
+  const [reviewSettled, checkSettled] = await Promise.allSettled([
+    postReviewResults(ports, state, walkthrough, aggregated, pr, postingDeps),
+    postCheckRun(ports, pr, headSha, walkthrough.tldr),
+  ]);
+
+  if (reviewSettled.status === "rejected") {
+    // The REVIEW failed to deliver. The placeholder stays (the "reviewing…" notice is still accurate). The
+    // H-2 dropped-state inline skip already ran inside postReviewResults before it rejected. Re-raise so the
+    // body's BF-5/BF-13 terminal-transition path marks the run FAILED — exactly as the prior Promise.all did
+    // for a postReview rejection. (A post_check_run rejection that ALSO occurred is subordinate; the review
+    // failure is the dominant operator signal.)
+    throw reviewSettled.reason;
+  }
+
+  // The REVIEW delivered. Tear down the placeholder NOW — INDEPENDENT of post_check_run's outcome — so a
+  // delivered review never strands its placeholder. Best-effort: the injected callback wraps the dispatch in
+  // stageOutcome + swallows; it never fails the pipeline. No-op when ctx.onPlaceholderTeardown is omitted
+  // (unit tests). 1:1 with the Python `delete_review_placeholder` INSIDE `_post_review` after the post lands.
+  if (ctx.onPlaceholderTeardown !== undefined) {
+    await ctx.onPlaceholderTeardown();
+  }
+
+  // A post_check_run-only failure → DEGRADED-AFTER-REVIEW-DELIVERY: surface the stage-outcome=error + a
+  // degradation note, then CONTINUE (the review is already on GitHub; the check-run is advisory). recordStage
+  // emits `post_check_run` outcome=error (no-op outside a workflow). We do NOT re-raise — that would fail an
+  // already-delivered review.
+  if (checkSettled.status === "rejected") {
+    recordStage({ stage: "post_check_run", outcome: "error" });
+    (ctx.logger ?? NULL_LOGGER).warning(
+      `stage_outcome: post_check_run failed; review already delivered ` +
+        `head_sha=${headSha} run_id=${pr.runId}`,
+    );
+    state.degradation.add("post_check_run_failed");
+  }
 }
 
 // ─── small pure helpers ──────────────────────────────────────────────────────────────────────────
