@@ -42,6 +42,8 @@ import type { AnalysisFindingV1 } from "#contracts/analysis_findings.v1.js";
 import type { ToolStatusV1 } from "#contracts/tool_status.v1.js";
 import type { ConsumerHitV1, RemovedOrChangedSymbolV1 } from "#contracts/symbol_graph.v1.js";
 import { wrapUntrusted, wrapUntrustedManifest } from "#backend/security/trust_tier_wrapping.js";
+import { priorityTier, deriveAuthority, deriveDocType } from "#backend/retrieval/precedence.js";
+import { specificityBucket } from "#backend/retrieval/match_specificity.js";
 import {
   assemblePrompt,
   emitAssembledPromptCounters,
@@ -138,14 +140,47 @@ function renderPathInstructions(rules: ReadonlyArray<PathInstructionV1>): Array<
   return out;
 }
 
-// ── retrieved-knowledge block (repo_knowledge path) ───────────────────────────────────────────────
-// Port of `_render_retrieved_knowledge` for the repo_knowledge branch + degraded handling.
-//
-// NOTE — Confluence branch (source="confluence") is NOT ported here: it depends on the Confluence
-// precedence machinery (priority_tier / derive_authority / derive_doc_type / specificity_bucket) +
-// the inner-<doc>-wrapper strip, none of which are in this task's scope. The frozen Python renders
-// confluence chunks with the full r3 attribute set; the parity fixtures here exercise repo_knowledge
-// chunks only. A `source="confluence"` chunk reaching this builder throws a loud blocker.
+// ── retrieved-knowledge block ─────────────────────────────────────────────────────────────────────
+// Port of `_render_retrieved_knowledge` (review/activities.py). Repo_knowledge chunks render in the legacy
+// `### chunk_id=… — <path> — § <heading>` shape; confluence chunks (source="confluence") render with the
+// Sub-spec B T16 full r3 attribute set (`<knowledge trust="semi" …>` + `confluence:<space>/<page>` locator)
+// and their inner `<doc trust="untrusted">` wrapper stripped (P1-7 audit fix — the outer wrapper carries the
+// trust signal; nesting produced contradictory trust attributes the LLM resolved unpredictably).
+
+/** Round-half-to-even to an integer (Python `round(float)` — used for `freshness_days`). */
+function roundHalfEvenInt(x: number): number {
+  const f = Math.floor(x);
+  const diff = x - f;
+  if (diff < 0.5) return f;
+  if (diff > 0.5) return f + 1;
+  return f % 2 === 0 ? f : f + 1; // exactly .5 → nearest even
+}
+
+/** Strip the redactor's `<doc trust="untrusted">…</doc>` wrapper before re-wrapping (`_strip_inner_doc_wrapper`).
+ *  The DB row still contains the wrapper (dedup strips it separately per ADR-0057); only rendering strips here. */
+function stripInnerDocWrapper(body: string): string {
+  return body.replace(/<doc\s+trust="untrusted"\s*>/gi, "").replace(/<\/doc>/gi, "");
+}
+
+/** The per-chunk attribute string for a confluence chunk (`_confluence_attrs`, Sub-spec B T16 / F-23).
+ *  trust+curation_level hardcoded "semi" (ADR-0057 baseline); authority/doc_type/match_specificity derived. */
+function confluenceAttrs(c: KnowledgeChunkV1): string {
+  const tier = priorityTier({ labels: c.labels, source: c.source, doc_kind: c.doc_kind });
+  const authority = deriveAuthority(tier);
+  const docType = deriveDocType(c.labels, c.source, c.doc_kind);
+  const specificity = specificityBucket(c.match_specificity_score);
+  const freshnessDays = roundHalfEvenInt(c.age_days);
+  return (
+    `trust="semi" ` +
+    `curation_level="semi" ` +
+    `authority="${authority}" ` +
+    `status="active" ` +
+    `freshness_days="${freshnessDays}" ` +
+    `doc_type="${docType}" ` +
+    `match_specificity="${specificity}"`
+  );
+}
+
 function renderRetrievedKnowledge(
   chunks: ReadonlyArray<KnowledgeChunkV1>,
   opts: { degraded: boolean; degradationReason: string },
@@ -164,16 +199,21 @@ function renderRetrievedKnowledge(
   let charsSoFar = 0;
   let truncated = false;
   for (const c of chunks) {
+    let block: string;
     if (c.source === "confluence") {
-      throw new Error(
-        "prompt_builder: confluence knowledge rendering is not ported (out of scope); " +
-          "see renderRetrievedKnowledge NOTE",
-      );
+      // T16 path: full r3 attribute set + nested-wrapper strip + the confluence:<space>/<page> locator.
+      const attrs = confluenceAttrs(c);
+      const body = stripInnerDocWrapper(c.body);
+      const spaceKey = c.space_key ?? "";
+      const pageId = c.page_id ?? "";
+      const header = `### chunk_id=${c.chunk_id} — confluence:${spaceKey}/${pageId}`;
+      block = `\n<knowledge ${attrs}>\n${header}\n${body}\n</knowledge>\n`;
+    } else {
+      const path = c.relative_path;
+      const heading = c.heading_path.length > 0 ? c.heading_path.join(" › ") : "";
+      const header = `### chunk_id=${c.chunk_id} — ${path}` + (heading ? ` — § ${heading}` : "");
+      block = `\n${header}\n${c.body}\n`;
     }
-    const path = c.relative_path;
-    const heading = c.heading_path.length > 0 ? c.heading_path.join(" › ") : "";
-    const header = `### chunk_id=${c.chunk_id} — ${path}` + (heading ? ` — § ${heading}` : "");
-    const block = `\n${header}\n${c.body}\n`;
     if (charsSoFar + pyLen(block) > MAX_KNOWLEDGE_CHARS) {
       truncated = true;
       break;

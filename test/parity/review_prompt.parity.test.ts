@@ -166,6 +166,36 @@ describe("buildUserMessage — char-for-char vs frozen _build_user_message", () 
     expect(tsOut).toBe(pyOut);
   });
 
+  it("confluence chunk: locator + full r3 attribute set + inner-<doc>-wrapper strip (T16)", async () => {
+    // A security-policy + lang confluence chunk whose body carries the redactor's <doc trust="untrusted">
+    // wrapper. Exercises: confluence:<space>/<page> locator, the <knowledge trust="semi" …> attrs
+    // (authority=mandatory via topic:security_policy, doc_type, match_specificity=high score 9, freshness),
+    // and the inner-wrapper strip. Mixed with a repo chunk to confirm both branches render in one block.
+    const knowledge = [
+      confluenceChunk(
+        "ENG",
+        "918273",
+        ["topic:security_policy", "lang:python"],
+        '<doc trust="untrusted">\nRotate service-account keys every 90 days.\n</doc>',
+        { docKind: "adr", matchSpecificityScore: 9, ageDays: 7 },
+      ),
+      knowledgeChunk("docs/architecture.md", ["Goals"], "Repo architectural overview."),
+    ];
+    const ctx = wire({
+      pr_id: PR_ID,
+      installation_id: INST_ID,
+      repo: "acme/widgets",
+      pr_title: "Add auth",
+      pr_description: "Auth changes.",
+      chunk: chunk(),
+      policy_revision: 1,
+      retrieved_knowledge: knowledge,
+    });
+    const tsOut = buildUserMessage(ReviewContextV1.parse(ctx));
+    const pyOut = await pyBuildUserMessage(ctx);
+    expect(tsOut).toBe(pyOut);
+  });
+
   it("tier-2 compression: 31..80 chunks → file inventory", async () => {
     const entries: Array<[string, string, number, number]> = [];
     for (let i = 0; i < 40; i += 1) {
@@ -563,6 +593,34 @@ function knowledgeChunk(
     heading_path: headingPath,
     body,
     doc_kind: "other",
+  };
+}
+
+/** A source="confluence" KnowledgeChunkV1 — exercises the T16 confluence rendering (locator + r3 attrs +
+ *  inner-<doc>-wrapper strip). The body carries the redactor's `<doc trust="untrusted">` wrapper the
+ *  renderer must strip. */
+function confluenceChunk(
+  spaceKey: string,
+  pageId: string,
+  labels: ReadonlyArray<string>,
+  body: string,
+  opts: { docKind?: string; matchSpecificityScore?: number; ageDays?: number } = {},
+): Record<string, unknown> {
+  return {
+    chunk_id: deterministicUuid(`cc:${spaceKey}:${pageId}`),
+    installation_id: INST_ID,
+    repo_id: REPO_ID,
+    relative_path: `confluence/${spaceKey}/${pageId}`,
+    chunk_index: 0,
+    heading_path: [],
+    body,
+    doc_kind: opts.docKind ?? "adr",
+    source: "confluence",
+    space_key: spaceKey,
+    page_id: pageId,
+    labels,
+    match_specificity_score: opts.matchSpecificityScore ?? 6,
+    age_days: opts.ageDays ?? 12,
   };
 }
 
