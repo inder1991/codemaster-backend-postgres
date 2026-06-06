@@ -616,7 +616,10 @@ export class GitHubApiClient {
     path: string;
     ref: string;
   }): Promise<readonly [Uint8Array, string] | null> {
-    const encodedPath = encodeURIComponent(args.path);
+    // Encode each path SEGMENT but preserve the '/' separators — GitHub's contents API resolves
+    // /repos/{owner}/{repo}/contents/{a}/{b}/{c}, so encodeURIComponent on the whole path (which turns
+    // '/' into %2F) 404s nested monorepo manifests like services/api/package.json.
+    const encodedPath = args.path.split("/").map(encodeURIComponent).join("/");
     const encodedRef = encodeURIComponent(args.ref);
     let resp: GitHubHttpResponse;
     try {

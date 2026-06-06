@@ -62,6 +62,31 @@ describe("GitHubApiClient.getContents (manifest fetch)", () => {
     const client = makeClient(() => jsonResp(200, { type: "file" }));
     expect(await client.getContents({ ...BASE, path: "x", ref: "x" })).toBeNull();
   });
+
+  it("nested monorepo path: preserves '/' separators (encodes each segment, not the whole path)", async () => {
+    // encodeURIComponent on the WHOLE path turns '/' into %2F, producing
+    // /contents/services%2Fapi%2Fpackage.json which GitHub's contents API 404s. The fix encodes each
+    // segment and rejoins with literal '/', so monorepo nested manifests resolve.
+    let capturedUrl = "";
+    const client = makeClient((args) => {
+      capturedUrl = args.url;
+      return jsonResp(200, { type: "file", content: Buffer.from("x = 1\n").toString("base64"), sha: "s" });
+    });
+    await client.getContents({ ...BASE, path: "services/api/package.json", ref: "deadbeef" });
+    expect(capturedUrl).toContain("/contents/services/api/package.json?ref=deadbeef");
+    expect(capturedUrl).not.toContain("%2F");
+  });
+
+  it("a path segment that needs encoding is still percent-encoded (only the '/' is preserved)", async () => {
+    let capturedUrl = "";
+    const client = makeClient((args) => {
+      capturedUrl = args.url;
+      return jsonResp(200, { type: "file", content: Buffer.from("x").toString("base64"), sha: "s" });
+    });
+    // a space in a segment must encode to %20; the '/' separator stays literal.
+    await client.getContents({ ...BASE, path: "my dir/package.json", ref: "x" });
+    expect(capturedUrl).toContain("/contents/my%20dir/package.json?ref=x");
+  });
 });
 
 describe("GitHubApiClient.getRecursiveTree", () => {
