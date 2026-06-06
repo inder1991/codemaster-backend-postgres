@@ -28,7 +28,21 @@ export const WEBHOOK_BODY_CAP_BYTES = 10 * 1024 * 1024;
  */
 export type WebhookSecretProvider = { currentSecret(): Promise<Uint8Array> };
 
-export type GithubWebhookRoutesOptions = { secretProvider: WebhookSecretProvider };
+/**
+ * Persistence seam (the W3 wiring). When provided, it runs on EVERY verified-or-not delivery (forensics-
+ * first: the audit row is written even for a spoofed signature), BEFORE the 401. Omitted in
+ * verification-edge unit tests (no DB); server.ts wires the real {@link persistWebhook} bound to a pool.
+ */
+export type WebhookPersist = (args: {
+  body: Uint8Array;
+  headers: Record<string, string>;
+  signatureValid: boolean;
+}) => Promise<unknown>;
+
+export type GithubWebhookRoutesOptions = {
+  secretProvider: WebhookSecretProvider;
+  persist?: WebhookPersist;
+};
 
 /** Coerce a Fastify header value to a non-empty string, or null. */
 function headerStr(value: string | Array<string> | undefined): string | null {
@@ -77,13 +91,21 @@ export async function registerGithubWebhookRoutes(
 
         const secret = await opts.secretProvider.currentSecret();
         const valid = verifyGithubSignature({ body: new Uint8Array(body), header: signature, secret });
+
+        // Persist BEFORE the 401 (forensics-first — the audit row is written even for a spoofed delivery;
+        // persistWebhook skips the idempotency + enqueue when signatureValid=false). Persist errors
+        // propagate to Fastify's 500 (GitHub redelivers).
+        if (opts.persist !== undefined) {
+          await opts.persist({
+            body: new Uint8Array(body),
+            headers: { "x-github-delivery": delivery, "x-github-event": event },
+            signatureValid: valid,
+          });
+        }
+
         if (!valid) {
           return reply.code(401).send({ detail: "invalid signature" });
         }
-
-        // FOLLOW-UP-webhook-persistence: on a valid signature, the next slice persists to
-        // audit.webhook_events + dedupes via cache.cache_idempotency + allocates the review run + emits the
-        // outbox dispatch row. The verification edge returns 204 with no side effects.
         return reply.code(204).send();
       },
     );
