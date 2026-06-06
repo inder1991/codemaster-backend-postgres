@@ -2,8 +2,14 @@
 // listens. The analogue of worker/main.ts for the HTTP side. Routers (the GitHub webhook, auth, admin)
 // register onto the app here as they land in subsequent slices.
 
+import { VaultHttpPort } from "#backend/adapters/vault_http.js";
+import { registerAuthRoutes } from "#backend/api/auth/auth_routes.js";
+import { makeAuthSecretsProvider } from "#backend/api/auth/auth_secrets_provider.js";
+import { PostgresLocalUserRepo } from "#backend/api/auth/local_user_repo.js";
+import { NoOpLdapClient } from "#backend/api/auth/noop_ldap.js";
 import { persistWebhook } from "#backend/ingest/github_webhook_persistence.js";
 import { makeWebhookSecretProvider } from "#backend/ingest/webhook_secret_provider.js";
+import { loadFieldEncryptionKeyRegistry } from "#backend/security/field_encryption_keys_loader.js";
 
 import { tenantKysely } from "#platform/db/database.js";
 import { WallClock } from "#platform/clock.js";
@@ -37,8 +43,37 @@ export async function runServer(): Promise<void> {
     },
   });
 
+  // D1 — auth routes (admin login surface). Opt-in via CODEMASTER_AUTH_ROUTES_ENABLED so webhook-only
+  // deploys still boot without the auth secrets. When enabled, EAGERLY load the field-encryption key
+  // registry + session signing key + CSRF secret from Vault at startup (ADR-0033: field keys fetched at
+  // pod startup) and fail loud if Vault / the DSN is unavailable — the admin API can't run without them.
+  // The field keyset loads via the Vault HTTP API (its nested payload can't be agent-file-rendered as flat
+  // strings); the signing key + CSRF secret follow the agent-file-or-API selector (ADR-0071).
+  if ((process.env["CODEMASTER_AUTH_ROUTES_ENABLED"] ?? "false") === "true") {
+    const dsn = process.env["CODEMASTER_PG_CORE_DSN"];
+    if (dsn === undefined || dsn === "") {
+      throw new Error(
+        "CODEMASTER_AUTH_ROUTES_ENABLED=true requires CODEMASTER_PG_CORE_DSN (the core.local_users pool).",
+      );
+    }
+    const registry = await loadFieldEncryptionKeyRegistry(VaultHttpPort.fromEnv());
+    const authSecrets = makeAuthSecretsProvider();
+    const [signingKey, csrfSecret] = await Promise.all([
+      authSecrets.sessionSigningKey(),
+      authSecrets.csrfSecret(),
+    ]);
+    await registerAuthRoutes(app, {
+      localRepo: new PostgresLocalUserRepo({ db: tenantKysely(dsn), registry }),
+      ldap: new NoOpLdapClient(),
+      clock: new WallClock(),
+      signingKey,
+      csrfSecret,
+      secureCookies: (process.env["CODEMASTER_SECURE_COOKIES"] ?? "true") !== "false",
+    });
+  }
+
   // ── More routers register here as they land ──
-  // D1: auth routes · D2: admin routes · F-b: feedback
+  // D2: admin routes · F-b: feedback
 
   const port = Number(process.env.CODEMASTER_API_PORT ?? "8080");
   const host = process.env.CODEMASTER_API_HOST ?? "0.0.0.0";
