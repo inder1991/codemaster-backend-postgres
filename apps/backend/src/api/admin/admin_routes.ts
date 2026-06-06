@@ -13,21 +13,35 @@ import type { FastifyInstance } from "fastify";
 
 import type { Clock } from "#platform/clock.js";
 
-import { DashboardSummaryV1, OrgsListV1, TaxonomyGapListV1 } from "#contracts/admin.v1.js";
+import {
+  DashboardSummaryV1,
+  FindingListResponseV1,
+  OrgsListV1,
+  TaxonomyGapListV1,
+} from "#contracts/admin.v1.js";
 
-import { listOrgs, listTaxonomyGaps } from "#backend/api/admin/admin_read_repo.js";
+import { listFindings, listOrgs, listTaxonomyGaps } from "#backend/api/admin/admin_read_repo.js";
 import { makeRequireRole } from "#backend/api/admin/_authz.js";
 
 const TAXONOMY_DEFAULT_LIMIT = 50;
 const TAXONOMY_MAX_LIMIT = 200;
+const FINDINGS_DEFAULT_LIMIT = 50;
+const FINDINGS_MAX_LIMIT = 200;
 
-/** Parse + clamp the ?limit query param to [1, MAX] (mirrors taxonomy_gaps.list_gaps's clamp). */
-function clampTaxonomyLimit(query: unknown): number {
-  const raw = Number((query as { limit?: unknown }).limit ?? TAXONOMY_DEFAULT_LIMIT);
-  if (!Number.isFinite(raw)) {
-    return TAXONOMY_DEFAULT_LIMIT;
+type AdminQuery = Record<string, unknown>;
+
+/** Clamp a ?limit param to [1, max] with a default (the paginated reads). */
+function clampLimit(raw: unknown, fallback: number, max: number): number {
+  const n = typeof raw === "string" || typeof raw === "number" ? Number(raw) : fallback;
+  if (!Number.isFinite(n)) {
+    return fallback;
   }
-  return Math.max(1, Math.min(TAXONOMY_MAX_LIMIT, Math.floor(raw)));
+  return Math.max(1, Math.min(max, Math.floor(n)));
+}
+
+/** Read an optional string query param (undefined/empty → null). */
+function optStr(value: unknown): string | null {
+  return typeof value === "string" && value !== "" ? value : null;
 }
 
 export type AdminRoutesOptions = {
@@ -76,8 +90,48 @@ export async function registerAdminRoutes(
       "/api/admin/taxonomy/gaps",
       { preHandler: requireRole(["platform_owner", "super_admin"]) },
       async (request, reply) => {
-        const rows = await listTaxonomyGaps(opts.db, clampTaxonomyLimit(request.query));
+        const limit = clampLimit(
+          (request.query as AdminQuery).limit,
+          TAXONOMY_DEFAULT_LIMIT,
+          TAXONOMY_MAX_LIMIT,
+        );
+        const rows = await listTaxonomyGaps(opts.db, limit);
         return reply.code(200).send(TaxonomyGapListV1.parse({ rows }));
+      },
+    );
+
+    scope.get(
+      "/api/admin/findings",
+      { preHandler: requireRole(["super_admin", "platform_operator"]) },
+      async (request, reply) => {
+        const q = request.query as AdminQuery;
+        const pageSize = clampLimit(q.limit, FINDINGS_DEFAULT_LIMIT, FINDINGS_MAX_LIMIT);
+        // Over-fetch one row to detect has-more without a COUNT.
+        const rows = await listFindings(opts.db, {
+          installationId: request.authPrincipal!.installationId,
+          repositoryId: optStr(q.repository_id),
+          severity: optStr(q.severity),
+          category: optStr(q.category),
+          filePathSubstring: optStr(q.file_path_substring),
+          createdAfter: optStr(q.created_after),
+          createdBefore: optStr(q.created_before),
+          cursorCreatedAt: optStr(q.cursor_created_at),
+          cursorFindingId: optStr(q.cursor_finding_id),
+          limit: pageSize + 1,
+        });
+        const hasMore = rows.length > pageSize;
+        const emitted = rows.slice(0, pageSize);
+        let nextCursor: Record<string, string> | null = null;
+        if (hasMore && emitted.length > 0) {
+          const last = emitted[emitted.length - 1]!;
+          nextCursor = {
+            cursor_created_at: last.created_at,
+            cursor_finding_id: last.review_finding_id,
+          };
+        }
+        return reply
+          .code(200)
+          .send(FindingListResponseV1.parse({ rows: emitted, next_cursor: nextCursor }));
       },
     );
 

@@ -22,6 +22,39 @@ export const OrgsListV1 = z
   .strict();
 export type OrgsListV1 = z.infer<typeof OrgsListV1>;
 
+/** One row from GET /api/admin/findings (a persisted core.review_findings row). */
+export const FindingRowV1 = z
+  .object({
+    review_finding_id: z.string().uuid(),
+    installation_id: z.string().uuid(),
+    pr_id: z.string().uuid(),
+    file_path: z.string(),
+    start_line: z.number().int(),
+    end_line: z.number().int(),
+    severity: z.string(),
+    category: z.string(),
+    title: z.string(),
+    body: z.string(),
+    suggestion: z.string().nullable().default(null),
+    confidence: z.number(),
+    github_comment_id: z.number().int().nullable().default(null),
+    posted_review_pr_id: z.string().uuid().nullable().default(null),
+    created_at: z.string().datetime({ offset: true }),
+  })
+  .strict();
+export type FindingRowV1 = z.infer<typeof FindingRowV1>;
+
+/** GET /api/admin/findings — keyset-paginated findings page. next_cursor (when present) carries
+ *  cursor_created_at + cursor_finding_id to pass back as query params. */
+export const FindingListResponseV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    rows: z.array(FindingRowV1),
+    next_cursor: z.record(z.string(), z.string()).nullable().default(null),
+  })
+  .strict();
+export type FindingListResponseV1 = z.infer<typeof FindingListResponseV1>;
+
 /** One unrecognized-label entry from core.v_taxonomy_gaps. */
 export const TaxonomyGapEntryV1 = z
   .object({
