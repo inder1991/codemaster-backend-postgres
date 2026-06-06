@@ -74,6 +74,7 @@ import { ReviewWorkflowState } from "#backend/review/pipeline/state.js";
 import { CHUNK_CONCURRENCY_DEFAULT } from "#backend/review/pipeline/parallelism.js";
 import { stageOutcome, type StageLogger } from "#backend/review/pipeline/degradation.js";
 import { resolveDegradedPayload, buildAnalyzedPayload } from "#backend/review/pipeline/helpers.js";
+import { buildManifestCandidatePaths } from "#backend/review/manifest_candidates.js";
 import { RETRY_POLICIES } from "#backend/review/pipeline/activity_ports.js";
 import {
   recordLifecycleSetterSucceeded,
@@ -272,6 +273,15 @@ const { loadParentReviewFindings } = proxyActivities<{
  * once flipped + observed stable (see feedback_remove_rollout_scaffolding_post_flip).
  */
 const CARRY_FORWARD_V2_WITH_DB = false;
+
+/**
+ * #D root-manifest seeding flag (default OFF). EXCEEDS the frozen Python (which passes changed_paths only),
+ * so it ships dormant to keep the parity dual-run clean AND to give the extra GitHub root-manifest fetches
+ * the same measure-then-enable treatment as carry-forward. Flip to true (+ redeploy) to make root-level
+ * dependency context independent of the GitHub Tree-API nearest-walk (which returns [] on large-repo tree
+ * truncation / fetch failure). Remove this scaffolding once flipped + observed stable.
+ */
+const SEED_COMMON_ROOT_MANIFESTS = false;
 
 /** LINKED ISSUES — fetch_linked_issues_activity (review_pull_request.py:2143-2148): 30s timeout, 2 attempts,
  *  GitHubAppUnauthorized non-retryable. Returns the resolved tuple[LinkedIssueV1, ...] for the walkthrough. */
@@ -653,7 +663,12 @@ export async function reviewPullRequest(
             gh_owner: payload.gh_owner,
             gh_repo_name: payload.gh_repo_name,
             head_sha: payload.head_sha,
-            candidate_paths: [...changedPathsForOrchestrator],
+            // #D: default OFF → changed paths only (1:1 with Python). When SEED_COMMON_ROOT_MANIFESTS is
+            // flipped on, union the common root manifests so root-level dependency context survives a
+            // Tree-API nearest-walk failure/truncation on large repos.
+            candidate_paths: SEED_COMMON_ROOT_MANIFESTS
+              ? buildManifestCandidatePaths(changedPathsForOrchestrator)
+              : [...changedPathsForOrchestrator],
           }),
       );
       if (fetchResult !== undefined) {
