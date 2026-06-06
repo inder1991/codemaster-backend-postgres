@@ -33,17 +33,32 @@ and execute an actual review workflow. This is operator-gated (you start Tempora
 ## Run
 
 ```bash
-# 1. The worker (buildActivities + the spine workflow)
-TEMPORAL_NAMESPACE=dualrun TEMPORAL_TASK_QUEUE=review-pr-dualrun TEMPORAL_ADDRESS=localhost:7233 \
-CODEMASTER_PG_CORE_DSN=postgresql://postgres:postgres@localhost:5434/codemaster \
-CODEMASTER_GITHUB_INSTALLATION_ID=<id> \
+# 0. Shared env — the worker + the dispatch must agree on DSN + namespace + task queue.
+export CODEMASTER_PG_CORE_DSN=postgresql://postgres:postgres@localhost:5434/codemaster
+export TEMPORAL_ADDRESS=localhost:7233
+export TEMPORAL_NAMESPACE=dualrun
+# Task queue defaults to `review-pull-request-dualrun` on BOTH sides (worker temporal_config.ts ↔
+# prove_full_chain.ts), so leaving TEMPORAL_TASK_QUEUE unset is fine on localhost.
+
+# 1. The worker — registers buildActivities() + the REAL reviewPullRequest workflow.
+CODEMASTER_GITHUB_INSTALLATION_ID=<numeric-install-id> \
   npx tsx apps/backend/src/worker/main.ts
 
-# 2. Dispatch a real review (a dispatch script modeled on scripts/dualrun/prove_pipe.ts — seeds the FK
-#    chain: pull_request_reviews + review_runs, then executes ReviewPullRequestWorkflow with a v2 payload,
-#    awaits the ReviewPullRequestResultV1, and verifies core.review_findings + core.review_walkthroughs +
-#    the GitHub review). Authored at dual-run time.
+# 2. Dispatch a real review against YOUR test PR. scripts/dualrun/prove_full_chain.ts seeds the FK chain
+#    with these real GitHub identifiers, dispatches `reviewPullRequest`, awaits ReviewPullRequestResultV1,
+#    and verifies core.review_findings + core.review_walkthroughs + review_runs.status=COMPLETED + the
+#    audit.workflow_events milestone trail.
+DUALRUN_GH_OWNER=<owner> DUALRUN_GH_REPO=<repo> \
+DUALRUN_GH_INSTALLATION_ID=<numeric-install-id> \
+DUALRUN_HEAD_SHA=<40-char-head-sha> DUALRUN_PR_NUMBER=<n> \
+  npx tsx scripts/dualrun/prove_full_chain.ts
 ```
+
+> `prove_full_chain.ts` is the first runnable artifact for the FULL chain (vs `prove_pipe.ts`, which only
+> dispatches the spine). It is typecheck + lint clean but has **not** been executed live — it needs the
+> worker + Temporal + Ollama + a real PR. The **first run is the debugging surface**: the FK-seeding
+> contract and any activity-level gaps surface here, which is the whole point of the dual-run. (Example of
+> exactly this: the STAGE_NAMES crash that the Temporal-gated tests caught — commit `04594cc`.)
 
 ## Verify (the acceptance criteria)
 
