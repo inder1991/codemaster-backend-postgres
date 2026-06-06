@@ -22,6 +22,41 @@ export const OrgsListV1 = z
   .strict();
 export type OrgsListV1 = z.infer<typeof OrgsListV1>;
 
+/** One row from GET /api/admin/pull-requests (a core.pull_requests row + resolved author_login). */
+export const PullRequestRowV1 = z
+  .object({
+    pr_id: z.string().uuid(),
+    installation_id: z.string().uuid(),
+    repository_id: z.string().uuid(),
+    pr_number: z.number().int(),
+    state: z.enum(["open", "closed", "merged"]),
+    title: z.string(),
+    author_login: z.string().nullable().default(null),
+    base_ref: z.string(),
+    head_ref: z.string(),
+    head_sha: z.string(),
+    draft: z.boolean(),
+    cross_fork: z.boolean(),
+    opened_at: z.string().datetime({ offset: true }),
+    closed_at: z.string().datetime({ offset: true }).nullable().default(null),
+    merged_at: z.string().datetime({ offset: true }).nullable().default(null),
+    created_at: z.string().datetime({ offset: true }),
+    updated_at: z.string().datetime({ offset: true }),
+  })
+  .strict();
+export type PullRequestRowV1 = z.infer<typeof PullRequestRowV1>;
+
+/** GET /api/admin/pull-requests — keyset-paginated PR page. next_cursor carries
+ *  cursor_opened_at + cursor_pr_id. */
+export const PullRequestListResponseV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    rows: z.array(PullRequestRowV1),
+    next_cursor: z.record(z.string(), z.string()).nullable().default(null),
+  })
+  .strict();
+export type PullRequestListResponseV1 = z.infer<typeof PullRequestListResponseV1>;
+
 /** One row from GET /api/admin/findings (a persisted core.review_findings row). */
 export const FindingRowV1 = z
   .object({

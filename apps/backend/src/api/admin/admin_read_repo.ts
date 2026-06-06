@@ -4,7 +4,11 @@
 
 import { type Kysely, sql } from "kysely";
 
-import type { FindingRowV1, TaxonomyGapEntryV1 } from "#contracts/admin.v1.js";
+import type {
+  FindingRowV1,
+  PullRequestRowV1,
+  TaxonomyGapEntryV1,
+} from "#contracts/admin.v1.js";
 
 import { SUPER_ADMIN_PLATFORM_VIEW_UUID } from "#backend/infra/sentinels.js";
 
@@ -158,4 +162,113 @@ export async function listFindings(
     LIMIT ${args.limit}
   `.execute(db);
   return r.rows.map(mapFindingRow);
+}
+
+export type ListPullRequestsArgs = {
+  installationId: string;
+  repositoryId?: string | null;
+  state?: string | null;
+  openedAfter?: string | null;
+  openedBefore?: string | null;
+  cursorOpenedAt?: string | null;
+  cursorPrId?: string | null;
+  limit: number;
+};
+
+type PullRequestDbRow = {
+  pr_id: string;
+  installation_id: string;
+  repository_id: string;
+  pr_number: number;
+  state: "open" | "closed" | "merged";
+  title: string;
+  base_ref: string;
+  head_ref: string;
+  head_sha: string;
+  draft: boolean;
+  cross_fork: boolean;
+  opened_at: Date;
+  closed_at: Date | null;
+  merged_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+  author_gh_user_id: string | null;
+};
+
+/**
+ * Keyset-paginated pull requests (opened_at DESC, pr_id ASC), tenancy-filtered on installation_id, with
+ * optional repository_id/state/date filters + the (opened_at, pr_id) cursor. author_login is resolved per
+ * page via ONE batched IN query against core.gh_users (tenant-AGNOSTIC by design — no installation_id
+ * column; the author_gh_user_id values are already tenant-scoped at the pull_requests SELECT). 1:1 with
+ * postgres_pull_request_repo.list_pull_requests.
+ */
+export async function listPullRequests(
+  db: Kysely<unknown>,
+  args: ListPullRequestsArgs,
+): Promise<Array<PullRequestRowV1>> {
+  const conditions = [sql`installation_id = ${args.installationId}`];
+  if (args.repositoryId != null) {
+    conditions.push(sql`repository_id = ${args.repositoryId}`);
+  }
+  if (args.state != null) {
+    conditions.push(sql`state = ${args.state}`);
+  }
+  if (args.openedAfter != null) {
+    conditions.push(sql`opened_at >= ${args.openedAfter}`);
+  }
+  if (args.openedBefore != null) {
+    conditions.push(sql`opened_at < ${args.openedBefore}`);
+  }
+  if (args.cursorOpenedAt != null && args.cursorPrId != null) {
+    conditions.push(sql`(opened_at, pr_id) < (${args.cursorOpenedAt}, ${args.cursorPrId})`);
+  }
+  const whereClause = sql.join(conditions, sql` AND `);
+
+  const r = await sql<PullRequestDbRow>`
+    SELECT pr_id, installation_id, repository_id, pr_number, state, title, base_ref, head_ref, head_sha,
+           draft, cross_fork, opened_at, closed_at, merged_at, created_at, updated_at, author_gh_user_id
+    FROM core.pull_requests
+    WHERE ${whereClause}
+    ORDER BY opened_at DESC, pr_id ASC
+    LIMIT ${args.limit}
+  `.execute(db);
+
+  // Resolve author_login per page via one batched IN against core.gh_users (tenant-agnostic).
+  const authorIds = [
+    ...new Set(r.rows.map((row) => row.author_gh_user_id).filter((id): id is string => id != null)),
+  ];
+  const loginByGhUserId = new Map<string, string>();
+  if (authorIds.length > 0) {
+    const lr = await sql<{ gh_user_id: string; login: string }>`
+      SELECT gh_user_id, login FROM core.gh_users
+      WHERE gh_user_id IN (${sql.join(
+        authorIds.map((id) => sql`${id}`),
+        sql`, `,
+      )})
+    `.execute(db);
+    for (const row of lr.rows) {
+      loginByGhUserId.set(row.gh_user_id, row.login);
+    }
+  }
+
+  return r.rows.map((row) => ({
+    pr_id: row.pr_id,
+    installation_id: row.installation_id,
+    repository_id: row.repository_id,
+    pr_number: row.pr_number,
+    state: row.state,
+    title: row.title,
+    author_login:
+      row.author_gh_user_id === null ? null : (loginByGhUserId.get(row.author_gh_user_id) ?? null),
+    base_ref: row.base_ref,
+    head_ref: row.head_ref,
+    head_sha: row.head_sha.trim(), // char(40) is space-padded; the SHA itself is 40 chars (no-op here)
+    draft: row.draft,
+    cross_fork: row.cross_fork,
+    opened_at: new Date(row.opened_at).toISOString(),
+    closed_at: row.closed_at === null ? null : new Date(row.closed_at).toISOString(),
+    merged_at: row.merged_at === null ? null : new Date(row.merged_at).toISOString(),
+    created_at: new Date(row.created_at).toISOString(),
+    updated_at: new Date(row.updated_at).toISOString(),
+  }));
 }

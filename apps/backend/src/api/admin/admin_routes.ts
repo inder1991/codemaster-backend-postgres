@@ -17,16 +17,24 @@ import {
   DashboardSummaryV1,
   FindingListResponseV1,
   OrgsListV1,
+  PullRequestListResponseV1,
   TaxonomyGapListV1,
 } from "#contracts/admin.v1.js";
 
-import { listFindings, listOrgs, listTaxonomyGaps } from "#backend/api/admin/admin_read_repo.js";
+import {
+  listFindings,
+  listOrgs,
+  listPullRequests,
+  listTaxonomyGaps,
+} from "#backend/api/admin/admin_read_repo.js";
 import { makeRequireRole } from "#backend/api/admin/_authz.js";
 
 const TAXONOMY_DEFAULT_LIMIT = 50;
 const TAXONOMY_MAX_LIMIT = 200;
 const FINDINGS_DEFAULT_LIMIT = 50;
 const FINDINGS_MAX_LIMIT = 200;
+const PR_DEFAULT_LIMIT = 50;
+const PR_MAX_LIMIT = 200;
 
 type AdminQuery = Record<string, unknown>;
 
@@ -97,6 +105,35 @@ export async function registerAdminRoutes(
         );
         const rows = await listTaxonomyGaps(opts.db, limit);
         return reply.code(200).send(TaxonomyGapListV1.parse({ rows }));
+      },
+    );
+
+    scope.get(
+      "/api/admin/pull-requests",
+      { preHandler: requireRole(["super_admin", "platform_operator"]) },
+      async (request, reply) => {
+        const q = request.query as AdminQuery;
+        const pageSize = clampLimit(q.limit, PR_DEFAULT_LIMIT, PR_MAX_LIMIT);
+        const rows = await listPullRequests(opts.db, {
+          installationId: request.authPrincipal!.installationId,
+          repositoryId: optStr(q.repository_id),
+          state: optStr(q.state),
+          openedAfter: optStr(q.opened_after),
+          openedBefore: optStr(q.opened_before),
+          cursorOpenedAt: optStr(q.cursor_opened_at),
+          cursorPrId: optStr(q.cursor_pr_id),
+          limit: pageSize + 1,
+        });
+        const hasMore = rows.length > pageSize;
+        const emitted = rows.slice(0, pageSize);
+        let nextCursor: Record<string, string> | null = null;
+        if (hasMore && emitted.length > 0) {
+          const last = emitted[emitted.length - 1]!;
+          nextCursor = { cursor_opened_at: last.opened_at, cursor_pr_id: last.pr_id };
+        }
+        return reply
+          .code(200)
+          .send(PullRequestListResponseV1.parse({ rows: emitted, next_cursor: nextCursor }));
       },
     );
 
