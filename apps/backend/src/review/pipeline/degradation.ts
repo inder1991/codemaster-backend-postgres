@@ -31,8 +31,9 @@ import { CancelledFailure } from "@temporalio/common";
 import { metricMeter, inWorkflowContext } from "@temporalio/workflow";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-// STAGE_NAMES — the locked stage-name set. EXACT transcription of
-// pipeline_metrics.py::STAGE_NAMES (the frozenset cross-checked by the Python silent-degradation gate).
+// STAGE_NAMES — the locked stage-name set. Transcription of pipeline_metrics.py::STAGE_NAMES, PLUS the
+// TS-enhancement stages at the bottom (the #4 manifest fetch/parse wiring + the #6 carry-forward loader)
+// which exceed the frozen Python and so are not in its frozenset.
 // Adding a stage here is a deliberate contract change and must be paired with a workflow-body call site.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 export const STAGE_NAMES = new Set<string>([
@@ -66,6 +67,13 @@ export const STAGE_NAMES = new Set<string>([
   "load_repo_config",
   "persist_walkthrough",
   "fix_prompt",
+  // ── TS-enhancement stages (NOT in Python's STAGE_NAMES) ──
+  // #4 manifest fetch→parse wiring + #6 carry-forward loader. The frozen Python passed empty manifests +
+  // an empty parent set, so it never dispatched these through stage_outcome. The TS workflow body DOES
+  // (review_pull_request.workflow.ts), so they MUST be registered or stageOutcome throws at runtime.
+  "fetch_manifest_snapshots",
+  "parse_manifest_dependencies",
+  "load_parent_review_findings",
 ]);
 
 /** A stage name guaranteed (at runtime) to be in STAGE_NAMES. The branded check happens in stageOutcome. */

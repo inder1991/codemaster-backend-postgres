@@ -200,9 +200,19 @@ describe("recordStage shim — outcome allowlist guard (Stage 0 no-op emit)", ()
   });
 });
 
-describe("STAGE_NAMES registry — exact transcription of pipeline_metrics.STAGE_NAMES", () => {
-  it("contains the 30 locked stage names", () => {
-    expect(STAGE_NAMES.size).toBe(30);
+describe("STAGE_NAMES registry — pipeline_metrics.STAGE_NAMES + TS-enhancement stages", () => {
+  it("contains 33 stage names (30 from Python + 3 TS-enhancement)", () => {
+    expect(STAGE_NAMES.size).toBe(33);
+  });
+
+  it("contains the TS-enhancement stages (#4 manifest fetch/parse + #6 carry-forward)", () => {
+    for (const s of [
+      "fetch_manifest_snapshots",
+      "parse_manifest_dependencies",
+      "load_parent_review_findings",
+    ]) {
+      expect(STAGE_NAMES.has(s)).toBe(true);
+    }
   });
 
   it("contains the spine stages the orchestrator drives", () => {
