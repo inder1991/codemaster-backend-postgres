@@ -382,6 +382,11 @@ function makeStubActivities(
       calls.push("staticAnalysis");
       return StaticAnalysisResultV1.parse({});
     },
+    // #6 carry-forward loader is ALWAYS dispatched now; with the env flag off it returns the empty set.
+    loadParentReviewFindings: async (): Promise<unknown> => ({
+      parent_review_id: null,
+      parent_findings: [],
+    }),
     selectCarryForward: async (): Promise<unknown> => {
       calls.push("selectCarryForward");
       return CarryForwardSelectionV1.parse({

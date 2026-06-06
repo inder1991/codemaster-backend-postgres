@@ -8,9 +8,10 @@
 // finding per PR, and the loader runs BEFORE the current run persists. parent_review_id = the PR's
 // review_id (per-PR; pure provenance in select_carry_forward).
 //
-// Gated default-OFF behind the workflow-body CARRY_FORWARD_V2_WITH_DB flag until the EXPLAIN/A-B
-// validation the Python S22.DM.18 deferral required is done — so this activity is not dispatched in
-// production yet, and adds ZERO hot-path cost until enabled.
+// Gated default-OFF behind the CODEMASTER_CARRY_FORWARD_ENABLED env flag (read in this activity, so it
+// is operator-flippable + replay-safe) until the EXPLAIN/A-B validation the Python S22.DM.18 deferral
+// required is done. The workflow ALWAYS dispatches this activity; when the flag is off it short-circuits
+// to the empty parent set before any DB read, so the disabled path adds only a no-op activity round-trip.
 //
 // DSN: CODEMASTER_PG_CORE_DSN, routed through the ADR-0062 process-shared single pool.
 
@@ -49,6 +50,16 @@ function resolveClock(): Clock {
 export async function loadParentReviewFindingsActivity(
   input: LoadParentReviewFindingsInputV1,
 ): Promise<LoadParentReviewFindingsResultV1> {
+  // Carry-forward rollout flag (default OFF) — CODEMASTER_CARRY_FORWARD_ENABLED. Operator-flippable via
+  // env + worker restart, and replay-safe BECAUSE it is read here in the activity (Node), NOT in the
+  // workflow sandbox (1:1 with the CODEMASTER_LIFECYCLE_WRITES_ENABLED pattern). Until the EXPLAIN/A-B
+  // validation the Python S22.DM.18 deferral required is done, carry-forward stays disabled and this
+  // short-circuits to the empty parent set (the Python parent_findings=() / parent_review_id=None
+  // behavior) BEFORE the DSN read — no DB, zero hot-path cost.
+  if ((process.env.CODEMASTER_CARRY_FORWARD_ENABLED ?? "false").toLowerCase() !== "true") {
+    return LoadParentReviewFindingsResultV1.parse({ parent_review_id: null, parent_findings: [] });
+  }
+
   const dsn = process.env.CODEMASTER_PG_CORE_DSN;
   if (dsn === undefined || dsn === "") {
     throw new Error("CODEMASTER_PG_CORE_DSN is not set; cannot load parent review findings");

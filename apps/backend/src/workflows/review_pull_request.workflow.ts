@@ -267,14 +267,6 @@ const { loadParentReviewFindings } = proxyActivities<{
 });
 
 /**
- * #6 carry-forward DB-loader flag (default OFF). The selector + loader are fully wired, but dispatching the
- * loader on every review adds a DB read to the hot path — gated until the EXPLAIN/A-B validation the Python
- * S22.DM.18 deferral required. Flip to true (+ redeploy) to enable carry-forward. Remove this scaffolding
- * once flipped + observed stable (see feedback_remove_rollout_scaffolding_post_flip).
- */
-const CARRY_FORWARD_V2_WITH_DB = false;
-
-/**
  * #D root-manifest seeding flag (default OFF). EXCEEDS the frozen Python (which passes changed_paths only),
  * so it ships dormant to keep the parity dual-run clean AND to give the extra GitHub root-manifest fetches
  * the same measure-then-enable treatment as carry-forward. Flip to true (+ redeploy) to make root-level
@@ -688,27 +680,27 @@ export async function reviewPullRequest(
       }
     }
 
-    // ── #6 carry-forward loader (flag-gated default-OFF). With CARRY_FORWARD_V2_WITH_DB=false (the ship
-    // default), parentFindings stays [] / parentReviewId null — 1:1 with the frozen Python's
-    // parent_findings=() / parent_review_id=None at the orchestrate() call. Fail-open via stageOutcome.
+    // ── #6 carry-forward loader. ALWAYS dispatched; the activity reads the CODEMASTER_CARRY_FORWARD_ENABLED
+    // env flag (default OFF — operator-flippable, replay-safe) and short-circuits to the empty parent set
+    // when disabled. So with the flag off, parentFindings stays [] / parentReviewId null — 1:1 with the
+    // frozen Python's parent_findings=() / parent_review_id=None at the orchestrate() call. Fail-open via
+    // stageOutcome.
     let parentFindings: ReadonlyArray<ReviewFindingV1> = [];
     let parentReviewId: string | null = null;
-    if (CARRY_FORWARD_V2_WITH_DB) {
-      const loaded = await stageOutcome(
-        "load_parent_review_findings",
-        { logger, headSha: payload.head_sha, runId: payload.run_id },
-        async () =>
-          loadParentReviewFindings({
-            schema_version: 1,
-            installation_id: payload.installation_id,
-            pr_id: payload.pr_id,
-            review_id: payload.review_id,
-          }),
-      );
-      if (loaded !== undefined) {
-        parentFindings = loaded.parent_findings;
-        parentReviewId = loaded.parent_review_id;
-      }
+    const loaded = await stageOutcome(
+      "load_parent_review_findings",
+      { logger, headSha: payload.head_sha, runId: payload.run_id },
+      async () =>
+        loadParentReviewFindings({
+          schema_version: 1,
+          installation_id: payload.installation_id,
+          pr_id: payload.pr_id,
+          review_id: payload.review_id,
+        }),
+    );
+    if (loaded !== undefined) {
+      parentFindings = loaded.parent_findings;
+      parentReviewId = loaded.parent_review_id;
     }
 
     const ctx: ReviewPipelineContext = {
