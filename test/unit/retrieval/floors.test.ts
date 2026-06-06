@@ -110,24 +110,43 @@ describe("reservePriorityFloors", () => {
     expect(result.budgetRemaining).toBe(970);
   });
 
-  it("treats a missing token_count as 0 (real KnowledgeChunkV1 carries no token_count) — never NaN", () => {
+  it("missing token_count AND no body → estimateTokens('')=1, never NaN (degenerate fallback)", () => {
     // The real KnowledgeChunkV1 contract has NO token_count field (confirmed: neither the Python nor the
-    // TS contract carries it). So `normalize(pick).token_count` is undefined for a real wrapped chunk.
-    // Pre-fix: `budget -= undefined` → NaN, which silently corrupts every later floor's budget check (and
-    // in Python the equivalent raises AttributeError). The fix treats a missing token_count as 0.
+    // TS contract carries it). Pre-fix: `budget -= undefined` → NaN, which silently corrupted every later
+    // floor's budget check (and in Python the equivalent raises AttributeError). With no token_count AND
+    // no body, the estimate falls back to estimateTokens("") = 1 — a non-zero, non-NaN cost (the prior
+    // `?? 0` would under-budget by reserving the floor for free).
     const innerNoTokenCount = {
       labels: ["topic:security_policy"],
       source: "confluence",
       doc_kind: "other",
       match_specificity_score: 0,
       age_days: 0,
-      // NOTE: no token_count — mirrors the real KnowledgeChunkV1 contract (which omits the field).
+      // NOTE: no token_count AND no body — the degenerate fallback case.
     };
     const wrapped = { chunk: innerNoTokenCount, score: 0.5, stage: "ann" };
     const result = reservePriorityFloors([wrapped], { tokenBudget: 1000 });
     expect(Number.isNaN(result.budgetRemaining)).toBe(false);
-    // token_count treated as 0 → the floor is reserved, nothing deducted.
     expect(result.selected).toEqual([wrapped]);
-    expect(result.budgetRemaining).toBe(1000);
+    expect(result.budgetRemaining).toBe(999); // 1000 - estimateTokens("") = 1
+  });
+
+  it("estimates token cost from body when token_count is absent (knowledge chunk) — no under-budgeting", () => {
+    // KnowledgeChunkV1 reaches floors WITHOUT a token_count (the contract omits it) but WITH a body.
+    // Treating it as 0-cost (the prior behavior) under-budgets the rerank pass — a large knowledge floor
+    // pick would be reserved for free. Estimate from the body instead (Python's _FloorClassifiable
+    // Protocol requires a real token_count:int; estimateTokens is the 1:1 port of Python's estimate_tokens).
+    const innerWithBody = {
+      labels: ["topic:security_policy"],
+      source: "knowledge",
+      doc_kind: "other",
+      match_specificity_score: 0,
+      age_days: 0,
+      body: "x".repeat(400), // 400 ASCII chars → estimateTokens = trunc(400/4) = 100
+    };
+    const wrapped = { chunk: innerWithBody, score: 0.5, stage: "ann" };
+    const result = reservePriorityFloors([wrapped], { tokenBudget: 1000 });
+    expect(result.selected).toEqual([wrapped]);
+    expect(result.budgetRemaining).toBe(900); // 1000 - 100 (estimated), NOT 1000 (the under-budgeting bug)
   });
 });

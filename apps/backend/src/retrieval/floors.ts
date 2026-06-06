@@ -25,6 +25,7 @@ import {
   priorityTier,
   type PriorityClassifiable,
 } from "#backend/retrieval/precedence.js";
+import { estimateTokens } from "#backend/chunking/token_budget.js";
 
 /**
  * Structural shape floors operates on (Python `_FloorClassifiable` Protocol). KnowledgeChunkV1 (after
@@ -38,10 +39,14 @@ export type FloorClassifiable = {
   match_specificity_score: number;
   age_days: number;
   // OPTIONAL: the real KnowledgeChunkV1 contract carries NO token_count field (confirmed: neither the
-  // Python nor TS contract has it), so a wrapped repo/knowledge/confluence chunk reaches floors without
-  // it. Missing → treated as 0 by reservePriorityFloors (see below). Pre-fix the bare read produced
-  // `budget -= undefined` → NaN (and the equivalent Python read raises AttributeError).
+  // Python nor TS contract has it), so a wrapped repo/knowledge chunk reaches floors without it.
+  // Missing → ESTIMATED from `body` by reservePriorityFloors (see below), not treated as 0 — Python's
+  // `_FloorClassifiable` Protocol requires a real `token_count: int`, and a 0-cost floor pick would
+  // under-budget the rerank pass. Pre-fix the bare read produced `budget -= undefined` → NaN.
   token_count?: number;
+  // OPTIONAL content for the token-count estimate fallback. KnowledgeChunkV1 carries `body`;
+  // ConfluenceRetrievedChunk carries a cached `token_count` (so never reaches the estimate branch).
+  body?: string;
 };
 
 /** Tiers that get the minimum-reserved-slots treatment, in priority order (highest-authority first). */
@@ -125,10 +130,13 @@ export function reservePriorityFloors(
     });
 
     const pick = tierCandidates[0]!;
-    // `?? 0`: the real KnowledgeChunkV1 contract omits token_count, so a wrapped chunk normalizes without
-    // it. Treat missing as 0-cost (a single ~512-800-tok floor pick never starves a 32k budget anyway) —
-    // this eliminates the `budget -= undefined → NaN` corruption that silently broke every later floor.
-    const pickTokens = normalize(pick).token_count ?? 0;
+    // When the real KnowledgeChunkV1 normalizes without a token_count, ESTIMATE the cost from its body
+    // (estimateTokens is the 1:1 port of Python's estimate_tokens) rather than treating it as 0-cost —
+    // a large knowledge floor pick reserved for free would silently under-budget the rerank pass.
+    // `estimateTokens("")` returns 1, so a chunk with neither token_count nor body still costs ≥1 (never
+    // NaN, never a free reservation).
+    const pickNorm = normalize(pick);
+    const pickTokens = pickNorm.token_count ?? estimateTokens(pickNorm.body ?? "");
     if (pickTokens > budget) {
       starvation.push(tier);
       // Structured-log substitute for the deferred starvation counter (Python `_LOG.warning`).
