@@ -1087,7 +1087,10 @@ async function buildChunkContext(
     retrieved_evidence: [...retrievedEvidence],
     // pr-topology-manifest collapse-on: the manifest the fan-out threaded in.
     pr_topology_manifest: [...threading.prTopologyManifest],
-    manifests: [],
+    // #4 — the workflow body's fetch→parse manifest snapshots, threaded onto the ctx + rendered by the
+    // prompt builder's `## PR dependency manifests` section. Empty when manifest fetch was skipped (no
+    // enrichment / no changed paths / no github_installation_id) or failed (fail-open).
+    manifests: [...(ctx.manifestSnapshots ?? [])],
   };
 }
 

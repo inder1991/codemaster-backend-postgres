@@ -137,6 +137,12 @@ import { recordToolRuns } from "#backend/activities/record_tool_runs.activity.js
 import { FixPromptActivities } from "#backend/activities/generate_fix_prompt.activity.js";
 import { FixPromptRepo } from "#backend/domain/repos/fix_prompt_repo.js";
 import { GitHubApiClient } from "#backend/integrations/github/api_client.js";
+import {
+  FetchManifestSnapshotsActivity,
+  type GithubContentsPort,
+} from "#backend/activities/fetch_manifest_snapshots.activity.js";
+import { ParseManifestDependenciesActivity } from "#backend/activities/parse_manifest_dependencies.activity.js";
+import { loadParentReviewFindingsActivity } from "#backend/activities/load_parent_review_findings.activity.js";
 import { GitHubApiReviewClient } from "#backend/integrations/github/review_client.js";
 
 import { GitHubIssueClient } from "#backend/integrations/github/issue_client.js";
@@ -445,6 +451,39 @@ function makeLazyLlmClientCache(dsn: string): LlmClientCacheLike {
  * collaborators, and the bound-method activities (`aggregateFindings`, `embedQuery`, `retrieveKnowledge`)
  * are registered as arrow-property methods that stay bound when destructured into the map.
  */
+/**
+ * Build a bare {@link GitHubApiClient} (which structurally satisfies {@link GithubContentsPort} via its
+ * getContents/getRecursiveTree methods) through the SAME deferred-Vault wiring the issue/fix-prompt clients
+ * use: Vault token provider → GitHubApiClient. Deferred to the first manifest fetch so worker boot stays off
+ * VAULT_ADDR / GitHub round-trips.
+ */
+async function buildManifestContentsClient(): Promise<GitHubApiClient> {
+  const clock = new WallClock();
+  const githubHttp = new FetchGitHubHttpClient({});
+  const vault = VaultHttpPort.fromEnv();
+  const tokenProvider = await GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
+  return new GitHubApiClient({
+    tokenProvider: tokenProvider.getToken.bind(tokenProvider),
+    http: githubHttp,
+    clock,
+  });
+}
+
+/** A {@link GithubContentsPort} that lazily builds + memoizes the real client on first call (deferred-Vault). */
+function makeLazyManifestContentsClient(): GithubContentsPort {
+  let memo: Promise<GitHubApiClient> | undefined;
+  const lazy = (): Promise<GitHubApiClient> => {
+    if (memo === undefined) {
+      memo = buildManifestContentsClient();
+    }
+    return memo;
+  };
+  return {
+    getContents: async (args) => (await lazy()).getContents(args),
+    getRecursiveTree: async (args) => (await lazy()).getRecursiveTree(args),
+  };
+}
+
 export function buildActivities(): Record<string, (input: never) => Promise<unknown>> {
   const dsn = requireCoreDsn();
   const githubInstallationId = readGithubInstallationId();
@@ -534,6 +573,15 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     clock,
   });
 
+  // ── #4 manifest fetch + parse bound-method holders ──
+  // fetch_manifest_snapshots: the lazy deferred-Vault GitHubApiClient satisfies GithubContentsPort; the
+  // holder defaults a fresh per-pod LRU cache. parse_manifest_dependencies: the shared WallClock drives the
+  // per-manifest time-budget. (#6 load_parent_review_findings is a bare 1-arg function — registered below.)
+  const fetchManifestSnapshotsHolder = new FetchManifestSnapshotsActivity({
+    githubClient: makeLazyManifestContentsClient(),
+  });
+  const parseManifestDependenciesHolder = new ParseManifestDependenciesActivity({ clock });
+
   return {
     // ── 1-arg activities, ready as-is ──
     persistReviewFindings,
@@ -597,6 +645,12 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     retrieveKnowledge: retrieveKnowledgeActivity.retrieveKnowledge.bind(retrieveKnowledgeActivity),
     // generate_walkthrough — bound arrow property holding the shared ledger-wired LlmClientCache.
     generateWalkthrough: walkthroughActivities.generateWalkthrough,
+    // ── #4 manifest fetch/parse + #6 carry-forward loader (camelCase keys = the workflow-body proxy names) ──
+    fetchManifestSnapshots:
+      fetchManifestSnapshotsHolder.fetchManifestSnapshots.bind(fetchManifestSnapshotsHolder),
+    parseManifestDependencies:
+      parseManifestDependenciesHolder.parseManifestDependencies.bind(parseManifestDependenciesHolder),
+    loadParentReviewFindings: loadParentReviewFindingsActivity,
     // ── curried 2-arg activities (real collaborators threaded as the 2nd arg) ──
     // cloneRepoIntoWorkspace(req, deps) — curry the real GitSubprocessCloner deps so the registered
     // activity is genuinely 1-arg (the latent 2-arg-crash fix). Deps resolve lazily on first dispatch.

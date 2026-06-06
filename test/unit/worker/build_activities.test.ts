@@ -94,6 +94,11 @@ const EXPECTED_ACTIVITY_NAMES = [
   "retrieveKnowledge",
   "bedrockReviewChunk",
   "generateWalkthrough",
+  // #4 manifest fetch/parse (bound-method holders) + #6 carry-forward loader (bare fn) — dispatched
+  // directly by the workflow body (fetch→parse straight-line; loader flag-gated default-off).
+  "fetchManifestSnapshots",
+  "parseManifestDependencies",
+  "loadParentReviewFindings",
   // Stage-2 lifecycle: gate + mutex lease renew/release + placeholder post/delete (dispatched directly by
   // the workflow body, not the orchestrator's activity_proxy bridge).
   "startReviewForWebhook",

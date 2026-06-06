@@ -82,6 +82,20 @@ import {
 import { makeActivityPorts, toActivityOptions } from "./activity_proxy.js";
 
 import { ReviewPullRequestPayloadV1 } from "#contracts/review_pull_request.v1.js";
+import type {
+  FetchManifestSnapshotsInputV1,
+  FetchManifestSnapshotsOutputV1,
+} from "#contracts/fetch_manifest_snapshots.v1.js";
+import type {
+  ParseManifestDependenciesInputV1,
+  ParseManifestDependenciesOutputV1,
+} from "#contracts/parse_manifest_dependencies.v1.js";
+import type {
+  LoadParentReviewFindingsInputV1,
+  LoadParentReviewFindingsResultV1,
+} from "#contracts/load_parent_review_findings.v1.js";
+import type { ManifestSnapshot } from "#contracts/pr_context.v1.js";
+import type { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
 
 import type { ReviewPipelineResult } from "#backend/review/pipeline/pipeline_result.js";
 import type { ChangedLineRanges } from "#backend/review/pipeline/activity_ports.js";
@@ -219,6 +233,45 @@ const { enrichPrFilesV2 } = proxyActivities<{
     nonRetryableErrorTypes: ["GitHubAppUnauthorized"],
   },
 });
+
+/** #4 MANIFEST FETCH — fetch_manifest_snapshots_activity (review_pull_request.py:944-962): 30s, 3 attempts,
+ *  GitHubAppUnauthorized non-retryable. SHA-scoped manifest snapshot retrieval. */
+const { fetchManifestSnapshots } = proxyActivities<{
+  fetchManifestSnapshots(input: FetchManifestSnapshotsInputV1): Promise<FetchManifestSnapshotsOutputV1>;
+}>({
+  startToCloseTimeout: "30 seconds",
+  retry: {
+    initialInterval: "2 seconds",
+    maximumAttempts: 3,
+    nonRetryableErrorTypes: ["GitHubAppUnauthorized"],
+  },
+});
+
+/** #4 MANIFEST PARSE — parse_manifest_dependencies_activity (review_pull_request.py:989-1000): 30s, 3 attempts.
+ *  Per-ecosystem dependency parsing of the fetched snapshots. */
+const { parseManifestDependencies } = proxyActivities<{
+  parseManifestDependencies(input: ParseManifestDependenciesInputV1): Promise<ParseManifestDependenciesOutputV1>;
+}>({
+  startToCloseTimeout: "30 seconds",
+  retry: { initialInterval: "2 seconds", maximumAttempts: 3 },
+});
+
+/** #6 CARRY-FORWARD LOADER — load_parent_review_findings (ENHANCEMENT beyond Python; flag-gated default-off):
+ *  the PR's currently-live findings as the carry-forward parent set. 30s, 3 attempts. */
+const { loadParentReviewFindings } = proxyActivities<{
+  loadParentReviewFindings(input: LoadParentReviewFindingsInputV1): Promise<LoadParentReviewFindingsResultV1>;
+}>({
+  startToCloseTimeout: "30 seconds",
+  retry: { initialInterval: "2 seconds", maximumAttempts: 3 },
+});
+
+/**
+ * #6 carry-forward DB-loader flag (default OFF). The selector + loader are fully wired, but dispatching the
+ * loader on every review adds a DB read to the hot path — gated until the EXPLAIN/A-B validation the Python
+ * S22.DM.18 deferral required. Flip to true (+ redeploy) to enable carry-forward. Remove this scaffolding
+ * once flipped + observed stable (see feedback_remove_rollout_scaffolding_post_flip).
+ */
+const CARRY_FORWARD_V2_WITH_DB = false;
 
 /** LINKED ISSUES — fetch_linked_issues_activity (review_pull_request.py:2143-2148): 30s timeout, 2 attempts,
  *  GitHubAppUnauthorized non-retryable. Returns the resolved tuple[LinkedIssueV1, ...] for the walkthrough. */
@@ -575,6 +628,74 @@ export async function reviewPullRequest(
     if (enrichErrored) {
       state.degradation.add("pr_file_enrichment_failed");
     }
+
+    // ── #4 manifest fetch → parse (port of review_pull_request.py:919-1007). The Python gates this behind
+    // workflow.patched markers; in the historyless TS workflow type those gates COLLAPSE to true, so it runs
+    // straight-line when enrichment + changed paths + a github_installation_id are present. FAIL-OPEN via
+    // stageOutcome (returns undefined on error): a fetch/parse failure NEVER aborts the review — manifests
+    // are review-context enrichment, not gating. SHA-scoped (head_sha) so replay matches under force-push.
+    let manifestSnapshots: ReadonlyArray<ManifestSnapshot> = [];
+    if (
+      enrichment !== undefined &&
+      changedPathsForOrchestrator.length > 0 &&
+      payload.github_installation_id !== null
+    ) {
+      const githubInstallationId = payload.github_installation_id;
+      const fetchResult = await stageOutcome(
+        "fetch_manifest_snapshots",
+        { logger, headSha: payload.head_sha, runId: payload.run_id },
+        async () =>
+          fetchManifestSnapshots({
+            schema_version: 1,
+            installation_id: payload.installation_id,
+            github_installation_id: githubInstallationId,
+            repository_id: payload.repository_id,
+            gh_owner: payload.gh_owner,
+            gh_repo_name: payload.gh_repo_name,
+            head_sha: payload.head_sha,
+            candidate_paths: [...changedPathsForOrchestrator],
+          }),
+      );
+      if (fetchResult !== undefined) {
+        manifestSnapshots = fetchResult.manifests;
+        if (manifestSnapshots.length > 0) {
+          const snapshotsToParse = manifestSnapshots;
+          const parseResult = await stageOutcome(
+            "parse_manifest_dependencies",
+            { logger, headSha: payload.head_sha, runId: payload.run_id },
+            async () =>
+              parseManifestDependencies({ schema_version: 1, manifests: [...snapshotsToParse] }),
+          );
+          if (parseResult !== undefined) {
+            manifestSnapshots = parseResult.parsed_manifests;
+          }
+        }
+      }
+    }
+
+    // ── #6 carry-forward loader (flag-gated default-OFF). With CARRY_FORWARD_V2_WITH_DB=false (the ship
+    // default), parentFindings stays [] / parentReviewId null — 1:1 with the frozen Python's
+    // parent_findings=() / parent_review_id=None at the orchestrate() call. Fail-open via stageOutcome.
+    let parentFindings: ReadonlyArray<ReviewFindingV1> = [];
+    let parentReviewId: string | null = null;
+    if (CARRY_FORWARD_V2_WITH_DB) {
+      const loaded = await stageOutcome(
+        "load_parent_review_findings",
+        { logger, headSha: payload.head_sha, runId: payload.run_id },
+        async () =>
+          loadParentReviewFindings({
+            schema_version: 1,
+            installation_id: payload.installation_id,
+            pr_id: payload.pr_id,
+            review_id: payload.review_id,
+          }),
+      );
+      if (loaded !== undefined) {
+        parentFindings = loaded.parent_findings;
+        parentReviewId = loaded.parent_review_id;
+      }
+    }
+
     const ctx: ReviewPipelineContext = {
       repo: {
         repoUrl: `https://github.com/${payload.gh_owner}/${payload.gh_repo_name}.git`,
@@ -594,8 +715,9 @@ export async function reviewPullRequest(
         prNumber: payload.pr_number,
         // Stage-4 enrichment: the REAL per-file post-image hunk ranges (replaces the Stage-1 {}).
         changedLineRanges: changedLineRangesForOrchestrator,
-        parentFindings: [],
-        parentReviewId: null,
+        // #6 carry-forward: the PR's live findings (flag-gated) — [] / null when the flag is off (default).
+        parentFindings: [...parentFindings],
+        parentReviewId,
       },
       activities: makeActivityPorts(),
       limits: { chunkConcurrency: CHUNK_CONCURRENCY_DEFAULT },
@@ -614,7 +736,8 @@ export async function reviewPullRequest(
       // parse_manifest_dependencies activities are NOT yet ported (FOLLOW-UP-confluence-pr-context-manifests),
       // exactly the Python `_manifest_snapshots=()` fail-open fallback when those markers are unsatisfied.
       enrichment: enrichment ?? null,
-      manifestSnapshots: [],
+      // #4 — the fetch→parse manifest snapshots from the workflow-body flow above (empty when skipped/failed).
+      manifestSnapshots: [...manifestSnapshots],
       // Stage-5 arbitration `now` (the Python `now=workflow.now()` kwarg). The orchestrator runs in the
       // workflow sandbox where Date.now()/new Date() are clock-gate-banned, so the body resolves the instant
       // HERE from the SDK-provided, replay-deterministic workflow start time and threads the RFC3339 string.
