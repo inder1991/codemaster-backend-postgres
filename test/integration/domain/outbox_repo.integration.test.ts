@@ -136,13 +136,15 @@ describeDb("PostgresOutboxRepo (integration, disposable PG)", () => {
       ]);
       return res.rows[0]!.id;
     }
-    async function stateOf(id: string): Promise<{ state: string; attempts: number; leased: boolean }> {
+    async function rowOf(
+      id: string,
+    ): Promise<{ state: string; attempts: number; leasedUntil: Date | null }> {
       const res = await pool.query<{ state: string; attempts: number; leased_until: Date | null }>(
         `SELECT state, attempts, leased_until FROM core.outbox WHERE id = $1`,
         [id],
       );
       const r = res.rows[0]!;
-      return { state: r.state, attempts: Number(r.attempts), leased: r.leased_until !== null };
+      return { state: r.state, attempts: Number(r.attempts), leasedUntil: r.leased_until };
     }
 
     it("claimPending claims a pending row, holds the lease, then re-claims after expiry", async () => {
@@ -163,23 +165,71 @@ describeDb("PostgresOutboxRepo (integration, disposable PG)", () => {
       await cRepo.markDispatched({ db, id });
     });
 
-    it("markAttemptFailed bumps attempts + releases the lease; markDead is terminal; markDispatched succeeds", async () => {
+    it("markAttemptFailed below maxAttempts → stays pending, attempts+1, lease released, returns {state,sink}", async () => {
       const db = tenantKysely(INTEGRATION_DSN!);
-      const id = await seedPending("marks");
+      const id = await seedPending("fail-retry");
       await cRepo.claimPending({ db, leaseSeconds: 60 }); // lease it
 
-      await cRepo.markAttemptFailed({ db, id, error: "boom" });
-      const s = await stateOf(id);
-      expect(s.attempts).toBe(1);
-      expect(s.leased).toBe(false); // lease released → immediate retry
-      expect(s.state).toBe("pending");
+      const r = await cRepo.markAttemptFailed({ db, id, error: "boom", maxAttempts: 5, expectedAttempts: 0 });
+      expect(r).toEqual({ state: "pending", sink: "temporal_workflow_start" });
+      const row = await rowOf(id);
+      expect(row.attempts).toBe(1);
+      expect(row.state).toBe("pending");
+      expect(row.leasedUntil).toBeNull(); // released → immediate retry
+    });
 
-      await cRepo.markDead({ db, id, error: "give up" });
-      expect((await stateOf(id)).state).toBe("dead");
+    it("markAttemptFailed at maxAttempts → atomic dead-transition, returns {state:'dead',sink}", async () => {
+      const db = tenantKysely(INTEGRATION_DSN!);
+      const id = await seedPending("fail-dead");
 
-      const id2 = await seedPending("dispatched");
-      await cRepo.markDispatched({ db, id: id2 });
-      expect((await stateOf(id2)).state).toBe("dispatched");
+      const r = await cRepo.markAttemptFailed({ db, id, error: "give up", maxAttempts: 1, expectedAttempts: 0 });
+      expect(r?.state).toBe("dead");
+      expect(r?.sink).toBe("temporal_workflow_start");
+      expect((await rowOf(id)).state).toBe("dead");
+    });
+
+    it("markAttemptFailed is a redrive no-op when expectedAttempts mismatches (R-6 idempotency)", async () => {
+      const db = tenantKysely(INTEGRATION_DSN!);
+      const id = await seedPending("fail-redrive");
+
+      const first = await cRepo.markAttemptFailed({ db, id, error: "e", maxAttempts: 5, expectedAttempts: 0 });
+      expect(first?.state).toBe("pending");
+      expect((await rowOf(id)).attempts).toBe(1);
+      // Redrive: same expectedAttempts:0 but attempts is now 1 → WHERE matches nothing → null, no double bump.
+      const redrive = await cRepo.markAttemptFailed({ db, id, error: "e", maxAttempts: 5, expectedAttempts: 0 });
+      expect(redrive).toBeNull();
+      expect((await rowOf(id)).attempts).toBe(1);
+    });
+
+    it("markDispatched transitions pending→dispatched (returns timing); redrive on dispatched → null", async () => {
+      const db = tenantKysely(INTEGRATION_DSN!);
+      const id = await seedPending("dispatched");
+
+      const r = await cRepo.markDispatched({ db, id });
+      expect(r).not.toBeNull();
+      expect(r).toHaveProperty("createdAt");
+      expect((await rowOf(id)).state).toBe("dispatched");
+      // Idempotent under redrive: a second markDispatched on a now-dispatched row updates nothing → null.
+      expect(await cRepo.markDispatched({ db, id })).toBeNull();
+    });
+
+    it("extendLease pushes leased_until forward from the injected clock", async () => {
+      fakeClock.set({ now: new Date("2026-06-06T12:00:00.000Z") });
+      const db = tenantKysely(INTEGRATION_DSN!);
+      const id = await seedPending("extend");
+      await cRepo.claimPending({ db, leaseSeconds: 60 }); // leased_until = 12:01:00
+
+      await cRepo.extendLease({ db, id, leaseSeconds: 120 }); // leased_until = 12:02:00
+      const leased = (await rowOf(id)).leasedUntil;
+      expect(leased).not.toBeNull();
+      expect(leased!.getTime()).toBe(new Date("2026-06-06T12:02:00.000Z").getTime());
+    });
+
+    it("markDead is terminal (ops-only manual path)", async () => {
+      const db = tenantKysely(INTEGRATION_DSN!);
+      const id = await seedPending("dead-ops");
+      await cRepo.markDead({ db, id, error: "manual" });
+      expect((await rowOf(id)).state).toBe("dead");
     });
   });
 });

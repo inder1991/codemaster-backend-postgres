@@ -229,31 +229,72 @@ export class PostgresOutboxRepo {
     });
   }
 
-  /** Success: state='dispatched', dispatched_at=now, release lease (Python `mark_dispatched`). */
-  public async markDispatched(args: { db: Executor; id: string }): Promise<void> {
-    await sql`
+  /**
+   * Final transition pending → dispatched (Python `mark_dispatched`). Idempotent under Temporal redrive:
+   * the `AND state = 'pending'` guard makes a duplicate execution a rowcount-0 no-op. RETURNING the timing
+   * columns feeds the dispatch-to-done histogram (the activity records it; the OTel emit is deferred).
+   * Returns `null` when the row was already dispatched (redrive).
+   */
+  public async markDispatched(args: {
+    db: Executor;
+    id: string;
+  }): Promise<{ lastAttemptedAt: Date | null; createdAt: Date | null } | null> {
+    const result = await sql<{ last_attempted_at: Date | null; created_at: Date | null }>`
       UPDATE core.outbox
          SET state = 'dispatched', dispatched_at = ${this.#clock.now()}, leased_until = NULL
-       WHERE id = ${args.id}
+       WHERE id = ${args.id} AND state = 'pending'
+       RETURNING last_attempted_at, created_at
     `.execute(args.db);
+    const row = result.rows[0];
+    return row ? { lastAttemptedAt: row.last_attempted_at, createdAt: row.created_at } : null;
   }
 
-  /** Transient failure: attempts+1, last_error, last_attempted_at=now, release lease so retry is immediate
-   *  (Python `mark_attempt_failed`). The dispatcher decides when attempts exhaust → {@link markDead}. */
-  public async markAttemptFailed(args: { db: Executor; id: string; error: string }): Promise<void> {
+  /**
+   * Atomically increment attempts and dead-letter at the threshold (Python `mark_attempt_failed`, S14.5.D).
+   * A SINGLE UPDATE handles both "retry" (state unchanged) and "exhausted" (`attempts + 1 >= maxAttempts`
+   * → 'dead') — no torn-state window where another pod re-claims between two writes. The `AND attempts =
+   * expectedAttempts` guard (R-6) makes a Temporal redrive a rowcount-0 no-op rather than a double-
+   * increment → spurious dead-letter. RETURNING `{state, sink}` lets the activity emit the canonical
+   * dead-letter signal exactly once. Returns `null` when the guard rejected the write (redrive).
+   */
+  public async markAttemptFailed(args: {
+    db: Executor;
+    id: string;
+    error: string;
+    maxAttempts: number;
+    expectedAttempts: number;
+  }): Promise<{ state: string; sink: string } | null> {
+    const result = await sql<{ state: string; sink: string }>`
+      UPDATE core.outbox
+         SET attempts = attempts + 1,
+             last_error = ${args.error.slice(0, 1024)},
+             last_attempted_at = ${this.#clock.now()},
+             leased_until = NULL,
+             state = CASE WHEN attempts + 1 >= ${args.maxAttempts} THEN 'dead' ELSE state END
+       WHERE id = ${args.id} AND attempts = ${args.expectedAttempts}
+       RETURNING state, sink
+    `.execute(args.db);
+    return result.rows[0] ?? null;
+  }
+
+  /**
+   * Extend a held lease (Python `extend_lease`) — the substrate for the dispatch heartbeat (the heartbeat
+   * loop is deferred; this method lands now so the seam stays clean). Also usable standalone for ops.
+   */
+  public async extendLease(args: { db: Executor; id: string; leaseSeconds: number }): Promise<void> {
     await sql`
       UPDATE core.outbox
-         SET attempts = attempts + 1, last_error = ${args.error.slice(0, 2000)},
-             last_attempted_at = ${this.#clock.now()}, leased_until = NULL
+         SET leased_until = ${this.#clock.now()}::timestamptz + ${args.leaseSeconds} * interval '1 second'
        WHERE id = ${args.id}
     `.execute(args.db);
   }
 
-  /** Terminal dead-letter: state='dead', last_error, last_attempted_at=now, release lease. */
+  /** Terminal dead-letter, ops-only manual path (Python `mark_dead`). The dispatcher reaches 'dead' via the
+   *  atomic {@link markAttemptFailed} CASE; this remains for operator-driven dead-lettering. */
   public async markDead(args: { db: Executor; id: string; error: string }): Promise<void> {
     await sql`
       UPDATE core.outbox
-         SET state = 'dead', last_error = ${args.error.slice(0, 2000)},
+         SET state = 'dead', last_error = ${args.error.slice(0, 1024)},
              last_attempted_at = ${this.#clock.now()}, leased_until = NULL
        WHERE id = ${args.id}
     `.execute(args.db);
