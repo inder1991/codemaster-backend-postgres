@@ -11,7 +11,16 @@ import {
   markerFor,
   PostReviewTransientError,
 } from "#backend/activities/post_review_results.activity.js";
-import { extractDroppedStateFromPostFailure } from "#backend/review/pipeline/posting.js";
+import {
+  extractDroppedStateFromPostFailure,
+  postReviewResults,
+  type PostingLifecycleDeps,
+} from "#backend/review/pipeline/posting.js";
+import { ReviewWorkflowState } from "#backend/review/pipeline/state.js";
+
+import type { ReviewActivityPorts } from "#backend/review/pipeline/activity_ports.js";
+import type { ReviewPipelinePrCtx } from "#backend/review/pipeline/orchestrator.js";
+import type { SkippedInputV1 } from "#contracts/finding_lifecycle_inputs.v1.js";
 
 import {
   type CreatedReviewV1,
@@ -543,6 +552,67 @@ describeDb("post_review_results doPost (integration, disposable PG)", () => {
     expect(row).toBeDefined();
     expect(row!.github_review_id).toBeNull();
     expect(row!.publication_outcome).toBe("degraded_unposted");
+  });
+
+  it("FULL CHAIN: real activity failure → postReviewResults dispatches record_delivery_skipped for dropped findings", async () => {
+    // The activity↔WORKFLOW contract end-to-end: wire the REAL doPost (forced to fail non-422) as the
+    // `postReview` port, drive it through `postReviewResults` (the workflow-body lifecycle handler), and
+    // assert the handler extracts the activity's REAL PostReviewFailedWithDroppedState envelope + fires
+    // record_delivery_skipped for the dropped finding (index 1 → persistedFindingIds[1]) before re-raising.
+    // This closes the gap the unit H-2 tests left: those throw a HAND-BUILT failure from a stub; here the
+    // failure is the genuine envelope the activity mints on a live ladder failure.
+    const { client } = makeStub({ createReview: ["non422"] });
+    const input = makeInput({
+      seed,
+      findings: [
+        finding({ start_line: 10, end_line: 10 }), // in-window → kept (index 0)
+        finding({ file: "not/in/diff.ts" }), // out-of-window → dropped (index 1)
+      ],
+      changedLineRanges: { [FILE_IN_DIFF]: [[1, 100]] },
+    });
+
+    const rfid0 = newUuid();
+    const rfid1 = newUuid();
+    const skipped: Array<SkippedInputV1> = [];
+
+    // The postReview port IS the real activity executor (doPost) under a failing GitHub stub.
+    const ports = {
+      postReview: async (): Promise<PostedReviewV1> =>
+        doPost(input, { ghClient: client, dsn: INTEGRATION_DSN!, clock: FIXED_CLOCK }),
+    } as unknown as ReviewActivityPorts;
+
+    const pr: ReviewPipelinePrCtx = {
+      prMeta: input.pr_meta,
+      headSha: input.head_sha,
+      runId: input.run_id,
+      reviewId: input.review_id,
+      repositoryId: newUuid(),
+      policyRevision: 0,
+      prNumber: input.pr_number,
+      changedLineRanges: input.changed_line_ranges,
+      parentFindings: [],
+      parentReviewId: null,
+    };
+    const deps: PostingLifecycleDeps = {
+      persistedFindingIds: [rfid0, rfid1], // dropped index 1 → rfid1
+      recordDeliverySkipped: async (i) => {
+        skipped.push(i);
+        return i.rfids.length;
+      },
+    };
+
+    // postReviewResults re-raises the activity's failure AFTER dispatching the skip.
+    await expect(
+      postReviewResults(ports, new ReviewWorkflowState(), input.walkthrough, input.aggregated, pr, deps),
+    ).rejects.toBeInstanceOf(ApplicationFailure);
+
+    // The workflow-body skip-dispatch fired for the dropped finding (index 1 → rfid1), with the
+    // classifier-supplied reason + the PR-keyed posted_review_pr_id + the tenant installation_id.
+    expect(skipped.length).toBe(1);
+    expect(skipped[0]!.rfids).toEqual([rfid1]);
+    expect(skipped[0]!.reasons).toEqual(["file_not_in_diff"]);
+    expect(skipped[0]!.posted_review_pr_id).toBe(seed.prId);
+    expect(skipped[0]!.installation_id).toBe(seed.installationId);
   });
 
   it("WON ladder failure (422 then non-422 on body-only rung): also raises the dropped-state failure", async () => {
