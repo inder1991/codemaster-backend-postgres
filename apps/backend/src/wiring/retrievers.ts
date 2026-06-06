@@ -41,6 +41,7 @@ import { Bm25Retriever } from "#backend/retrieval/bm25_retriever.js";
 import type { ConfluenceRetrievalPort } from "#backend/retrieval/confluence_source.js";
 import { HybridRetriever } from "#backend/retrieval/hybrid_retriever.js";
 import { IdentityRerankPort, LlmRerank } from "#backend/retrieval/llm_rerank.js";
+import type { RerankLlmCacheLike } from "#backend/retrieval/llm_backed_rerank.js";
 
 import { tenantKysely } from "#platform/db/database.js";
 
@@ -101,6 +102,12 @@ export type BuildRetrieveKnowledgeActivityOptions = {
   modelName?: string;
   /** Per-chunk retrieval result cap (1:1 with the Python `top_k=5`). */
   topK?: number;
+  /**
+   * Optional rerank LLM cache (E). Threaded to {@link RetrieveKnowledgeActivity}; when wired AND
+   * `CODEMASTER_LLM_RERANK_ENABLED=true`, the activity builds a per-invocation LLM-backed reranker instead
+   * of the static IdentityRerankPort no-op. Omitted → identity rerank (1:1 with Python).
+   */
+  rerankCache?: RerankLlmCacheLike;
 };
 
 /**
@@ -119,6 +126,7 @@ export function buildRetrieveKnowledgeActivity({
   embedder,
   modelName = "qwen3-embed-0.6b",
   topK = 5,
+  rerankCache,
 }: BuildRetrieveKnowledgeActivityOptions): RetrieveKnowledgeActivity {
   const bm25Retriever = new Bm25Retriever({ port: buildBm25Port() });
   const annRetriever = new AnnRetriever({
@@ -135,5 +143,12 @@ export function buildRetrieveKnowledgeActivity({
     rerank: new LlmRerank({ port: new IdentityRerankPort() }),
     confluence: buildConfluencePort(),
   });
-  return new RetrieveKnowledgeActivity({ bm25Retriever, annRetriever, topK, hybridRetriever });
+  return new RetrieveKnowledgeActivity({
+    bm25Retriever,
+    annRetriever,
+    topK,
+    hybridRetriever,
+    // exactOptionalPropertyTypes: only pass the key when defined (never an explicit `undefined`).
+    ...(rerankCache !== undefined ? { rerankCache } : {}),
+  });
 }

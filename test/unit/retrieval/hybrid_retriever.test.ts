@@ -198,6 +198,28 @@ describe("HybridRetriever legacy path", () => {
     expect(out.items.length).toBeLessThanOrEqual(5);
   });
 
+  it("retrieve() uses the per-call rerank OVERRIDE instead of the static reranker (E)", async () => {
+    // The retrieve_knowledge activity constructs a per-invocation LlmBackedRerankPort (carrying the
+    // query's installation_id) and passes it as the override; the static factory reranker must NOT run.
+    let staticCalled = false;
+    let overrideCalled = false;
+    const port = (mark: () => void): LlmRerankerPort => ({
+      rerank: async ({ candidates }) => {
+        mark();
+        return candidates.map((_, i) => candidates.length - i);
+      },
+    });
+    const a = scored(knowledgeChunk({ rel: "a.ts" }));
+    const retriever = new HybridRetriever({
+      bm25: asBm25(new StubRetriever([a])),
+      ann: asAnn(new StubRetriever([a])),
+      rerank: new LlmRerank({ port: port(() => (staticCalled = true)) }),
+    });
+    await retriever.retrieve(query({}), new LlmRerank({ port: port(() => (overrideCalled = true)) }));
+    expect(overrideCalled).toBe(true);
+    expect(staticCalled).toBe(false);
+  });
+
   it("ANN degraded → BM25-only result with degraded=true propagated", async () => {
     const a = knowledgeChunk({ rel: "docs/a.md", body: "alpha auth" });
     const retriever = new HybridRetriever({

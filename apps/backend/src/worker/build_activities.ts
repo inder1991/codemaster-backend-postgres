@@ -497,7 +497,11 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
   // are arrow properties, so they stay bound when destructured into the map (Temporal registers the value).
   const aggregateActivity = new AggregateFindingsActivity({ embedder });
   const embedQueryActivity = new EmbedQueryActivity({ embeddings: embedder, modelName: "qwen3-embed-0.6b" });
-  const retrieveKnowledgeActivity = buildRetrieveKnowledgeActivity({ embedder });
+  // The lazy real LLM cache (deferred-Vault pattern; built on first forRole). Shared by bedrockReviewChunk,
+  // walkthrough, fix-prompt, AND (E) the retrieve_knowledge per-invocation LLM reranker (default-off behind
+  // CODEMASTER_LLM_RERANK_ENABLED — wired here so an operator can enable it without a code change).
+  const llmCache = makeLazyLlmClientCache(dsn);
+  const retrieveKnowledgeActivity = buildRetrieveKnowledgeActivity({ embedder, rerankCache: llmCache });
   // dedup_findings — the Temporal-activity port of the frozen Python `dedup_linter_with_llm` (the
   // semantic dedup stage embeds over the network, so it CANNOT run in the workflow sandbox; ADR-0065/0066).
   // Shares the same real embedder as the aggregate stage. FOLLOW-UP-dedup-findings-orchestrator-wiring:
@@ -505,9 +509,9 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
   // Python's inline `dedup_linter_with_llm` call. Registered here so the surface is dispatch-ready.
   const dedupFindingsActivity = new DedupFindingsActivity({ embedder });
 
-  // The lazy real cloner-deps + LLM cache (deferred-Vault pattern; constructed on first dispatch).
+  // The lazy real cloner-deps (deferred-Vault pattern; constructed on first dispatch). The shared LLM cache
+  // (llmCache) is built earlier (above the retrieve-knowledge activity, which now also consumes it for E).
   const resolveClonerDeps = makeClonerDepsResolver(githubInstallationId);
-  const llmCache = makeLazyLlmClientCache(dsn);
 
   // generate_walkthrough bound-method holder — 1:1 with the frozen Python `WalkthroughActivities(cache=…)`.
   // It SHARES the same lazy ledger-wired LlmClientCache the review-chunk activity uses (the cache is

@@ -161,7 +161,14 @@ export class HybridRetriever {
     return true;
   }
 
-  public async retrieve(query: KnowledgeQueryV1): Promise<RetrievedKnowledgeV1> {
+  public async retrieve(
+    query: KnowledgeQueryV1,
+    rerankOverride?: LlmRerank,
+  ): Promise<RetrievedKnowledgeV1> {
+    // Per-call rerank override (E): the activity may construct a per-invocation LlmBackedRerankPort
+    // carrying the query's installation_id; when supplied it REPLACES the static factory reranker for
+    // this call. Default (undefined) keeps the constructor-wired reranker (IdentityRerankPort no-op).
+    const rerank = rerankOverride ?? this.rerank;
     // Over-fetch each side so RRF has material to fuse.
     const wideQuery: KnowledgeQueryV1 = { ...query, top_k: PRE_RERANK_TOP_K };
     const composeConfluence = this.shouldComposeConfluence(query);
@@ -173,7 +180,7 @@ export class HybridRetriever {
         this.ann.retrieve(wideQuery),
       ]);
       const fused = rrfCombine([bm25Result, annResult], { topK: PRE_RERANK_TOP_K });
-      return this.rerank.apply({ query: query.query, candidates: fused });
+      return rerank.apply({ query: query.query, candidates: fused });
     }
 
     // Sub-spec B path: parallel confluence + merge + floors.
@@ -256,7 +263,7 @@ export class HybridRetriever {
       starvation_tiers: [],
       source_counts: {},
     };
-    const reranked = await this.rerank.apply({ query: query.query, candidates: rerankInput });
+    const reranked = await rerank.apply({ query: query.query, candidates: rerankInput });
 
     // Floor selections take priority slots; reranked fills the rest up to top_k.
     const floorSelected: Array<ScoredKnowledgeChunkV1> = floor.selected.filter(isScoredKnowledgeChunk);

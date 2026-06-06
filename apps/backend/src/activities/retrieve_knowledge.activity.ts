@@ -42,6 +42,8 @@ import { rrfCombine } from "#backend/retrieval/rrf.js";
 import type { AnnRetriever } from "#backend/retrieval/ann_retriever.js";
 import type { Bm25Retriever } from "#backend/retrieval/bm25_retriever.js";
 import type { HybridRetriever } from "#backend/retrieval/hybrid_retriever.js";
+import { LlmBackedRerankPort, type RerankLlmCacheLike } from "#backend/retrieval/llm_backed_rerank.js";
+import { LlmRerank } from "#backend/retrieval/llm_rerank.js";
 import type { KnowledgeChunkV1, KnowledgeQueryV1 } from "#contracts/knowledge_chunks.v1.js";
 import type {
   RetrieveKnowledgeInputV1,
@@ -59,7 +61,38 @@ export type RetrieveKnowledgeActivityOptions = {
    * BM25 + ANN + RRF fusion (1:1 with the Python `hybrid_retriever=None` default).
    */
   hybridRetriever?: HybridRetriever;
+  /**
+   * Optional rerank LLM cache (E). When wired AND `CODEMASTER_LLM_RERANK_ENABLED=true`, the activity builds
+   * a per-invocation {@link LlmBackedRerankPort} (carrying the query's installation_id for cost attribution)
+   * and passes it to the hybrid retriever, REPLACING the static IdentityRerankPort no-op. Omitted or
+   * flag-off → identity rerank (1:1 with the frozen Python, which ships only the no-op).
+   */
+  rerankCache?: RerankLlmCacheLike;
 };
+
+/** Read the `CODEMASTER_LLM_RERANK_ENABLED` rollout flag (default OFF) — operator-flippable, replay-safe. */
+function rerankEnabled(): boolean {
+  return (process.env.CODEMASTER_LLM_RERANK_ENABLED ?? "false").toLowerCase() === "true";
+}
+
+/**
+ * Build the per-invocation LLM-backed rerank override (E): a {@link LlmRerank} wrapping a
+ * {@link LlmBackedRerankPort} keyed to `installationId`, but ONLY when the flag is on AND a cache is wired.
+ * Returns `undefined` otherwise, so the {@link HybridRetriever} falls back to its static IdentityRerankPort
+ * no-op (1:1 with Python). Exported for unit testing the flag-gated construction.
+ */
+export function buildRerankOverride(args: {
+  enabled: boolean;
+  cache: RerankLlmCacheLike | undefined;
+  installationId: string;
+}): LlmRerank | undefined {
+  if (!args.enabled || args.cache === undefined) {
+    return undefined;
+  }
+  return new LlmRerank({
+    port: new LlmBackedRerankPort({ cache: args.cache, installationId: args.installationId }),
+  });
+}
 
 /**
  * Bound-method holder for `retrieve_knowledge_activity` (legacy BM25 + ANN + RRF OR the Sub-spec B T12
@@ -74,17 +107,20 @@ export class RetrieveKnowledgeActivity {
   private readonly ann: AnnRetriever;
   private readonly topK: number;
   private readonly hybrid: HybridRetriever | undefined;
+  private readonly rerankCache: RerankLlmCacheLike | undefined;
 
   public constructor({
     bm25Retriever,
     annRetriever,
     topK = 5,
     hybridRetriever,
+    rerankCache,
   }: RetrieveKnowledgeActivityOptions) {
     this.bm25 = bm25Retriever;
     this.ann = annRetriever;
     this.topK = topK;
     this.hybrid = hybridRetriever;
+    this.rerankCache = rerankCache;
   }
 
   /**
@@ -223,7 +259,14 @@ export class RetrieveKnowledgeActivity {
       default_pool_token_reservation_pct: 0.15,
     };
 
-    const result = await this.hybrid.retrieve(query);
+    // E: per-invocation LLM rerank override (flag-gated; carries the query's installation_id). Undefined
+    // when off → the hybrid retriever's static IdentityRerankPort no-op runs (1:1 with Python).
+    const rerankOverride = buildRerankOverride({
+      enabled: rerankEnabled(),
+      cache: this.rerankCache,
+      installationId: query.installation_id,
+    });
+    const result = await this.hybrid.retrieve(query, rerankOverride);
 
     const items: Array<KnowledgeChunkV1> = result.items.map((item) => item.chunk);
     return {
