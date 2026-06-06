@@ -2,15 +2,21 @@
 // listens. The analogue of worker/main.ts for the HTTP side. Routers (the GitHub webhook, auth, admin)
 // register onto the app here as they land in subsequent slices.
 
+import { makeLazyVaultWebhookSecretProvider } from "#backend/ingest/webhook_secret_provider.js";
+
 import { buildApp } from "./app.js";
+import { registerGithubWebhookRoutes } from "./github_webhook_routes.js";
 
 /** Build the app, register routers, and listen. Resolves when the server is listening. */
 export async function runServer(): Promise<void> {
   const app = buildApp();
 
-  // ── Routers register here as they land ──
-  // F1·b: app.register(githubWebhookRoutes, { ... })  — POST /v1/github/webhook
-  // D1:   auth routes · D2: admin routes · F-b: feedback
+  // F1·b — POST /v1/github/webhook (verification edge). The Vault-backed secret provider is lazy
+  // (deferred-Vault), so the server boots without VAULT_ADDR; only the first webhook needs Vault.
+  await registerGithubWebhookRoutes(app, { secretProvider: makeLazyVaultWebhookSecretProvider() });
+
+  // ── More routers register here as they land ──
+  // D1: auth routes · D2: admin routes · F-b: feedback
 
   const port = Number(process.env.CODEMASTER_API_PORT ?? "8080");
   const host = process.env.CODEMASTER_API_HOST ?? "0.0.0.0";
