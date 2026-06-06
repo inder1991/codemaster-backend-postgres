@@ -29,6 +29,7 @@ import {
 import { stageOutcomeForPublication, fixPromptStageOutcome } from "./helpers.js";
 import { stageOutcome, recordStage, type StageLogger } from "./degradation.js";
 import { renderArbitrationFooterMd } from "#backend/review/arbitration/arbitration_footer.js";
+import { renderWalkthrough } from "#backend/review/walkthrough_renderer.js";
 
 import type { ReviewActivityPorts, ChangedLineRanges } from "./activity_ports.js";
 import type { ReviewPipelinePrCtx } from "./orchestrator.js";
@@ -73,20 +74,21 @@ export type PostingLifecycleDeps = {
 /**
  * Render the walkthrough markdown the GitHub review body wraps (1:1 with the `_post_review` render step).
  *
- * The frozen Python calls `render_walkthrough(walkthrough)` (a structured-markdown renderer) then, when the
- * arbitration capture carries a result, appends `render_arbitration_footer_md(...)`. The structured-markdown
- * renderer is not yet ported; the spine posts the walkthrough's `tldr` as the base body markdown. The
- * arbitration footer fold IS wired (Stage 5 collapse-on): when `state.arbitration.result` is populated (the
- * Step 7.7 apply ran), the footer renderer appends the suppressed-finding + tool-degradation block (rstrip
- * the base + footer + trailing newline, 1:1 with the Python `walkthrough_md.rstrip() + footer_md + "\n"`).
- * When the result is null (arbitration skipped) the base markdown is returned unchanged. Pure: no activity
- * dispatch, no I/O.
+ * The frozen Python calls `render_walkthrough(walkthrough)` (the structured-markdown renderer) then, when
+ * the arbitration capture carries a result, appends `render_arbitration_footer_md(...)`. Both halves are
+ * now ported: {@link renderWalkthrough} produces the full structured body (header + TL;DR + truncated/
+ * degradation notices + file table + config section + linked issues + suggested reviewers, safety-cap
+ * truncated). The arbitration footer fold (Stage 5 collapse-on): when `state.arbitration.result` is
+ * populated (the Step 7.7 apply ran), the footer renderer appends the suppressed-finding + tool-degradation
+ * block (rstrip the base + footer + trailing newline, 1:1 with the Python
+ * `walkthrough_md.rstrip() + footer_md + "\n"`). When the result is null (arbitration skipped) the base
+ * markdown is returned unchanged. Pure: no activity dispatch, no I/O.
  */
 export function renderWalkthroughForPost(
   walkthrough: WalkthroughV1,
   state: ReviewWorkflowState,
 ): string {
-  const walkthroughMd = walkthrough.tldr;
+  const walkthroughMd = renderWalkthrough(walkthrough);
   // Arbitration footer fold — when Step 7.7's apply_arbitration populated state.arbitration.result, append
   // the footer HERE (the Python `if arbitration_capture.result is not None:` branch). The renderer returns
   // "" when there are no non-NONE decisions AND all tools completed, so even a populated (but empty) result

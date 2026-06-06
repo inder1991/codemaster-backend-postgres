@@ -12,10 +12,8 @@
  *   3. Rank by count DESC, ties broken by alpha-sorted login; take top-N (default 3).
  *   4. Strip the leading `@` + markdown-escape (the walkthrough body is GitHub markdown).
  *
- * The frozen Python's `format_suggested_reviewers_md` renderer is NOT ported here — it is a
- * walkthrough-rendering concern owned by a different module; this port covers ONLY the
- * activity-consumed ranker (`rank_suggested_reviewers`), 1:1 with the Python function the activity
- * calls.
+ * Both the activity-consumed ranker (`rank_suggested_reviewers`) AND the walkthrough-rendering
+ * formatter (`format_suggested_reviewers_md`) are ported here, 1:1 with the frozen Python.
  */
 
 import type { CodeOwnerRule } from "#backend/domain/repos/code_owners_repo.js";
@@ -159,4 +157,20 @@ export function rankSuggestedReviewers(args: {
   // Sort by count DESC, login alpha ASC. 1:1 with the Python `key=lambda kv: (-kv[1], kv[0])`.
   const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return ranked.slice(0, topN).map(([login]) => markdownEscapeLogin(login));
+}
+
+/**
+ * Render the suggested-reviewers walkthrough section (1:1 with `format_suggested_reviewers_md`). Returns
+ * "" for an empty list so the caller never emits an orphan header. Each line: `- @<reviewer>` (the
+ * reviewer strings are already markdown-escaped + `@`-stripped by {@link rankSuggestedReviewers}).
+ */
+export function formatSuggestedReviewersMd(reviewers: ReadonlyArray<string>): string {
+  if (reviewers.length === 0) {
+    return "";
+  }
+  const lines: Array<string> = ["### Suggested reviewers"];
+  for (const r of reviewers) {
+    lines.push(`- @${r}`);
+  }
+  return lines.join("\n") + "\n";
 }

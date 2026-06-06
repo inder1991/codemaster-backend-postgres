@@ -17,6 +17,7 @@ import {
   type PostingLifecycleDeps,
 } from "#backend/review/pipeline/posting.js";
 import { ReviewWorkflowState } from "#backend/review/pipeline/state.js";
+import { renderWalkthrough } from "#backend/review/walkthrough_renderer.js";
 
 import type { ReviewActivityPorts } from "#backend/review/pipeline/activity_ports.js";
 import type { ReviewPipelinePrCtx } from "#backend/review/pipeline/orchestrator.js";
@@ -85,9 +86,19 @@ function portsWith(postReview: ReviewActivityPorts["postReview"]): ReviewActivit
 }
 
 describe("renderWalkthroughForPost", () => {
-  it("returns the walkthrough tldr unchanged when no arbitration result was captured", () => {
+  // The base body is now the FULL structured render (header + TL;DR + "_no actionable findings_"), not the
+  // bare tldr — renderWalkthroughForPost delegates to the ported renderWalkthrough (byte-parity proven in
+  // walkthrough_renderer.parity.test.ts). These tests assert the wiring + the arbitration-footer fold.
+  const BASE_MD = renderWalkthrough(WALK);
+
+  it("renders the full structured walkthrough markdown when no arbitration result was captured", () => {
     const state = new ReviewWorkflowState();
-    expect(renderWalkthroughForPost(WALK, state)).toBe("all good");
+    const out = renderWalkthroughForPost(WALK, state);
+    expect(out).toBe(BASE_MD);
+    // Proof it is the structured render, NOT the old tldr stub.
+    expect(out).toContain("🤖 **codemaster review** — all good");
+    expect(out).toContain("_no actionable findings_");
+    expect(out).not.toBe("all good");
   });
 
   it("returns the base markdown unchanged when the captured result yields an EMPTY footer", () => {
@@ -95,7 +106,7 @@ describe("renderWalkthroughForPost", () => {
     // the base markdown is unchanged.
     const state = new ReviewWorkflowState();
     state.arbitration = { result: { decisions: [], rejected_intents: [] }, toolStatuses: [] };
-    expect(renderWalkthroughForPost(WALK, state)).toBe("all good");
+    expect(renderWalkthroughForPost(WALK, state)).toBe(BASE_MD);
   });
 
   it("folds the arbitration footer when a non-NONE decision is captured", () => {
@@ -120,7 +131,8 @@ describe("renderWalkthroughForPost", () => {
       toolStatuses: [],
     };
     const out = renderWalkthroughForPost(WALK, state);
-    expect(out.startsWith("all good\n\n---\n\n")).toBe(true);
+    // Footer fold: rstrip(base) + footer + "\n". The base is the full structured render.
+    expect(out.startsWith(BASE_MD.replace(/\s+$/, "") + "\n\n---\n\n")).toBe(true);
     expect(out).toContain("Suppressed findings (operator audit)");
     expect(out).toContain("- SUPPRESSED_BY_LLM x 1");
     expect(out.endsWith("\n")).toBe(true);

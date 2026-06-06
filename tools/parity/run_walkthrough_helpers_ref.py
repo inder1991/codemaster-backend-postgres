@@ -50,10 +50,13 @@ from codemaster.review.file_rows_synthesizer import (
     synthesize_file_rows_from_aggregated,
 )
 from codemaster.review.walkthrough_activity import _build_user_message
+from codemaster.review.walkthrough_renderer import render_walkthrough
 from codemaster.review.walkthrough_schema import WALKTHROUGH_TOOL_SCHEMA
+from codemaster.security.output_safety import MAX_OUTPUT_CHARS
 from contracts.aggregated_findings.v1 import AggregatedFindingsV1
 from contracts.review_findings.v1 import ReviewFindingV1
 from contracts.walkthrough.pr_meta_v1 import PrMetaV1
+from contracts.walkthrough.v1 import WalkthroughV1
 
 
 def _handle(req: dict[str, Any]) -> dict[str, Any]:
@@ -81,6 +84,14 @@ def _handle(req: dict[str, Any]) -> dict[str, Any]:
             "id": req["id"],
             "ok": True,
             "file_rows": [row.model_dump(mode="json") for row in rows],
+        }
+    if op == "render_walkthrough":
+        walkthrough = WalkthroughV1.model_validate(req["walkthrough"])
+        max_chars = req.get("max_chars", MAX_OUTPUT_CHARS)
+        return {
+            "id": req["id"],
+            "ok": True,
+            "markdown": render_walkthrough(walkthrough, max_chars=max_chars),
         }
     raise ValueError(f"unknown op: {op!r}")
 

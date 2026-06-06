@@ -13,9 +13,8 @@
  * for that issue number; the assembled `LinkedIssueV1` carries `title=null, state=null` so the
  * renderer falls back to `#42 — (title unavailable)`.
  *
- * The frozen Python's `format_linked_issues_md` renderer is NOT ported here — it is a walkthrough-
- * rendering concern owned by a different module; this port covers ONLY the activity-consumed assembler
- * (`assemble_linked_issues`), 1:1 with the Python function the activity calls.
+ * Both the activity-consumed assembler (`assemble_linked_issues`) AND the walkthrough-rendering
+ * formatter (`format_linked_issues_md`) are ported here, 1:1 with the frozen Python.
  */
 
 import type { IssueLink, LinkageKind } from "#contracts/issue_link.v1.js";
@@ -95,4 +94,31 @@ export function assembleLinkedIssues(args: {
     const [br, bn] = sortKey(b);
     return ar - br || an - bn;
   });
+}
+
+/** Python `str.capitalize()`: first char upper, the rest lower. linkage_kind values are single words. */
+function capitalize(s: string): string {
+  if (s === "") {
+    return "";
+  }
+  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+}
+
+/**
+ * Render the linked-issues walkthrough section (1:1 with the Python `format_linked_issues_md`). Returns
+ * "" for an empty tuple so the caller never emits an orphan header. Each line:
+ * `- **<Kind>** #<N> — <title or "(title unavailable)">` with an optional ` \`[<state>]\`` suffix.
+ */
+export function formatLinkedIssuesMd(linked: ReadonlyArray<LinkedIssueV1>): string {
+  if (linked.length === 0) {
+    return "";
+  }
+  const lines: Array<string> = ["### Linked issues"];
+  for (const link of linked) {
+    const kindLabel = capitalize(link.linkage_kind);
+    const titlePart = link.title ? link.title : "(title unavailable)";
+    const stateSuffix = link.state ? ` \`[${link.state}]\`` : "";
+    lines.push(`- **${kindLabel}** #${link.issue_number} — ${titlePart}${stateSuffix}`);
+  }
+  return lines.join("\n") + "\n";
 }

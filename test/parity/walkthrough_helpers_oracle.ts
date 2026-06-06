@@ -27,6 +27,7 @@ type RefResponse = {
   readonly fallback_note?: string;
   readonly user_message?: string;
   readonly file_rows?: ReadonlyArray<JsonValue>;
+  readonly markdown?: string;
   readonly err?: string;
 };
 
@@ -83,6 +84,20 @@ export async function pySynthesizeFileRows(
   const r = await request({ op: "synthesize_file_rows", findings });
   if (!r.ok) throw new Error(`python walkthrough-helpers ref failed: ${r.err}`);
   return r.file_rows!;
+}
+
+/** Render a wire-shape WalkthroughV1 to markdown via the frozen `render_walkthrough` (byte-exact). */
+export async function pyRenderWalkthrough(
+  walkthrough: unknown,
+  maxChars?: number,
+): Promise<string> {
+  const r = await request(
+    maxChars === undefined
+      ? { op: "render_walkthrough", walkthrough }
+      : { op: "render_walkthrough", walkthrough, max_chars: maxChars },
+  );
+  if (!r.ok) throw new Error(`python walkthrough-helpers ref failed: ${r.err}`);
+  return r.markdown!;
 }
 
 export function shutdownWalkthroughHelpersRef(): void {
