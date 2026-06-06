@@ -42,8 +42,10 @@ export class OutboxDispatchActivities {
   readonly #maxAttempts: number;
 
   public constructor(o: OutboxDispatchActivitiesOptions) {
-    if (o.maxAttempts < 1) {
-      throw new Error("max_attempts must be >= 1"); // 1:1 with the Python configure() ValueError
+    // 1:1 with the Python configure() ValueError, hardened against an env-sourced NaN (Number("abc")):
+    // `NaN < 1` is false, so a plain `< 1` check would let a non-dead-lettering threshold through.
+    if (!Number.isInteger(o.maxAttempts) || o.maxAttempts < 1) {
+      throw new Error(`max_attempts must be an integer >= 1; got ${String(o.maxAttempts)}`);
     }
     this.#repo = o.repo;
     this.#db = o.db;
