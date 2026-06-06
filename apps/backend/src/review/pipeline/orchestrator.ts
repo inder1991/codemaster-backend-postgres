@@ -695,7 +695,15 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
         schema_version: 1,
         workspace_path: workspaceRoot,
         findings: [...aggregated.findings],
-        knowledge_chunk_ids: null, // skip mode — see citation_validator docstring
+        // ENHANCEMENT beyond frozen Python (which hardcodes null/skip): pass the PR-level union of
+        // retrieved knowledge chunk IDs the fan-out accumulated so knowledge_chunk citations are validated
+        // against the actual retrieved set (a finding citing a non-retrieved id is dropped). Sorted →
+        // replay-deterministic activity input regardless of fan-out completion order. Empty set → null
+        // (skip mode), preserving the clean-PR / no-retrieval behavior 1:1 with Python.
+        knowledge_chunk_ids:
+          state.retrievedKnowledgeChunkIds.size > 0
+            ? [...state.retrievedKnowledgeChunkIds].sort()
+            : null,
         policy_citation: buildPolicyCitationContext(state.policyBundles, "observe"),
       });
       if (citationResult.dropped.length > 0) {
@@ -991,6 +999,12 @@ async function buildChunkContext(
   );
   if (retrieveResult !== undefined) {
     retrievedKnowledge = retrieveResult.items;
+    // Accumulate the retrieved knowledge chunk IDs into the PR-level union so the post-aggregate
+    // citationValidate can enforce knowledge-citation membership (strict mode) instead of skip mode. Each
+    // chunk contributes the IDs IT retrieved; the union is the full "retrieved set for this review".
+    for (const item of retrievedKnowledge) {
+      state.retrievedKnowledgeChunkIds.add(item.chunk_id);
+    }
     retrievalDegraded = retrievalDegraded || retrieveResult.retrieval_degraded;
     if (retrieveResult.degradation_reason !== "") {
       retrievalDegradationReason = retrieveResult.degradation_reason;

@@ -173,6 +173,20 @@ export class ReviewWorkflowState {
    *  surfaced through a canonical-JSON compare). */
   readonly queryVectorCache = new Map<string, ReadonlyArray<number>>();
 
+  /**
+   * Union of retrieved knowledge chunk IDs across ALL chunks, accumulated as each chunk's
+   * retrieve_knowledge result resolves during the fan-out. Passed to citationValidate as the allowed
+   * knowledge-citation set (strict membership) — a finding citing a knowledge_chunk NOT in this set is
+   * dropped. Empty → citationValidate runs in skip mode (knowledge_chunk_ids=null). ENHANCEMENT beyond the
+   * frozen Python, which hardcodes skip mode (review_pipeline_orchestrator.py:807) — the Python workflow
+   * body already threads a `frozenset[str] | None` param, so this populates what Python left empty.
+   *
+   * A Set (membership-only; iteration order never observed without a sort) — the citationValidate dispatch
+   * sorts before sending so the activity input is replay-deterministic regardless of fan-out completion
+   * order. Mutated only from the single-threaded workflow event loop (no true-parallel write race).
+   */
+  readonly retrievedKnowledgeChunkIds = new Set<string>();
+
   /** The deduped degradation collector — wraps the notes list + compose logic. */
   readonly degradation = new DegradationCollector();
 

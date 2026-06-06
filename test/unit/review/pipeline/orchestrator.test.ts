@@ -168,6 +168,9 @@ type StubOverrides = {
   embedThrows?: boolean;
   retrieveThrows?: boolean;
   retrieveDegraded?: boolean;
+  /** When set, retrieveKnowledge returns these items (each a KnowledgeChunkV1 wire dict). Drives the
+   *  state.retrievedKnowledgeChunkIds accumulation → the allowed knowledge_chunk_ids set on citationValidate. */
+  retrievedKnowledgeItems?: ReadonlyArray<Record<string, unknown>>;
   persistThrows?: boolean;
   dedupSemanticSkipped?: boolean;
   reviewChunkThrows?: boolean;
@@ -332,7 +335,7 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
         throw new Error("retrieve boom");
       }
       return RetrieveKnowledgeResultV1.parse({
-        items: [],
+        items: o.retrievedKnowledgeItems ?? [],
         retrieval_degraded: o.retrieveDegraded ?? false,
         degradation_reason: o.retrieveDegraded ? "qwen timeout" : "",
       });
@@ -904,7 +907,7 @@ describe("orchestrate — Stage-3 citation validation (Step 7.5)", () => {
     expect(result.findingsCount).toBe(1);
   });
 
-  it("dispatches citationValidate between aggregate and persist (skip-mode knowledge_chunk_ids=null)", async () => {
+  it("dispatches citationValidate between aggregate and persist; knowledge_chunk_ids=null when NO knowledge retrieved (skip mode)", async () => {
     const stub = makeStub({ chunkCount: 1, withCitationValidate: true, citationDropCount: 0 });
     await orchestrate(makeCtx(stub));
     const aggIdx = stub.calls.indexOf("aggregate");
@@ -913,11 +916,37 @@ describe("orchestrate — Stage-3 citation validation (Step 7.5)", () => {
     expect(aggIdx).toBeGreaterThanOrEqual(0);
     expect(citIdx).toBeGreaterThan(aggIdx);
     expect(persistIdx).toBeGreaterThan(citIdx);
-    // skip-mode: knowledge_chunk_ids travels as null (NOT [] — the null/array distinction is load-bearing).
+    // EMPTY retrieval → skip mode: knowledge_chunk_ids travels as null (NOT [] — the distinction is
+    // load-bearing; null disables knowledge-citation validation, [] forbids ALL knowledge citations).
     expect(stub.citationInputs[0]!.knowledge_chunk_ids).toBeNull();
     // observe-mode policy citation context (empty rule_ids — no bundles in this fixture).
     expect(stub.citationInputs[0]!.policy_citation?.enforcement).toBe("observe");
     expect(stub.citationInputs[0]!.workspace_path).toBe("/ws/abc/repo");
+  });
+
+  it("passes the accumulated retrieved knowledge chunk IDs (sorted union) to citationValidate (strict mode)", async () => {
+    // The fan-out accumulates each chunk's retrieved knowledge chunk_ids into state.retrievedKnowledgeChunkIds;
+    // the post-aggregate citationValidate receives the SORTED union (replay-deterministic), NOT null — so a
+    // finding citing a knowledge_chunk outside the retrieved set would be dropped. ENHANCEMENT beyond Python.
+    const idA = uuidFor(811);
+    const idB = uuidFor(810); // lexically BELOW idA → proves the output is sorted, not insertion-ordered
+    const knowledgeItem = (chunkId: string): Record<string, unknown> => ({
+      chunk_id: chunkId,
+      installation_id: uuidFor(2),
+      repo_id: uuidFor(3),
+      relative_path: "docs/guide.md",
+      chunk_index: 0,
+      body: "knowledge body",
+      doc_kind: "other",
+    });
+    const stub = makeStub({
+      chunkCount: 1,
+      withCitationValidate: true,
+      retrievedKnowledgeItems: [knowledgeItem(idA), knowledgeItem(idB)],
+    });
+    await orchestrate(makeCtx(stub));
+    // Sorted union of the two retrieved chunk_ids (idB < idA), regardless of insertion order.
+    expect(stub.citationInputs[0]!.knowledge_chunk_ids).toEqual([idA, idB].sort());
   });
 
   it("drops findings citing missing paths + appends a degradation note + filters the downstream set", async () => {
