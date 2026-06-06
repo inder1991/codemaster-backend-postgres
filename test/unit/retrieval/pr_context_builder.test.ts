@@ -1,11 +1,11 @@
 // Unit tests for retrieval/pr_context_builder.ts — 1:1 with the frozen Python
 // vendor/codemaster-py/tests/unit/review/test_pr_context_builder.py.
 //
-// Both helpers are pure data folds — no clock, no I/O, no random. The classification-specific Python
-// cases (`test_classification_populated_from_t2_classifier`, etc.) exercise the real detection-pipeline
-// `classify_files`, which is NOT ported (FOLLOW-UP-pr-context-classifier-port). Here those are covered
-// by (a) a stub classifier proving the seam threads through, and (b) the default identity classifier
-// leaving flags false. All non-classification fields are full Tier-1 parity against frozen Python.
+// Both helpers are pure data folds — no clock, no I/O, no random. The default classifier IS the real
+// detection-pipeline `classify_files` (1:1 with Python's build_pr_context_full); the classification-flag
+// parity itself is asserted in the Tier-1 parity suite (retrieval_hybrid_tier1.parity.test.ts). Here the
+// classifier seam is covered by (a) a stub classifier proving injection threads through, and (b) the
+// real default leaving a normal source file all-false. All fields are full Tier-1 parity vs frozen Python.
 
 import { randomUUID } from "node:crypto";
 
@@ -113,7 +113,7 @@ describe("buildPrContextFull", () => {
     ]);
   });
 
-  it("default (identity) classifier leaves all flags false + reason null", () => {
+  it("default classifier (real classify_files) leaves a normal source file all-false + reason null", () => {
     const result = buildPrContextFull({
       prId: randomUUID(),
       headSha: "0".repeat(40),
@@ -129,8 +129,8 @@ describe("buildPrContextFull", () => {
   });
 
   it("threads an injected classifier (Python's classify_files seam)", () => {
-    // Stub classifier: flips is_test on any path under tests/, mirroring the detection orchestrator's
-    // effect (the real classifier port is FOLLOW-UP-pr-context-classifier-port).
+    // Stub classifier: flips is_test on any path under tests/, proving the injection seam threads
+    // through even though the DEFAULT is now the real detection-pipeline classify_files.
     const markTests: PrContextClassifier = (ctx) =>
       PRContext.parse({
         ...ctx,

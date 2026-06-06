@@ -16,18 +16,15 @@
 // workflow sandbox without triggering non-determinism checks (the workflow picks between them via
 // `workflow.patched("confluence-pr-context-full-pr")`).
 //
-// ── classify_files seam (DIVERGENCE from the Python, documented for the verifier) ──────────────────
+// ── classify_files seam ─────────────────────────────────────────────────────────────────────────
 // The Python `build_pr_context_full` calls the detection-pipeline orchestrator
 // `codemaster.retrieval.detection.classifiers.classify_files` directly to populate each ChangedFile's
-// `classification` (is_generated / is_vendored / is_test). That detection subsystem
-// (classify_generated / classify_vendored / classify_test) is NOT ported to TS yet — tracked as
-// FOLLOW-UP-pr-context-classifier-port. To keep this builder faithful to the Python STRUCTURE (which
-// imports + applies the classifier) while not coupling to an unported subsystem, the classifier is an
-// INJECTED seam ({@link PrContextClassifier}) defaulting to the identity pass-through
-// ({@link identityClassifier}). When the detection port lands, the workflow wires its `classifyFiles`
-// (PRContext → PRContext) here and the classification flags populate exactly as in Python. All other
-// fields (path / additions / deletions order, head_sha + branch passthrough, manifest threading) are
-// byte-for-byte 1:1 with the frozen Python and Tier-1-parity-tested.
+// `classification` (is_generated / is_vendored / is_test). That subsystem IS now ported
+// ({@link classifyFiles} in retrieval/detection/classifiers.ts), and `buildPrContextFull` DEFAULTS to it
+// — so classification flags populate exactly as in Python (Tier-1-parity-tested). The classifier stays an
+// INJECTED seam ({@link PrContextClassifier}) so tests can substitute a stub; {@link identityClassifier}
+// is the no-op opt-out. All other fields (path / additions / deletions order, head_sha + branch
+// passthrough, manifest threading) are byte-for-byte 1:1 with the frozen Python.
 
 import {
   ChangedFile,
@@ -38,6 +35,8 @@ import {
 import type { PrFileV1 } from "#contracts/pr_file.v1.js";
 import type { PrFilesEnrichmentResultV1 } from "#contracts/pr_files_enrichment.v1.js";
 
+import { classifyFiles } from "#backend/retrieval/detection/classifiers.js";
+
 /**
  * The detection-pipeline classifier seam (Python `classify_files: (PRContext) -> PRContext`). Takes a
  * raw PRContext + returns one with every ChangedFile's `classification` populated. Replay-safe (pure).
@@ -46,8 +45,8 @@ export type PrContextClassifier = (ctx: PRContext) => PRContext;
 
 /**
  * Identity classifier — returns the PRContext unchanged (all ChangedFile.classification flags stay at
- * their constructed default of all-false / reason=null). The MVP default until the detection subsystem
- * is ported (FOLLOW-UP-pr-context-classifier-port).
+ * their constructed default of all-false / reason=null). The no-op OPT-OUT from the real
+ * {@link classifyFiles} default (used by tests that want to assert un-classified input).
  */
 export const identityClassifier: PrContextClassifier = (ctx) => ctx;
 
@@ -91,7 +90,9 @@ export function buildPrContextFull(args: {
   if (enrichment === null || enrichment === undefined) {
     return null;
   }
-  const classify = args.classify ?? identityClassifier;
+  // Default to the real detection-pipeline classify_files (1:1 with Python's build_pr_context_full, which
+  // always classifies). Callers may still inject a stub via `classify` for testing. Pure + replay-safe.
+  const classify = args.classify ?? classifyFiles;
   const rawCtx = PRContext.parse({
     pr_id: args.prId,
     head_sha: args.headSha,

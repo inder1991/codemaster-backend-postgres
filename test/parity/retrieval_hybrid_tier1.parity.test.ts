@@ -165,9 +165,9 @@ describe("Tier-1 parity: build_pr_context_full", () => {
     expect(ctx!.manifests).toEqual(FROZEN_FULL.manifests);
   });
 
-  it("DELTA: classification is_test diverges (identity classifier vs frozen classify_files)", () => {
-    // Documents the FOLLOW-UP-pr-context-classifier-port delta: the frozen Python flags
-    // tests/test_a.py is_test=true; the TS identity classifier (detection port unported) emits false.
+  it("classification is_test matches frozen classify_files (tests/test_a.py → true)", () => {
+    // The default classifier is now the real detection-pipeline classify_files, so TS classification
+    // matches the frozen Python output — closes the former FOLLOW-UP-pr-context-classifier-port delta.
     const enrichment: PrFilesEnrichmentResultV1 = {
       schema_version: 1,
       files: [
@@ -187,10 +187,9 @@ describe("Tier-1 parity: build_pr_context_full", () => {
     });
     expect(ctx).not.toBeNull();
     const tsTestCls = ctx!.changed_files.map((cf) => cf.classification.is_test);
-    // TS identity classifier → all false.
-    expect(tsTestCls).toEqual([false, false, false, false]);
-    // Frozen Python → tests/test_a.py true (the delta the follow-up closes).
-    expect(FROZEN_FULL.pythonTestCls).toEqual([false, false, true, false]);
+    // TS now MATCHES the frozen Python classify_files output (parity, not a delta).
+    expect(tsTestCls).toEqual(FROZEN_FULL.pythonTestCls);
+    expect(tsTestCls).toEqual([false, false, true, false]);
   });
 });
 
