@@ -13,10 +13,22 @@ import type { FastifyInstance } from "fastify";
 
 import type { Clock } from "#platform/clock.js";
 
-import { DashboardSummaryV1, OrgsListV1 } from "#contracts/admin.v1.js";
+import { DashboardSummaryV1, OrgsListV1, TaxonomyGapListV1 } from "#contracts/admin.v1.js";
 
-import { listOrgs } from "#backend/api/admin/admin_read_repo.js";
+import { listOrgs, listTaxonomyGaps } from "#backend/api/admin/admin_read_repo.js";
 import { makeRequireRole } from "#backend/api/admin/_authz.js";
+
+const TAXONOMY_DEFAULT_LIMIT = 50;
+const TAXONOMY_MAX_LIMIT = 200;
+
+/** Parse + clamp the ?limit query param to [1, MAX] (mirrors taxonomy_gaps.list_gaps's clamp). */
+function clampTaxonomyLimit(query: unknown): number {
+  const raw = Number((query as { limit?: unknown }).limit ?? TAXONOMY_DEFAULT_LIMIT);
+  if (!Number.isFinite(raw)) {
+    return TAXONOMY_DEFAULT_LIMIT;
+  }
+  return Math.max(1, Math.min(TAXONOMY_MAX_LIMIT, Math.floor(raw)));
+}
 
 export type AdminRoutesOptions = {
   db: Kysely<unknown>;
@@ -57,6 +69,15 @@ export async function registerAdminRoutes(
       async (request, reply) => {
         const orgs = await listOrgs(opts.db, request.authPrincipal!.installationId);
         return reply.code(200).send(OrgsListV1.parse({ orgs }));
+      },
+    );
+
+    scope.get(
+      "/api/admin/taxonomy/gaps",
+      { preHandler: requireRole(["platform_owner", "super_admin"]) },
+      async (request, reply) => {
+        const rows = await listTaxonomyGaps(opts.db, clampTaxonomyLimit(request.query));
+        return reply.code(200).send(TaxonomyGapListV1.parse({ rows }));
       },
     );
 

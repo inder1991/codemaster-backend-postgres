@@ -22,6 +22,28 @@ export const OrgsListV1 = z
   .strict();
 export type OrgsListV1 = z.infer<typeof OrgsListV1>;
 
+/** One unrecognized-label entry from core.v_taxonomy_gaps. */
+export const TaxonomyGapEntryV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    label: z.string().min(14).regex(/^unrecognized:[a-z][a-z0-9_-]*$/),
+    chunks_carrying: z.number().int().min(0),
+    pages_carrying: z.number().int().min(0),
+    spaces_carrying: z.number().int().min(0),
+    most_recent_use: z.string().datetime({ offset: true }),
+  })
+  .strict();
+export type TaxonomyGapEntryV1 = z.infer<typeof TaxonomyGapEntryV1>;
+
+/** GET /api/admin/taxonomy/gaps — top-N unrecognized labels (sorted by chunks_carrying DESC). */
+export const TaxonomyGapListV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    rows: z.array(TaxonomyGapEntryV1),
+  })
+  .strict();
+export type TaxonomyGapListV1 = z.infer<typeof TaxonomyGapListV1>;
+
 /** GET /api/admin/dashboard — the operator landing summary. */
 export const DashboardSummaryV1 = z
   .object({
