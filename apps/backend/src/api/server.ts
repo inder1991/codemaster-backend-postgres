@@ -3,6 +3,7 @@
 // register onto the app here as they land in subsequent slices.
 
 import { VaultHttpPort } from "#backend/adapters/vault_http.js";
+import { registerAdminRoutes } from "#backend/api/admin/admin_routes.js";
 import { registerAuthRoutes } from "#backend/api/auth/auth_routes.js";
 import { makeAuthSecretsProvider } from "#backend/api/auth/auth_secrets_provider.js";
 import { PostgresLocalUserRepo } from "#backend/api/auth/local_user_repo.js";
@@ -62,14 +63,18 @@ export async function runServer(): Promise<void> {
       authSecrets.sessionSigningKey(),
       authSecrets.csrfSecret(),
     ]);
+    const coreDb = tenantKysely(dsn);
+    const clock = new WallClock();
     await registerAuthRoutes(app, {
-      localRepo: new PostgresLocalUserRepo({ db: tenantKysely(dsn), registry }),
+      localRepo: new PostgresLocalUserRepo({ db: coreDb, registry }),
       ldap: new NoOpLdapClient(),
-      clock: new WallClock(),
+      clock,
       signingKey,
       csrfSecret,
       secureCookies: (process.env["CODEMASTER_SECURE_COOKIES"] ?? "true") !== "false",
     });
+    // D2 — admin READ endpoints (operator visibility), behind the same makeRequireRole gate + signing key.
+    await registerAdminRoutes(app, { db: coreDb, signingKey, clock });
   }
 
   // ── More routers register here as they land ──
