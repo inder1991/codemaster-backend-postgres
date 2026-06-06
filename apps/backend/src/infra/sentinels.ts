@@ -6,3 +6,8 @@ export const SUPER_ADMIN_SESSION_INSTALLATION_ID = "00000000-0000-0000-0000-0000
 
 /** The installation_id stamped on platform-scope audit rows (login events, etc.) that aren't tenant-bound. */
 export const PLATFORM_SCOPE_AUDIT_INSTALLATION_ID = "00000000-0000-0000-0000-000000000001";
+
+/** Signals "super_admin viewing platform-aggregated data" in admin read queries (e.g. the orgs filter's
+ *  platform-view bypass). NUMERICALLY IDENTICAL to {@link SUPER_ADMIN_SESSION_INSTALLATION_ID} (UUID int=0);
+ *  a conceptually-distinct sentinel kept separate to mirror the frozen Python sentinels.py. */
+export const SUPER_ADMIN_PLATFORM_VIEW_UUID = "00000000-0000-0000-0000-000000000000";
