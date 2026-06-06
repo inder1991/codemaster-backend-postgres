@@ -5,6 +5,7 @@
 // EVERY call (no in-process cache — the secret rotates rarely, HMAC verification is once per request, and
 // the Vault round-trip is sub-ms same-cluster; add a cache only if telemetry shows a hot path).
 
+import { FileKvReader } from "#backend/adapters/vault_file_kv.js";
 import { VaultHttpPort } from "#backend/adapters/vault_http.js";
 
 import type { WebhookSecretProvider } from "#backend/api/github_webhook_routes.js";
@@ -53,4 +54,20 @@ export function makeLazyVaultWebhookSecretProvider(): WebhookSecretProvider {
       return provider.currentSecret();
     },
   };
+}
+
+/**
+ * Select the webhook-secret source by env (ADR-0071). `CODEMASTER_VAULT_SECRET_SOURCE=agent-file` reads the
+ * secret from the Vault Agent-rendered file (via {@link FileKvReader} — no Vault API call, no token held);
+ * anything else (default `vault-api`) keeps the lazy Vault HTTP provider. Both reuse
+ * {@link VaultWebhookSecretProvider}, which extracts the `webhook_secret` key — only the read surface
+ * differs. The file reader is constructed eagerly but reads nothing until the first `currentSecret()`, so
+ * the server still boots without touching Vault or the file.
+ */
+export function makeWebhookSecretProvider(): WebhookSecretProvider {
+  const source = process.env["CODEMASTER_VAULT_SECRET_SOURCE"] ?? "vault-api";
+  if (source === "agent-file") {
+    return new VaultWebhookSecretProvider({ vault: new FileKvReader() });
+  }
+  return makeLazyVaultWebhookSecretProvider();
 }
