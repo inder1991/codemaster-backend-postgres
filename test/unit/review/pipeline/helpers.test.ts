@@ -12,10 +12,14 @@ import { describe, it, expect } from "vitest";
 import {
   buildAnalyzedPayload,
   buildPolicyCitationContext,
+  configChangeNoticeFinding,
+  maybeAppendConfigNotice,
 } from "#backend/review/pipeline/helpers.js";
 import { makePostReviewCapture } from "#backend/review/pipeline/state.js";
 import { ResolvedGuidanceBundleV1 } from "#contracts/resolved_guidance.v1.js";
 import { PublicationOutcome } from "#contracts/posted_review.v1.js";
+import { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
+import { AggregatedFindingsV1 } from "#contracts/aggregated_findings.v1.js";
 
 // ─── helpers to build a minimal valid policy bundle keyed by a set of rule_ids ───────────────────────
 
@@ -72,6 +76,76 @@ describe("buildPolicyCitationContext — union + dedup + sort", () => {
   it("honours an explicit enforcement override", () => {
     const ctx = buildPolicyCitationContext(new Map(), "enforce");
     expect(ctx.enforcement).toBe("enforce");
+  });
+});
+
+// ─── maybeAppendConfigNotice — the spec §7 config-change notice mutator ───────────────────────────────
+
+function ordinaryFinding(idx: number): ReviewFindingV1 {
+  return ReviewFindingV1.parse({
+    file: `src/file_${idx}.ts`,
+    start_line: 1,
+    end_line: 1,
+    severity: "issue",
+    category: "bug",
+    title: `finding-${idx}`,
+    body: `body ${idx}`,
+    confidence: 0.9,
+  });
+}
+
+function aggregatedOf(findings: ReadonlyArray<ReviewFindingV1>): AggregatedFindingsV1 {
+  return AggregatedFindingsV1.parse({
+    findings: [...findings],
+    dedupe_stats: { input_count: findings.length, exact_dropped: 0, semantic_merged: 0, capped: 0 },
+    policy_revision: 3,
+  });
+}
+
+describe("maybeAppendConfigNotice — spec §7 (.codemaster.yaml) config-change notice", () => {
+  it("appends the notice when .codemaster.yaml is in the changed set", () => {
+    const before = aggregatedOf([ordinaryFinding(1)]);
+    const after = maybeAppendConfigNotice(before, ["src/file_1.ts", ".codemaster.yaml"]);
+    expect(after.findings.length).toBe(2);
+    const notice = after.findings[after.findings.length - 1]!;
+    expect(notice.file).toBe(".codemaster.yaml");
+    expect(notice.category).toBe("config");
+    expect(notice.title).toBe("codemaster: this PR modifies .codemaster.yaml");
+    expect(notice.severity).toBe("suggestion");
+    // The notice the helper appends is the canonical configChangeNoticeFinding leaf.
+    expect(notice).toEqual(configChangeNoticeFinding());
+    // dedupe_stats + policy_revision + schema_version are preserved on the rebuild.
+    expect(after.dedupe_stats).toEqual(before.dedupe_stats);
+    expect(after.policy_revision).toBe(before.policy_revision);
+    expect(after.schema_version).toBe(before.schema_version);
+  });
+
+  it("does NOT append the notice when .codemaster.yaml is absent from the changed set", () => {
+    const before = aggregatedOf([ordinaryFinding(1), ordinaryFinding(2)]);
+    const after = maybeAppendConfigNotice(before, ["src/file_1.ts", "src/file_2.ts"]);
+    // Identity-by-value: no notice added.
+    expect(after.findings.length).toBe(2);
+    expect(after.findings.some((f) => f.file === ".codemaster.yaml")).toBe(false);
+    // No-op path returns the SAME object reference (the Python `return aggregated`).
+    expect(after).toBe(before);
+  });
+
+  it("is idempotent — a second call over an already-noticed result does not double-append", () => {
+    const before = aggregatedOf([ordinaryFinding(1)]);
+    const once = maybeAppendConfigNotice(before, [".codemaster.yaml"]);
+    expect(once.findings.length).toBe(2);
+    const twice = maybeAppendConfigNotice(once, [".codemaster.yaml"]);
+    // No duplicate: still exactly one notice. The idempotency guard returns the same object reference.
+    expect(twice.findings.length).toBe(2);
+    expect(twice.findings.filter((f) => f.file === ".codemaster.yaml").length).toBe(1);
+    expect(twice).toBe(once);
+  });
+
+  it("appends to an empty findings set when .codemaster.yaml is the only changed file", () => {
+    const before = aggregatedOf([]);
+    const after = maybeAppendConfigNotice(before, [".codemaster.yaml"]);
+    expect(after.findings.length).toBe(1);
+    expect(after.findings[0]!.file).toBe(".codemaster.yaml");
   });
 });
 

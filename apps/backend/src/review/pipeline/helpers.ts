@@ -32,6 +32,7 @@ import type { PostReviewCapture } from "./state.js";
 import type { ReviewPipelineResult } from "./pipeline_result.js";
 import type { ResolvedGuidanceBundleV1 } from "#contracts/resolved_guidance.v1.js";
 import type { PolicyCitationContextV1, PolicyCitationEnforcement } from "#contracts/policy_citation.v1.js";
+import type { AggregatedFindingsV1 } from "#contracts/aggregated_findings.v1.js";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // _stage_outcome_for_publication (review_pull_request.py:155)
@@ -191,6 +192,70 @@ export function configChangeNoticeFinding(): ReviewFindingV1 {
     suggestion: null,
     confidence: 0.99,
   });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// _maybe_append_config_notice (review_pull_request.py:246)
+//
+// spec §7 — append the .codemaster.yaml config-change notice when the PR touched .codemaster.yaml.
+// Returns a (possibly new) AggregatedFindingsV1 with the notice appended; otherwise returns `aggregated`
+// unchanged. Pure + sandbox-safe (no clock / random / uuid / I/O) — only constructs a fresh
+// AggregatedFindingsV1 from its inputs + the pure configChangeNoticeFinding leaf.
+//
+// ── GATE COLLAPSE (repo-config-wiring collapse-on) ──
+// The frozen Python takes a `patched` kwarg (`workflow.patched("repo-config-wiring")`) and no-ops when
+// false. This drives a NEW Temporal workflow type with ZERO histories, so the gate is unconditionally TRUE
+// — the `if not patched: return aggregated` early-out is dead code and is NOT ported. Only the membership
+// guard remains.
+//
+// The membership check uses the PRE-path_filters changed-paths snapshot (the orchestrator's
+// `repo.changedPaths`, = the Python `original_changed_paths`) so a `path_filters` exclusion of
+// .codemaster.yaml cannot hide the notice. Callers MUST append AFTER the MAX_INLINE_FINDINGS cap so the
+// notice is never capped away.
+//
+// IDEMPOTENT — does not double-append. A second call over an already-noticed AggregatedFindingsV1 is a
+// no-op (the notice is detected by its sentinel file + category + title, the same shape
+// configChangeNoticeFinding mints). The Python relied on the caller wiring (one append site); the TS port
+// hardens the function itself so a re-invocation in a fan-out / retry path can never duplicate the notice.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+const CONFIG_YAML_PATH = ".codemaster.yaml";
+
+/** Does `findings` already carry the config-change notice? Detected by the sentinel
+ *  (file, category, title) the notice mints — so a re-append is a no-op (idempotency guard). */
+function hasConfigNotice(findings: ReadonlyArray<ReviewFindingV1>): boolean {
+  for (const f of findings) {
+    if (
+      f.file === CONFIG_YAML_PATH &&
+      f.category === "config" &&
+      f.title === "codemaster: this PR modifies .codemaster.yaml"
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function maybeAppendConfigNotice(
+  aggregated: AggregatedFindingsV1,
+  changedPaths: ReadonlyArray<string>,
+): AggregatedFindingsV1 {
+  // Membership: .codemaster.yaml in the PRE-path_filters changed set (the Python `if ".codemaster.yaml"
+  // not in set(changed_paths): return aggregated`).
+  if (!changedPaths.includes(CONFIG_YAML_PATH)) {
+    return aggregated;
+  }
+  // Idempotency: never double-append (see header).
+  if (hasConfigNotice(aggregated.findings)) {
+    return aggregated;
+  }
+  // Python: AggregatedFindingsV1(findings=(*aggregated.findings, notice), dedupe_stats=..., policy_revision=...).
+  // schema_version is preserved (the Python keeps the model's existing version on the rebuild).
+  return {
+    schema_version: aggregated.schema_version,
+    findings: [...aggregated.findings, configChangeNoticeFinding()],
+    dedupe_stats: aggregated.dedupe_stats,
+    policy_revision: aggregated.policy_revision,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────

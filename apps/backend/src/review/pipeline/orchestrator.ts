@@ -69,6 +69,7 @@ import {
   inferPrTopologyKind,
   pathFiltersExcludedAllFinding,
   buildPolicyCitationContext,
+  maybeAppendConfigNotice,
 } from "./helpers.js";
 import { stageOutcome, recordStage, type StageLogger } from "./degradation.js";
 import { postReviewResults, type PostingLifecycleDeps } from "./posting.js";
@@ -229,6 +230,23 @@ const QUERY_TEXT_MAX = 8000;
  *  `ReviewContextV1.retrieved_evidence` max_length (100) so the producer output never overflows the
  *  ReviewContextV1 field that carries it. The producer drops the LOWEST-priority entries first. */
 const EVIDENCE_ENTRY_CAP = 100;
+
+/** M-A5 chunk cap (Python `MAX_CHUNKS_PER_REVIEW`, review_pull_request.py:64). Bounds the Temporal
+ *  event-history per PR fan-out: the chunk set fed to fanOutReview is truncated to at most this many chunks
+ *  (the Python `_chunk_and_redact` closure applied it AFTER chunk_and_redact_activity returned). The TS port
+ *  caps AFTER selectCarryForward narrows to `to_review` — the only chunks the fan-out actually reviews —
+ *  which is the strictly tighter (mathematically subsumed) bound, so the event-history ceiling still holds
+ *  while never truncating a chunk the carry-forward layer already dropped. */
+const MAX_CHUNKS_PER_REVIEW = 100;
+
+/** M-A3 inline-findings cap (Python `MAX_INLINE_FINDINGS`, review_pull_request.py:63). GitHub's PR Review
+ *  API rejects > 300 inline comments; this is the belt-and-suspenders ceiling the workflow body's
+ *  `_aggregate` closure applied to `aggregated.findings` AFTER the aggregate activity returned and BEFORE
+ *  appending the config-change notice (so the notice is never capped away). It is SEPARATE from — and looser
+ *  than — the aggregate activity's own per-review cap (`PER_REVIEW_CAP = 50`, rankAndCap), which always runs
+ *  first; under normal flow this ceiling is a no-op, but it is ported faithfully as the Python's second
+ *  guard. */
+const MAX_INLINE_FINDINGS = 250;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // orchestrate — drive the full review pipeline through one PR push.
@@ -437,13 +455,32 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
     // outer catch adds the human-readable variant the walkthrough renderer consumes.
     const selection = await selectCarryForwardWithFallback(ctx, chunks);
 
+    // M-A5 chunk cap (Python `_chunk_and_redact` closure, review_pull_request.py:1138). Bound the chunk set
+    // fed to the fan-out to MAX_CHUNKS_PER_REVIEW so the Temporal event-history per PR stays bounded. The
+    // Python applied this inside `_chunk_and_redact` (on the raw chunk tuple, BEFORE carry-forward); the TS
+    // port applies it to `selection.to_review` (AFTER carry-forward narrows) — the strictly tighter bound the
+    // fan-out actually reviews, so the event-history ceiling still holds and a chunk the carry-forward layer
+    // already dropped is never the one truncated. On truncation: WARN log + a degradation note so the
+    // walkthrough renderer surfaces the partial-review state.
+    let toReview: ReadonlyArray<DiffChunkV1> = selection.to_review;
+    if (toReview.length > MAX_CHUNKS_PER_REVIEW) {
+      (ctx.logger ?? NULL_LOGGER).warning(
+        `review_pipeline.chunks_capped: original=${toReview.length} capped_to=${MAX_CHUNKS_PER_REVIEW}`,
+      );
+      state.degradation.add(
+        `chunk set truncated to ${MAX_CHUNKS_PER_REVIEW} of ${toReview.length} chunks; ` +
+          `review may be incomplete`,
+      );
+      toReview = toReview.slice(0, MAX_CHUNKS_PER_REVIEW);
+    }
+
     // Step 5 — fan-out LLM review. Collapse-on of static-analysis-orchestrator-v2 + pr-topology-manifest:
     // thread tier1_findings / tool_statuses (straight from sa) AND build the PR-topology manifest from the
-    // chunks selected for review. fanOutReview returns [findings, intents]; intents propagate to the result
-    // for Stage 5's arbitration layer.
+    // (capped) chunks selected for review. fanOutReview returns [findings, intents]; intents propagate to the
+    // result for Stage 5's arbitration layer.
     const tier1ForFanout = sa.tier1_findings;
     const toolStatusesForFanout = sa.tool_statuses;
-    const prTopologyManifest: ReadonlyArray<PRTopologyEntryV1> = selection.to_review.map(
+    const prTopologyManifest: ReadonlyArray<PRTopologyEntryV1> = toReview.map(
       (c): PRTopologyEntryV1 => ({
         chunk_id: c.chunk_id,
         path: c.path,
@@ -485,7 +522,7 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
       return result;
     };
 
-    const [newFindings, arbitrationIntents] = await fanOutReview(selection.to_review, invokeChunk, {
+    const [newFindings, arbitrationIntents] = await fanOutReview(toReview, invokeChunk, {
       concurrency: ctx.limits.chunkConcurrency,
       threading,
     });
@@ -515,12 +552,43 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
       await ctx.claimCheck();
     }
 
-    // Step 7 — aggregate. (`let`: Step 7.2's policy post-filter, Step 7.5's citation_validate, and the
-    // Step 7.7 arbitration-result derivation reassign `aggregated` as the pipeline narrows the findings.)
+    // Step 7 — aggregate. (`let`: the M-A3 cap + config-notice append below, Step 7.2's policy post-filter,
+    // Step 7.5's citation_validate, and the Step 7.7 arbitration-result derivation reassign `aggregated` as
+    // the pipeline narrows the findings.)
     let aggregated: AggregatedFindingsV1 = await ports.aggregate({
       findings: deduped.findings,
       policyRevision: pr.policyRevision,
     });
+
+    // M-A3 inline-findings cap (Python `_aggregate` closure, review_pull_request.py:1986). GitHub's PR
+    // Review API rejects > 300 inline comments; cap `aggregated.findings` to MAX_INLINE_FINDINGS. This is the
+    // belt-and-suspenders ceiling the workflow body applied to the aggregate-activity result; the activity's
+    // own rankAndCap (PER_REVIEW_CAP=50) always ran first, so under normal flow this is a no-op, but it is
+    // ported faithfully as the Python's second guard. On truncation: WARN log (the Python
+    // `findings_capped` line). Applied BEFORE the config-notice append so the notice is never capped away.
+    if (aggregated.findings.length > MAX_INLINE_FINDINGS) {
+      (ctx.logger ?? NULL_LOGGER).warning(
+        `review_pipeline.findings_capped: original=${aggregated.findings.length} ` +
+          `capped_to=${MAX_INLINE_FINDINGS}`,
+      );
+      aggregated = {
+        schema_version: aggregated.schema_version,
+        findings: aggregated.findings.slice(0, MAX_INLINE_FINDINGS),
+        dedupe_stats: aggregated.dedupe_stats,
+        policy_revision: aggregated.policy_revision,
+      };
+    }
+
+    // spec §7 — append the .codemaster.yaml config-change notice (Python `_maybe_append_config_notice`,
+    // review_pull_request.py:2002, called INSIDE the `_aggregate` closure right after the M-A3 cap). The
+    // membership check uses `repo.changedPaths` = the Python `original_changed_paths` (the PRE-path_filters
+    // snapshot), so a path_filters exclusion of .codemaster.yaml cannot hide the notice. Appended AFTER the
+    // MAX_INLINE_FINDINGS cap so it can never be capped away — and BEFORE every downstream consumer
+    // (post-filter / citation / persist / walkthrough / post), exactly like the Python ordering, so the
+    // notice flows through the whole chain and lands in the persisted row + the GitHub comment. Idempotent —
+    // maybeAppendConfigNotice never double-appends. cfg.no_spurious_notice smoke surface: the notice appears
+    // IFF .codemaster.yaml is in the changed set, NOT otherwise.
+    aggregated = maybeAppendConfigNotice(aggregated, repo.changedPaths);
 
     // Step 7.2 — inline policy post-filter (policy-post-filter-relocated collapse-on; the R-23 relocation).
     // Runs HERE, AFTER aggregate and BEFORE every downstream consumer (citation_validate / persist /

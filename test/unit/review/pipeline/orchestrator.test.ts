@@ -26,6 +26,7 @@ import {
   type ReviewPipelineContext,
 } from "#backend/review/pipeline/orchestrator.js";
 import { ReviewWorkflowState } from "#backend/review/pipeline/state.js";
+import { PER_FILE_CAP, PER_REVIEW_CAP } from "#backend/review/aggregation.js";
 
 import type { ReviewActivityPorts, ChangedLineRanges } from "#backend/review/pipeline/activity_ports.js";
 import type { ReviewContextV1 } from "#contracts/review_context.v1.js";
@@ -1252,5 +1253,136 @@ describe("fix-prompt (post path)", () => {
     const result = await orchestrate(ctx);
     expect(stub.calls).toContain("postReview");
     expect(result.status).toBe("accepted");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// spec §7 — .codemaster.yaml config-change notice (the cfg.no_spurious_notice smoke surface). The notice
+// appears IFF .codemaster.yaml is in the PR's PRE-path_filters changed set (repo.changedPaths), NOT
+// otherwise. Wired into orchestrate() right after the aggregate activity (Step 7), AFTER the M-A3 cap and
+// BEFORE every downstream consumer, so the notice flows through persist + walkthrough + post.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describe("config-change notice (spec §7 — cfg.no_spurious_notice)", () => {
+  function ctxWithChangedPaths(
+    stub: RecordingStub,
+    changedPaths: ReadonlyArray<string>,
+  ): ReviewPipelineContext {
+    const base = makeCtx(stub);
+    return { ...base, repo: { ...base.repo, changedPaths: [...changedPaths] } };
+  }
+
+  it("APPENDS the notice when .codemaster.yaml is in the changed set", async () => {
+    const stub = makeStub({ chunkCount: 1 });
+    const result = await orchestrate(
+      ctxWithChangedPaths(stub, ["src/a.ts", ".codemaster.yaml"]),
+    );
+    // 1 LLM finding + the appended config notice = 2.
+    expect(result.findingsCount).toBe(2);
+    const notice = result.aggregated!.findings.find((f) => f.file === ".codemaster.yaml");
+    expect(notice).toBeDefined();
+    expect(notice!.category).toBe("config");
+    expect(notice!.title).toBe("codemaster: this PR modifies .codemaster.yaml");
+    // The notice flows through to the walkthrough + persist (it was appended BEFORE those stages).
+    const walkthroughAgg = stub.walkthroughInputs[0]!.aggregated;
+    expect(walkthroughAgg.findings.some((f) => f.file === ".codemaster.yaml")).toBe(true);
+  });
+
+  it("does NOT append the notice when .codemaster.yaml is absent (no spurious notice)", async () => {
+    const stub = makeStub({ chunkCount: 1 });
+    const result = await orchestrate(ctxWithChangedPaths(stub, ["src/a.ts", "src/b.ts"]));
+    // Only the 1 LLM finding — no notice.
+    expect(result.findingsCount).toBe(1);
+    expect(result.aggregated!.findings.some((f) => f.file === ".codemaster.yaml")).toBe(false);
+    const walkthroughAgg = stub.walkthroughInputs[0]!.aggregated;
+    expect(walkthroughAgg.findings.some((f) => f.file === ".codemaster.yaml")).toBe(false);
+  });
+
+  it("appends EXACTLY ONE notice (no double-append) on a single pipeline run", async () => {
+    const stub = makeStub({ chunkCount: 1 });
+    const result = await orchestrate(ctxWithChangedPaths(stub, [".codemaster.yaml"]));
+    const notices = result.aggregated!.findings.filter((f) => f.file === ".codemaster.yaml");
+    expect(notices.length).toBe(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// M-A5 chunk cap (Python MAX_CHUNKS_PER_REVIEW = 100). The chunk set fed to fanOutReview is truncated to
+// at most 100 chunks; on truncation a WARN line + a degradation note surface the partial-review state.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describe("chunk cap (M-A5 — MAX_CHUNKS_PER_REVIEW = 100)", () => {
+  it("truncates the fan-out to 100 chunks and adds a degradation note when 101 chunks are selected", async () => {
+    const logs: Array<string> = [];
+    const logger = {
+      warning(msg: string): void {
+        logs.push(msg);
+      },
+    };
+    const stub = makeStub({ chunkCount: 101 });
+    const result = await orchestrate(makeCtx(stub, logger));
+    // reviewChunk fired EXACTLY 100 times (the cap), not 101.
+    expect(stub.calls.filter((c) => c === "reviewChunk").length).toBe(100);
+    // The degradation note names the cap + the original count.
+    expect(
+      result.degradationNotes.some((n) => n.includes("truncated to 100 of 101 chunks")),
+    ).toBe(true);
+    // The WARN line mirrors the Python `chunks_capped` log.
+    expect(logs.some((l) => l.includes("chunks_capped") && l.includes("capped_to=100"))).toBe(true);
+  });
+
+  it("does NOT truncate or add a note at exactly the cap (100 chunks)", async () => {
+    const stub = makeStub({ chunkCount: 100 });
+    const result = await orchestrate(makeCtx(stub));
+    expect(stub.calls.filter((c) => c === "reviewChunk").length).toBe(100);
+    expect(result.degradationNotes.some((n) => n.includes("truncated"))).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// Aggregate caps — the aggregate ACTIVITY's per-file (10) + per-review (50) caps (rankAndCap) AND the
+// workflow-body M-A3 MAX_INLINE_FINDINGS belt-and-suspenders ceiling (250). The cap VALUES are asserted
+// against the frozen Python constants (verified via grep on review_pull_request.py / aggregation.py).
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describe("aggregate caps — values match the frozen Python", () => {
+  it("PER_FILE_CAP=10 / PER_REVIEW_CAP=50 (rankAndCap) match review/aggregation.py", () => {
+    // Asserted directly against the exported activity-side cap constants (the rankAndCap defaults). These
+    // are the Python `PER_FILE_CAP: Final = 10` / `PER_REVIEW_CAP: Final = 50` (aggregation.py:85-86).
+    expect(PER_FILE_CAP).toBe(10);
+    expect(PER_REVIEW_CAP).toBe(50);
+  });
+
+  it("M-A3 MAX_INLINE_FINDINGS=250 caps aggregated.findings before the config notice", async () => {
+    // Override the aggregate stub to return 300 findings (above the 250 ceiling). The orchestrator's M-A3
+    // cap must truncate to 250 BEFORE the config notice would be appended.
+    const stub = makeStub({ chunkCount: 1 });
+    stub.ports.aggregate = async (input) => {
+      stub.calls.push("aggregate");
+      const padded = Array.from({ length: 300 }, (_v, i) =>
+        ReviewFindingV1.parse({
+          file: `src/over_${i}.ts`,
+          start_line: 1,
+          end_line: 1,
+          severity: "issue",
+          category: "bug",
+          title: `over-${i}`,
+          body: `body ${i}`,
+          confidence: 0.9,
+        }),
+      );
+      return AggregatedFindingsV1.parse({
+        findings: padded,
+        dedupe_stats: { input_count: input.findings.length, exact_dropped: 0, semantic_merged: 0, capped: 0 },
+        policy_revision: input.policyRevision,
+      });
+    };
+    const logs: Array<string> = [];
+    const logger = {
+      warning(msg: string): void {
+        logs.push(msg);
+      },
+    };
+    // .codemaster.yaml is NOT in the changed set, so the only cap effect is the truncation to 250.
+    const result = await orchestrate(makeCtx(stub, logger));
+    expect(result.aggregated!.findings.length).toBe(250);
+    expect(logs.some((l) => l.includes("findings_capped") && l.includes("capped_to=250"))).toBe(true);
   });
 });
