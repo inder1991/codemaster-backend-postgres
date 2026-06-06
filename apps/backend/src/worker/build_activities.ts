@@ -77,7 +77,10 @@ import { postCheckRun } from "#backend/activities/post_check_run.activity.js";
 import { postReviewResults } from "#backend/activities/post_review_results.activity.js";
 import { releaseWorkspace } from "#backend/activities/release_workspace.activity.js";
 import { selectCarryForward } from "#backend/activities/select_carry_forward.activity.js";
-import { staticAnalysis } from "#backend/activities/static_analysis.activity.js";
+import { buildStaticAnalysisActivity } from "#backend/activities/static_analysis.activity.js";
+import { RuffInWorkerRunner } from "#backend/analysis/ruff_runner.js";
+import { EslintInWorkerRunner } from "#backend/analysis/eslint_runner.js";
+import { GitleaksInWorkerRunner } from "#backend/analysis/gitleaks_runner.js";
 
 // ── Stage-2 lifecycle activities (mutex GATE + lease renew/release + placeholder post/delete) ──
 // The workflow body (review_pull_request.workflow.ts) dispatches these directly by their registered names
@@ -171,6 +174,15 @@ import { buildRetrieveKnowledgeActivity } from "#backend/wiring/retrievers.js";
 import { WallClock } from "#platform/clock.js";
 
 // ─── env reads (the same fail-loud reads the individual activities use) ──────────────────────────
+
+/**
+ * The Tier-1 static-analysis soft-barrier deadline (seconds). 1:1 with the frozen Python default
+ * `review_budgets.yaml::tier1_static_analysis_seconds: 60` — the StaticAnalysisOrchestrator owns this
+ * authoritative deadline (per-tool runner timeouts are only safety guards). The DB/yaml-backed budgets
+ * config loader (`review_budgets.py::load_budgets`) is NOT ported to TS yet; this constant is the
+ * unconfigured default until it lands. FOLLOW-UP-review-budgets-loader.
+ */
+const TIER1_STATIC_ANALYSIS_SECONDS = 60;
 
 /**
  * Read the canonical core-store DSN, fail-loud when unset. Mirrors the private `requireCoreDsn()` in
@@ -500,6 +512,28 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     clock,
   });
 
+  // ── static_analysis bound-method holder (REAL runner orchestration) ──
+  // 1:1 with the frozen Python `_wire_static_analysis_activity`: the three in-worker runners
+  // (Ruff/ESLint/Gitleaks — default binary names on $PATH; the worker-image provides the binaries) +
+  // the soft-barrier StaticAnalysisOrchestrator (Tier-1 deadline + the shared WallClock) + the Haiku
+  // AnalysisCurator (which resolves `forRole("secondary")` off the SAME lazy ledger-wired LlmClientCache
+  // the review-chunk/walkthrough/fix-prompt activities use). The K8s-Job runners (Semgrep/Trivy/Checkov/
+  // Kube-linter) are DEFERRED owner-provided infra — only the in-worker runners are registered today
+  // (FOLLOW-UP-static-analysis-k8s-job-runners). The Tier-1 deadline is the frozen Python default
+  // (review_budgets.yaml `tier1_static_analysis_seconds: 60`); the config-loader port is a separate
+  // follow-up (FOLLOW-UP-review-budgets-loader). `.staticAnalysis` is an arrow property so it stays
+  // bound when destructured into the map.
+  const staticAnalysisActivity = buildStaticAnalysisActivity({
+    runners: {
+      ruff: new RuffInWorkerRunner(),
+      eslint: new EslintInWorkerRunner(),
+      gitleaks: new GitleaksInWorkerRunner(),
+    },
+    curatorCache: llmCache,
+    deadlineSeconds: TIER1_STATIC_ANALYSIS_SECONDS,
+    clock,
+  });
+
   return {
     // ── 1-arg activities, ready as-is ──
     persistReviewFindings,
@@ -513,8 +547,9 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     redactChunks,
     // selectCarryForward(input) — pure deterministic 1-arg activity (no collaborators); registered bare.
     selectCarryForward,
-    // staticAnalysis(input) — Stage-1 empty-valid 1-arg activity (no collaborators yet); registered bare.
-    staticAnalysis,
+    // staticAnalysis(input) — REAL runner orchestration. Bound arrow property holding the in-worker
+    // runners + soft-barrier orchestrator + Haiku curator (shared ledger-wired LlmClientCache).
+    staticAnalysis: staticAnalysisActivity.staticAnalysis,
     // ── self-defaulting (optional 2nd `deps` arg → fn.length === 1) — registered bare ──
     allocateWorkspace,
     releaseWorkspace,

@@ -1,30 +1,37 @@
-// Unit tests for the STAGE-1 empty-valid `staticAnalysis` activity port.
+// Unit tests for the REAL `staticAnalysis` activity (StaticAnalysisActivity holder) — 1:1 port of the
+// frozen Python `StaticAnalysisActivity` (vendor/codemaster-py/codemaster/activities/static_analysis.py)
+// + the production `_ProductionPipeline` wiring (vendor/.../worker/main.py:2275-2327).
 //
-// Stage 1a ships the structurally-faithful "no-tools-configured" result: the activity accepts the real
-// typed input envelope (workspace_path + sandbox_files + changed_line_ranges + pr_meta) and returns a
-// well-formed StaticAnalysisResultV1 with EMPTY collections — no Ruff/ESLint/Gitleaks runner fires (those
-// land in Stage 4). This is NOT a hidden stub of behavior; it is the faithful result when no tool is
-// configured, identical to what the frozen Python returns on the empty-file-routing fast path
-// (StaticAnalysisResultV1() — see vendor/codemaster-py/codemaster/activities/static_analysis.py).
+// The holder owns: the in-worker runners (ruff/eslint/gitleaks), the soft-barrier orchestrator
+// (StaticAnalysisOrchestrator — deadline + clock), and the AnalysisCurator. The bound activity method:
+//   1. empty sandbox_files → default StaticAnalysisResultV1 (no runner fires);
+//   2. else routes files by language → RunnerSpec list → orchestrator → raw findings + tool_statuses;
+//   3. tier1_findings = the RAW orchestrator findings;
+//   4. MAX_RAW_PER_TOOL cap per-tool (records truncated_per_tool), THEN changed-line filter;
+//   5. curator promotes filtered → ReviewFindingV1 findings + curator_skipped;
+//   6. per_tool_errors derived from the failed/timed-out tool statuses;
+//   7. assembles StaticAnalysisResultV1.{findings, tier1_findings, tool_statuses, per_tool_errors,
+//      truncated_per_tool, curator_skipped}.
 //
-// The load-bearing assertions:
-//  (1) the return PARSES as a StaticAnalysisResultV1 (the orchestrator's dedup/aggregate/fan-out path
-//      re-validates the wire dict with extra="forbid"; a malformed shape would crash Step 3b);
-//  (2) every collection is EMPTY (findings / per_tool_errors / curator_skipped=true / truncated_per_tool /
-//      tier1_findings / tool_statuses) — byte-identical to the frozen Python's default envelope;
-//  (3) the activity tolerates the real input's structural shape (populated sandbox_files +
-//      changed_line_ranges + pr_meta) without inspecting it — the no-tools result is invariant in the
-//      payload at Stage 1.
+// These tests inject FAKE runners (in-memory AnalysisFindingV1 producers / throwers) + a FAKE curator
+// (records its input, returns canned ReviewFindingV1s) — the real runners + curator are tested in
+// test/unit/analysis/. NO subprocess, NO LLM, NO DB.
 
 import { describe, expect, it } from "vitest";
 
-import { staticAnalysis } from "#backend/activities/static_analysis.activity.js";
+import { FakeClock } from "#platform/clock.js";
+import { StaticAnalysisActivity, MAX_RAW_PER_TOOL } from "#backend/activities/static_analysis.activity.js";
+import type { CuratorPort } from "#backend/activities/static_analysis.activity.js";
+import type { AnalysisRunner, RunnerRunInput } from "#backend/analysis/runner_port.js";
 
+import { AnalysisFindingV1 } from "#contracts/analysis_findings.v1.js";
+import { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
 import { StaticAnalysisInputV1 } from "#contracts/static_analysis_input.v1.js";
 import { StaticAnalysisResultV1 } from "#contracts/static_analysis_result.v1.js";
+import type { PrMetaV1 } from "#contracts/walkthrough.v1.js";
 
-// A fully-populated valid PrMetaV1 payload (per contracts/walkthrough/pr_meta_v1.py). pr_id /
-// installation_id are canonical-lowercase UUIDs.
+// ─── fixtures ──────────────────────────────────────────────────────────────────────────────────
+
 const PR_META = {
   pr_id: "0123abcd-4567-89ab-cdef-0123456789ab",
   installation_id: "0123abcd-4567-89ab-cdef-0123456789ac",
@@ -33,82 +40,275 @@ const PR_META = {
   pr_description: "A change that adds the thing.",
 };
 
-describe("staticAnalysis (Stage-1 empty-valid placeholder)", () => {
-  it("returns a well-formed StaticAnalysisResultV1 that the dedup/aggregate path accepts", async () => {
-    const input = StaticAnalysisInputV1.parse({
-      workspace_path: "/tmp/ws-abc",
-      sandbox_files: ["src/app.py", "src/util.ts"],
-      changed_line_ranges: { "src/app.py": [[10, 20]], "src/util.ts": [[1, 5]] },
-      pr_meta: PR_META,
-    });
-
-    const result = await staticAnalysis(input);
-
-    // The activity already returns the typed shape; re-parsing through the strict (extra=forbid) output
-    // contract proves the orchestrator's Step-3b round-trip (StaticAnalysisResultV1.model_validate)
-    // accepts it. .strict() throws on any drift.
-    expect(() => StaticAnalysisResultV1.parse(result)).not.toThrow();
+let seq = 0;
+function finding(
+  tool: "ruff" | "eslint" | "gitleaks",
+  file: string,
+  line: number,
+  rule = `${tool}-rule`,
+): AnalysisFindingV1 {
+  seq += 1;
+  const hex = seq.toString(16).padStart(12, "0");
+  return AnalysisFindingV1.parse({
+    finding_id: `00000000-0000-4000-8000-${hex}`,
+    tool,
+    rule_id: rule,
+    file,
+    start_line: line,
+    end_line: line,
+    severity_raw: tool === "gitleaks" ? "blocker" : "warning",
+    message: `${tool} finding`,
+    fix_suggestion: null,
   });
+}
 
-  it("emits the empty-valid no-tools envelope (every collection empty; defaults match frozen Python)", async () => {
-    const input = StaticAnalysisInputV1.parse({
-      workspace_path: "/tmp/ws-abc",
-      sandbox_files: ["a.py"],
-      changed_line_ranges: { "a.py": [[1, 1]] },
-      pr_meta: PR_META,
-    });
+class FakeRunner implements AnalysisRunner {
+  public ranWith: RunnerRunInput | undefined;
+  public constructor(
+    public readonly name: string,
+    private readonly behavior: { kind: "ok"; findings: ReadonlyArray<AnalysisFindingV1> } | { kind: "throw"; error: Error },
+  ) {}
 
-    const result = await staticAnalysis(input);
+  public async run(input: RunnerRunInput): Promise<ReadonlyArray<AnalysisFindingV1>> {
+    this.ranWith = input;
+    if (this.behavior.kind === "throw") throw this.behavior.error;
+    return this.behavior.findings;
+  }
+}
 
-    // Byte-for-byte the frozen Python StaticAnalysisResultV1() default envelope: schema_version=1,
-    // findings=[], per_tool_errors={}, curator_skipped=true, truncated_per_tool={}, tier1_findings=[],
-    // tool_statuses=[].
-    expect(result.schema_version).toBe(1);
+/** A curator double: records the (findings, prMeta) it received, returns a canned CuratedResult. */
+class FakeCurator implements CuratorPort {
+  public sawFindings: ReadonlyArray<AnalysisFindingV1> | undefined;
+  public sawPrMeta: PrMetaV1 | undefined;
+  public constructor(
+    private readonly result: { findings: ReadonlyArray<ReviewFindingV1>; curator_skipped: boolean },
+  ) {}
+
+  public async curate(
+    findings: ReadonlyArray<AnalysisFindingV1>,
+    args: { prMeta: PrMetaV1 },
+  ): Promise<{ findings: ReadonlyArray<ReviewFindingV1>; curator_skipped: boolean }> {
+    this.sawFindings = findings;
+    this.sawPrMeta = args.prMeta;
+    return this.result;
+  }
+}
+
+function reviewFinding(file: string, line: number): ReviewFindingV1 {
+  return ReviewFindingV1.parse({
+    file,
+    start_line: line,
+    end_line: line,
+    severity: "issue",
+    category: "bug",
+    title: "promoted",
+    body: "a promoted finding",
+    suggestion: null,
+    confidence: 0.8,
+  });
+}
+
+function buildHolder(args: {
+  runners: { ruff: AnalysisRunner; eslint: AnalysisRunner; gitleaks: AnalysisRunner };
+  curator: CuratorPort;
+  deadlineSeconds?: number;
+}): StaticAnalysisActivity {
+  return new StaticAnalysisActivity({
+    runners: args.runners,
+    curator: args.curator,
+    deadlineSeconds: args.deadlineSeconds ?? 30,
+    clock: new FakeClock(),
+  });
+}
+
+function input(overrides: Partial<Record<string, unknown>> = {}): StaticAnalysisInputV1 {
+  return StaticAnalysisInputV1.parse({
+    workspace_path: "/tmp/ws",
+    sandbox_files: ["a.py", "b.ts"],
+    changed_line_ranges: { "a.py": [[1, 100]], "b.ts": [[1, 100]] },
+    pr_meta: PR_META,
+    ...overrides,
+  });
+}
+
+// ─── tests ─────────────────────────────────────────────────────────────────────────────────────
+
+describe("StaticAnalysisActivity (real runner orchestration)", () => {
+  it("empty sandbox_files → default StaticAnalysisResultV1 (no runner fires)", async () => {
+    const ruff = new FakeRunner("ruff", { kind: "ok", findings: [] });
+    const eslint = new FakeRunner("eslint", { kind: "ok", findings: [] });
+    const gitleaks = new FakeRunner("gitleaks", { kind: "ok", findings: [] });
+    const curator = new FakeCurator({ findings: [], curator_skipped: true });
+    const holder = buildHolder({ runners: { ruff, eslint, gitleaks }, curator });
+
+    const result = await holder.staticAnalysis(input({ sandbox_files: [], changed_line_ranges: {} }));
+
+    expect(() => StaticAnalysisResultV1.parse(result)).not.toThrow();
     expect(result.findings).toEqual([]);
-    expect(result.per_tool_errors).toEqual({});
+    expect(result.tier1_findings).toEqual([]);
+    expect(result.tool_statuses).toEqual([]);
     expect(result.curator_skipped).toBe(true);
-    expect(result.truncated_per_tool).toEqual({});
-    expect(result.tier1_findings).toEqual([]);
-    expect(result.tool_statuses).toEqual([]);
+    // no runner was ever invoked
+    expect(ruff.ranWith).toBeUndefined();
+    expect(eslint.ranWith).toBeUndefined();
+    expect(gitleaks.ranWith).toBeUndefined();
   });
 
-  it("returns the same empty envelope when sandbox_files is empty (empty-routing fast path)", async () => {
-    const input = StaticAnalysisInputV1.parse({
-      workspace_path: "/tmp/ws-empty",
-      sandbox_files: [],
-      changed_line_ranges: {},
-      pr_meta: PR_META,
+  it("routes files by language: .py→ruff, .ts/.tsx/.js/.jsx→eslint, ALL files→gitleaks", async () => {
+    const ruff = new FakeRunner("ruff", { kind: "ok", findings: [] });
+    const eslint = new FakeRunner("eslint", { kind: "ok", findings: [] });
+    const gitleaks = new FakeRunner("gitleaks", { kind: "ok", findings: [] });
+    const curator = new FakeCurator({ findings: [], curator_skipped: true });
+    const holder = buildHolder({ runners: { ruff, eslint, gitleaks }, curator });
+
+    const files = ["a.py", "b.ts", "c.tsx", "d.js", "e.jsx", "f.go", "secrets.env"];
+    await holder.staticAnalysis(
+      input({ sandbox_files: files, changed_line_ranges: Object.fromEntries(files.map((f) => [f, [[1, 100]]])) }),
+    );
+
+    expect(ruff.ranWith?.files).toEqual(["a.py"]);
+    expect(eslint.ranWith?.files).toEqual(["b.ts", "c.tsx", "d.js", "e.jsx"]);
+    // gitleaks scans the WHOLE file set (secret scanner; file-language irrelevant)
+    expect(gitleaks.ranWith?.files).toEqual(files);
+  });
+
+  it("tier1_findings = the RAW orchestrator findings (pre-cap, pre-filter, pre-curator)", async () => {
+    // ruff emits a finding OUTSIDE the changed range; it survives in tier1_findings (raw) but is
+    // dropped from the curated `findings` path by the changed-line filter.
+    const ruff = new FakeRunner("ruff", { kind: "ok", findings: [finding("ruff", "a.py", 999)] });
+    const eslint = new FakeRunner("eslint", { kind: "ok", findings: [] });
+    const gitleaks = new FakeRunner("gitleaks", { kind: "ok", findings: [] });
+    const curator = new FakeCurator({ findings: [], curator_skipped: true });
+    const holder = buildHolder({ runners: { ruff, eslint, gitleaks }, curator });
+
+    const result = await holder.staticAnalysis(
+      input({ sandbox_files: ["a.py"], changed_line_ranges: { "a.py": [[1, 10]] } }),
+    );
+
+    expect(result.tier1_findings).toHaveLength(1);
+    expect(result.tier1_findings[0]!.start_line).toBe(999);
+    // the curator got the CHANGED-LINE-FILTERED set: the 999 finding was dropped before curation
+    expect(curator.sawFindings).toEqual([]);
+  });
+
+  it("caps raw findings at MAX_RAW_PER_TOOL per tool BEFORE the changed-line filter; records truncated_per_tool", async () => {
+    const overflow = MAX_RAW_PER_TOOL + 7;
+    const many = Array.from({ length: overflow }, (_u, i) => finding("ruff", "a.py", i + 1));
+    const ruff = new FakeRunner("ruff", { kind: "ok", findings: many });
+    const eslint = new FakeRunner("eslint", { kind: "ok", findings: [] });
+    const gitleaks = new FakeRunner("gitleaks", { kind: "ok", findings: [] });
+    const curator = new FakeCurator({ findings: [], curator_skipped: true });
+    const holder = buildHolder({ runners: { ruff, eslint, gitleaks }, curator });
+
+    const result = await holder.staticAnalysis(
+      input({ sandbox_files: ["a.py"], changed_line_ranges: { "a.py": [[1, 100_000]] } }),
+    );
+
+    // tier1_findings keeps ALL raw findings (cap is for the curator budget, not the Tier-2 prompt)
+    expect(result.tier1_findings).toHaveLength(overflow);
+    expect(result.truncated_per_tool).toEqual({ ruff: 7 });
+    // the curator saw the capped (then filtered) set: exactly MAX_RAW_PER_TOOL
+    expect(curator.sawFindings).toHaveLength(MAX_RAW_PER_TOOL);
+  });
+
+  it("passes the changed-line-filtered findings to the curator; returns its findings + curator_skipped", async () => {
+    const ruff = new FakeRunner("ruff", {
+      kind: "ok",
+      findings: [finding("ruff", "a.py", 5), finding("ruff", "a.py", 50)],
     });
+    const eslint = new FakeRunner("eslint", { kind: "ok", findings: [] });
+    const gitleaks = new FakeRunner("gitleaks", { kind: "ok", findings: [] });
+    const promoted = reviewFinding("a.py", 5);
+    const curator = new FakeCurator({ findings: [promoted], curator_skipped: false });
+    const holder = buildHolder({ runners: { ruff, eslint, gitleaks }, curator });
 
-    const result = await staticAnalysis(input);
+    const result = await holder.staticAnalysis(
+      input({ sandbox_files: ["a.py"], changed_line_ranges: { "a.py": [[1, 10]] } }),
+    );
 
-    // The empty-file-routing path in the frozen Python returns StaticAnalysisResultV1() too — at Stage 1
-    // the populated and empty inputs converge on the identical no-tools result.
+    // only the line-5 finding is in the changed range [1,10]; line-50 is dropped before curation
+    expect(curator.sawFindings?.map((f) => f.start_line)).toEqual([5]);
+    expect(curator.sawPrMeta?.repo).toBe("octo/widgets");
+    expect(result.findings).toEqual([promoted]);
+    expect(result.curator_skipped).toBe(false);
+  });
+
+  it("a recoverable runner failure DEGRADES (per_tool_errors + failed status); the review survives", async () => {
+    const ruff = new FakeRunner("ruff", {
+      kind: "throw",
+      // a launch failure (binary missing) — the orchestrator records failed_startup
+      error: new (await import("#backend/analysis/in_worker_runner.js")).SubprocessLaunchError({
+        command: ["ruff"],
+        reason: "spawn ruff ENOENT",
+      }),
+    });
+    const eslint = new FakeRunner("eslint", { kind: "ok", findings: [finding("eslint", "b.ts", 3)] });
+    const gitleaks = new FakeRunner("gitleaks", { kind: "ok", findings: [] });
+    const promoted = reviewFinding("b.ts", 3);
+    const curator = new FakeCurator({ findings: [promoted], curator_skipped: false });
+    const holder = buildHolder({ runners: { ruff, eslint, gitleaks }, curator });
+
+    const result = await holder.staticAnalysis(
+      input({ sandbox_files: ["a.py", "b.ts"], changed_line_ranges: { "a.py": [[1, 100]], "b.ts": [[1, 100]] } }),
+    );
+
+    // the review did NOT fail; the surviving tool's curated finding came through
+    expect(result.findings).toEqual([promoted]);
+    // per_tool_errors carries the degraded tool with its error message
+    expect(result.per_tool_errors["ruff"]).toContain("ruff");
+    expect(result.per_tool_errors["eslint"]).toBeUndefined();
+    // the failed tool's status is first-class in tool_statuses
+    const byName = new Map(result.tool_statuses.map((s) => [s.tool_name, s]));
+    expect(byName.get("ruff")?.status).toBe("failed_startup");
+    expect(byName.get("eslint")?.status).toBe("completed");
+  });
+
+  it("gitleaks findings flow through the orchestrator → curator (always-promoted there); statuses are first-class", async () => {
+    // The curator does the gitleaks always-promote; the activity just routes + assembles. Here the fake
+    // curator stands in for that promotion. We assert the activity hands gitleaks findings to the curator
+    // and surfaces the gitleaks status.
+    const ruff = new FakeRunner("ruff", { kind: "ok", findings: [] });
+    const eslint = new FakeRunner("eslint", { kind: "ok", findings: [] });
+    const gitleaks = new FakeRunner("gitleaks", {
+      kind: "ok",
+      findings: [finding("gitleaks", "secrets.env", 14, "aws-access-token")],
+    });
+    const promotedSecret = ReviewFindingV1.parse({
+      file: "secrets.env",
+      start_line: 14,
+      end_line: 14,
+      severity: "blocker",
+      category: "security",
+      title: "gitleaks: aws-access-token",
+      body: "secret",
+      suggestion: null,
+      confidence: 0.99,
+    });
+    const curator = new FakeCurator({ findings: [promotedSecret], curator_skipped: true });
+    const holder = buildHolder({ runners: { ruff, eslint, gitleaks }, curator });
+
+    const result = await holder.staticAnalysis(
+      input({ sandbox_files: ["secrets.env"], changed_line_ranges: { "secrets.env": [[1, 100]] } }),
+    );
+
+    expect(curator.sawFindings?.map((f) => f.tool)).toEqual(["gitleaks"]);
+    expect(result.findings).toEqual([promotedSecret]);
+    const byName = new Map(result.tool_statuses.map((s) => [s.tool_name, s]));
+    expect(byName.get("gitleaks")?.status).toBe("completed");
+  });
+
+  it("returns a strictly-valid StaticAnalysisResultV1 the orchestrator's Step-3b round-trip accepts", async () => {
+    const ruff = new FakeRunner("ruff", { kind: "ok", findings: [finding("ruff", "a.py", 5)] });
+    const eslint = new FakeRunner("eslint", { kind: "ok", findings: [] });
+    const gitleaks = new FakeRunner("gitleaks", { kind: "ok", findings: [] });
+    const curator = new FakeCurator({ findings: [reviewFinding("a.py", 5)], curator_skipped: false });
+    const holder = buildHolder({ runners: { ruff, eslint, gitleaks }, curator });
+
+    const result = await holder.staticAnalysis(
+      input({ sandbox_files: ["a.py"], changed_line_ranges: { "a.py": [[1, 10]] } }),
+    );
+
     expect(() => StaticAnalysisResultV1.parse(result)).not.toThrow();
-    expect(result.findings).toEqual([]);
-    expect(result.tier1_findings).toEqual([]);
-    expect(result.tool_statuses).toEqual([]);
-  });
-
-  it("does not mutate / depend on the input payload (no-tools result is payload-invariant at Stage 1)", async () => {
-    const inputA = StaticAnalysisInputV1.parse({
-      workspace_path: "/tmp/ws-a",
-      sandbox_files: ["x.py", "y.go", "z.rs"],
-      changed_line_ranges: { "x.py": [[1, 100]], "y.go": [[2, 3]] },
-      pr_meta: PR_META,
-    });
-    const inputB = StaticAnalysisInputV1.parse({
-      workspace_path: "/tmp/ws-b",
-      sandbox_files: [],
-      changed_line_ranges: {},
-      pr_meta: { ...PR_META, repo: "octo/other" },
-    });
-
-    const a = await staticAnalysis(inputA);
-    const b = await staticAnalysis(inputB);
-
-    // Structurally identical regardless of the input — confirms the Stage-1 result carries NO derived
-    // state from the payload (the runners that WOULD derive findings land in Stage 4).
-    expect(a).toEqual(b);
+    expect(result.schema_version).toBe(1);
   });
 });
