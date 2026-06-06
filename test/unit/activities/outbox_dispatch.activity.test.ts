@@ -18,6 +18,12 @@ import type { Kysely } from "kysely";
 const clock = new FakeClock({ now: new Date("2099-07-08T09:10:11.000Z") });
 const dummyDb = {} as unknown as Kysely<unknown>;
 
+// Valid UUIDs — the activities now .parse(input) at the boundary, so row_id must be a real UUID.
+const ROW_1 = "00000000-0000-4000-8000-000000000001";
+const ROW_2 = "00000000-0000-4000-8000-000000000002";
+const ROW_3 = "00000000-0000-4000-8000-000000000003";
+const ROW_4 = "00000000-0000-4000-8000-000000000004";
+
 function makeActs(repoOverrides: Partial<PostgresOutboxRepo>): OutboxDispatchActivities {
   return new OutboxDispatchActivities({
     repo: repoOverrides as unknown as PostgresOutboxRepo,
@@ -57,7 +63,7 @@ describe("OutboxDispatchActivities", () => {
 
     await acts.dispatchRow({
       schema_version: 2,
-      row_id: "row-1",
+      row_id: ROW_1,
       sink: "sync_code_owners",
       payload: { x: 1 },
       trace_context: {},
@@ -74,12 +80,38 @@ describe("OutboxDispatchActivities", () => {
     expect(calls[0]!.context).toEqual({ deliveryId: null, installationId: null, runId: null });
   });
 
+  it("dispatchRow REJECTS the tagged-union propagation-bug shape at the boundary (both installation_id + orphan_reason null)", async () => {
+    let invoked = false;
+    registerSink("sync_code_owners", async () => {
+      invoked = true;
+    });
+    const acts = makeActs({});
+    // installation_id null with NO orphan_reason is the BF-3-Phase-A propagation bug — the boundary parse
+    // (DispatchRowInputV1.superRefine) must reject it BEFORE the sink runs (parity with the Python
+    // pydantic_data_converter re-validating _check_tenant_pair on activity-side deserialization).
+    await expect(
+      acts.dispatchRow({
+        schema_version: 2,
+        row_id: ROW_2,
+        sink: "sync_code_owners",
+        payload: {},
+        trace_context: {},
+        run_id: null,
+        review_id: null,
+        provider: null,
+        installation_id: null,
+        orphan_reason: null,
+      }),
+    ).rejects.toThrow();
+    expect(invoked).toBe(false);
+  });
+
   it("dispatchRow propagates UnknownSinkError when no handler is registered", async () => {
     const acts = makeActs({});
     await expect(
       acts.dispatchRow({
         schema_version: 2,
-        row_id: "row-2",
+        row_id: ROW_2,
         sink: "nope",
         payload: {},
         trace_context: {},
@@ -95,8 +127,8 @@ describe("OutboxDispatchActivities", () => {
   it("markDispatched delegates to repo.markDispatched", async () => {
     const markDispatched = vi.fn(async () => null);
     const acts = makeActs({ markDispatched } as unknown as Partial<PostgresOutboxRepo>);
-    await acts.markDispatched({ row_id: "row-3" });
-    expect(markDispatched).toHaveBeenCalledWith({ db: dummyDb, id: "row-3" });
+    await acts.markDispatched({ row_id: ROW_3 });
+    expect(markDispatched).toHaveBeenCalledWith({ db: dummyDb, id: ROW_3 });
   });
 
   it("markAttemptFailed injects maxAttempts + expectedAttempts and dead-letters exactly once on 'dead'", async () => {
@@ -104,11 +136,11 @@ describe("OutboxDispatchActivities", () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const acts = makeActs({ markAttemptFailed } as unknown as Partial<PostgresOutboxRepo>);
 
-    await acts.markAttemptFailed({ row_id: "row-4", error: "boom", expected_attempts: 2 });
+    await acts.markAttemptFailed({ row_id: ROW_4, error: "boom", expected_attempts: 2 });
 
     expect(markAttemptFailed).toHaveBeenCalledWith({
       db: dummyDb,
-      id: "row-4",
+      id: ROW_4,
       error: "boom",
       maxAttempts: 5,
       expectedAttempts: 2,
@@ -122,10 +154,10 @@ describe("OutboxDispatchActivities", () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const acts1 = makeActs({ markAttemptFailed: vi.fn(async () => ({ state: "pending", sink: "x" })) } as unknown as Partial<PostgresOutboxRepo>);
-    await acts1.markAttemptFailed({ row_id: "r", error: "e", expected_attempts: 0 });
+    await acts1.markAttemptFailed({ row_id: ROW_1, error: "e", expected_attempts: 0 });
 
     const acts2 = makeActs({ markAttemptFailed: vi.fn(async () => null) } as unknown as Partial<PostgresOutboxRepo>);
-    await acts2.markAttemptFailed({ row_id: "r", error: "e", expected_attempts: 0 });
+    await acts2.markAttemptFailed({ row_id: ROW_2, error: "e", expected_attempts: 0 });
 
     expect(errSpy).not.toHaveBeenCalled();
     errSpy.mockRestore();

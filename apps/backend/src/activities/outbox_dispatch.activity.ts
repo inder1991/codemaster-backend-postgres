@@ -19,7 +19,7 @@ import { getSink, type SinkContext } from "#backend/outbox/sink_registry.js";
 
 import { type Clock } from "#platform/clock.js";
 
-import type {
+import {
   ClaimPendingRowsInputV1,
   DispatchRowInputV1,
   MarkAttemptFailedInputV1,
@@ -55,10 +55,11 @@ export class OutboxDispatchActivities {
 
   /** `claim_pending_rows` — lease a batch of pending rows for the dispatcher loop. */
   public readonly claimPendingRows = async (input: ClaimPendingRowsInputV1): Promise<Array<OutboxRow>> => {
+    const v = ClaimPendingRowsInputV1.parse(input); // boundary validation (parity with the Python data-converter)
     return this.#repo.claimPending({
       db: this.#db,
-      batchSize: input.batch_size,
-      leaseSeconds: input.lease_seconds,
+      batchSize: v.batch_size,
+      leaseSeconds: v.lease_seconds,
     });
   };
 
@@ -69,16 +70,22 @@ export class OutboxDispatchActivities {
    * (installation_reconcile / sync_code_owners, whose review_id is null) skip the guard block entirely.
    */
   public readonly dispatchRow = async (input: DispatchRowInputV1): Promise<void> => {
-    const handler = getSink(input.sink); // throws UnknownSinkError BEFORE any DB work (1:1 with Python)
+    // Boundary validation FIRST — restores the DispatchRowInputV1.superRefine tagged-union guard
+    // (installation_id null IFF orphan_reason set) that the Python pydantic_data_converter re-runs on
+    // activity-side deserialization. The TS stock JSON converter does not, so without this the BF-3
+    // NULL-tenant-column invariant would be enforced nowhere at runtime.
+    const v = DispatchRowInputV1.parse(input);
 
-    if (input.run_id !== null && input.review_id !== null) {
-      await this.#guardTransitionAndIngest(input, input.run_id, input.review_id);
+    const handler = getSink(v.sink); // throws UnknownSinkError BEFORE any DB work (1:1 with Python)
+
+    if (v.run_id !== null && v.review_id !== null) {
+      await this.#guardTransitionAndIngest(v, v.run_id, v.review_id);
     }
 
     const context: SinkContext = {
       deliveryId: null, // DispatchRowInput carries no delivery_id field
-      installationId: input.installation_id,
-      runId: input.run_id,
+      installationId: v.installation_id,
+      runId: v.run_id,
     };
 
     // SEAM (heartbeat — DEFER §D4): the lease-extend loop is not ported. The only live sink
@@ -87,10 +94,10 @@ export class OutboxDispatchActivities {
     // without this. Activate by spawning a `this.#repo.extendLease` loop on `this.#clock.sleep` here.
     const heartbeat = this.#startLeaseHeartbeat();
     try {
-      // SEAM (trace-restore — DEFER §E): OTel trace-context restore is not ported. `input.trace_context` is
+      // SEAM (trace-restore — DEFER §E): OTel trace-context restore is not ported. `v.trace_context` is
       // carried through the contract but not bound to the OTel context here (fail-open — Python's
       // bind_trace_context({}) is a no-op for empty context). Activate by binding it around this call.
-      await handler({ payload: input.payload, context });
+      await handler({ payload: v.payload, context });
     } finally {
       heartbeat.stop();
     }
@@ -101,7 +108,8 @@ export class OutboxDispatchActivities {
    * dispatch-to-done histogram from the returned timing is deferred with the OTel surface (§D5).
    */
   public readonly markDispatched = async (input: MarkDispatchedInputV1): Promise<void> => {
-    await this.#repo.markDispatched({ db: this.#db, id: input.row_id });
+    const v = MarkDispatchedInputV1.parse(input);
+    await this.#repo.markDispatched({ db: this.#db, id: v.row_id });
     // SEAM (OTel — DEFER §D5): on a non-null return, record the dispatch-to-done histogram from the timing.
   };
 
@@ -111,12 +119,13 @@ export class OutboxDispatchActivities {
    * crosses into 'dead' (the repo's `null` on a redrive suppresses a duplicate signal).
    */
   public readonly markAttemptFailed = async (input: MarkAttemptFailedInputV1): Promise<void> => {
+    const v = MarkAttemptFailedInputV1.parse(input);
     const result = await this.#repo.markAttemptFailed({
       db: this.#db,
-      id: input.row_id,
-      error: input.error,
+      id: v.row_id,
+      error: v.error,
       maxAttempts: this.#maxAttempts,
-      expectedAttempts: input.expected_attempts,
+      expectedAttempts: v.expected_attempts,
     });
     if (result?.state === "dead") {
       // SEAM (OTel — DEFER §D5): OUTBOX_DEAD_LETTER_COUNTER.add(1, { sink: result.sink }). The structured
@@ -124,9 +133,9 @@ export class OutboxDispatchActivities {
       console.error(
         JSON.stringify({
           event: "outbox.dead_letter",
-          row_id: input.row_id,
+          row_id: v.row_id,
           sink: result.sink,
-          error: input.error,
+          error: v.error,
         }),
       );
     }
