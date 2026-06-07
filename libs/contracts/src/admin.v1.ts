@@ -22,6 +22,30 @@ export const OrgsListV1 = z
   .strict();
 export type OrgsListV1 = z.infer<typeof OrgsListV1>;
 
+/** One row in GET /api/admin/audit-events (decrypted excerpts; no schema_version, matching the Python
+ *  internal HTTP type). */
+export const AuditEventListItemV1 = z
+  .object({
+    audit_event_id: z.string().uuid(),
+    actor_user_id: z.string().uuid(),
+    action: z.string(),
+    target_id: z.string().nullable().default(null),
+    occurred_at: z.string().datetime({ offset: true }),
+    before_excerpt: z.string(),
+    after_excerpt: z.string(),
+  })
+  .strict();
+export type AuditEventListItemV1 = z.infer<typeof AuditEventListItemV1>;
+
+/** GET /api/admin/audit-events — cursor-paginated audit page. */
+export const AuditSearchResponseV1 = z
+  .object({
+    rows: z.array(AuditEventListItemV1),
+    next_cursor: z.string().nullable().default(null),
+  })
+  .strict();
+export type AuditSearchResponseV1 = z.infer<typeof AuditSearchResponseV1>;
+
 /** One item in the GET /api/admin/reviews page (Pydantic __contract_internal__). */
 export const ReviewListItemV1 = z
   .object({

@@ -14,6 +14,7 @@ import type { FastifyInstance } from "fastify";
 import type { Clock } from "#platform/clock.js";
 
 import {
+  AuditSearchResponseV1,
   DashboardSummaryV1,
   FindingListResponseV1,
   OrgsListV1,
@@ -29,6 +30,15 @@ import {
   listTaxonomyGaps,
   searchReviews,
 } from "#backend/api/admin/admin_read_repo.js";
+import {
+  AUDIT_DEFAULT_PAGE_SIZE,
+  AUDIT_MAX_PAGE_SIZE,
+  AUDIT_READ_ROLES,
+  AuditCrossTenantRefusedError,
+  AuditCursorInvalidError,
+  AuditWindowTooWideError,
+  searchAuditEvents,
+} from "#backend/api/admin/audit_events_read.js";
 import { makeRequireRole } from "#backend/api/admin/_authz.js";
 
 const TAXONOMY_DEFAULT_LIMIT = 50;
@@ -109,6 +119,41 @@ export async function registerAdminRoutes(
         );
         const rows = await listTaxonomyGaps(opts.db, limit);
         return reply.code(200).send(TaxonomyGapListV1.parse({ rows }));
+      },
+    );
+
+    scope.get(
+      "/api/admin/audit-events",
+      { preHandler: requireRole([...AUDIT_READ_ROLES]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const q = request.query as AdminQuery;
+        try {
+          const { rows, nextCursor } = await searchAuditEvents(opts.db, {
+            role: principal.role,
+            callerInstallationId: principal.installationId,
+            query: {
+              actorUserId: optStr(q.actor),
+              action: optStr(q.action),
+              targetId: optStr(q.target_id),
+              fromAt: optStr(q.from_at),
+              toAt: optStr(q.to_at),
+              crossTenant: q.cross_tenant === "true" || q.cross_tenant === true,
+            },
+            cursor: optStr(q.cursor),
+            size: clampLimit(q.size, AUDIT_DEFAULT_PAGE_SIZE, AUDIT_MAX_PAGE_SIZE),
+            now: opts.clock.now(),
+          });
+          return reply.code(200).send(AuditSearchResponseV1.parse({ rows, next_cursor: nextCursor }));
+        } catch (e) {
+          if (e instanceof AuditCrossTenantRefusedError || e instanceof AuditWindowTooWideError) {
+            return reply.code(403).send({ detail: e.message });
+          }
+          if (e instanceof AuditCursorInvalidError) {
+            return reply.code(400).send({ detail: e.message });
+          }
+          throw e;
+        }
       },
     );
 

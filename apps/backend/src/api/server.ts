@@ -10,6 +10,7 @@ import { PostgresLocalUserRepo } from "#backend/api/auth/local_user_repo.js";
 import { NoOpLdapClient } from "#backend/api/auth/noop_ldap.js";
 import { persistWebhook } from "#backend/ingest/github_webhook_persistence.js";
 import { makeWebhookSecretProvider } from "#backend/ingest/webhook_secret_provider.js";
+import { setAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
 import { loadFieldEncryptionKeyRegistry } from "#backend/security/field_encryption_keys_loader.js";
 
 import { tenantKysely } from "#platform/db/database.js";
@@ -58,6 +59,8 @@ export async function runServer(): Promise<void> {
       );
     }
     const registry = await loadFieldEncryptionKeyRegistry(VaultHttpPort.fromEnv());
+    // The audit-events READ endpoint decrypts before/after via the shared field-encryption registry.
+    setAuditKeyRegistry(registry);
     const authSecrets = makeAuthSecretsProvider();
     const [signingKey, csrfSecret] = await Promise.all([
       authSecrets.sessionSigningKey(),
