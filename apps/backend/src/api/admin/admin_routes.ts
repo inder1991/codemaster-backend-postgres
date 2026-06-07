@@ -31,7 +31,9 @@ import {
   LearningListPageV1,
   LlmModelListV1,
   LlmProviderConfigV1,
+  LlmPurposeAssignmentUpdateV1,
   LlmPurposeModelListV1,
+  LlmPurposeModelV1,
   MemberApproverBodyV1,
   MembersPageV1,
   NotificationRuleCreateRequestV1,
@@ -98,6 +100,7 @@ import {
   getByReview,
   listByPr,
 } from "#backend/api/admin/retrieval_aggregate_read.js";
+import { upsertPurposeModel } from "#backend/api/admin/llm_catalog_write.js";
 import { setEnabled } from "#backend/api/admin/repositories_write.js";
 import {
   getRetrievalTrace,
@@ -928,6 +931,46 @@ export async function registerAdminRoutes(
         reply
           .code(200)
           .send(LlmPurposeModelListV1.parse({ assignments: await listLlmPurposeModels(opts.db) })),
+    );
+
+    scope.put(
+      "/api/admin/llm-purpose-routing",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const parsed = LlmPurposeAssignmentUpdateV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        const body = parsed.data;
+        // ADR-0060 §4 guardrail: a purpose may only be assigned a catalog model that is enabled AND has
+        // passed preflight (last_validation_status === 'ok'). Match on model_id only (provider-agnostic).
+        const match = (await listLlmModels(opts.db)).find((m) => m.model_id === body.model_id);
+        if (match === undefined) {
+          return reply.code(422).send({
+            detail: { code: "llm_model_not_in_catalog", message: `model '${body.model_id}' not in catalog; add it first` },
+          });
+        }
+        if (!match.enabled) {
+          return reply.code(422).send({
+            detail: { code: "llm_model_disabled", message: `model '${body.model_id}' is disabled; enable it first` },
+          });
+        }
+        if (match.last_validation_status !== "ok") {
+          return reply.code(422).send({
+            detail: {
+              code: "llm_model_not_validated",
+              message: `model '${body.model_id}' has not passed preflight (status=${match.last_validation_status}); run /test first`,
+            },
+          });
+        }
+        await upsertPurposeModel(opts.db, {
+          purpose: body.purpose,
+          modelId: body.model_id,
+          updatedByUserId: principal.userId,
+        });
+        return reply.code(200).send(LlmPurposeModelV1.parse({ purpose: body.purpose, model_id: body.model_id }));
+      },
     );
 
     scope.get(

@@ -378,6 +378,25 @@ export const LlmPurposeModelListV1 = z
   .strict();
 export type LlmPurposeModelListV1 = z.infer<typeof LlmPurposeModelListV1>;
 
+/** PUT /api/admin/llm-purpose-routing body — assign one purpose to a catalog model. The purpose enum is
+ *  the 7-value LlmPurposeV1 vocabulary (it OMITS 'fix_prompt' which the DB CHECK admits — faithful drift). */
+export const LlmPurposeAssignmentUpdateV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    purpose: z.enum([
+      "review_summary",
+      "review_finding",
+      "chat_reply",
+      "walkthrough",
+      "redaction_check",
+      "cost_estimate",
+      "analysis_curator",
+    ]),
+    model_id: z.string().min(1).max(128),
+  })
+  .strict();
+export type LlmPurposeAssignmentUpdateV1 = z.infer<typeof LlmPurposeAssignmentUpdateV1>;
+
 /** GET /api/admin/llm-provider-config (the active per-role provider metadata; 404 when unconfigured). */
 export const LlmProviderConfigV1 = z
   .object({
