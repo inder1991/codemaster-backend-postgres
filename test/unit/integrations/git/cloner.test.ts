@@ -46,6 +46,8 @@ type FakeProcConfig = {
   stderr?: string;
   /** When true the fake process NEVER emits `close` — drives the timeout path. */
   hang?: boolean;
+  /** When set, the fake emits an `error` event (NOT `close`) — models a spawn failure (e.g. ENOENT). */
+  spawnError?: string;
 };
 
 class FakeStream extends EventEmitter {}
@@ -62,6 +64,11 @@ class FakeProcess extends EventEmitter {
     this.cfg = cfg;
     // Emit synchronously-but-async so listeners (attached right after spawn) are in place.
     queueMicrotask(() => {
+      if (this.cfg.spawnError) {
+        // A real spawn failure (ENOENT etc.) emits `error` and never `close`.
+        this.emit("error", new Error(this.cfg.spawnError));
+        return;
+      }
       if (this.cfg.stdout) this.stdout.emit("data", Buffer.from(this.cfg.stdout));
       if (this.cfg.stderr) this.stderr.emit("data", Buffer.from(this.cfg.stderr));
       if (!this.cfg.hang) {
@@ -146,7 +153,6 @@ describe("GitSubprocessCloner argv / cwd / env construction", () => {
     const { provider } = fakeTokenProvider();
     const cloner = new GitSubprocessCloner({
       tokenProvider: provider,
-      githubInstallationId: INSTALLATION_ID,
       spawnFn: recorder.spawn,
     });
     const workspace = await makeWorkspace();
@@ -156,6 +162,7 @@ describe("GitSubprocessCloner argv / cwd / env construction", () => {
       workspace,
       repoUrl: "https://github.com/acme/widget.git",
       headSha: VALID_SHA,
+      installationId: INSTALLATION_ID,
       paths: [],
     });
 
@@ -184,7 +191,6 @@ describe("GitSubprocessCloner argv / cwd / env construction", () => {
     const { provider } = fakeTokenProvider();
     const cloner = new GitSubprocessCloner({
       tokenProvider: provider,
-      githubInstallationId: INSTALLATION_ID,
       spawnFn: recorder.spawn,
     });
     const workspace = await makeWorkspace();
@@ -193,6 +199,7 @@ describe("GitSubprocessCloner argv / cwd / env construction", () => {
       workspace,
       repoUrl: "https://github.com/acme/widget.git",
       headSha: VALID_SHA,
+      installationId: INSTALLATION_ID,
       paths: [],
       prNumber: 42,
     });
@@ -212,7 +219,6 @@ describe("GitSubprocessCloner argv / cwd / env construction", () => {
     const { provider } = fakeTokenProvider();
     const cloner = new GitSubprocessCloner({
       tokenProvider: provider,
-      githubInstallationId: INSTALLATION_ID,
       spawnFn: recorder.spawn,
     });
     const workspace = await makeWorkspace();
@@ -221,6 +227,7 @@ describe("GitSubprocessCloner argv / cwd / env construction", () => {
       workspace,
       repoUrl: "https://github.com/acme/widget.git",
       headSha: VALID_SHA,
+      installationId: INSTALLATION_ID,
       paths: [],
     });
 
@@ -236,25 +243,36 @@ describe("GitSubprocessCloner argv / cwd / env construction", () => {
     }
   });
 
-  it("calls the token provider with the bound installation_id", async () => {
+  it("calls the token provider with the PER-CALL installation_id (per-review routing — one cloner, any org)", async () => {
     const recorder = new SpawnRecorder();
     const { provider, calls } = fakeTokenProvider();
+    // ONE cloner instance, NOT bound to any installation. Two clones with DIFFERENT ids must mint for the
+    // id passed to THAT call — the whole point of per-review routing (one worker pool serves all orgs).
     const cloner = new GitSubprocessCloner({
       tokenProvider: provider,
-      githubInstallationId: INSTALLATION_ID,
       spawnFn: recorder.spawn,
     });
-    const workspace = await makeWorkspace();
+    const wsA = await makeWorkspace();
+    const wsB = await makeWorkspace();
 
     await cloner.clone({
-      workspace,
+      workspace: wsA,
       repoUrl: "https://github.com/acme/widget.git",
       headSha: VALID_SHA,
+      installationId: INSTALLATION_ID,
+      paths: [],
+    });
+    await cloner.clone({
+      workspace: wsB,
+      repoUrl: "https://github.com/acme/widget.git",
+      headSha: VALID_SHA,
+      installationId: 7654321,
       paths: [],
     });
 
-    expect(calls.length).toBeGreaterThanOrEqual(1);
-    expect(calls.every((iid) => iid === INSTALLATION_ID)).toBe(true);
+    // The same cloner minted for BOTH installation ids — proving it's not bound to one.
+    expect(calls).toContain(INSTALLATION_ID);
+    expect(calls).toContain(7654321);
   });
 });
 
@@ -270,7 +288,6 @@ describe("GitSubprocessCloner askpass helper", () => {
     const { provider } = fakeTokenProvider();
     const cloner = new GitSubprocessCloner({
       tokenProvider: provider,
-      githubInstallationId: INSTALLATION_ID,
       spawnFn: (command, args, options) => {
         const askpass = (options.env as Record<string, string>)["GIT_ASKPASS"];
         if (askpass && capturedBody === undefined) {
@@ -286,6 +303,7 @@ describe("GitSubprocessCloner askpass helper", () => {
       workspace,
       repoUrl: "https://github.com/acme/widget.git",
       headSha: VALID_SHA,
+      installationId: INSTALLATION_ID,
       paths: [],
     });
 
@@ -312,7 +330,6 @@ describe("GitSubprocessCloner askpass helper", () => {
     const { provider } = fakeTokenProvider(trickyToken);
     const cloner = new GitSubprocessCloner({
       tokenProvider: provider,
-      githubInstallationId: INSTALLATION_ID,
       spawnFn: (command, args, options) => {
         const askpass = (options.env as Record<string, string>)["GIT_ASKPASS"];
         if (askpass && capturedBody === undefined) {
@@ -327,6 +344,7 @@ describe("GitSubprocessCloner askpass helper", () => {
       workspace,
       repoUrl: "https://github.com/acme/widget.git",
       headSha: VALID_SHA,
+      installationId: INSTALLATION_ID,
       paths: [],
     });
 
@@ -349,7 +367,6 @@ describe("GitSubprocessCloner token redaction (adversarial)", () => {
     const { provider } = fakeTokenProvider(CANARY_TOKEN);
     const cloner = new GitSubprocessCloner({
       tokenProvider: provider,
-      githubInstallationId: 999,
       spawnFn: recorder.spawn,
     });
     const workspace = await makeWorkspace();
@@ -358,6 +375,7 @@ describe("GitSubprocessCloner token redaction (adversarial)", () => {
       workspace,
       repoUrl: "https://github.com/acme/widget.git",
       headSha: VALID_SHA,
+      installationId: INSTALLATION_ID,
       paths: [],
     });
 
@@ -382,7 +400,6 @@ describe("GitSubprocessCloner input validation", () => {
     const { provider } = fakeTokenProvider();
     const cloner = new GitSubprocessCloner({
       tokenProvider: provider,
-      githubInstallationId: INSTALLATION_ID,
       spawnFn: recorder.spawn,
     });
     const workspace = await makeWorkspace();
@@ -392,6 +409,7 @@ describe("GitSubprocessCloner input validation", () => {
         workspace,
         repoUrl: "https://github.com/acme/widget.git",
         headSha: "not-a-real-sha-bytes; rm -rf /",
+        installationId: INSTALLATION_ID,
         paths: [],
       }),
     ).rejects.toThrow(/head_sha/);
@@ -403,7 +421,6 @@ describe("GitSubprocessCloner input validation", () => {
     const { provider } = fakeTokenProvider();
     const cloner = new GitSubprocessCloner({
       tokenProvider: provider,
-      githubInstallationId: INSTALLATION_ID,
       spawnFn: recorder.spawn,
     });
     const workspace = await makeWorkspace();
@@ -414,7 +431,7 @@ describe("GitSubprocessCloner input validation", () => {
       "https://evil.example.com/acme/widget.git",
     ]) {
       await expect(
-        cloner.clone({ workspace, repoUrl: badUrl, headSha: VALID_SHA, paths: [] }),
+        cloner.clone({ workspace, repoUrl: badUrl, headSha: VALID_SHA, installationId: INSTALLATION_ID, paths: [] }),
       ).rejects.toThrow(/repo_url/);
     }
     expect(recorder.calls).toEqual([]);
@@ -425,7 +442,6 @@ describe("GitSubprocessCloner input validation", () => {
     const { provider } = fakeTokenProvider();
     const cloner = new GitSubprocessCloner({
       tokenProvider: provider,
-      githubInstallationId: INSTALLATION_ID,
       spawnFn: recorder.spawn,
     });
     const workspace = await makeWorkspace();
@@ -436,6 +452,7 @@ describe("GitSubprocessCloner input validation", () => {
           workspace,
           repoUrl: "https://github.com/acme/widget.git",
           headSha: VALID_SHA,
+          installationId: INSTALLATION_ID,
           paths: [],
           prNumber: badPr,
         }),
@@ -444,11 +461,22 @@ describe("GitSubprocessCloner input validation", () => {
     expect(recorder.calls).toEqual([]);
   });
 
-  it("rejects a non-positive installation id at construction", () => {
+  it("rejects a non-positive installation id PER-CALL (the guard moved from ctor to clone — per-review routing)", async () => {
+    const recorder = new SpawnRecorder();
     const { provider } = fakeTokenProvider();
-    expect(
-      () => new GitSubprocessCloner({ tokenProvider: provider, githubInstallationId: 0 }),
-    ).toThrow(/github_installation_id/);
+    const cloner = new GitSubprocessCloner({ tokenProvider: provider, spawnFn: recorder.spawn });
+    const workspace = await makeWorkspace();
+
+    await expect(
+      cloner.clone({
+        workspace,
+        repoUrl: "https://github.com/acme/widget.git",
+        headSha: VALID_SHA,
+        installationId: 0,
+        paths: [],
+      }),
+    ).rejects.toThrow(/github_installation_id/);
+    expect(recorder.calls).toEqual([]);
   });
 
   it("rejects a non-positive timeout at construction", () => {
@@ -457,7 +485,6 @@ describe("GitSubprocessCloner input validation", () => {
       () =>
         new GitSubprocessCloner({
           tokenProvider: provider,
-          githubInstallationId: INSTALLATION_ID,
           timeoutSeconds: 0,
         }),
     ).toThrow(/timeout_seconds/);
@@ -472,7 +499,6 @@ describe("GitSubprocessCloner failure taxonomy", () => {
     const { provider } = fakeTokenProvider();
     const cloner = new GitSubprocessCloner({
       tokenProvider: provider,
-      githubInstallationId: INSTALLATION_ID,
       spawnFn: recorder.spawn,
     });
     const workspace = await makeWorkspace();
@@ -482,6 +508,7 @@ describe("GitSubprocessCloner failure taxonomy", () => {
         workspace,
         repoUrl: "https://github.com/acme/widget.git",
         headSha: VALID_SHA,
+        installationId: INSTALLATION_ID,
         paths: [],
       }),
     ).rejects.toThrow(new GitCloneFailedError("git clone exited 128: fatal: not found"));
@@ -492,7 +519,6 @@ describe("GitSubprocessCloner failure taxonomy", () => {
     const { provider } = fakeTokenProvider();
     const cloner = new GitSubprocessCloner({
       tokenProvider: provider,
-      githubInstallationId: INSTALLATION_ID,
       spawnFn: recorder.spawn,
     });
     const workspace = await makeWorkspace();
@@ -502,6 +528,7 @@ describe("GitSubprocessCloner failure taxonomy", () => {
         workspace,
         repoUrl: "https://github.com/acme/widget.git",
         headSha: VALID_SHA,
+        installationId: INSTALLATION_ID,
         paths: [],
       }),
     ).rejects.toThrow("git clone exited 1: no output");
@@ -514,7 +541,6 @@ describe("GitSubprocessCloner failure taxonomy", () => {
     const { provider } = fakeTokenProvider();
     const cloner = new GitSubprocessCloner({
       tokenProvider: provider,
-      githubInstallationId: INSTALLATION_ID,
       timeoutSeconds: 1, // 1s timeout — the transport seam fires the abort deterministically
       spawnFn: (command, args, options) => {
         const proc = hangingRecorder.spawn(command, args, options);
@@ -529,6 +555,7 @@ describe("GitSubprocessCloner failure taxonomy", () => {
         workspace,
         repoUrl: "https://github.com/acme/widget.git",
         headSha: VALID_SHA,
+        installationId: INSTALLATION_ID,
         paths: [],
       }),
     ).rejects.toThrow(GitCloneTimeoutError);
@@ -536,4 +563,25 @@ describe("GitSubprocessCloner failure taxonomy", () => {
     expect(hangProc?.killCount).toBeGreaterThanOrEqual(1);
     expect(hangProc?.killSignals[0]).toBe("SIGTERM");
   }, 15_000);
+
+  it("surfaces a spawn FAILURE (ENOENT) as a catchable GitCloneFailedError, not an uncaught crash", async () => {
+    // `git` absent from the runtime image's PATH → spawn emits an `error` event, NOT `close`. WITHOUT an
+    // `error` listener the unhandled event becomes an uncaught exception that crashes the fail-loud process —
+    // one missing binary would take down the WHOLE pod instead of failing this one review. The cloner MUST
+    // map the spawn failure to a catchable GitCloneFailedError so the clone activity degrades gracefully.
+    const recorder = new SpawnRecorder([{ spawnError: "spawn git ENOENT" }]);
+    const { provider } = fakeTokenProvider();
+    const cloner = new GitSubprocessCloner({ tokenProvider: provider, spawnFn: recorder.spawn });
+    const workspace = await makeWorkspace();
+
+    await expect(
+      cloner.clone({
+        workspace,
+        repoUrl: "https://github.com/acme/widget.git",
+        headSha: VALID_SHA,
+        installationId: INSTALLATION_ID,
+        paths: [],
+      }),
+    ).rejects.toThrow(new GitCloneFailedError("git clone failed to spawn: spawn git ENOENT"));
+  });
 });

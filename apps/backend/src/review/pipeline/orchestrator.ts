@@ -164,6 +164,12 @@ export type ReviewPipelineRepoCtx = {
 export type ReviewPipelinePrCtx = {
   /** The walkthrough/post PR metadata envelope (pr_id, installation_id, repo, pr_title, pr_description). */
   readonly prMeta: PrMetaV1;
+  /** github_installation_id — the NUMERIC GitHub-App installation id every GitHub-touching stage (clone +
+   *  post + check-run + fix-prompt + pr-description) mints its token for (per-review routing; ADR — replaces
+   *  the removed CODEMASTER_GITHUB_INSTALLATION_ID env pin). Distinct from prMeta.installation_id (the
+   *  internal UUID tenant FK). Nullable: sourced from the workflow payload's nullable github_installation_id;
+   *  the clone fail-closes on null, the GitHub posts skip/guard. */
+  readonly githubInstallationId: number | null;
   /** head_sha — the commit under review (post deep-links, persist, post stages). */
   readonly headSha: string;
   /** run_id — the ephemeral workflow execution id (persist + degradation pivot). UUID wire string. */
@@ -275,6 +281,21 @@ const NULL_LOGGER: StageLogger = {
   },
 };
 
+/**
+ * Deep-copy the orchestrator's READONLY changed-line-range map into the MUTABLE shape the `*InputV1`
+ * dispatch contracts infer (Zod `z.array`/`z.tuple` infer mutable `[number, number][]`). The runtime shape
+ * is byte-identical; only TypeScript's readonly→mutable variance differs, so this is a type-bridging copy —
+ * NOT a transform. Sandbox-safe (pure `Object.entries`/`.map`, no clock/RNG/IO).
+ */
+function toMutableRanges(ranges: ChangedLineRanges): Record<string, Array<[number, number]>> {
+  return Object.fromEntries(
+    Object.entries(ranges).map(([path, pairs]) => [
+      path,
+      pairs.map((p): [number, number] => [p[0], p[1]]),
+    ]),
+  );
+}
+
 // ─── tunables (1:1 with the Python module constants) ─────────────────────────────────────────────
 
 /** _CLASSIFIER_FAILURE_THRESHOLD (review_pipeline_orchestrator.py:292). > this ratio → a degradation note. */
@@ -349,6 +370,7 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
     handle: repo.workspaceHandle,
     repo_url: repo.repoUrl,
     head_sha: headSha,
+    github_installation_id: pr.githubInstallationId,
     changed_paths: [...repo.changedPaths],
     pr_number: pr.prNumber,
   });
@@ -423,7 +445,8 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
 
     // Step 2 — classify.
     const routing = await ports.classify({
-      workspacePath: workspaceRoot,
+      schema_version: 1,
+      workspace_path: workspaceRoot,
       files: [...repo.changedPaths],
     });
     const failureRatio =
@@ -453,8 +476,9 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
       }
       const emptyNotice = pathFiltersExcludedAllFinding();
       const aggregatedEmpty = await ports.aggregate({
+        schema_version: 1,
         findings: [emptyNotice],
-        policyRevision: pr.policyRevision,
+        policy_revision: pr.policyRevision,
       });
       const walkthroughEmpty = await ports.generateWalkthrough({
         schema_version: 1,
@@ -503,15 +527,17 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
     // Step 3 — parallel: chunk+redact the review files; static analysis on the sandbox files.
     const [chunks, sa] = await Promise.all([
       ports.chunkAndRedact({
-        workspacePath: workspaceRoot,
-        files: reviewFiles,
-        ranges: pr.changedLineRanges,
+        schema_version: 1,
+        workspace_path: workspaceRoot,
+        files: [...reviewFiles],
+        changed_line_ranges: toMutableRanges(pr.changedLineRanges),
       }),
       ports.staticAnalysis({
-        workspacePath: workspaceRoot,
-        files: [...routing.sandbox_files],
-        ranges: pr.changedLineRanges,
-        prMeta: pr.prMeta,
+        schema_version: 1,
+        workspace_path: workspaceRoot,
+        sandbox_files: [...routing.sandbox_files],
+        changed_line_ranges: toMutableRanges(pr.changedLineRanges),
+        pr_meta: pr.prMeta,
       }),
     ]);
 
@@ -635,8 +661,9 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
     // Step 7.5's citation_validate, and the Step 7.7 arbitration-result derivation reassign `aggregated` as
     // the pipeline narrows the findings.)
     let aggregated: AggregatedFindingsV1 = await ports.aggregate({
-      findings: deduped.findings,
-      policyRevision: pr.policyRevision,
+      schema_version: 1,
+      findings: [...deduped.findings],
+      policy_revision: pr.policyRevision,
     });
 
     // M-A3 inline-findings cap (Python `_aggregate` closure, review_pull_request.py:1986). GitHub's PR
@@ -1119,10 +1146,11 @@ async function selectCarryForwardWithFallback(
       },
       async () =>
         ports.selectCarryForward({
-          parentFindings: [...pr.parentFindings],
-          currentChunks: [...chunks],
-          changedLineRanges: pr.changedLineRanges,
-          parentReviewId: pr.parentReviewId,
+          schema_version: 1,
+          parent_findings: [...pr.parentFindings],
+          current_chunks: [...chunks],
+          changed_line_ranges: toMutableRanges(pr.changedLineRanges),
+          parent_review_id: pr.parentReviewId,
         }),
     );
     // raiseAfterLog=true → on success `selection` is the result; on failure stageOutcome re-raised into the
@@ -1345,6 +1373,7 @@ async function postCheckRun(
   await ports.postCheckRun({
     schema_version: 1,
     pr_meta: pr.prMeta,
+    github_installation_id: pr.githubInstallationId,
     head_sha: headSha,
     summary,
     owner: ownerOf(pr.prMeta.repo),

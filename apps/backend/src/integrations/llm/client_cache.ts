@@ -56,6 +56,7 @@ import { BlobStorePostgresAdapter } from "#backend/adapters/blobstore_postgres.j
 import { PostgresCostCapEnforcer } from "#backend/cost/postgres_enforcer.js";
 import { KeyedMutex } from "#backend/integrations/github/installation_token.js";
 import { AnthropicBedrockSdkAdapter } from "#backend/integrations/llm/bedrock_sdk_adapter.js";
+import { AnthropicDirectSdkAdapter } from "#backend/integrations/llm/anthropic_direct_sdk_adapter.js";
 import {
   type BlobStore,
   type LlmCallsTelemetryWriter,
@@ -109,20 +110,25 @@ export type SdkFactory = (args: {
 export type ClientFactory = (args: { sdk: LlmSdk }) => LlmClient;
 
 /**
- * Production default {@link SdkFactory}: the REAL {@link AnthropicBedrockSdkAdapter}.
+ * Production default {@link SdkFactory}: BRANCHES on the settings-row `provider` string
+ * (`core.llm_provider_settings.provider`) — `"anthropic_direct"` → the {@link AnthropicDirectSdkAdapter}
+ * (`@anthropic-ai/sdk`, api.anthropic.com), anything else → the {@link AnthropicBedrockSdkAdapter}
+ * (`@anthropic-ai/bedrock-sdk`). Both satisfy the {@link LlmSdk} Protocol — their `createMessage(...)` is
+ * exactly the call surface {@link LlmClient} drives.
  *
- * `provider` is accepted-and-ignored today (only Bedrock is wired); a future second provider branches
- * on it here. The adapter satisfies the {@link LlmSdk} Protocol — its `createMessage(...)` is exactly
- * the call surface {@link LlmClient} drives. The cast bridges the two structurally-identical shapes
- * (the adapter's `createMessage` accepts the same `{ model, messages, maxTokens, tools, role }`).
+ * (Previously `provider` was accepted-and-ignored — only Bedrock was wired — so an `anthropic_direct`
+ * config silently built a Bedrock client and failed with an empty-region "Connection error". ADR-0028.)
  */
 export const defaultSdkFactory: SdkFactory = (args: {
   provider: string;
   credentialsProvider: LlmCredentialsProvider;
 }): LlmSdk => {
-  // The adapter's `createMessage({ model, messages, maxTokens, tools, role })` IS the `LlmSdk`
-  // Protocol surface — the structural assignment below is the compiler-checked proof it satisfies it.
-  const adapter: LlmSdk = new AnthropicBedrockSdkAdapter({ provider: args.credentialsProvider });
+  // The adapter's `createMessage({ model, messages, maxTokens, tools, role })` IS the `LlmSdk` Protocol
+  // surface — the structural assignment below is the compiler-checked proof it satisfies it.
+  const adapter: LlmSdk =
+    args.provider === "anthropic_direct"
+      ? new AnthropicDirectSdkAdapter({ provider: args.credentialsProvider })
+      : new AnthropicBedrockSdkAdapter({ provider: args.credentialsProvider });
   return adapter;
 };
 

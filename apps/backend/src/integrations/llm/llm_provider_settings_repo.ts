@@ -239,4 +239,100 @@ export class PostgresLlmProviderSettingsRepo {
     }
     return row.last_rotated_at;
   }
+
+  /**
+   * Admin-side credential write — 1:1 port of `write_settings_atomic` MINUS the in-transaction audit
+   * callback. The Python emits the dual rotation-audit rows inside the same transaction; in the TS port the
+   * admin route emits them post-write through the dormant `AdminRoutesOptions.audit` no-op seam (matching
+   * every other ported admin write), so this method is a single self-atomic UPSERT.
+   *
+   * Encrypts the plaintext token via the REAL Vault Transit key `"llm_provider_settings"` and UPSERTs the
+   * platform-scope row (scope='platform', installation_id=NULL) on the
+   * `(scope, role, COALESCE(installation_id, zero-uuid))` expression-index conflict target. Returns the
+   * 4-char fingerprint (last 4 plaintext chars; the length-4 CHECK) the route surfaces in its response.
+   */
+  public async writeSettings(args: {
+    role: LlmProviderRole;
+    provider: string;
+    apiKeyPlaintext: string;
+    modelId: string;
+    region: string | null;
+    enabled: boolean;
+    validatedAt: Date | null;
+    validationStatus: "ok" | "failed" | null;
+    rotatedAt: Date;
+    rotatedByUserId: string;
+  }): Promise<{ fingerprint: string }> {
+    const ciphertext = await this.vault.transitEncrypt({
+      keyName: VAULT_KEY_NAME,
+      plaintext: new TextEncoder().encode(args.apiKeyPlaintext),
+    });
+    const fingerprint = args.apiKeyPlaintext.slice(-4);
+    // tenant:exempt reason=platform-config follow_up=PERMANENT-EXEMPTION-platform-llm-config
+    await sql`
+      INSERT INTO core.llm_provider_settings
+        (scope, role, installation_id, provider, model_id, region,
+         api_key_ciphertext, api_key_fingerprint, enabled,
+         last_validated_at, last_validation_status,
+         last_rotated_at, last_rotated_by_user_id)
+      VALUES
+        ('platform', ${args.role}, NULL, ${args.provider}, ${args.modelId}, ${args.region},
+         ${ciphertext}, ${fingerprint}, ${args.enabled},
+         ${args.validatedAt}, ${args.validationStatus},
+         ${args.rotatedAt}, ${args.rotatedByUserId})
+      ON CONFLICT (scope, role, COALESCE(installation_id, '00000000-0000-0000-0000-000000000000'::uuid))
+      DO UPDATE SET
+         provider = EXCLUDED.provider,
+         model_id = EXCLUDED.model_id,
+         region = EXCLUDED.region,
+         api_key_ciphertext = EXCLUDED.api_key_ciphertext,
+         api_key_fingerprint = EXCLUDED.api_key_fingerprint,
+         enabled = EXCLUDED.enabled,
+         last_validated_at = EXCLUDED.last_validated_at,
+         last_validation_status = EXCLUDED.last_validation_status,
+         last_rotated_at = EXCLUDED.last_rotated_at,
+         last_rotated_by_user_id = EXCLUDED.last_rotated_by_user_id
+    `.execute(this.db);
+    return { fingerprint };
+  }
+
+  /**
+   * Return decrypted credentials for `provider` or `null` — 1:1 port of `read_decrypted_for_provider`. Scans
+   * for an ENABLED platform-scope row whose `provider` matches, preferring `role='primary'` (the
+   * `ORDER BY (role = 'primary') DESC` makes primary win the `LIMIT 1`). Used by the llm-models `/test`
+   * per-model credential ping. The plaintext key is consumed transiently by the caller — never logged or
+   * returned. (No `enabled` post-filter: the `enabled = true` predicate is in the WHERE clause.)
+   */
+  public async readDecryptedForProvider(provider: string): Promise<LlmProviderSettings | null> {
+    // tenant:exempt reason=platform-config follow_up=PERMANENT-EXEMPTION-platform-llm-config
+    const result = await sql<ProviderCredsRow>`
+      SELECT provider, model_id, region, api_key_ciphertext, enabled
+        FROM core.llm_provider_settings
+       WHERE provider = ${provider} AND scope = 'platform' AND enabled = true
+       ORDER BY (role = 'primary') DESC
+       LIMIT 1
+    `.execute(this.db);
+
+    const row = result.rows[0];
+    if (row === undefined) {
+      return null;
+    }
+
+    const plaintextBytes = await this.vault.transitDecrypt({
+      keyName: VAULT_KEY_NAME,
+      ciphertext: row.api_key_ciphertext,
+    });
+    const apiKey = new TextDecoder("utf-8").decode(plaintextBytes);
+
+    return { provider: row.provider, modelId: row.model_id, region: row.region, apiKey, enabled: row.enabled };
+  }
 }
+
+/** Row shape of the readDecryptedForProvider SELECT (pre-decrypt — carries the ciphertext). */
+type ProviderCredsRow = {
+  readonly provider: string;
+  readonly model_id: string;
+  readonly region: string | null;
+  readonly api_key_ciphertext: string;
+  readonly enabled: boolean;
+};

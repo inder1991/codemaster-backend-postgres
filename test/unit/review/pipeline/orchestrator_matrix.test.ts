@@ -203,8 +203,8 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
       calls.push("selectCarryForward");
       return CarryForwardSelectionV1.parse({
         carried: [],
-        to_review: [...input.currentChunks],
-        parent_review_id: input.parentReviewId,
+        to_review: [...input.current_chunks],
+        parent_review_id: input.parent_review_id,
       });
     },
     embedQuery: async () => {
@@ -253,7 +253,7 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
           semantic_merged: 0,
           capped: 0,
         },
-        policy_revision: input.policyRevision,
+        policy_revision: input.policy_revision,
       });
     },
     persistReviewFindings: async (input) => {
@@ -329,6 +329,7 @@ function makeCtx(stub: RecordingStub, logger?: { warning(msg: string): void }): 
     },
     pr: {
       prMeta: PR_META,
+      githubInstallationId: 4815162342,
       // 40-char git SHA — the Sub-spec B T17 confluence-context build (pickPrContext → PRContext.parse)
       // validates head_sha min/max_length=40, so the per-chunk PRContext requires a real-shaped SHA.
       headSha: "abcdef0123456789abcdef0123456789abcdef01",

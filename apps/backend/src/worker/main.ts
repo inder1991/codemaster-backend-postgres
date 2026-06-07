@@ -80,11 +80,14 @@ export async function runWorker(): Promise<void> {
     connection,
     namespace: temporal.namespace,
     taskQueue: temporal.taskQueue,
-    // Stage 1 — the spine worker now serves the THIN review-pipeline workflow
-    // (review_pull_request.workflow), which REPLACES the Phase-2.0 walking skeleton as the spine. The
-    // skeleton workflow file stays importable for any test that still references it, but the worker no
-    // longer registers it (a workflow bundle has one workflowsPath; the new spine is the live one).
-    workflowsPath: require_.resolve("../workflows/review_pull_request.workflow"),
+    // The combined-pod worker serves FOUR workflow types from ONE bundle (a workflow bundle has one
+    // workflowsPath): `reviewPullRequest` (the review-pipeline spine) PLUS the three auto-registration
+    // workflows (`reconcileInstallation` / `reconcileRepositories` / `repairInstallationRepositories`),
+    // re-exported together from `all_workflows.ts`. Project-owner directive: REUSE this worker (no separate
+    // "ingest" worker) — so the reconcile/repair workflows register here and their outbox task_queue is this
+    // worker's queue (REVIEW_TASK_QUEUE "review-default"). The skeleton workflow file stays importable for
+    // tests but is not registered.
+    workflowsPath: require_.resolve("../workflows/all_workflows"),
     activities,
     dataConverter: { payloadConverterPath: require_.resolve("./data_converter") },
   });

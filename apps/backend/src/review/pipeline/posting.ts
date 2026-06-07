@@ -290,6 +290,7 @@ export async function postReviewResults(
     posted = await ports.postReview({
       schema_version: 1,
       pr_meta: pr.prMeta,
+      github_installation_id: pr.githubInstallationId,
       aggregated,
       walkthrough,
       head_sha: pr.headSha,
@@ -336,6 +337,7 @@ export async function postReviewResults(
           owner: ownerOf(pr.prMeta.repo),
           repo: repoNameOf(pr.prMeta.repo),
           pr_number: pr.prNumber,
+          github_installation_id: pr.githubInstallationId,
           aggregated,
         });
       },
@@ -363,6 +365,7 @@ export async function postReviewResults(
           schema_version: 1,
           review_id: pr.reviewId,
           installation_id: pr.prMeta.installation_id,
+          github_installation_id: pr.githubInstallationId,
           pr_number: pr.prNumber,
           owner: ownerOf(pr.prMeta.repo),
           repo: repoNameOf(pr.prMeta.repo),

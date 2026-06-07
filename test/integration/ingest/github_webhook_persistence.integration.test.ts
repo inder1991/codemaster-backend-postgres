@@ -119,6 +119,10 @@ async function cleanup(seed: Seed): Promise<void> {
     [seed.githubRepoId],
   );
   await pool.query(`DELETE FROM core.pull_request_reviews WHERE repo_id = $1`, [seed.githubRepoId]);
+  // S3 PR-metadata persistence (safePersistPr) now writes core.pull_requests during persistWebhook; its FK to
+  // core.repositories is ON DELETE RESTRICT, so it must be cleared BEFORE the repositories delete. The delete
+  // cascades to core.pr_state_transitions + core.pr_files (both ON DELETE CASCADE).
+  await pool.query(`DELETE FROM core.pull_requests WHERE installation_id = $1`, [seed.installationId]);
   await pool.query(`DELETE FROM core.repositories WHERE github_repo_id = $1`, [seed.githubRepoId]);
   await pool.query(`DELETE FROM core.installations WHERE installation_id = $1`, [seed.installationId]);
 }

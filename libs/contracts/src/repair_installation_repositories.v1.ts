@@ -30,3 +30,25 @@ export const RepairInstallationRepositoriesPayloadV1 = z
 export type RepairInstallationRepositoriesPayloadV1 = z.infer<
   typeof RepairInstallationRepositoriesPayloadV1
 >;
+
+// Zod port of RepairResultV1 — the RETURN contract of hydrate_installation_repositories_activity.
+// Frozen Python: codemaster/activities/hydrate_installation_repositories.py:54-71
+// (ConfigDict(extra="forbid") → .strict()). Lives here next to the request payload it pairs with
+// (the repair workflow's input → output) so the repair contract surface is one module.
+//
+// Field notes (1:1 with frozen Python):
+//  - schema_version: Literal[1] = 1   → z.literal(1).default(1)
+//  - newly_created: int = 0           → z.number().int().default(0)  (rows where upsert `before` was empty)
+//  - refreshed: int = 0               → z.number().int().default(0)  (rows that already existed)
+//  - blocked: bool = False            → z.boolean().default(false)   (terminal-failure classification)
+//  - blocked_reason: str | None = None→ z.string().nullable().default(null)
+export const RepairResultV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    newly_created: z.number().int().default(0),
+    refreshed: z.number().int().default(0),
+    blocked: z.boolean().default(false),
+    blocked_reason: z.string().nullable().default(null),
+  })
+  .strict();
+export type RepairResultV1 = z.infer<typeof RepairResultV1>;

@@ -113,6 +113,22 @@ export const CostCapPageV1 = z
   .strict();
 export type CostCapPageV1 = z.infer<typeof CostCapPageV1>;
 
+/** Cap ceiling enforced at the contract boundary (1:1 with HARD_CEILING_CENTS). */
+export const COST_CAP_HARD_CEILING_CENTS = 5_000_000;
+
+/** POST /api/admin/cost-caps/changes body — stage a cap change (two-person approval). The structural
+ *  target_kind/target_id consistency rules are enforced at the route helper, not the schema. */
+export const CostCapChangeRequestV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    target_kind: z.enum(["global", "per_org_default", "per_org_override"]),
+    target_id: z.string().uuid().nullable().default(null),
+    new_cap_cents: z.number().int().min(0).max(COST_CAP_HARD_CEILING_CENTS),
+    expires_at: z.string().datetime({ offset: true }).nullable().default(null),
+  })
+  .strict();
+export type CostCapChangeRequestV1 = z.infer<typeof CostCapChangeRequestV1>;
+
 // ─── Knowledge (learnings; tenant-scoped; in-memory keyset) ──────────────────────────────────────
 
 /** One learning in GET /api/admin/knowledge. accept_rate is app-computed (accepted/feedback). */
@@ -192,6 +208,93 @@ export const IntegrationListPageV1 = z
   .strict();
 export type IntegrationListPageV1 = z.infer<typeof IntegrationListPageV1>;
 
+/** Atlassian space-key charset (1:1 with integrations.py _SPACE_KEY_REGEX). Anchored; refuses
+ *  path-traversal before any Confluence call. */
+const SPACE_KEY_RE = /^[A-Z0-9_-]{1,255}$/;
+/** 'platform' | 'org:<slug>' (1:1 with _AddConfluenceSpaceV1.visibility pattern). */
+const INTEGRATION_VISIBILITY_RE = /^(platform|org:[a-z][a-z0-9_-]*)$/;
+
+/**
+ * POST /api/admin/integrations/confluence-spaces request body — 1:1 with integrations.py
+ * `_AddConfluenceSpaceV1`. No cross-field rule: page_tree_root_id is NOT required even when
+ * scope='page_tree' (the Python does not pair them — preserve the gap). .strict() ⇔ extra="forbid".
+ * The 201 response reuses IntegrationListItemV1 (the Python _IntegrationHTTP is field-identical).
+ */
+export const AddConfluenceSpaceRequestV1 = z
+  .object({
+    space_key: z.string().min(1).max(255).regex(SPACE_KEY_RE),
+    space_name: z.string().min(1).max(255),
+    scope: z.enum(["whole_space", "page_tree"]).default("whole_space"),
+    page_tree_root_id: z.string().max(64).nullable().default(null),
+    trust_tier: z.enum(["trusted", "semi"]).default("trusted"),
+    governance_ack: z.boolean().default(false),
+    visibility: z.string().max(64).regex(INTEGRATION_VISIBILITY_RE).default("platform"),
+    strict_label_mode: z.boolean().default(false),
+  })
+  .strict();
+export type AddConfluenceSpaceRequestV1 = z.infer<typeof AddConfluenceSpaceRequestV1>;
+
+// ─── Platform credentials (Vault KV-backed: confluence + embedder.qwen) ───────────────────────────
+// 1:1 port of contracts/admin/platform_credentials/v1.py. Secrets NEVER appear in any shape — GET
+// surfaces token_present:bool only.
+
+const PLATFORM_CREDENTIAL_KEY = z.enum(["confluence", "embedder.qwen"]);
+
+/** Stable probe error vocabulary (Python PlatformTestErrorCode). */
+export const PLATFORM_TEST_ERROR_CODE = z.enum([
+  "auth_error",
+  "rate_limited",
+  "connectivity_error",
+  "unknown_model",
+  "dimension_mismatch",
+  "ssrf_blocked",
+  "https_required",
+  "validation_failed",
+]);
+export type PlatformTestErrorCode = z.infer<typeof PLATFORM_TEST_ERROR_CODE>;
+
+/** GET response — NEVER carries the secret value (Python PlatformCredentialsMetaV1). last_rotated_by is
+ *  EmailStr|null in Python; ported as a loose nullable string (TS has no EmailStr; production feeds
+ *  session-resolved emails and the shim resolver emits a valid one). */
+export const PlatformCredentialsMetaV1 = z
+  .object({
+    schema_version: z.number().int().default(1), // Python `int = 1` (not Literal[1]); value ignored
+    credential_key: PLATFORM_CREDENTIAL_KEY,
+    base_url: z.string().nullable(),
+    token_present: z.boolean(),
+    last_rotated_at: z.string().datetime({ offset: true }).nullable(),
+    last_rotated_by: z.string().nullable(),
+    last_validated_at: z.string().datetime({ offset: true }).nullable(),
+    last_validation_error: z.string().nullable(),
+  })
+  .strict();
+export type PlatformCredentialsMetaV1 = z.infer<typeof PlatformCredentialsMetaV1>;
+
+/** PATCH body — base_url + token independently rotatable (both default null). The "≥1 supplied" +
+ *  "complete credential" rules live in the HANDLER (Python defers them to the route), not here. */
+export const PatchPlatformCredentialsRequestV1 = z
+  .object({
+    schema_version: z.number().int().default(1), // Python `int = 1`; a body with schema_version:2 is accepted
+    base_url: z.string().min(1).max(512).nullable().default(null),
+    token: z.string().max(4096).nullable().default(null),
+  })
+  .strict();
+export type PatchPlatformCredentialsRequestV1 = z.infer<typeof PatchPlatformCredentialsRequestV1>;
+
+/** POST /test response (Python TestPlatformCredentialsResponseV1). 200 even on probe failure. */
+export const TestPlatformCredentialsResponseV1 = z
+  .object({
+    schema_version: z.number().int().default(1), // Python `int = 1`
+    ok: z.boolean(),
+    error: PLATFORM_TEST_ERROR_CODE.nullable(),
+    error_detail: z.string().nullable(),
+    latency_ms: z.number().int().nullable(),
+    detected_dimension: z.number().int().nullable(),
+    corpus_dimension: z.number().int().nullable(),
+  })
+  .strict();
+export type TestPlatformCredentialsResponseV1 = z.infer<typeof TestPlatformCredentialsResponseV1>;
+
 // ─── Notification rules (platform-scope) ─────────────────────────────────────────────────────────
 
 const SlackRecipientV1 = z
@@ -247,6 +350,71 @@ export const NotificationRulesPageV1 = z
   .strict();
 export type NotificationRulesPageV1 = z.infer<typeof NotificationRulesPageV1>;
 
+// Cron validation for the WRITE request contracts (mirrors the Python `_cron_valid` field_validator, which
+// uses croniter). 1:1-DIVERGENCE: this is a STRUCTURAL validator (standard 5/6-field grammar + @macros),
+// not byte-identical to croniter — it rejects malformed input at 422 but may not match croniter on
+// pathological-yet-valid expressions (real notification crons are standard). Swap in a cron-parser dep
+// here if exact croniter parity is ever required.
+const _CRON_MACROS = new Set([
+  "@yearly", "@annually", "@monthly", "@weekly", "@daily", "@midnight", "@hourly",
+]);
+const _CRON_ATOM = "(?:\\*|\\?|(?:[0-9]+|[a-z]{3})(?:-(?:[0-9]+|[a-z]{3}))?)(?:\\/[0-9]+)?";
+const _CRON_FIELD = new RegExp(`^${_CRON_ATOM}(?:,${_CRON_ATOM})*$`, "i");
+
+/** Structural cron check: @macro, or 5/6 whitespace-separated fields each matching the standard atom
+ *  grammar (wildcard, ranges, steps, lists, 3-letter names). See divergence note above. */
+export function isValidCron(value: string): boolean {
+  const v = value.trim();
+  if (v === "") return false;
+  if (v.startsWith("@")) return _CRON_MACROS.has(v.toLowerCase());
+  const fields = v.split(/\s+/);
+  if (fields.length !== 5 && fields.length !== 6) return false;
+  return fields.every((f) => _CRON_FIELD.test(f));
+}
+
+function cronRefine(value: string | null | undefined, ctx: z.RefinementCtx): void {
+  if (typeof value === "string" && !isValidCron(value)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "invalid cron expression: " + value });
+  }
+}
+
+/** POST /api/admin/notification-rules body — state/timestamps/rule_id are server-assigned. */
+export const NotificationRuleCreateRequestV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    name: z.string().min(1).max(200),
+    trigger_event: z.string().min(1).max(100),
+    filters: z.record(z.string(), z.unknown()).default({}),
+    recipients: z.array(RecipientV1).default([]),
+    schedule_cron: z.string().nullable().default(null).superRefine(cronRefine),
+  })
+  .strict();
+export type NotificationRuleCreateRequestV1 = z.infer<typeof NotificationRuleCreateRequestV1>;
+
+/** PATCH /api/admin/notification-rules/{rule_id} body — every field optional; only provided fields are
+ *  written (exclude-unset semantics enforced at the route from the raw body's keys). */
+export const NotificationRuleUpdateRequestV1 = z
+  .object({
+    schema_version: z.literal(1).optional(),
+    name: z.string().min(1).max(200).optional(),
+    trigger_event: z.string().min(1).max(100).optional(),
+    filters: z.record(z.string(), z.unknown()).optional(),
+    recipients: z.array(RecipientV1).optional(),
+    schedule_cron: z.string().nullable().optional().superRefine(cronRefine),
+    state: z.enum(["active", "paused"]).optional(),
+  })
+  .strict();
+export type NotificationRuleUpdateRequestV1 = z.infer<typeof NotificationRuleUpdateRequestV1>;
+
+/** POST /api/admin/notification-rules/{rule_id}/dry-run response — the recipients the rule WOULD fire to. */
+export const NotificationRuleDryRunResponseV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    would_dispatch_to: z.array(z.record(z.string(), z.string())),
+  })
+  .strict();
+export type NotificationRuleDryRunResponseV1 = z.infer<typeof NotificationRuleDryRunResponseV1>;
+
 // ─── LLM config reads (llm_models_router / llm_provider_config) ──────────────────────────────────
 
 /** One model in GET /api/admin/llm-models (core.llm_models). */
@@ -263,6 +431,19 @@ export const LlmModelV1 = z
   })
   .strict();
 export type LlmModelV1 = z.infer<typeof LlmModelV1>;
+
+/** PUT /api/admin/llm-models body — upsert a catalog model. model_id is guarded against BEDROCK_MODELS at
+ *  the route (the engine rejects anything outside that set, regardless of provider). */
+export const LlmModelUpsertV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    provider: z.enum(["anthropic_direct", "bedrock"]),
+    model_id: z.string().min(1).max(128),
+    display_name: z.string().nullable().default(null),
+    enabled: z.boolean().default(true),
+  })
+  .strict();
+export type LlmModelUpsertV1 = z.infer<typeof LlmModelUpsertV1>;
 
 export const LlmModelListV1 = z
   .object({ schema_version: z.literal(1).default(1), models: z.array(LlmModelV1).default([]) })
@@ -297,6 +478,25 @@ export const LlmPurposeModelListV1 = z
   .strict();
 export type LlmPurposeModelListV1 = z.infer<typeof LlmPurposeModelListV1>;
 
+/** PUT /api/admin/llm-purpose-routing body — assign one purpose to a catalog model. The purpose enum is
+ *  the 7-value LlmPurposeV1 vocabulary (it OMITS 'fix_prompt' which the DB CHECK admits — faithful drift). */
+export const LlmPurposeAssignmentUpdateV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    purpose: z.enum([
+      "review_summary",
+      "review_finding",
+      "chat_reply",
+      "walkthrough",
+      "redaction_check",
+      "cost_estimate",
+      "analysis_curator",
+    ]),
+    model_id: z.string().min(1).max(128),
+  })
+  .strict();
+export type LlmPurposeAssignmentUpdateV1 = z.infer<typeof LlmPurposeAssignmentUpdateV1>;
+
 /** GET /api/admin/llm-provider-config (the active per-role provider metadata; 404 when unconfigured). */
 export const LlmProviderConfigV1 = z
   .object({
@@ -313,6 +513,99 @@ export const LlmProviderConfigV1 = z
   })
   .strict();
 export type LlmProviderConfigV1 = z.infer<typeof LlmProviderConfigV1>;
+
+/** AWS region shape (Bedrock). 1:1 with the Python region Field pattern. */
+const LLM_REGION_RE = /^[a-z]{2}-[a-z]+-\d+$/;
+
+/**
+ * PUT /api/admin/llm-provider-config request body — 1:1 with contracts/admin/llm_provider_config/v1.py
+ * `LlmProviderConfigUpdateV1`. api_key is the plaintext token (Vault-Transit-encrypted at rest, never
+ * returned). Cross-field invariants (superRefine, mirroring the Python model_validator):
+ *   - bedrock requires a region; anthropic_direct does not.
+ *   - model_id pattern is provider-specific (bedrock: `anthropic.`|`claude-`; anthropic_direct: `claude-`).
+ */
+export const LlmProviderConfigUpdateV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    provider: z.enum(["bedrock", "anthropic_direct"]),
+    role: z.enum(["primary", "secondary"]),
+    model_id: z.string().min(1).max(128),
+    region: z.string().min(1).max(32).regex(LLM_REGION_RE).nullable().default(null),
+    api_key: z.string().min(20),
+    enabled: z.boolean().default(true),
+  })
+  .strict()
+  .superRefine((v, ctx) => {
+    if (v.provider === "bedrock" && v.region === null) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "region is required for bedrock", path: ["region"] });
+    }
+    if (v.provider === "bedrock" && !/^(anthropic\.|claude-)/.test(v.model_id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "bedrock model_id must start with 'anthropic.' or 'claude-'",
+        path: ["model_id"],
+      });
+    }
+    if (v.provider === "anthropic_direct" && !/^claude-/.test(v.model_id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "anthropic_direct model_id must start with 'claude-'",
+        path: ["model_id"],
+      });
+    }
+  });
+export type LlmProviderConfigUpdateV1 = z.infer<typeof LlmProviderConfigUpdateV1>;
+
+/**
+ * POST /api/admin/llm-provider-config/test-credentials request — 1:1 with `LlmCredentialsTestV1`. Model-LESS
+ * connection check (ADR-0060): no model_id. bedrock still requires a region.
+ */
+export const LlmCredentialsTestV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    provider: z.enum(["bedrock", "anthropic_direct"]),
+    region: z.string().min(1).max(32).regex(LLM_REGION_RE).nullable().default(null),
+    api_key: z.string().min(20),
+  })
+  .strict()
+  .superRefine((v, ctx) => {
+    if (v.provider === "bedrock" && v.region === null) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "region is required for bedrock", path: ["region"] });
+    }
+  });
+export type LlmCredentialsTestV1 = z.infer<typeof LlmCredentialsTestV1>;
+
+/** Response of the preflight / test-credentials connection checks — `{ ok, message }` (Python returns a bare
+ *  dict; "ok" on success, the sanitized upstream error otherwise). 200 regardless of outcome. */
+export const LlmConnectionTestResultV1 = z
+  .object({
+    ok: z.boolean(),
+    message: z.string(),
+  })
+  .strict();
+export type LlmConnectionTestResultV1 = z.infer<typeof LlmConnectionTestResultV1>;
+
+/** Legacy GET/PUT /api/admin/bedrock-config response — 1:1 alias of LlmProviderConfigV1
+ *  (Python: BedrockConfigV1 = LlmProviderConfigV1, bedrock_config.py:41). */
+export const BedrockConfigV1 = LlmProviderConfigV1;
+export type BedrockConfigV1 = z.infer<typeof BedrockConfigV1>;
+
+/**
+ * PUT /api/admin/bedrock-config request body — the LEGACY shim shape (Python: _LegacyBedrockConfigUpdateBody,
+ * bedrock_config.py:53-84). NOT a cross-process contract: provider/role are hardcoded by the shim to
+ * bedrock/primary; region is REQUIRED (not nullable, unlike LlmProviderConfigUpdateV1); model_id uses the
+ * bedrock pattern unconditionally. .strict() ⇔ Python extra="forbid" (a stray provider/role field → 422).
+ */
+export const LegacyBedrockConfigUpdateBodyV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    model_id: z.string().min(1).max(128).regex(/^(anthropic\.|claude-)/),
+    region: z.string().min(1).max(32).regex(LLM_REGION_RE),
+    api_key: z.string().min(20),
+    enabled: z.boolean().default(true),
+  })
+  .strict();
+export type LegacyBedrockConfigUpdateBodyV1 = z.infer<typeof LegacyBedrockConfigUpdateBodyV1>;
 
 /** One feature flag in GET /api/admin/flags (incl. pending two-person-approval state). */
 export const FlagDetailV1 = z
@@ -334,6 +627,24 @@ export type FlagDetailV1 = z.infer<typeof FlagDetailV1>;
 /** GET /api/admin/flags — a bare array of flags visible to the session (global + own-installation). */
 export const FlagListV1 = z.array(FlagDetailV1);
 export type FlagListV1 = z.infer<typeof FlagListV1>;
+
+/** PUT /api/admin/flags/{flag_name} request body. 1:1 with flags.py `_PutFlagV1` (no schema_version). */
+export const PutFlagRequestV1 = z
+  .object({
+    value_json: z.string().min(1).max(8192),
+  })
+  .strict();
+export type PutFlagRequestV1 = z.infer<typeof PutFlagRequestV1>;
+
+/** PUT /api/admin/flags/{flag_name} response — the post-write flag + which two-person approval path ran.
+ *  1:1 with flags.py `_PutFlagResponseV1` (no schema_version). */
+export const PutFlagResponseV1 = z
+  .object({
+    flag: FlagDetailV1,
+    path: z.enum(["staged_first", "committed"]),
+  })
+  .strict();
+export type PutFlagResponseV1 = z.infer<typeof PutFlagResponseV1>;
 
 /** One row in GET /api/admin/audit-events (decrypted excerpts; no schema_version, matching the Python
  *  internal HTTP type). */
@@ -541,6 +852,27 @@ export const MembersPageV1 = z
   })
   .strict();
 export type MembersPageV1 = z.infer<typeof MembersPageV1>;
+
+/** POST /api/admin/members/{subject_kind}/{subject_id}/role-changes body — stage a grant/revoke. */
+export const RoleChangeRequestV1 = z
+  .object({
+    schema_version: z.literal(2).default(2),
+    subject_kind: z.enum(["user", "team"]),
+    subject_id: z.string().uuid(),
+    role: z.enum(["platform_owner", "platform_operator", "reader"]),
+    action: z.enum(["grant", "revoke"]),
+    scope: z.enum(["platform", "installation"]).default("installation"),
+  })
+  .strict();
+export type RoleChangeRequestV1 = z.infer<typeof RoleChangeRequestV1>;
+
+/** POST body for the approve / reject role-change routes — carries the SECOND user for the two-person rule. */
+export const MemberApproverBodyV1 = z
+  .object({
+    approver_user_id: z.string().uuid(),
+  })
+  .strict();
+export type MemberApproverBodyV1 = z.infer<typeof MemberApproverBodyV1>;
 
 // ─── Embedder (GET /api/admin/embedder/{state,coverage,reembed/status}) ──────────────────────────────
 // 1:1 with contracts/admin/embedder/v1.py. created_by_email/updated_by_email are EmailStr|None in
@@ -777,3 +1109,80 @@ export const ProposalListPageV1 = z
   })
   .strict();
 export type ProposalListPageV1 = z.infer<typeof ProposalListPageV1>;
+
+// ─── Repositories enable (PUT /api/admin/repositories/{github_repo_id}/enable) ───────────────────────
+// 1:1 with contracts/admin/repositories/v1.py.
+
+/** A repository row (the PUT-enable response). github_repo_id is bigint → coerced to number. */
+export const RepositoryV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    repository_id: z.string().uuid(),
+    installation_id: z.string().uuid(),
+    github_repo_id: z.number().int().gt(0),
+    full_name: z.string().min(1).max(512),
+    default_branch: z.string().min(1).max(255),
+    enabled: z.boolean(),
+    archived: z.boolean(),
+    updated_at: z.string().datetime({ offset: true }),
+  })
+  .strict();
+export type RepositoryV1 = z.infer<typeof RepositoryV1>;
+
+/** PUT /api/admin/repositories/{github_repo_id}/enable body — flips core.repositories.enabled. */
+export const RepositoryEnableUpdateV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    enabled: z.boolean(),
+  })
+  .strict();
+export type RepositoryEnableUpdateV1 = z.infer<typeof RepositoryEnableUpdateV1>;
+
+// ─── Taxonomy suggestions (POST /api/admin/taxonomy/suggestions) ─────────────────────────────────────
+// 1:1 with contracts/admin/taxonomy_gaps/v1.py. schema_version is a plain int in the Python (not Literal).
+
+/** Operator-submitted suggestion to formalize an `unrecognized:*` label into a curated one. */
+export const TaxonomySuggestionV1 = z
+  .object({
+    schema_version: z.number().int().default(1),
+    label: z.string().min(14).regex(/^unrecognized:[a-z][a-z0-9_-]*$/),
+    proposed_canonical_label: z
+      .string()
+      .min(3)
+      .regex(/^(default|(lang|framework|infra|topic|org|version):[a-z][a-z0-9_-]*)$/),
+    rationale: z.string().min(20).max(2000),
+    suggester_email: z.string().email().nullable().default(null),
+  })
+  .strict();
+export type TaxonomySuggestionV1 = z.infer<typeof TaxonomySuggestionV1>;
+
+/** 201 response — the minted id + queued-for-review timestamp. */
+export const TaxonomySuggestionAcceptedV1 = z
+  .object({
+    schema_version: z.number().int().default(1),
+    suggestion_id: z.string().uuid(),
+    queued_at: z.string().datetime({ offset: true }),
+  })
+  .strict();
+export type TaxonomySuggestionAcceptedV1 = z.infer<typeof TaxonomySuggestionAcceptedV1>;
+
+// ─── Finding feedback (POST /api/admin/reviews/{review_id}/findings/{finding_id}/feedback) ───────────
+// 1:1 with contracts/admin/v1.py. verb maps to core.feedback_events.kind (helpful→thumbs_up,
+// not_helpful/wrong→thumbs_down); the verb is preserved only in the encrypted raw_payload.
+
+export const SubmitFindingFeedbackRequestV1 = z
+  .object({
+    schema_version: z.number().int().default(1),
+    verb: z.enum(["helpful", "not_helpful", "wrong"]),
+  })
+  .strict();
+export type SubmitFindingFeedbackRequestV1 = z.infer<typeof SubmitFindingFeedbackRequestV1>;
+
+/** 201 response — the persisted feedback event id. */
+export const FindingFeedbackResponseV1 = z
+  .object({
+    schema_version: z.number().int().default(1),
+    feedback_event_id: z.string().uuid(),
+  })
+  .strict();
+export type FindingFeedbackResponseV1 = z.infer<typeof FindingFeedbackResponseV1>;

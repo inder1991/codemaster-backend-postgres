@@ -9,14 +9,18 @@
 
 import cookie from "@fastify/cookie";
 import { type Kysely } from "kysely";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 
 import type { Clock } from "#platform/clock.js";
 import type { KeyRegistry } from "#platform/crypto/key_registry.js";
 
 import {
+  AddConfluenceSpaceRequestV1,
   AuditSearchResponseV1,
+  BedrockConfigV1,
+  CostCapChangeRequestV1,
   CostCapPageV1,
+  CostCapPendingChangeV1,
   DashboardSummaryV1,
   DefaultCorpusHealthV1,
   EmbedderCoverageV1,
@@ -24,27 +28,63 @@ import {
   EmbeddingGenerationV1,
   FindingListResponseV1,
   FlagListV1,
+  IntegrationListItemV1,
   IntegrationListPageV1,
   LearningDetailV1,
   LearningListPageV1,
+  LegacyBedrockConfigUpdateBodyV1,
   LlmModelListV1,
+  LlmModelUpsertV1,
+  LlmModelV1,
+  LlmConnectionTestResultV1,
+  LlmCredentialsTestV1,
+  LlmProviderConfigUpdateV1,
   LlmProviderConfigV1,
+  LlmPurposeAssignmentUpdateV1,
   LlmPurposeModelListV1,
+  LlmPurposeModelV1,
+  MemberApproverBodyV1,
   MembersPageV1,
+  NotificationRuleCreateRequestV1,
+  NotificationRuleDryRunResponseV1,
   NotificationRulesPageV1,
+  NotificationRuleUpdateRequestV1,
   NotificationRuleV1,
   OrgsListV1,
+  PatchPlatformCredentialsRequestV1,
+  PlatformCredentialsMetaV1,
   ProposalListPageV1,
   PullRequestListResponseV1,
+  PutFlagRequestV1,
+  PutFlagResponseV1,
   RetrievalAggregatePRListV1,
   RetrievalAggregateV1,
+  RepositoryEnableUpdateV1,
+  RepositoryV1,
   RetrievalTraceListPageV1,
   ReviewsListPageV1,
+  RoleChangePendingV1,
+  RoleChangeRequestV1,
+  FindingFeedbackResponseV1,
+  SubmitFindingFeedbackRequestV1,
   TaxonomyGapListV1,
+  TestPlatformCredentialsResponseV1,
+  TaxonomySuggestionAcceptedV1,
+  TaxonomySuggestionV1,
 } from "#contracts/admin.v1.js";
 
 import { CursorInvalidError } from "#backend/api/admin/_keyset_cursor.js";
 import { CostCapSettingsMissingError, buildCostCapsPage } from "#backend/api/admin/cost_caps_read.js";
+import {
+  CostCapConcurrentPendingChangeError,
+  CostCapInvalidRequestError,
+  CostCapPendingChangeNotFoundError,
+  CostCapPendingChangeStaleError,
+  CostCapSelfApprovalError,
+  approveCostCapChange,
+  rejectCostCapChange,
+  requestCostCapChange,
+} from "#backend/api/admin/cost_caps_write.js";
 import { buildDefaultCorpusHealth } from "#backend/api/admin/default_corpus_read.js";
 import {
   buildEmbedderCoverage,
@@ -53,11 +93,76 @@ import {
 } from "#backend/api/admin/embedder_read.js";
 import { buildMembersPage } from "#backend/api/admin/members_read.js";
 import {
+  NotificationRuleNotFoundError,
+  type NotificationRulePatch,
+  createRule,
+  deleteRule,
+  recipientSummary,
+  ruleAuditPayload,
+  updateRule,
+} from "#backend/api/admin/notification_rules_write.js";
+import {
+  MemberConcurrentPendingChangeError,
+  MemberExpiredApprovalError,
+  MemberRoleChangePendingNotFoundError,
+  MemberRoleChangePendingStaleError,
+  MemberSelfApprovalError,
+  type MemberAuditEmitter,
+  approveRoleChange,
+  rejectRoleChange,
+  requestRoleChange,
+} from "#backend/api/admin/members_write.js";
+import {
   RetrievalAggregateDataIntegrityError,
   RetrievalAggregateTraceNotFoundError,
   getByReview,
   listByPr,
 } from "#backend/api/admin/retrieval_aggregate_read.js";
+import {
+  BEDROCK_MODELS,
+  deleteModel,
+  setValidation,
+  upsertModel,
+  upsertPurposeModel,
+} from "#backend/api/admin/llm_catalog_write.js";
+import { setEnabled } from "#backend/api/admin/repositories_write.js";
+import { submitFindingFeedback } from "#backend/api/admin/finding_feedback_write.js";
+import {
+  FlagNotFoundError,
+  FlagStaleWriteError,
+  putFlag,
+  SelfSecondApproverError,
+  TypedConfirmRequiredError,
+  typedConfirmPhraseFor,
+} from "#backend/api/admin/flags_write.js";
+import {
+  deleteIntegration,
+  insertConfluenceSpace,
+  IntegrationDuplicateError,
+  IntegrationNotFoundError,
+  IntegrationValidationError,
+} from "#backend/api/admin/integrations_write.js";
+import { type GetConfluenceValidator } from "#backend/integrations/confluence/confluence_validator.js";
+import { PostgresPlatformCredentialsMetaRepo } from "#backend/api/admin/platform_credentials_repo.js";
+import {
+  type GetPlatformCredentialProbe,
+  type UserEmailResolverPort,
+  shimUserEmailResolver,
+} from "#backend/api/admin/platform_credentials_probe.js";
+import {
+  getCredential,
+  patchCredential,
+  PlatformCredentialError,
+  type PlatformCredentialKey,
+  type PlatformCredentialsDeps,
+  testCredential,
+} from "#backend/api/admin/platform_credentials_write.js";
+import { type DnsResolver } from "#backend/security/url_validator.js";
+import { type VaultPort } from "#backend/adapters/vault_port.js";
+import { PostgresLlmProviderSettingsRepo } from "#backend/integrations/llm/llm_provider_settings_repo.js";
+import { type GetPreflightValidator } from "#backend/integrations/llm/preflight_validator.js";
+import { PLATFORM_SCOPE_AUDIT_INSTALLATION_ID } from "#backend/infra/sentinels.js";
+import { insertTaxonomySuggestion } from "#backend/api/admin/taxonomy_write.js";
 import {
   getRetrievalTrace,
   listRetrievalTraces,
@@ -119,6 +224,22 @@ function optStr(value: unknown): string | null {
   return typeof value === "string" && value !== "" ? value : null;
 }
 
+/** Coerce a boolean query param the way FastAPI/pydantic-v2 does — absent → false; truthy/falsy token sets
+ *  (case-insensitive) → the bool; any other present value → "invalid" (the route 422s). */
+function coerceBoolQueryParam(raw: string | undefined): boolean | "invalid" {
+  if (raw === undefined) {
+    return false;
+  }
+  const v = raw.toLowerCase();
+  if (["true", "1", "yes", "on", "t", "y"].includes(v)) {
+    return true;
+  }
+  if (["false", "0", "no", "off", "f", "n"].includes(v)) {
+    return false;
+  }
+  return "invalid";
+}
+
 export type AdminRoutesOptions = {
   db: Kysely<unknown>;
   signingKey: Buffer | Uint8Array;
@@ -126,6 +247,26 @@ export type AdminRoutesOptions = {
   /** Field-encryption registry for decrypting core.users.email in the members read. server.ts always
    *  provides it; the field is optional only so endpoint tests that don't exercise members need no crypto. */
   registry?: KeyRegistry;
+  /** Optional audit-emit seam for the admin WRITE endpoints (members role-changes). Undefined → no-op
+   *  (the TS audit-emit pg-client wiring is dormant — FOLLOW-UP). Mirrors login.ts's audit callback. */
+  audit?: MemberAuditEmitter;
+  /** Vault Transit port for the llm-provider-config credential write (encrypt). Undefined → the
+   *  PUT/preflight/test-credentials credential-write routes 503 (unwired at the composition root). */
+  vault?: VaultPort;
+  /** Injected preflight-validator factory (1:1 with the Python get_preflight_validator). Undefined → the
+   *  llm-provider-config credential routes 503. Production wires the real Bedrock/AnthropicDirect SDK
+   *  validators; tests inject a stub. */
+  getPreflightValidator?: GetPreflightValidator;
+  /** Injected Confluence space-validator factory. Undefined → the integrations CREATE route 503. Production
+   *  wires the real Confluence v2 adapter (deferred — live-untested surface); tests inject a stub. */
+  getConfluenceValidator?: GetConfluenceValidator;
+  /** Injected platform-credential probe factory. Undefined → the platform-credentials PATCH/test routes 503.
+   *  Real Confluence/Qwen probe adapters deferred; tests inject a stub. */
+  getPlatformCredentialProbe?: GetPlatformCredentialProbe;
+  /** Resolves an actor user_id → email for the credential-rotation audit. Defaults to the shim resolver. */
+  userEmailResolver?: UserEmailResolverPort;
+  /** Injected DNS resolver for the SSRF URL validator (platform-credentials base_url). Defaults to node:dns. */
+  dnsResolver?: DnsResolver;
 };
 
 /** The static dashboard summary (1:1 with the shipped Python: _HealthyProbe for the 4 services +
@@ -185,6 +326,137 @@ export async function registerAdminRoutes(
         }
         const page = await buildMembersPage({ db: opts.db, registry: opts.registry, installationId });
         return reply.code(200).send(MembersPageV1.parse(page));
+      },
+    );
+
+    const MEMBER_MUTATION_ROLES = ["super_admin", "platform_owner"] as const;
+    const ROLE_CHANGE_EXPIRES_MS = 7 * 24 * 60 * 60 * 1000; // 7-day TTL (Python _DEFAULT_EXPIRES_IN).
+
+    // Translate the orchestration's typed errors to HTTP (shared by approve + reject).
+    function pendingChangeErrorReply(e: unknown, reply: FastifyReply): boolean {
+      if (e instanceof MemberRoleChangePendingNotFoundError) {
+        void reply.code(404).send({ detail: e.message });
+        return true;
+      }
+      if (e instanceof MemberRoleChangePendingStaleError) {
+        void reply.code(409).send({ detail: e.message });
+        return true;
+      }
+      if (e instanceof MemberSelfApprovalError) {
+        void reply.code(403).send({ detail: e.message });
+        return true;
+      }
+      if (e instanceof MemberExpiredApprovalError) {
+        void reply.code(410).send({ detail: e.message });
+        return true;
+      }
+      return false;
+    }
+
+    scope.post(
+      "/api/admin/members/:subject_kind/:subject_id/role-changes",
+      { preHandler: requireRole([...MEMBER_MUTATION_ROLES]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const params = request.params as { subject_kind: string; subject_id: string };
+        if (params.subject_kind !== "user" && params.subject_kind !== "team") {
+          return reply.code(422).send({ detail: "subject_kind must be 'user' or 'team'" });
+        }
+        if (!UUID_RE.test(params.subject_id)) {
+          return reply.code(422).send({ detail: "subject_id must be a UUID" });
+        }
+        const parsed = RoleChangeRequestV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        const body = parsed.data;
+        // Path subject_kind / subject_id MUST agree with the body — reject inconsistency at 400.
+        if (body.subject_kind !== params.subject_kind || body.subject_id !== params.subject_id) {
+          return reply.code(400).send({ detail: "path subject_kind / subject_id must match the request body" });
+        }
+        // Platform-scope grants cross every installation; only super_admin may stage them.
+        if (body.scope === "platform" && principal.role !== "super_admin") {
+          return reply.code(403).send({
+            detail: "platform-scope grants require super_admin; platform_owner is scoped to a single installation",
+          });
+        }
+        try {
+          const row = await requestRoleChange({
+            db: opts.db,
+            body,
+            installationId: principal.installationId,
+            requesterUserId: principal.userId,
+            now: opts.clock.now(),
+            expiresInMs: ROLE_CHANGE_EXPIRES_MS,
+            audit: opts.audit,
+          });
+          return reply.code(201).send(RoleChangePendingV1.parse(row));
+        } catch (e) {
+          if (e instanceof MemberConcurrentPendingChangeError) {
+            return reply.code(409).send({ detail: { existing_pending_id: e.existingPendingId } });
+          }
+          throw e;
+        }
+      },
+    );
+
+    scope.post(
+      "/api/admin/members/role-changes/:pending_id/approve",
+      { preHandler: requireRole([...MEMBER_MUTATION_ROLES]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const pendingId = (request.params as { pending_id: string }).pending_id;
+        if (!UUID_RE.test(pendingId)) {
+          return reply.code(422).send({ detail: "pending_id must be a UUID" });
+        }
+        const parsed = MemberApproverBodyV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        try {
+          const row = await approveRoleChange({
+            db: opts.db,
+            pendingId,
+            installationId: principal.installationId,
+            approverUserId: parsed.data.approver_user_id,
+            now: opts.clock.now(),
+            audit: opts.audit,
+          });
+          return reply.code(200).send(RoleChangePendingV1.parse(row));
+        } catch (e) {
+          if (pendingChangeErrorReply(e, reply)) return reply;
+          throw e;
+        }
+      },
+    );
+
+    scope.post(
+      "/api/admin/members/role-changes/:pending_id/reject",
+      { preHandler: requireRole([...MEMBER_MUTATION_ROLES]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const pendingId = (request.params as { pending_id: string }).pending_id;
+        if (!UUID_RE.test(pendingId)) {
+          return reply.code(422).send({ detail: "pending_id must be a UUID" });
+        }
+        const parsed = MemberApproverBodyV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        try {
+          const row = await rejectRoleChange({
+            db: opts.db,
+            pendingId,
+            installationId: principal.installationId,
+            approverUserId: parsed.data.approver_user_id,
+            now: opts.clock.now(),
+            audit: opts.audit,
+          });
+          return reply.code(200).send(RoleChangePendingV1.parse(row));
+        } catch (e) {
+          if (pendingChangeErrorReply(e, reply)) return reply;
+          throw e;
+        }
       },
     );
 
@@ -340,6 +612,156 @@ export async function registerAdminRoutes(
       },
     );
 
+    // ── cost-caps WRITE (two-person; super_admin / platform_owner) ──
+    const CC_MUTATION_ROLES = ["super_admin", "platform_owner"] as const;
+
+    // approve + reject share this error→HTTP mapping.
+    function costCapPendingErrorReply(e: unknown, reply: FastifyReply): boolean {
+      if (e instanceof CostCapPendingChangeNotFoundError) {
+        void reply.code(404).send({ detail: e.message });
+        return true;
+      }
+      if (e instanceof CostCapPendingChangeStaleError) {
+        void reply.code(409).send({ detail: e.message });
+        return true;
+      }
+      if (e instanceof CostCapSelfApprovalError) {
+        void reply.code(403).send({ detail: e.message });
+        return true;
+      }
+      if (e instanceof CostCapSettingsMissingError) {
+        void reply.code(500).send({ detail: e.message });
+        return true;
+      }
+      return false;
+    }
+
+    scope.post(
+      "/api/admin/cost-caps/changes",
+      { preHandler: requireRole([...CC_MUTATION_ROLES]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const parsed = CostCapChangeRequestV1.safeParse(request.body);
+        if (!parsed.success) {
+          // new_cap_cents outside [0, HARD_CEILING] etc.
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        try {
+          const row = await requestCostCapChange({
+            db: opts.db,
+            body: parsed.data,
+            installationId: principal.installationId,
+            requesterUserId: principal.userId,
+            now: opts.clock.now(),
+            audit: opts.audit,
+          });
+          return reply.code(202).send(CostCapPendingChangeV1.parse(row)); // 202 ACCEPTED (staged, not applied)
+        } catch (e) {
+          if (e instanceof CostCapInvalidRequestError) {
+            return reply.code(400).send({ detail: e.message });
+          }
+          if (e instanceof CostCapConcurrentPendingChangeError) {
+            return reply.code(409).send({ detail: { existing_pending_change_id: e.existingPendingChangeId } });
+          }
+          throw e;
+        }
+      },
+    );
+
+    scope.post(
+      "/api/admin/cost-caps/changes/:pending_change_id/approve",
+      { preHandler: requireRole([...CC_MUTATION_ROLES]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const id = (request.params as { pending_change_id: string }).pending_change_id;
+        if (!UUID_RE.test(id)) {
+          return reply.code(422).send({ detail: "pending_change_id must be a UUID" });
+        }
+        try {
+          const row = await approveCostCapChange({
+            db: opts.db,
+            pendingChangeId: id,
+            installationId: principal.installationId,
+            approverUserId: principal.userId,
+            now: opts.clock.now(),
+            audit: opts.audit,
+          });
+          return reply.code(200).send(CostCapPendingChangeV1.parse(row));
+        } catch (e) {
+          if (costCapPendingErrorReply(e, reply)) return reply;
+          throw e;
+        }
+      },
+    );
+
+    scope.post(
+      "/api/admin/cost-caps/changes/:pending_change_id/reject",
+      { preHandler: requireRole([...CC_MUTATION_ROLES]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const id = (request.params as { pending_change_id: string }).pending_change_id;
+        if (!UUID_RE.test(id)) {
+          return reply.code(422).send({ detail: "pending_change_id must be a UUID" });
+        }
+        try {
+          const row = await rejectCostCapChange({
+            db: opts.db,
+            pendingChangeId: id,
+            installationId: principal.installationId,
+            approverUserId: principal.userId,
+            now: opts.clock.now(),
+            audit: opts.audit,
+          });
+          return reply.code(200).send(CostCapPendingChangeV1.parse(row));
+        } catch (e) {
+          if (costCapPendingErrorReply(e, reply)) return reply;
+          throw e;
+        }
+      },
+    );
+
+    scope.put(
+      "/api/admin/repositories/:github_repo_id/enable",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const raw = (request.params as { github_repo_id: string }).github_repo_id;
+        if (!/^\d+$/.test(raw)) {
+          return reply.code(422).send({ detail: "github_repo_id must be a positive integer" });
+        }
+        const githubRepoId = Number(raw);
+        const parsed = RepositoryEnableUpdateV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        const now = opts.clock.now();
+        const { repo, changed } = await setEnabled(opts.db, {
+          githubRepoId,
+          enabled: parsed.data.enabled,
+          now,
+        });
+        if (repo === null) {
+          return reply.code(404).send({
+            detail: `repository github_repo_id=${githubRepoId} not found; it must be seen via a webhook before enable applies`,
+          });
+        }
+        if (changed) {
+          // The audit's installation_id is the REPO's (tenant-affected), not the actor's session.
+          await opts.audit?.({
+            actorUserId: principal.userId,
+            installationId: repo.installation_id,
+            action: "repository.enabled.set",
+            targetKind: "repository",
+            targetId: repo.repository_id,
+            before: { enabled: !parsed.data.enabled },
+            after: { enabled: parsed.data.enabled },
+            now,
+          });
+        }
+        return reply.code(200).send(RepositoryV1.parse(repo));
+      },
+    );
+
     // Static path → Fastify matches this before the parametric /api/admin/knowledge/:learning_id below.
     scope.get(
       "/api/admin/knowledge/proposals",
@@ -425,6 +847,163 @@ export async function registerAdminRoutes(
       },
     );
 
+    scope.delete(
+      "/api/admin/integrations/:integration_id",
+      { preHandler: requireRole(["platform_owner", "super_admin"]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const integrationId = (request.params as { integration_id: string }).integration_id;
+        if (!UUID_RE.test(integrationId)) {
+          return reply.code(422).send({ detail: "integration_id must be a uuid" });
+        }
+        try {
+          await deleteIntegration(opts.db, {
+            integrationId,
+            actorUserId: principal.userId,
+            now: opts.clock.now(),
+            audit: opts.audit,
+          });
+          return reply.code(204).send();
+        } catch (err) {
+          if (err instanceof IntegrationNotFoundError) {
+            return reply.code(404).send({ detail: "integration not found" });
+          }
+          throw err;
+        }
+      },
+    );
+
+    // POST /integrations/confluence-spaces — register a Confluence space. 1:1 with add_confluence_space.
+    // platform_owner+. dedup → validate (injected Confluence validator) → INSERT → audit. 201 on success.
+    scope.post(
+      "/api/admin/integrations/confluence-spaces",
+      { preHandler: requireRole(["platform_owner", "super_admin"]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const parsed = AddConfluenceSpaceRequestV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        if (opts.getConfluenceValidator === undefined) {
+          return reply.code(503).send({ detail: "confluence validator unwired" });
+        }
+        const body = parsed.data;
+        try {
+          const item = await insertConfluenceSpace(opts.db, {
+            spaceKey: body.space_key,
+            spaceName: body.space_name,
+            scope: body.scope,
+            pageTreeRootId: body.page_tree_root_id,
+            trustTier: body.trust_tier,
+            governanceAck: body.governance_ack,
+            visibility: body.visibility,
+            strictLabelMode: body.strict_label_mode,
+            actorUserId: principal.userId,
+            now: opts.clock.now(),
+            validator: opts.getConfluenceValidator(),
+            audit: opts.audit,
+          });
+          return reply.code(201).send(IntegrationListItemV1.parse(item));
+        } catch (err) {
+          if (err instanceof IntegrationDuplicateError) {
+            return reply.code(409).send({ detail: { code: "duplicate", space_key: body.space_key } });
+          }
+          if (err instanceof IntegrationValidationError) {
+            if (err.code === "rate_limited") {
+              // Retry-After header + 503 (1:1 with the Python rate-limit branch).
+              return reply
+                .code(503)
+                .header("Retry-After", "60")
+                .send({ detail: { code: "rate_limited", detail: err.validationDetail } });
+            }
+            // auth_error | not_found | validation_failed → 422 with the nested {code, detail} body.
+            return reply.code(422).send({ detail: { code: err.code, detail: err.validationDetail } });
+          }
+          throw err;
+        }
+      },
+    );
+
+    // ─── Platform credentials (Vault KV-backed: confluence + embedder/qwen) ────────────────────────
+    // 1:1 with platform_credentials.py. platform_owner+. GET (meta only — never the secret) / PATCH
+    // (probe-first-then-write, ?force=true override) / POST /test (probe the existing Vault credential).
+    // 503 when the vault/probe seam is unwired at the composition root.
+    const PLATFORM_CRED_ROUTES: ReadonlyArray<{ key: PlatformCredentialKey; segment: string }> = [
+      { key: "confluence", segment: "confluence" },
+      { key: "embedder.qwen", segment: "embedder/qwen" },
+    ];
+    for (const { key, segment } of PLATFORM_CRED_ROUTES) {
+      const base = `/api/admin/platform-credentials/${segment}`;
+      scope.get(base, { preHandler: requireRole(["platform_owner", "super_admin"]) }, async (_request, reply) => {
+        if (opts.vault === undefined) {
+          return reply.code(503).send({ detail: "platform-credentials not configured (vault unwired)" });
+        }
+        const meta = await getCredential(
+          { vault: opts.vault, metaRepo: new PostgresPlatformCredentialsMetaRepo(opts.db) },
+          key,
+        );
+        return reply.code(200).send(PlatformCredentialsMetaV1.parse(meta));
+      });
+
+      scope.patch(base, { preHandler: requireRole(["platform_owner", "super_admin"]) }, async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const parsed = PatchPlatformCredentialsRequestV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        // FastAPI parses the `force: bool` query param before the handler — a non-boolean token 422s.
+        const force = coerceBoolQueryParam((request.query as { force?: string }).force);
+        if (force === "invalid") {
+          return reply.code(422).send({ detail: "force query param must be a boolean" });
+        }
+        if (opts.vault === undefined || opts.getPlatformCredentialProbe === undefined) {
+          return reply.code(503).send({ detail: "platform-credentials write not configured (vault + probe unwired)" });
+        }
+        const deps: PlatformCredentialsDeps = {
+          db: opts.db,
+          vault: opts.vault,
+          probe: opts.getPlatformCredentialProbe(),
+          metaRepo: new PostgresPlatformCredentialsMetaRepo(opts.db),
+          userEmailResolver: opts.userEmailResolver ?? shimUserEmailResolver,
+          clock: opts.clock,
+          audit: opts.audit,
+          ...(opts.dnsResolver ? { dnsResolver: opts.dnsResolver } : {}),
+        };
+        try {
+          const meta = await patchCredential(deps, key, parsed.data, principal.userId, force);
+          return reply.code(200).send(PlatformCredentialsMetaV1.parse(meta));
+        } catch (err) {
+          if (err instanceof PlatformCredentialError) {
+            return reply.code(422).send({ error: err.errorCode, msg: err.msg });
+          }
+          throw err;
+        }
+      });
+
+      scope.post(`${base}/test`, { preHandler: requireRole(["platform_owner", "super_admin"]) }, async (_request, reply) => {
+        if (opts.vault === undefined || opts.getPlatformCredentialProbe === undefined) {
+          return reply.code(503).send({ detail: "platform-credentials probe not configured" });
+        }
+        try {
+          const res = await testCredential(
+            {
+              vault: opts.vault,
+              probe: opts.getPlatformCredentialProbe(),
+              metaRepo: new PostgresPlatformCredentialsMetaRepo(opts.db),
+              clock: opts.clock,
+            },
+            key,
+          );
+          return reply.code(200).send(TestPlatformCredentialsResponseV1.parse(res));
+        } catch (err) {
+          if (err instanceof PlatformCredentialError) {
+            return reply.code(422).send({ error: err.errorCode, msg: err.msg });
+          }
+          throw err;
+        }
+      });
+    }
+
     scope.get(
       "/api/admin/notification-rules",
       { preHandler: requireRole(["super_admin", "platform_owner", "platform_operator"]) },
@@ -456,11 +1035,248 @@ export async function registerAdminRoutes(
       },
     );
 
+    // ── notification-rules WRITE (super_admin / platform_owner only) ──
+    const NR_MUTATION_ROLES = ["super_admin", "platform_owner"] as const;
+
+    scope.post(
+      "/api/admin/notification-rules",
+      { preHandler: requireRole([...NR_MUTATION_ROLES]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const parsed = NotificationRuleCreateRequestV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        const b = parsed.data;
+        const row = await createRule(opts.db, {
+          name: b.name,
+          triggerEvent: b.trigger_event,
+          filters: b.filters,
+          recipients: b.recipients,
+          scheduleCron: b.schedule_cron,
+          now: opts.clock.now(),
+        });
+        const rule = NotificationRuleV1.parse(row);
+        await opts.audit?.({
+          actorUserId: principal.userId,
+          installationId: principal.installationId,
+          action: "notification_rule.created",
+          targetKind: "notification_rule",
+          targetId: rule.rule_id,
+          before: null,
+          after: ruleAuditPayload(rule),
+          now: opts.clock.now(),
+        });
+        return reply.code(201).send(rule);
+      },
+    );
+
+    scope.patch(
+      "/api/admin/notification-rules/:rule_id",
+      { preHandler: requireRole([...NR_MUTATION_ROLES]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const ruleId = (request.params as { rule_id: string }).rule_id;
+        if (!UUID_RE.test(ruleId)) {
+          return reply.code(422).send({ detail: "rule_id must be a UUID" });
+        }
+        const parsed = NotificationRuleUpdateRequestV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        const beforeRow = await getNotificationRule(opts.db, ruleId);
+        if (beforeRow === null) {
+          return reply.code(404).send({ detail: `rule ${ruleId} not found` });
+        }
+        // exclude-unset: the update schema has no defaults, so parsed.data holds only the provided keys.
+        // updateRule writes only the allowed keys (it ignores schema_version), so pass the parsed body.
+        const patch = parsed.data as NotificationRulePatch;
+        try {
+          const updated = NotificationRuleV1.parse(
+            await updateRule(opts.db, ruleId, patch, opts.clock.now()),
+          );
+          await opts.audit?.({
+            actorUserId: principal.userId,
+            installationId: principal.installationId,
+            action: "notification_rule.updated",
+            targetKind: "notification_rule",
+            targetId: ruleId,
+            before: ruleAuditPayload(NotificationRuleV1.parse(beforeRow)),
+            after: ruleAuditPayload(updated),
+            now: opts.clock.now(),
+          });
+          return reply.code(200).send(updated);
+        } catch (e) {
+          if (e instanceof NotificationRuleNotFoundError) {
+            return reply.code(404).send({ detail: e.message });
+          }
+          throw e;
+        }
+      },
+    );
+
+    scope.delete(
+      "/api/admin/notification-rules/:rule_id",
+      { preHandler: requireRole([...NR_MUTATION_ROLES]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const ruleId = (request.params as { rule_id: string }).rule_id;
+        if (!UUID_RE.test(ruleId)) {
+          return reply.code(422).send({ detail: "rule_id must be a UUID" });
+        }
+        const beforeRow = await getNotificationRule(opts.db, ruleId);
+        if (beforeRow === null) {
+          return reply.code(404).send({ detail: `rule ${ruleId} not found` });
+        }
+        const deleted = await deleteRule(opts.db, ruleId);
+        if (!deleted) {
+          // Concurrent-deletion race — surface as 404 rather than swallowing.
+          return reply.code(404).send({ detail: `rule ${ruleId} not found` });
+        }
+        await opts.audit?.({
+          actorUserId: principal.userId,
+          installationId: principal.installationId,
+          action: "notification_rule.deleted",
+          targetKind: "notification_rule",
+          targetId: ruleId,
+          before: ruleAuditPayload(NotificationRuleV1.parse(beforeRow)),
+          after: null,
+          now: opts.clock.now(),
+        });
+        return reply.code(204).send();
+      },
+    );
+
+    scope.post(
+      "/api/admin/notification-rules/:rule_id/dry-run",
+      { preHandler: requireRole([...NR_MUTATION_ROLES]) },
+      async (request, reply) => {
+        const ruleId = (request.params as { rule_id: string }).rule_id;
+        if (!UUID_RE.test(ruleId)) {
+          return reply.code(422).send({ detail: "rule_id must be a UUID" });
+        }
+        const row = await getNotificationRule(opts.db, ruleId);
+        if (row === null) {
+          return reply.code(404).send({ detail: `rule ${ruleId} not found` });
+        }
+        const rule = NotificationRuleV1.parse(row);
+        return reply.code(200).send(
+          NotificationRuleDryRunResponseV1.parse({
+            would_dispatch_to: rule.recipients.map(recipientSummary),
+          }),
+        );
+      },
+    );
+
     scope.get(
       "/api/admin/llm-models",
       { preHandler: requireRole([...READER_ROLES]) },
       async (_request, reply) =>
         reply.code(200).send(LlmModelListV1.parse({ models: await listLlmModels(opts.db) })),
+    );
+
+    scope.put(
+      "/api/admin/llm-models",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const parsed = LlmModelUpsertV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        const b = parsed.data;
+        // ADR-0060 guardrail: reject at config time a model the engine can't invoke (provider-agnostic).
+        if (!BEDROCK_MODELS.has(b.model_id)) {
+          return reply.code(422).send({
+            detail: {
+              code: "llm_model_not_supported",
+              message: `model '${b.model_id}' is not in the engine's accepted set ${JSON.stringify([...BEDROCK_MODELS].sort())}`,
+            },
+          });
+        }
+        await upsertModel(opts.db, {
+          provider: b.provider,
+          modelId: b.model_id,
+          displayName: b.display_name,
+          enabled: b.enabled,
+          createdByUserId: principal.userId,
+        });
+        // Re-read so the response reflects persisted status (untested on a fresh row — preflight is /test).
+        const row = (await listLlmModels(opts.db)).find(
+          (m) => m.provider === b.provider && m.model_id === b.model_id,
+        );
+        if (row === undefined) {
+          return reply.code(500).send({ detail: "internal: model upsert succeeded but read returned no row" });
+        }
+        return reply.code(200).send(LlmModelV1.parse(row));
+      },
+    );
+
+    scope.delete(
+      "/api/admin/llm-models/:provider/:model_id",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const params = request.params as { provider: string; model_id: string };
+        // Dependents check: any purpose routing to this model_id blocks the delete (match model_id only).
+        const dependents = (await listLlmPurposeModels(opts.db))
+          .filter((m) => m.model_id === params.model_id)
+          .map((m) => m.purpose)
+          .sort();
+        if (dependents.length > 0) {
+          return reply.code(409).send({
+            detail: { code: "llm_model_in_use", message: `model in use by: ${dependents.join(", ")}`, purposes: dependents },
+          });
+        }
+        const deleted = await deleteModel(opts.db, { provider: params.provider, modelId: params.model_id });
+        if (!deleted) {
+          return reply.code(404).send({ detail: `no such model: ${params.provider}/${params.model_id}` });
+        }
+        return reply.code(204).send();
+      },
+    );
+
+    // POST /llm-models/{provider}/{model_id}/test — per-model credential ping. 1:1 with llm_models_router.py
+    // test_model. super_admin only. Reads DECRYPTED provider creds → validate(model_id) → persist the catalog
+    // row's validation status. Returns 200 {ok,message} in every non-auth case (no-creds, ping-ok/fail);
+    // 503 when the vault/validator seam is unwired (TS credential-route convention).
+    scope.post(
+      "/api/admin/llm-models/:provider/:model_id/test",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const params = request.params as { provider: string; model_id: string };
+        if (opts.vault === undefined || opts.getPreflightValidator === undefined) {
+          return reply.code(503).send({ detail: "llm-models preflight not configured (vault + preflight validator unwired)" });
+        }
+        const noCreds = (provider: string) =>
+          reply.code(200).send(
+            LlmConnectionTestResultV1.parse({
+              ok: false,
+              message: `no enabled credentials configured for provider ${provider}; configure /admin/llm-provider-config first`,
+            }),
+          );
+        // Provider-narrowing guard: an unknown provider has no settings row (CHECK-constrained column) →
+        // the faithful no-creds outcome, AND it avoids getPreflightValidator throwing on an unknown provider.
+        if (params.provider !== "bedrock" && params.provider !== "anthropic_direct") {
+          return noCreds(params.provider);
+        }
+        const repo = new PostgresLlmProviderSettingsRepo({ db: opts.db, vault: opts.vault, clock: opts.clock });
+        const creds = await repo.readDecryptedForProvider(params.provider);
+        if (creds === null) {
+          return noCreds(params.provider);
+        }
+        const result = await opts
+          .getPreflightValidator(params.provider)
+          .validate({ apiKey: creds.apiKey, modelId: params.model_id, region: creds.region });
+        // Persist the probe outcome on the catalog row (bare UPDATE — no-ops on an unregistered model_id).
+        await setValidation(opts.db, {
+          provider: params.provider,
+          modelId: params.model_id,
+          status: result.ok ? "ok" : "failed",
+          error: result.errorMessage,
+          validatedAt: opts.clock.now(),
+        });
+        return reply.code(200).send(LlmConnectionTestResultV1.parse({ ok: result.ok, message: result.errorMessage || "validated" }));
+      },
     );
 
     scope.get(
@@ -470,6 +1286,46 @@ export async function registerAdminRoutes(
         reply
           .code(200)
           .send(LlmPurposeModelListV1.parse({ assignments: await listLlmPurposeModels(opts.db) })),
+    );
+
+    scope.put(
+      "/api/admin/llm-purpose-routing",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const parsed = LlmPurposeAssignmentUpdateV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        const body = parsed.data;
+        // ADR-0060 §4 guardrail: a purpose may only be assigned a catalog model that is enabled AND has
+        // passed preflight (last_validation_status === 'ok'). Match on model_id only (provider-agnostic).
+        const match = (await listLlmModels(opts.db)).find((m) => m.model_id === body.model_id);
+        if (match === undefined) {
+          return reply.code(422).send({
+            detail: { code: "llm_model_not_in_catalog", message: `model '${body.model_id}' not in catalog; add it first` },
+          });
+        }
+        if (!match.enabled) {
+          return reply.code(422).send({
+            detail: { code: "llm_model_disabled", message: `model '${body.model_id}' is disabled; enable it first` },
+          });
+        }
+        if (match.last_validation_status !== "ok") {
+          return reply.code(422).send({
+            detail: {
+              code: "llm_model_not_validated",
+              message: `model '${body.model_id}' has not passed preflight (status=${match.last_validation_status}); run /test first`,
+            },
+          });
+        }
+        await upsertPurposeModel(opts.db, {
+          purpose: body.purpose,
+          modelId: body.model_id,
+          updatedByUserId: principal.userId,
+        });
+        return reply.code(200).send(LlmPurposeModelV1.parse({ purpose: body.purpose, model_id: body.model_id }));
+      },
     );
 
     scope.get(
@@ -486,6 +1342,217 @@ export async function registerAdminRoutes(
       },
     );
 
+    // PUT /llm-provider-config — rotate platform LLM credentials. super_admin only. 1:1 with
+    // llm_provider_config.py put_route: preflight (skipped when disabling) → Vault-Transit-encrypted UPSERT
+    // → dual rotation-audit (post-write seam) → re-read metadata. The credential routes 503 when the vault /
+    // validator seam is unwired at the composition root (server.ts does not yet inject them).
+    scope.put(
+      "/api/admin/llm-provider-config",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const parsed = LlmProviderConfigUpdateV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        if (opts.vault === undefined || opts.getPreflightValidator === undefined) {
+          return reply
+            .code(503)
+            .send({ detail: "llm-provider-config write not configured (vault + preflight validator unwired)" });
+        }
+        const body = parsed.data;
+        // Skip preflight when disabling — the intent is to halt traffic, not validate the token.
+        if (body.enabled) {
+          const result = await opts
+            .getPreflightValidator(body.provider)
+            .validate({ apiKey: body.api_key, modelId: body.model_id, region: body.region });
+          if (!result.ok) {
+            return reply.code(400).send({
+              detail: { code: "llm_provider_preflight_failed", message: result.errorMessage || "preflight failed" },
+            });
+          }
+        }
+        const rotatedAt = opts.clock.now();
+        const repo = new PostgresLlmProviderSettingsRepo({ db: opts.db, vault: opts.vault, clock: opts.clock });
+        await repo.writeSettings({
+          role: body.role,
+          provider: body.provider,
+          apiKeyPlaintext: body.api_key,
+          modelId: body.model_id,
+          region: body.region,
+          enabled: body.enabled,
+          validatedAt: rotatedAt,
+          validationStatus: "ok",
+          rotatedAt,
+          rotatedByUserId: principal.userId,
+        });
+        // Dual rotation audit (legacy + new action strings) via the post-write seam (the Python emits these
+        // in-transaction; the TS audit seam is post-action — see writeSettings divergence note).
+        const after = {
+          provider: body.provider,
+          role: body.role,
+          model_id: body.model_id,
+          region: body.region,
+          enabled: body.enabled,
+          rotated_at: rotatedAt.toISOString(),
+          validation_status: "ok",
+        };
+        for (const [action, targetKind] of [
+          ["bedrock_credential.rotated", "bedrock_credential"],
+          ["llm_provider_credential.rotated", "llm_provider_credential"],
+        ] as const) {
+          await opts.audit?.({
+            actorUserId: principal.userId,
+            installationId: PLATFORM_SCOPE_AUDIT_INSTALLATION_ID,
+            action,
+            targetKind,
+            targetId: "global",
+            before: null,
+            after,
+            now: rotatedAt,
+          });
+        }
+        // Re-read the PRIMARY slot unconditionally — 1:1 with Python read_metadata_for_ui() (no role arg →
+        // defaults role='primary'; docstring "Return the primary slot's metadata"). So a role='secondary'
+        // PUT returns the primary slot's body (a Python latent quirk), and 500s when no primary row exists.
+        const meta = await getLlmProviderConfig(opts.db);
+        if (meta === null) {
+          return reply.code(500).send({ detail: "internal: write succeeded but read returned no row" });
+        }
+        return reply.code(200).send(LlmProviderConfigV1.parse(meta));
+      },
+    );
+
+    // POST /llm-provider-config/preflight — run preflight WITHOUT writing (the save-path re-runs it). 200
+    // regardless of outcome; the UI shows {ok, message} inline. super_admin only.
+    scope.post(
+      "/api/admin/llm-provider-config/preflight",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const parsed = LlmProviderConfigUpdateV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        if (opts.getPreflightValidator === undefined) {
+          return reply.code(503).send({ detail: "preflight validator unwired" });
+        }
+        const body = parsed.data;
+        const result = await opts
+          .getPreflightValidator(body.provider)
+          .validate({ apiKey: body.api_key, modelId: body.model_id, region: body.region });
+        return reply.code(200).send(LlmConnectionTestResultV1.parse({ ok: result.ok, message: result.errorMessage || "ok" }));
+      },
+    );
+
+    // POST /llm-provider-config/test-credentials — model-LESS connection check (ADR-0060). super_admin only.
+    scope.post(
+      "/api/admin/llm-provider-config/test-credentials",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const parsed = LlmCredentialsTestV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        if (opts.getPreflightValidator === undefined) {
+          return reply.code(503).send({ detail: "preflight validator unwired" });
+        }
+        const body = parsed.data;
+        const result = await opts
+          .getPreflightValidator(body.provider)
+          .validateCredentials({ apiKey: body.api_key, region: body.region });
+        return reply.code(200).send(LlmConnectionTestResultV1.parse({ ok: result.ok, message: result.errorMessage || "ok" }));
+      },
+    );
+
+    // ─── Legacy bedrock-config GET/PUT — DEPRECATED compat shim over the llm-provider-config machinery,
+    // hardcoding provider='bedrock', role='primary'. 1:1 with bedrock_config.py. Migrate callers to
+    // /api/admin/llm-provider-config.
+    scope.get(
+      "/api/admin/bedrock-config",
+      { preHandler: requireRole([...READER_ROLES]) },
+      async (_request, reply) => {
+        const config = await getLlmProviderConfig(opts.db);
+        if (config === null) {
+          return reply.code(404).send({ detail: "Bedrock not configured; PUT /api/admin/bedrock-config to seed." });
+        }
+        return reply.code(200).send(BedrockConfigV1.parse(config));
+      },
+    );
+
+    scope.put(
+      "/api/admin/bedrock-config",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const parsed = LegacyBedrockConfigUpdateBodyV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        if (opts.vault === undefined || opts.getPreflightValidator === undefined) {
+          return reply.code(503).send({ detail: "bedrock-config write not configured (vault + preflight validator unwired)" });
+        }
+        request.log.warn(
+          { rule: "bedrock-config-deprecated", installation_id: principal.installationId },
+          "DEPRECATED: PUT /api/admin/bedrock-config is a compat shim; migrate callers to PUT /api/admin/llm-provider-config",
+        );
+        const body = parsed.data;
+        if (body.enabled) {
+          const result = await opts
+            .getPreflightValidator("bedrock")
+            .validate({ apiKey: body.api_key, modelId: body.model_id, region: body.region });
+          if (!result.ok) {
+            // DIVERGENCE from the canonical route: the legacy code is `bedrock_preflight_failed` (Python :219).
+            return reply.code(400).send({
+              detail: { code: "bedrock_preflight_failed", message: result.errorMessage || "preflight failed" },
+            });
+          }
+        }
+        const rotatedAt = opts.clock.now();
+        const repo = new PostgresLlmProviderSettingsRepo({ db: opts.db, vault: opts.vault, clock: opts.clock });
+        await repo.writeSettings({
+          role: "primary",
+          provider: "bedrock",
+          apiKeyPlaintext: body.api_key,
+          modelId: body.model_id,
+          region: body.region,
+          enabled: body.enabled,
+          validatedAt: rotatedAt,
+          validationStatus: "ok",
+          rotatedAt,
+          rotatedByUserId: principal.userId,
+        });
+        const after = {
+          provider: "bedrock",
+          role: "primary",
+          model_id: body.model_id,
+          region: body.region,
+          enabled: body.enabled,
+          rotated_at: rotatedAt.toISOString(),
+          validation_status: "ok",
+        };
+        for (const [action, targetKind] of [
+          ["bedrock_credential.rotated", "bedrock_credential"],
+          ["llm_provider_credential.rotated", "llm_provider_credential"],
+        ] as const) {
+          await opts.audit?.({
+            actorUserId: principal.userId,
+            installationId: PLATFORM_SCOPE_AUDIT_INSTALLATION_ID,
+            action,
+            targetKind,
+            targetId: "global",
+            before: null,
+            after,
+            now: rotatedAt,
+          });
+        }
+        const meta = await getLlmProviderConfig(opts.db, "primary");
+        if (meta === null) {
+          return reply.code(500).send({ detail: "internal: write succeeded but read returned no row" });
+        }
+        return reply.code(200).send(BedrockConfigV1.parse(meta));
+      },
+    );
+
     scope.get(
       "/api/admin/flags",
       {
@@ -494,6 +1561,67 @@ export async function registerAdminRoutes(
       async (request, reply) => {
         const flags = await listFlags(opts.db, request.authPrincipal!.installationId);
         return reply.code(200).send(FlagListV1.parse(flags));
+      },
+    );
+
+    scope.put(
+      "/api/admin/flags/:flag_name",
+      { preHandler: requireRole(["platform_owner", "super_admin"]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const flagName = (request.params as { flag_name: string }).flag_name;
+        const parsed = PutFlagRequestV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        // Optimistic-concurrency token. If-Match is REQUIRED on every PUT (428 if absent) and parsed as an
+        // ISO-8601 timestamp (ETag-style surrounding quotes tolerated) — 400 if unparseable. 1:1 with put_route.
+        const ifMatchRaw = request.headers["if-match"];
+        const ifMatch = Array.isArray(ifMatchRaw) ? ifMatchRaw[0] : ifMatchRaw;
+        if (ifMatch === undefined) {
+          return reply.code(428).send({ detail: "If-Match header is required (locked-time-iso)" });
+        }
+        const ifMatchChangedAt = new Date(ifMatch.replace(/^"|"$/g, ""));
+        if (Number.isNaN(ifMatchChangedAt.getTime())) {
+          return reply.code(400).send({ detail: "If-Match must be an ISO-8601 timestamp" });
+        }
+        const typedConfirmRaw = request.headers["x-typed-confirm-phrase"];
+        const typedConfirm = (Array.isArray(typedConfirmRaw) ? typedConfirmRaw[0] : typedConfirmRaw) ?? null;
+        try {
+          const result = await putFlag(opts.db, {
+            flagName,
+            installationId: principal.installationId,
+            newValueJson: parsed.data.value_json,
+            ifMatchChangedAt,
+            actorUserId: principal.userId,
+            typedConfirmPhrase: typedConfirm,
+            now: opts.clock.now(),
+            audit: opts.audit,
+          });
+          return reply.code(200).send(PutFlagResponseV1.parse(result));
+        } catch (err) {
+          if (err instanceof FlagNotFoundError) {
+            return reply.code(404).send({ detail: "flag not found" });
+          }
+          if (err instanceof TypedConfirmRequiredError) {
+            return reply
+              .code(400)
+              .send({ detail: { code: "typed_confirm_required", expected_phrase: typedConfirmPhraseFor(flagName) } });
+          }
+          if (err instanceof SelfSecondApproverError) {
+            return reply.code(409).send({ detail: { code: "self_second_approver" } });
+          }
+          if (err instanceof FlagStaleWriteError) {
+            return reply.code(409).send({
+              detail: {
+                code: "stale_write",
+                current_value_json: err.currentValueJson,
+                current_changed_at: err.currentChangedAt.toISOString(),
+              },
+            });
+          }
+          throw err;
+        }
       },
     );
 
@@ -508,6 +1636,60 @@ export async function registerAdminRoutes(
         );
         const rows = await listTaxonomyGaps(opts.db, limit);
         return reply.code(200).send(TaxonomyGapListV1.parse({ rows }));
+      },
+    );
+
+    scope.post(
+      "/api/admin/taxonomy/suggestions",
+      { preHandler: requireRole(["platform_owner", "super_admin"]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const parsed = TaxonomySuggestionV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        const accepted = await insertTaxonomySuggestion(opts.db, {
+          suggestion: parsed.data,
+          actorUserId: principal.userId,
+          now: opts.clock.now(),
+        });
+        return reply.code(201).send(TaxonomySuggestionAcceptedV1.parse(accepted));
+      },
+    );
+
+    scope.post(
+      "/api/admin/reviews/:review_id/findings/:finding_id/feedback",
+      { preHandler: requireRole(["platform_operator", "platform_owner", "super_admin"]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const { review_id: reviewId, finding_id: findingId } = request.params as {
+          review_id: string;
+          finding_id: string;
+        };
+        if (!UUID_RE.test(reviewId) || !UUID_RE.test(findingId)) {
+          return reply.code(422).send({ detail: "review_id and finding_id must be UUIDs" });
+        }
+        const parsed = SubmitFindingFeedbackRequestV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        if (opts.registry === undefined) {
+          throw new Error("finding-feedback endpoint requires a key registry (server misconfiguration)");
+        }
+        const feedbackEventId = await submitFindingFeedback(opts.db, {
+          reviewId,
+          findingId,
+          installationId: principal.installationId,
+          verb: parsed.data.verb,
+          actorUserId: principal.userId,
+          now: opts.clock.now(),
+          registry: opts.registry,
+          audit: opts.audit,
+        });
+        if (feedbackEventId === null) {
+          return reply.code(404).send({ detail: "finding not found in this tenant" });
+        }
+        return reply.code(201).send(FindingFeedbackResponseV1.parse({ feedback_event_id: feedbackEventId }));
       },
     );
 

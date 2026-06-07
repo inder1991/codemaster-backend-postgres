@@ -252,4 +252,77 @@ describeDb("PostgresLlmProviderSettingsRepo (integration)", () => {
       vault.transitDecrypt({ keyName: VAULT_KEY_NAME, ciphertext: "vault:v1:bogus:999" }),
     ).rejects.toThrow();
   });
+
+  it("writeSettings encrypts via Vault Transit + UPSERTs; round-trips through readDecryptedSettings", async () => {
+    const rotatedAt = new Date("2026-06-05T08:00:00.000Z");
+    const out = await repo.writeSettings({
+      role: "primary",
+      provider: "bedrock",
+      apiKeyPlaintext: "sk-write-token-PQRS",
+      modelId: "claude-sonnet-4-6",
+      region: "us-east-1",
+      enabled: true,
+      validatedAt: rotatedAt,
+      validationStatus: "ok",
+      rotatedAt,
+      rotatedByUserId: SYSTEM_ACTOR_UUID,
+    });
+    expect(out.fingerprint).toBe("PQRS"); // last 4 chars of the plaintext (length-4 CHECK)
+
+    // Round-trip: the ciphertext decrypts back to the original plaintext under the production key.
+    expect(await repo.readDecryptedSettings("primary")).toEqual({
+      provider: "bedrock",
+      modelId: "claude-sonnet-4-6",
+      region: "us-east-1",
+      apiKey: "sk-write-token-PQRS",
+      enabled: true,
+    });
+
+    // Metadata columns persisted (fingerprint, validation status, rotated-by).
+    const meta = await pool.query(
+      "SELECT api_key_fingerprint, last_validation_status, last_rotated_by_user_id FROM core.llm_provider_settings WHERE scope='platform' AND role='primary'",
+    );
+    expect(meta.rows[0].api_key_fingerprint).toBe("PQRS");
+    expect(meta.rows[0].last_validation_status).toBe("ok");
+    expect(meta.rows[0].last_rotated_by_user_id).toBe(SYSTEM_ACTOR_UUID);
+
+    // UPSERT idempotency: a second write rotates ciphertext + model on the same (scope, role) PK.
+    await repo.writeSettings({
+      role: "primary",
+      provider: "bedrock",
+      apiKeyPlaintext: "sk-rotated-token-TUVW",
+      modelId: "claude-haiku-4-5-20251001",
+      region: "us-west-2",
+      enabled: true,
+      validatedAt: rotatedAt,
+      validationStatus: "ok",
+      rotatedAt,
+      rotatedByUserId: SYSTEM_ACTOR_UUID,
+    });
+    const dec2 = await repo.readDecryptedSettings("primary");
+    expect(dec2?.apiKey).toBe("sk-rotated-token-TUVW");
+    expect(dec2?.modelId).toBe("claude-haiku-4-5-20251001");
+    expect(dec2?.region).toBe("us-west-2");
+  });
+
+  it("writeSettings with enabled=false stores a disabled row (read returns null, fail-closed)", async () => {
+    const rotatedAt = new Date("2026-06-05T08:00:00.000Z");
+    await repo.writeSettings({
+      role: "secondary",
+      provider: "bedrock",
+      apiKeyPlaintext: "sk-disabled-write-MNOP",
+      modelId: "claude-sonnet-4-6",
+      region: "us-east-1",
+      enabled: false,
+      validatedAt: rotatedAt,
+      validationStatus: "ok",
+      rotatedAt,
+      rotatedByUserId: SYSTEM_ACTOR_UUID,
+    });
+    // Disabled slot → readDecryptedSettings returns null (halts traffic without rotating).
+    expect(await repo.readDecryptedSettings("secondary")).toBeNull();
+    // But the row exists (fingerprint persisted) — the rotation fingerprint still sees it.
+    const fp = await repo.readRotationFingerprint();
+    expect(fp.map((e) => e.role)).toContain("secondary");
+  });
 });

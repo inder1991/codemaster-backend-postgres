@@ -33,12 +33,13 @@
  * filter short-circuits subsequent calls so exactly one placeholder comment exists per PR (covers both a
  * Temporal retry of this activity AND a re-trigger workflow on the same PR).
  *
- * ## Feature flag (read at invocation, fail-safe default OFF)
+ * ## Feature flag (read at invocation, default ON — opt-out)
  *
- * `CODEMASTER_REVIEW_PLACEHOLDER_ENABLED` MUST equal `"1"` to enable the placeholder; ANY other value
- * (including unset) disables it. The flag is read INSIDE {@link postReviewPlaceholder} (not at module
- * import) so a Helm value flip takes effect on the next workflow without a worker restart — 1:1 with the
- * Python `os.getenv` placement inside the activity body.
+ * `CODEMASTER_REVIEW_PLACEHOLDER_ENABLED` is enabled by DEFAULT; only an explicit `"0"` disables it
+ * (unset / "1" / any other value enables). The flag is read INSIDE {@link postReviewPlaceholder} (not at
+ * module import) so a Helm value flip takes effect on the next workflow without a worker restart. NOTE:
+ * the default-ON polarity INTENTIONALLY DIVERGES from the frozen Python (`os.getenv(...) != "1"`, opt-in)
+ * per the platform-owner "enabled everytime" directive — see {@link placeholderEnabled}.
  *
  * ## DI idiom (matches the sibling `allocate_workspace` / `post_review_results` ports)
  *
@@ -256,18 +257,23 @@ export function makePlaceholderAuditEmit(dsn: string, clock: Clock): Placeholder
 // ─── Temporal activity entry point ───────────────────────────────────────────────────────────────────
 
 /**
- * Read the feature flag. `CODEMASTER_REVIEW_PLACEHOLDER_ENABLED === "1"` enables; ANY other value
- * (including unset) disables — fail-safe default OFF, 1:1 with the Python `os.getenv(...) != "1"`. Static
- * `process.env.X` access (no dynamic indexing) so no object-injection sink is introduced.
+ * Read the feature flag. The placeholder is core UX (engineers see life on the PR within seconds), so it is
+ * enabled by DEFAULT: only an explicit `CODEMASTER_REVIEW_PLACEHOLDER_ENABLED === "0"` disables it (opt-out);
+ * unset / "1" / any other value enables. Static `process.env.X` access (no dynamic indexing) so no
+ * object-injection sink is introduced.
+ *
+ * INTENTIONAL DIVERGENCE from the frozen Python (`os.getenv(...) != "1"` → opt-in, default OFF): platform-owner
+ * product decision (2026-06-07) — "enabled everytime". Same sensible-default family as default-enable repos.
  */
-function placeholderEnabled(): boolean {
-  return process.env.CODEMASTER_REVIEW_PLACEHOLDER_ENABLED === "1";
+export function placeholderEnabled(): boolean {
+  return process.env.CODEMASTER_REVIEW_PLACEHOLDER_ENABLED !== "0";
 }
 
 /**
  * The registered `post_review_placeholder` Temporal activity (single typed-input envelope per CLAUDE.md
  * invariant 11). Reads the feature flag (returns early when disabled); resolves the DSN from
- * `CODEMASTER_PG_CORE_DSN` + the numeric GitHub installation id from `CODEMASTER_GITHUB_INSTALLATION_ID`;
+ * `CODEMASTER_PG_CORE_DSN` + the per-review numeric installation id from the input's `github_installation_id`
+ * (per-review routing — replaces the removed `CODEMASTER_GITHUB_INSTALLATION_ID` env pin; a null id skips);
  * constructs the production {@link GitHubApiReviewClient} (Vault token provider → GitHubApiClient → wrapped
  * client) — the SAME wiring the `post_review_results` activity uses — and delegates to
  * {@link doPostPlaceholder} with the production audit-emit closure. Mirrors the frozen Python
@@ -288,7 +294,13 @@ export async function postReviewPlaceholder(input: PostReviewPlaceholderInput): 
     if (dsn === undefined || dsn === "") {
       throw new Error("CODEMASTER_PG_CORE_DSN is not set");
     }
-    const installationId = readGithubInstallationId();
+    // Per-review routing: the numeric installation id comes from the input. The placeholder is dispatched
+    // EARLY (before clone), so a null id is reachable (synthetic/legacy triggers) — throwing here is caught
+    // by the surrounding try → logged "not_configured" → the placeholder is skipped (best-effort, non-fatal).
+    const installationId = parsed.github_installation_id;
+    if (installationId === null) {
+      throw new Error("github_installation_id is null in the post_review_placeholder input (per-review routing)");
+    }
     const clock = new WallClock();
     const githubHttp = new FetchGitHubHttpClient({});
     const vault = VaultHttpPort.fromEnv();
@@ -311,29 +323,4 @@ export async function postReviewPlaceholder(input: PostReviewPlaceholderInput): 
   }
 
   await doPostPlaceholder(parsed, deps);
-}
-
-/**
- * Read + validate `CODEMASTER_GITHUB_INSTALLATION_ID` (the numeric GitHub App installation id this pod
- * authenticates as). 1:1 with the sibling `post_review_results.activity.ts::readGithubInstallationId`.
- * Static `process.env.X` access (no dynamic indexing) so no object-injection sink is introduced.
- */
-function readGithubInstallationId(): number {
-  const raw = process.env.CODEMASTER_GITHUB_INSTALLATION_ID;
-  if (raw === undefined || raw.trim() === "") {
-    throw new Error(
-      "CODEMASTER_GITHUB_INSTALLATION_ID env var is required for the post_review_placeholder activity. " +
-        "Set it to the numeric GitHub App installation id this pod authenticates as.",
-    );
-  }
-  const value = Number(raw);
-  if (!Number.isInteger(value)) {
-    throw new Error(
-      `CODEMASTER_GITHUB_INSTALLATION_ID must be an integer; got ${JSON.stringify(raw)}`,
-    );
-  }
-  if (value <= 0) {
-    throw new Error(`CODEMASTER_GITHUB_INSTALLATION_ID must be >= 1; got ${value}`);
-  }
-  return value;
 }

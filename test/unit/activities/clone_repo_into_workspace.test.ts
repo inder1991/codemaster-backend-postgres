@@ -49,7 +49,10 @@ async function makeWorkspace(): Promise<string> {
   return ws;
 }
 
-function input(workspace: string, overrides: Partial<{ head_sha: string }> = {}): CloneRepoIntoWorkspaceInput {
+function input(
+  workspace: string,
+  overrides: Partial<{ head_sha: string; github_installation_id: number | null }> = {},
+): CloneRepoIntoWorkspaceInput {
   return CloneRepoIntoWorkspaceInput.parse({
     handle: {
       workspace_id: UUID,
@@ -60,6 +63,10 @@ function input(workspace: string, overrides: Partial<{ head_sha: string }> = {})
     },
     repo_url: "https://github.com/acme/widget",
     head_sha: overrides.head_sha ?? HEAD_SHA,
+    // Per-review routing: the clone mints its token for this numeric id; the activity fail-closes on null.
+    // `in` check (not ??) so an EXPLICIT null override reaches the contract (the null-fail-closed test).
+    github_installation_id:
+      "github_installation_id" in overrides ? overrides.github_installation_id : 4815162342,
     changed_paths: ["src/foo.ts"],
     pr_number: 42,
   });
@@ -169,6 +176,23 @@ describe("cloneRepoIntoWorkspace — error paths", () => {
     expect(clone).not.toHaveBeenCalled();
     // Sanity: the threshold is the git short-SHA width.
     expect(MIN_HEAD_SHA_LEN).toBe(7);
+  });
+
+  it("null github_installation_id → CloneFailedError('missing github_installation_id'), cloner not run", async () => {
+    // Per-review routing: the clone is the spine core loop and CANNOT mint a token without a numeric
+    // installation id. A null id (e.g. a synthetic/legacy trigger) must FAIL-CLOSED here rather than
+    // silently produce an empty workspace + a false-clean review.
+    const ws = await makeWorkspace();
+    const clone = vi.fn(async () => {});
+    const cloner: GitCloner = { clone };
+
+    await expect(
+      cloneRepoIntoWorkspace(input(ws, { github_installation_id: null }), deps(cloner)),
+    ).rejects.toMatchObject({
+      name: "CloneFailedError",
+      reason: "missing github_installation_id",
+    });
+    expect(clone).not.toHaveBeenCalled();
   });
 
   it("a generic Error from cloner.clone is wrapped in CloneFailedError", async () => {

@@ -52,12 +52,17 @@ const REPO_SUBDIR = "repo";
  */
 export type SpawnFn = (command: string, args: ReadonlyArray<string>, options: SpawnOptions) => ChildProcess;
 
-/** The git-driver contract. Production: subprocess-git. Mirrors the Python `GitCloner` Protocol. */
+/** The git-driver contract. Production: subprocess-git. Mirrors the Python `GitCloner` Protocol.
+ *
+ * `installationId` is PER-CALL (per-review routing) — the cloner is no longer bound to one installation at
+ * construction. The caller (clone_repo_into_workspace activity) resolves the per-PR numeric id from the
+ * activity input and passes it here; one cloner instance serves every installation. */
 export type GitCloner = {
   clone(input: {
     workspace: string;
     repoUrl: string;
     headSha: string;
+    installationId: number;
     paths: ReadonlyArray<string>;
     prNumber?: number | null;
   }): Promise<void>;
@@ -65,7 +70,6 @@ export type GitCloner = {
 
 type GitSubprocessClonerOptions = {
   tokenProvider: TokenProvider;
-  githubInstallationId: number;
   timeoutSeconds?: number;
   /** Injected for tests; defaults to `node:child_process.spawn`. */
   spawnFn?: SpawnFn;
@@ -74,24 +78,18 @@ type GitSubprocessClonerOptions = {
 /** Production `GitCloner` impl backed by `git` subprocess calls. */
 export class GitSubprocessCloner implements GitCloner {
   private readonly tokenProvider: TokenProvider;
-  private readonly githubInstallationId: number;
   private readonly timeoutSeconds: number;
   private readonly spawnFn: SpawnFn;
 
   public constructor({
     tokenProvider,
-    githubInstallationId,
     timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
     spawnFn = nodeSpawn,
   }: GitSubprocessClonerOptions) {
-    if (githubInstallationId <= 0) {
-      throw new Error(`github_installation_id must be >= 1, got ${githubInstallationId}`);
-    }
     if (timeoutSeconds <= 0) {
       throw new Error(`timeout_seconds must be > 0, got ${timeoutSeconds}`);
     }
     this.tokenProvider = tokenProvider;
-    this.githubInstallationId = githubInstallationId;
     this.timeoutSeconds = timeoutSeconds;
     this.spawnFn = spawnFn;
   }
@@ -100,11 +98,13 @@ export class GitSubprocessCloner implements GitCloner {
     workspace,
     repoUrl,
     headSha,
+    installationId,
     prNumber = null,
   }: {
     workspace: string;
     repoUrl: string;
     headSha: string;
+    installationId: number;
     paths: ReadonlyArray<string>;
     prNumber?: number | null;
   }): Promise<void> {
@@ -122,8 +122,13 @@ export class GitSubprocessCloner implements GitCloner {
     if (prNumber !== null && prNumber !== undefined && prNumber <= 0) {
       throw new Error(`pr_number must be a positive integer when supplied; got ${prNumber}`);
     }
+    // Per-call installation guard (was a constructor guard before per-review routing). The activity
+    // fail-closes on a null id BEFORE calling clone(); this defends against a 0/negative id reaching the mint.
+    if (installationId <= 0) {
+      throw new Error(`github_installation_id must be >= 1, got ${installationId}`);
+    }
 
-    const token = await this.tokenProvider(this.githubInstallationId);
+    const token = await this.tokenProvider(installationId);
 
     // Write a per-clone GIT_ASKPASS helper so the token is not in argv. The helper just prints the
     // token; git invokes it when the remote prompts for a password (the username is `x-access-token`
@@ -217,7 +222,17 @@ export class GitSubprocessCloner implements GitCloner {
     proc.stdout?.on("data", (d: Buffer) => stdoutChunks.push(d));
     proc.stderr?.on("data", (d: Buffer) => stderrChunks.push(d));
 
-    const exitCode = await this.awaitWithTimeout(proc, verb);
+    // A spawn FAILURE (e.g. `git` not on PATH → ENOENT, or a permission error) emits an 'error' event, NOT
+    // 'close'. WITHOUT this listener the unhandled 'error' becomes an uncaught exception that crashes the
+    // (fail-loud) process — a missing/unspawnable git would take down the WHOLE pod instead of failing this
+    // one review. Reject with a catchable GitCloneFailedError so the clone activity degrades gracefully.
+    const spawnFailed = new Promise<never>((_resolve, reject) => {
+      proc.on("error", (err: Error) =>
+        reject(new GitCloneFailedError(`git ${verb} failed to spawn: ${err.message}`)),
+      );
+    });
+
+    const exitCode = await Promise.race([this.awaitWithTimeout(proc, verb), spawnFailed]);
 
     if (exitCode !== 0) {
       const stderrText = Buffer.concat(stderrChunks).toString("utf8");

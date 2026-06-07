@@ -55,6 +55,11 @@ import { KeyRegistry, makeKeySet } from "#platform/crypto/key_registry.js";
  */
 export const AUDIT_BEFORE_AAD: Uint8Array = new TextEncoder().encode("audit.audit_events.before");
 export const AUDIT_AFTER_AAD: Uint8Array = new TextEncoder().encode("audit.audit_events.after");
+/** AAD for core.feedback_events.raw_payload — the finding-feedback write encrypts its {verb, user_id}
+ *  JSON under this column AAD (1:1 with finding_feedback.py `_RAW_PAYLOAD_AAD`). */
+export const FEEDBACK_RAW_PAYLOAD_AAD: Uint8Array = new TextEncoder().encode(
+  "core.feedback_events.raw_payload",
+);
 
 /** Env var carrying the dev/test field-encryption key (base64 of 32 raw bytes) — name only, for errors. */
 const ENV_KEY_B64_NAME = "CODEMASTER_FIELD_ENCRYPTION_KEY_B64";
@@ -212,6 +217,24 @@ export function encryptAuditJsonBytea(value: unknown, aad: Uint8Array): Buffer |
   const envelope = encryptField({ plaintext, registry: reg, aad });
   // Python returns `envelope.encode("ascii")`; the kms2 envelope is base64 + a small ASCII header.
   return Buffer.from(envelope, "ascii");
+}
+
+/**
+ * Same JSON→AES-GCM-AAD→bytea encoding as {@link encryptAuditJsonBytea}, but with an EXPLICIT key
+ * registry instead of the module-global one. Used by per-request write paths (e.g. finding-feedback's
+ * raw_payload) that already hold a registry in their DI options — avoiding the shared module-global state
+ * (and the cross-test races it causes when multiple suites set it).
+ */
+export function encryptJsonByteaWithRegistry(
+  value: unknown,
+  aad: Uint8Array,
+  registry: KeyRegistry,
+): Buffer | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const plaintext = new TextEncoder().encode(canonicalAuditJson(value));
+  return Buffer.from(encryptField({ plaintext, registry, aad }), "ascii");
 }
 
 /**

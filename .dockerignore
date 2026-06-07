@@ -1,0 +1,13 @@
+node_modules
+dist
+vendor
+test
+.git
+.github
+.claude
+docs
+coverage
+*.md
+*.log
+.env*
+deploy

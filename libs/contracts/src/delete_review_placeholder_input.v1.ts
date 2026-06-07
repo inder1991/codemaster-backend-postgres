@@ -22,6 +22,11 @@ export const DeleteReviewPlaceholderInput = z
     run_id: z.string().uuid(),
     review_id: z.string().uuid(),
     installation_id: z.string().uuid(),
+    // NUMERIC GitHub-App installation id the cleanup posts under (per-review routing). DISTINCT from
+    // installation_id above (the internal UUID tenant FK). NULLABLE (faithful to the nullable workflow
+    // payload; the activity skips on null). `.default(null)` keeps the KEY required at construction so the
+    // dispatch threads the id explicitly. TS-only field, absent in frozen Python; symmetric with the placeholder.
+    github_installation_id: z.number().int().gte(0).nullable().default(null),
     owner: z.string(),
     repo_name: z.string(),
     pr_number: z.number().int(),

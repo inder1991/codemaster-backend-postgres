@@ -317,8 +317,8 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
       }
       return CarryForwardSelectionV1.parse({
         carried: [],
-        to_review: [...input.currentChunks],
-        parent_review_id: input.parentReviewId,
+        to_review: [...input.current_chunks],
+        parent_review_id: input.parent_review_id,
       });
     },
     embedQuery: async (input) => {
@@ -369,7 +369,7 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
           semantic_merged: 0,
           capped: 0,
         },
-        policy_revision: input.policyRevision,
+        policy_revision: input.policy_revision,
       });
     },
     persistReviewFindings: async (input) => {
@@ -531,6 +531,7 @@ function makeCtx(
     },
     pr: {
       prMeta: PR_META,
+      githubInstallationId: 4815162342,
       // 40-char git SHA — the confluence-context build (pickPrContext → PRContext.parse) validates
       // head_sha min_length=40/max_length=40 (Sub-spec B T17), so the per-chunk PRContext requires a
       // real-shaped SHA. Production always supplies one (typed_payload.head_sha).
@@ -1639,7 +1640,7 @@ describe("aggregate caps — values match the frozen Python", () => {
       return AggregatedFindingsV1.parse({
         findings: padded,
         dedupe_stats: { input_count: input.findings.length, exact_dropped: 0, semantic_merged: 0, capped: 0 },
-        policy_revision: input.policyRevision,
+        policy_revision: input.policy_revision,
       });
     };
     const logs: Array<string> = [];

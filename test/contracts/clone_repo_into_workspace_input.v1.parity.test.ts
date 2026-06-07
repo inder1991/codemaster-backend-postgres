@@ -9,6 +9,13 @@ afterAll(() => shutdownRef());
 // Contract parity WITHOUT fixtures: round-trip the SAME payload through Pydantic (calling the frozen
 // CloneRepoIntoWorkspaceInput via the oracle) and through Zod, then diff canonical JSON. The nested
 // WorkspaceHandle is supplied inline; its parity is also pinned by workspace_handle.v1.parity.test.ts.
+//
+// PER-REVIEW ROUTING DIVERGENCE (ADR — remove the CODEMASTER_GITHUB_INSTALLATION_ID env pin): the TS
+// contract carries a NULLABLE numeric `github_installation_id` the frozen Python model does NOT (the clone
+// is dispatched unconditionally on the spine; the activity fail-closes on a null id). The omitted-field
+// payloads below default it to null in Zod; `stripGhId` removes it from the Zod canonical JSON before the
+// diff so every SHARED field stays byte-identical to Python. A dedicated test pins that a provided id
+// round-trips.
 const PY = "codemaster.activities._workspace_clone";
 
 const HANDLE = {
@@ -19,8 +26,15 @@ const HANDLE = {
   state: "allocated",
 };
 
+// Drop the TS-only github_installation_id from a Zod canonical string (the oracle never had the field).
+function stripGhId(canon: string): string {
+  const o = JSON.parse(canon) as Record<string, unknown>;
+  delete o.github_installation_id;
+  return canonicalize(o);
+}
+
 describe("CloneRepoIntoWorkspaceInput parity (Pydantic ↔ Zod)", () => {
-  it("validates + dumps a fully-specified payload identically", async () => {
+  it("validates + dumps a fully-specified payload identically (shared fields)", async () => {
     const payload = {
       schema_version: 1,
       handle: HANDLE,
@@ -31,8 +45,21 @@ describe("CloneRepoIntoWorkspaceInput parity (Pydantic ↔ Zod)", () => {
     };
     const r = await pyRef({ pyModule: PY, pyCallable: "CloneRepoIntoWorkspaceInput", kwargs: payload });
     expect(r.ok, r.err).toBe(true);
-    expect(canonicalize(CloneRepoIntoWorkspaceInput.parse(payload))).toBe(r.out);
+    expect(stripGhId(canonicalize(CloneRepoIntoWorkspaceInput.parse(payload)))).toBe(r.out);
   }, 30_000);
+
+  it("defaults github_installation_id to null when omitted; a provided id round-trips (per-review routing ADR)", () => {
+    const base = {
+      handle: HANDLE,
+      repo_url: "https://github.com/acme/widget.git",
+      head_sha: "abc1234567",
+      changed_paths: [],
+    };
+    expect(CloneRepoIntoWorkspaceInput.parse(base).github_installation_id).toBe(null);
+    expect(CloneRepoIntoWorkspaceInput.parse({ ...base, github_installation_id: 4815162342 }).github_installation_id).toBe(
+      4815162342,
+    );
+  });
 
   it("applies the same defaults (schema_version=1, pr_number=null) when omitted", async () => {
     const payload = {
@@ -43,7 +70,7 @@ describe("CloneRepoIntoWorkspaceInput parity (Pydantic ↔ Zod)", () => {
     };
     const r = await pyRef({ pyModule: PY, pyCallable: "CloneRepoIntoWorkspaceInput", kwargs: payload });
     expect(r.ok, r.err).toBe(true);
-    expect(canonicalize(CloneRepoIntoWorkspaceInput.parse(payload))).toBe(r.out);
+    expect(stripGhId(canonicalize(CloneRepoIntoWorkspaceInput.parse(payload)))).toBe(r.out);
   }, 30_000);
 
   it("treats an explicit null pr_number identically to the default", async () => {
@@ -56,7 +83,7 @@ describe("CloneRepoIntoWorkspaceInput parity (Pydantic ↔ Zod)", () => {
     };
     const r = await pyRef({ pyModule: PY, pyCallable: "CloneRepoIntoWorkspaceInput", kwargs: payload });
     expect(r.ok, r.err).toBe(true);
-    expect(canonicalize(CloneRepoIntoWorkspaceInput.parse(payload))).toBe(r.out);
+    expect(stripGhId(canonicalize(CloneRepoIntoWorkspaceInput.parse(payload)))).toBe(r.out);
   }, 30_000);
 
   it("both REJECT schema_version != 1 (Literal[1])", async () => {

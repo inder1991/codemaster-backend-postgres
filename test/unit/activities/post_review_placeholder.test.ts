@@ -21,6 +21,7 @@ import {
   doPostPlaceholder,
   markerForPlaceholder,
   placeholderBody,
+  placeholderEnabled,
   type GhIssueCommentPostClient,
   type PlaceholderAuditEmit,
   type PostPlaceholderDeps,
@@ -278,5 +279,39 @@ describe("PostReviewPlaceholderInput contract", () => {
       pr_number: 1,
     });
     expect(parsed.schema_version).toBe(1);
+  });
+});
+
+// NOTE: This intentionally DIVERGES from the frozen Python (`os.getenv(...) != "1"` → opt-in, default OFF).
+// Platform-owner product decision: the placeholder is core UX and must be enabled EVERYTIME, so the TS code
+// default is ON (opt-OUT only via an explicit "0"). Same "sensible default" family as default-enable repos.
+describe("placeholderEnabled (default ON — diverges from frozen-Python opt-in)", () => {
+  let saved: string | undefined;
+  beforeEach(() => {
+    saved = process.env.CODEMASTER_REVIEW_PLACEHOLDER_ENABLED;
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.CODEMASTER_REVIEW_PLACEHOLDER_ENABLED;
+    else process.env.CODEMASTER_REVIEW_PLACEHOLDER_ENABLED = saved;
+  });
+
+  it("is ENABLED by default when the env var is unset", () => {
+    delete process.env.CODEMASTER_REVIEW_PLACEHOLDER_ENABLED;
+    expect(placeholderEnabled()).toBe(true);
+  });
+
+  it("is ENABLED for an explicit '1'", () => {
+    process.env.CODEMASTER_REVIEW_PLACEHOLDER_ENABLED = "1";
+    expect(placeholderEnabled()).toBe(true);
+  });
+
+  it("is DISABLED only for an explicit '0' (the opt-out)", () => {
+    process.env.CODEMASTER_REVIEW_PLACEHOLDER_ENABLED = "0";
+    expect(placeholderEnabled()).toBe(false);
+  });
+
+  it("is ENABLED for any other value", () => {
+    process.env.CODEMASTER_REVIEW_PLACEHOLDER_ENABLED = "true";
+    expect(placeholderEnabled()).toBe(true);
   });
 });

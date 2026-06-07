@@ -4,6 +4,7 @@
 
 import { VaultHttpPort } from "#backend/adapters/vault_http.js";
 import { registerAdminRoutes } from "#backend/api/admin/admin_routes.js";
+import { getPreflightValidator } from "#backend/integrations/llm/preflight_validator_real.js";
 import { registerAuthRoutes } from "#backend/api/auth/auth_routes.js";
 import { makeAuthSecretsProvider } from "#backend/api/auth/auth_secrets_provider.js";
 import { PostgresLocalUserRepo } from "#backend/api/auth/local_user_repo.js";
@@ -58,7 +59,8 @@ export async function runServer(): Promise<void> {
         "CODEMASTER_AUTH_ROUTES_ENABLED=true requires CODEMASTER_PG_CORE_DSN (the core.local_users pool).",
       );
     }
-    const registry = await loadFieldEncryptionKeyRegistry(VaultHttpPort.fromEnv());
+    const vault = VaultHttpPort.fromEnv();
+    const registry = await loadFieldEncryptionKeyRegistry(vault);
     // The audit-events READ endpoint decrypts before/after via the shared field-encryption registry.
     setAuditKeyRegistry(registry);
     const authSecrets = makeAuthSecretsProvider();
@@ -76,8 +78,11 @@ export async function runServer(): Promise<void> {
       csrfSecret,
       secureCookies: (process.env["CODEMASTER_SECURE_COOKIES"] ?? "true") !== "false",
     });
-    // D2 — admin READ endpoints (operator visibility), behind the same makeRequireRole gate + signing key.
-    await registerAdminRoutes(app, { db: coreDb, signingKey, clock, registry });
+    // D2 — admin READ + WRITE endpoints, behind the same makeRequireRole gate + signing key. vault +
+    // getPreflightValidator make the LLM credential-rotation routes (llm-provider-config / bedrock-config /
+    // llm-models test) LIVE; the Confluence-validator + platform-credential-probe seams stay unwired (those
+    // routes 503) pending their real, live-tested external adapters.
+    await registerAdminRoutes(app, { db: coreDb, signingKey, clock, registry, vault, getPreflightValidator });
   }
 
   // ── More routers register here as they land ──

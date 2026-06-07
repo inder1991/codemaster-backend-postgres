@@ -43,6 +43,11 @@ export const UpdatePrDescriptionInputV1 = z
     owner: z.string(),
     repo: z.string(),
     pr_number: z.number().int(),
+    // NUMERIC GitHub-App installation id the PR-description update posts under (per-review routing). This
+    // envelope carries NO UUID installation_id, so the numeric id is the only installation id it holds.
+    // NULLABLE (faithful to the nullable workflow payload; the activity enforces presence). `.default(null)`
+    // keeps the KEY required at construction so the dispatch threads the id explicitly. ADR per-review routing.
+    github_installation_id: z.number().int().gte(0).nullable().default(null),
     aggregated: AggregatedFindingsV1,
   })
   .strict();
