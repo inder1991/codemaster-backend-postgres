@@ -48,3 +48,52 @@ Single combined pod (API + review worker + outbox dispatcher, fail-loud) healthy
 **real GitHub webhook verified end-to-end** (App → smee → backend `/v1/github/webhook` → `204`, signature
 valid) — i.e. the per-review-routing + webhook-ingestion + secret plumbing all compose. The review itself is
 the next thing to observe once F-1's repo is resolvable (seeded for now).
+
+---
+
+## Second pass (2026-06-07 PM) — FULL review posted on PR #131 + degradation audit
+
+The spine now runs **end-to-end**: webhook → S3 PR-metadata persist → clone → classify → chunk → **LLM
+review** → aggregate → **post** (review comment + 2 inline findings, incl. the seeded SQL-injection blocker
+with a policy citation). Bugs found + FIXED on the way: git missing from the image; the camelCase→snake
+dispatch-contract drift; placeholder default-off; the S3 `pull_requests`/`gh_users`/`pr_state_transitions`
+writer; and the `anthropic_direct` provider gap (the cache ignored `provider` and always built Bedrock).
+
+A 3-agent degradation audit of run `019ea2ac-…` then surfaced these:
+
+### F-4 (FIXED) — deterministic static-analysis layer absent from the image
+`ruff` + `gitleaks` binaries were not installed (only `git`); `eslint` was a devDependency stripped by
+`npm ci --omit=dev`; and the bundled configs (`ruff.toml`, `eslint.config.mjs`) were never copied into
+`dist`. Net: every review degraded to LLM-only with `failed_startup` on the deterministic linters.
+**Fix:** Dockerfile now installs `ruff`/`gitleaks` release binaries + global `eslint` (1:1 with the frozen
+Python image), and `scripts/build_copy_static_analysis_configs.mjs` copies the configs into `dist`.
+
+### F-5 (FIXED, code) / OWED (config) — check-run 403 + App permissions
+`post_check_run` 403'd (`Resource not accessible by integration`) — the dev App lacks `checks:write` — and
+retried a *permanent* permission error 3×. **Fix (code):** `GitHubForbiddenError` added to
+`postCheckRun.nonRetryableErrorTypes` (fail fast; the check-run is advisory per invariant 9). **Owed
+(config, operator):** the dev App `codemaster-dev-1` is missing `checks:write` (+ diverges on `contents:read`
+/ `issues:write`); grant per the new `deploy/github/app-manifest.yaml`. The review body + inline comments
+post fine without it.
+
+### F-6 (FIXED) — fix-prompt theme-synthesis failures were silent
+The `deterministic_fallback` path swallowed LLM/infra errors silently (the frozen Python warns). **Fix:** a
+structured WARN (`fix_prompt.theme_synthesis_failed`) so an error-driven fallback is distinguishable from a
+no-themes-returned one. (The original fallback was itself a symptom of the now-fixed `anthropic_direct` gap.)
+
+### F-7 (DEFERRED, tracked) — `core.retrieval_traces` has no writer
+No `persist_retrieval_trace` activity was ported; the admin retrieval inspector has no data. This is a
+**large** port (HybridRetriever trace instrumentation) and the retrieval returns empty anyway in this env
+(0 `knowledge_chunks` / `confluence_chunks`, stub embedder), so it stays **Pattern-A deferred** (table
+exists, no writer; consumer = the also-deferred admin inspector). Tracked: `persist RetrievalTraceV2`.
+
+### Confirmed by-design / NOT bugs (no action)
+Confluence/knowledge retrieval empty (0 corpus + stub embedder); `delivery_outcome`/lifecycle columns NULL
+(`CODEMASTER_LIFECYCLE_WRITES_ENABLED` dormant-ship default, 1:1 Python); `pr_files.language` NULL (faithful
+port); `cross-installation … Phase B` WARN (informational); `eslint skipped 0/0` (correct on a Python PR);
+`topic:security` visibility drop (intended default-deny).
+
+### Caveat — what #131 did NOT validate
+#131 was a *minimal* ad-hoc PR. It proved the spine but **not** the policy-engine config *features*,
+`knowledge.file_patterns` retrieval, or Confluence retrieval — those need the **seeded-fixture PR** the
+`.codemaster.yaml` is written against, plus a seeded Confluence corpus + a real embedder.

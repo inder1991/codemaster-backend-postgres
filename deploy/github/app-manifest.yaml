@@ -1,0 +1,42 @@
+# GitHub App manifest for the codemaster TypeScript backend (1:1 with the frozen Python
+# vendor/codemaster-py/deploy/github/app-manifest.yaml, + checks:write made explicit — see below).
+#
+# Submitted via GitHub's manifest flow (POST /app-manifests/{code}/conversions). The platform team
+# registers the app ONCE per environment (dev / staging / prod); the resulting private key + webhook
+# secret are stored in Vault (secret/codemaster/github/app: private_key_pem + webhook_secret).
+#
+# Permissions = the minimum the review pipeline needs. Adding a new scope requires an ADR.
+#
+# ── Endpoint→permission map (what each scope is for) ──
+#   contents: read       → the cloner (git clone over a per-install token); private-repo read.
+#   pull_requests: write → the inline PR review + review comments (the review body).
+#   issues: write        → the issue-comment surfaces (the placeholder + the fix-it prompt).
+#   metadata: read       → always required.
+#   checks: write        → the ADVISORY check-run status indicator (post_check_run). OPTIONAL by design
+#                          (CLAUDE.md invariant 9: the bot is COMMENT-only). Omitted from the frozen
+#                          Python manifest (granted via the runbook); made explicit here because the
+#                          code DOES call POST /check-runs — WITHOUT this scope that call 403s
+#                          ("Resource not accessible by integration") and degrades gracefully (the
+#                          review still posts; only the check-run indicator is absent).
+name: codemaster-dev
+url: https://codemaster-dev.example.com
+hook_attributes:
+  url: https://codemaster-dev.example.com/v1/github/webhook
+  active: true
+redirect_url: https://codemaster-dev.example.com/auth/github/callback
+public: false
+default_permissions:
+  contents: read
+  pull_requests: write
+  issues: write
+  metadata: read
+  checks: write
+default_events:
+  - installation
+  - installation_repositories
+  - pull_request
+  - issue_comment
+  - push
+description: |
+  codemaster — internal AI-powered PR review platform. Posts review comments on PRs as advisory only
+  (event = COMMENT; never APPROVE or REQUEST_CHANGES).
