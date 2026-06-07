@@ -50,10 +50,13 @@ beforeAll(async () => {
   await seedChunk("universal", "active");
   await seedChunk("universal", "active");
   await seedChunk("security_only", "stale");
-  // a retrieval trace from the last 24h that retrieved 2 'universal' default chunks
-  // schema_version present so this row stays valid in v_retrieval_traces_recent (the matview's
-  // trace_schema_version extract is NOT NULL) when a parallel retrieval-traces suite REFRESHes it.
-  const trace = { schema_version: 2, stage3: { track_a_default: { selected_chunks_detail: [{ default_scope: "universal" }, { default_scope: "universal" }] } } };
+  // a retrieval trace from the last 24h that retrieved 2 'universal' default chunks.
+  // This row also lands in the SHARED v_retrieval_traces_recent matview when a parallel retrieval-traces
+  // suite REFRESHes it, so the trace must satisfy that matview's non-COALESCEd extracts or the parallel
+  // GET /api/admin/retrieval-traces 500s on RetrievalTraceListPageV1.parse: (a) schema_version →
+  // trace_schema_version::integer (min 1); (b) stage3.starvation_observed → ::boolean (z.boolean(), NOT
+  // nullable — a missing key yields SQL NULL and fails the contract).
+  const trace = { schema_version: 2, stage3: { starvation_observed: false, track_a_default: { selected_chunks_detail: [{ default_scope: "universal" }, { default_scope: "universal" }] } } };
   await sql`INSERT INTO core.retrieval_traces (trace_id, review_id, pr_id, captured_at, taxonomy_version, pipeline_version, trace)
             VALUES (${TRACE}, gen_random_uuid(), gen_random_uuid(), now(), 1, 1, CAST(${JSON.stringify(trace)} AS jsonb))`.execute(db);
 });
