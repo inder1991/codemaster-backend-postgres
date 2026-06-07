@@ -14,6 +14,7 @@ import { type Kysely, sql } from "kysely";
 
 import { OUTBOX_PAYLOAD_SCHEMA_VERSION, PostgresOutboxRepo } from "#backend/domain/repos/outbox_repo.js";
 import { derivePrId } from "#backend/ingest/_pr_id.js";
+import { safePersistPr } from "#backend/ingest/_pr_persistence.js";
 import { allocateRun, type AllocationOutcome } from "#backend/ingest/_review_run_allocator.js";
 import { upsertReview } from "#backend/ingest/_reviews_repository.js";
 import {
@@ -240,6 +241,20 @@ export async function persistWebhook(args: {
         const prMeta = extractPrMetadata(args.body);
         if (prMeta !== null) {
           const internalRepoId = await resolveInternalRepositoryId(tx, prMeta.githubRepoId, internalIid);
+          if (internalRepoId !== null && internalIid !== null) {
+            // S3 (PR-metadata persistence): write the gh_users → pull_requests → pr_state_transitions trio
+            // for every DERIVABLE action, BEFORE the dispatch split below, so core.pull_requests exists by
+            // the time the review workflow's enrich_pr_files activity runs (it FK-references it via
+            // fk_pr_files_pr_id_pull_requests). Fail-open SAVEPOINT: a persistence fault rolls back ONLY these
+            // writes — it never poisons the outer webhook transaction, fails the 204, or blocks the dispatch.
+            await safePersistPr(tx, {
+              prMeta,
+              internalIid,
+              internalRepoId,
+              deliveryId,
+              clock: args.clock,
+            });
+          }
           if (internalRepoId === null || internalIid === null) {
             // Drift: known installation, unknown repo. STAGE-1 STUB for maybeEnqueueRepair (Stage 2 wires
             // RepairInstallationRepositoriesWorkflow via the shared dispatcher; ADR-0054 / invariant 16
