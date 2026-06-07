@@ -427,6 +427,77 @@ export const LlmProviderConfigV1 = z
   .strict();
 export type LlmProviderConfigV1 = z.infer<typeof LlmProviderConfigV1>;
 
+/** AWS region shape (Bedrock). 1:1 with the Python region Field pattern. */
+const LLM_REGION_RE = /^[a-z]{2}-[a-z]+-\d+$/;
+
+/**
+ * PUT /api/admin/llm-provider-config request body — 1:1 with contracts/admin/llm_provider_config/v1.py
+ * `LlmProviderConfigUpdateV1`. api_key is the plaintext token (Vault-Transit-encrypted at rest, never
+ * returned). Cross-field invariants (superRefine, mirroring the Python model_validator):
+ *   - bedrock requires a region; anthropic_direct does not.
+ *   - model_id pattern is provider-specific (bedrock: `anthropic.`|`claude-`; anthropic_direct: `claude-`).
+ */
+export const LlmProviderConfigUpdateV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    provider: z.enum(["bedrock", "anthropic_direct"]),
+    role: z.enum(["primary", "secondary"]),
+    model_id: z.string().min(1).max(128),
+    region: z.string().min(1).max(32).regex(LLM_REGION_RE).nullable().default(null),
+    api_key: z.string().min(20),
+    enabled: z.boolean().default(true),
+  })
+  .strict()
+  .superRefine((v, ctx) => {
+    if (v.provider === "bedrock" && v.region === null) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "region is required for bedrock", path: ["region"] });
+    }
+    if (v.provider === "bedrock" && !/^(anthropic\.|claude-)/.test(v.model_id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "bedrock model_id must start with 'anthropic.' or 'claude-'",
+        path: ["model_id"],
+      });
+    }
+    if (v.provider === "anthropic_direct" && !/^claude-/.test(v.model_id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "anthropic_direct model_id must start with 'claude-'",
+        path: ["model_id"],
+      });
+    }
+  });
+export type LlmProviderConfigUpdateV1 = z.infer<typeof LlmProviderConfigUpdateV1>;
+
+/**
+ * POST /api/admin/llm-provider-config/test-credentials request — 1:1 with `LlmCredentialsTestV1`. Model-LESS
+ * connection check (ADR-0060): no model_id. bedrock still requires a region.
+ */
+export const LlmCredentialsTestV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    provider: z.enum(["bedrock", "anthropic_direct"]),
+    region: z.string().min(1).max(32).regex(LLM_REGION_RE).nullable().default(null),
+    api_key: z.string().min(20),
+  })
+  .strict()
+  .superRefine((v, ctx) => {
+    if (v.provider === "bedrock" && v.region === null) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "region is required for bedrock", path: ["region"] });
+    }
+  });
+export type LlmCredentialsTestV1 = z.infer<typeof LlmCredentialsTestV1>;
+
+/** Response of the preflight / test-credentials connection checks — `{ ok, message }` (Python returns a bare
+ *  dict; "ok" on success, the sanitized upstream error otherwise). 200 regardless of outcome. */
+export const LlmConnectionTestResultV1 = z
+  .object({
+    ok: z.boolean(),
+    message: z.string(),
+  })
+  .strict();
+export type LlmConnectionTestResultV1 = z.infer<typeof LlmConnectionTestResultV1>;
+
 /** One feature flag in GET /api/admin/flags (incl. pending two-person-approval state). */
 export const FlagDetailV1 = z
   .object({
