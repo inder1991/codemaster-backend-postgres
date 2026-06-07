@@ -19,10 +19,38 @@ FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 # git: the review cloner (GitSubprocessCloner) shells out to `git clone/fetch/checkout` — a HARD runtime
-# dependency, absent from node:*-slim. ca-certificates: TLS trust for the HTTPS clone to the GitHub host.
+# dependency, absent from node:*-slim. ca-certificates: TLS trust for the HTTPS clone. curl: fetch the
+# static-analysis release binaries below.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git ca-certificates \
+  && apt-get install -y --no-install-recommends git ca-certificates curl \
   && rm -rf /var/lib/apt/lists/*
+
+# ── Tier-1 deterministic static-analysis binaries (1:1 with the frozen Python image, vendor/.../Dockerfile) ──
+# The review's in-worker runners spawn `ruff` / `gitleaks` / `eslint` BY NAME; if absent the spawn fails
+# (ENOENT → SubprocessLaunchError → failed_startup) and the whole deterministic linter + secret-scan layer
+# silently disappears, leaving LLM-only reviews. Pinned versions; each install ends in a --version verify so
+# a silent registry-side regression fails the build.
+ARG RUFF_VERSION=0.6.9
+ARG GITLEAKS_VERSION=8.18.4
+ARG ESLINT_VERSION=10.4.1
+# ruff: the standalone release binary — node:*-slim has no python/pip, so NOT `pip install ruff`.
+RUN curl -fsSL "https://github.com/astral-sh/ruff/releases/download/${RUFF_VERSION}/ruff-x86_64-unknown-linux-gnu.tar.gz" -o /tmp/ruff.tar.gz \
+  && tar -xzf /tmp/ruff.tar.gz -C /tmp \
+  && find /tmp -maxdepth 2 -type f -name ruff -exec mv {} /usr/local/bin/ruff \; \
+  && rm -rf /tmp/ruff.tar.gz /tmp/ruff-x86_64-unknown-linux-gnu \
+  && chmod +x /usr/local/bin/ruff \
+  && ruff --version
+# gitleaks: pinned release tarball.
+RUN curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -o /tmp/gitleaks.tar.gz \
+  && tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks \
+  && rm /tmp/gitleaks.tar.gz \
+  && chmod +x /usr/local/bin/gitleaks \
+  && gitleaks version
+# eslint: the bundled flat config (config/static_analysis/eslint/eslint.config.mjs) is plugin-FREE
+# (built-in rules only), so the eslint binary alone suffices. Installed GLOBALLY (on PATH) because the
+# review repo's own eslint is a devDependency that `npm ci --omit=dev` strips.
+RUN npm install -g "eslint@${ESLINT_VERSION}" \
+  && eslint --version
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 # Flatten the compiled tree into /app so the package.json "imports" map (#backend/* -> ./apps/backend/src/*,

@@ -11,7 +11,7 @@
     "#backend/*": "./apps/backend/src/*"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node scripts/build_copy_grammars.mjs",
+    "build": "tsc -p tsconfig.build.json && node scripts/build_copy_grammars.mjs && node scripts/build_copy_static_analysis_configs.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint .",
     "test": "vitest run",
