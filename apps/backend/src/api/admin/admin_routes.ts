@@ -17,6 +17,7 @@ import {
   AuditSearchResponseV1,
   CostCapPageV1,
   DashboardSummaryV1,
+  DefaultCorpusHealthV1,
   FindingListResponseV1,
   FlagListV1,
   IntegrationListPageV1,
@@ -35,6 +36,7 @@ import {
 
 import { CursorInvalidError } from "#backend/api/admin/_keyset_cursor.js";
 import { CostCapSettingsMissingError, buildCostCapsPage } from "#backend/api/admin/cost_caps_read.js";
+import { buildDefaultCorpusHealth } from "#backend/api/admin/default_corpus_read.js";
 import {
   getLearningWithRevisions,
   getLlmProviderConfig,
@@ -131,6 +133,15 @@ export async function registerAdminRoutes(
         const orgs = await listOrgs(opts.db, request.authPrincipal!.installationId);
         return reply.code(200).send(OrgsListV1.parse({ orgs }));
       },
+    );
+
+    scope.get(
+      "/api/admin/default-corpus/health",
+      { preHandler: requireRole(["super_admin", "platform_owner"]) },
+      async (_request, reply) =>
+        reply
+          .code(200)
+          .send(DefaultCorpusHealthV1.parse(await buildDefaultCorpusHealth(opts.db, opts.clock.now()))),
     );
 
     scope.get(

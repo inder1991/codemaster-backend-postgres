@@ -22,6 +22,39 @@ export const OrgsListV1 = z
   .strict();
 export type OrgsListV1 = z.infer<typeof OrgsListV1>;
 
+// ─── Default-corpus health (platform-scope) ──────────────────────────────────────────────────────
+
+export const DefaultScopeHitRateV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    scope: z.enum([
+      "universal",
+      "security_only",
+      "compliance_only",
+      "framework_only",
+      "language_only",
+    ]),
+    chunks_in_corpus: z.number().int().min(0),
+    chunks_retrieved_24h: z.number().int().min(0),
+    hit_rate_24h: z.number().min(0).max(1),
+  })
+  .strict();
+export type DefaultScopeHitRateV1 = z.infer<typeof DefaultScopeHitRateV1>;
+
+/** GET /api/admin/default-corpus/health — default-corpus coverage + 24h per-scope hit rate. */
+export const DefaultCorpusHealthV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    captured_at: z.string().datetime({ offset: true }),
+    total_default_chunks: z.number().int().min(0),
+    stale_default_chunks: z.number().int().min(0),
+    total_tokens: z.number().int().min(0),
+    spaces_with_defaults: z.number().int().min(0),
+    hit_rate_24h_by_scope: z.array(DefaultScopeHitRateV1),
+  })
+  .strict();
+export type DefaultCorpusHealthV1 = z.infer<typeof DefaultCorpusHealthV1>;
+
 // ─── Cost caps (platform-scope governance) ───────────────────────────────────────────────────────
 
 export const CostCapSettingsV1 = z
