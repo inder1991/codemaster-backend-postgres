@@ -247,6 +247,71 @@ export const NotificationRulesPageV1 = z
   .strict();
 export type NotificationRulesPageV1 = z.infer<typeof NotificationRulesPageV1>;
 
+// Cron validation for the WRITE request contracts (mirrors the Python `_cron_valid` field_validator, which
+// uses croniter). 1:1-DIVERGENCE: this is a STRUCTURAL validator (standard 5/6-field grammar + @macros),
+// not byte-identical to croniter — it rejects malformed input at 422 but may not match croniter on
+// pathological-yet-valid expressions (real notification crons are standard). Swap in a cron-parser dep
+// here if exact croniter parity is ever required.
+const _CRON_MACROS = new Set([
+  "@yearly", "@annually", "@monthly", "@weekly", "@daily", "@midnight", "@hourly",
+]);
+const _CRON_ATOM = "(?:\\*|\\?|(?:[0-9]+|[a-z]{3})(?:-(?:[0-9]+|[a-z]{3}))?)(?:\\/[0-9]+)?";
+const _CRON_FIELD = new RegExp(`^${_CRON_ATOM}(?:,${_CRON_ATOM})*$`, "i");
+
+/** Structural cron check: @macro, or 5/6 whitespace-separated fields each matching the standard atom
+ *  grammar (wildcard, ranges, steps, lists, 3-letter names). See divergence note above. */
+export function isValidCron(value: string): boolean {
+  const v = value.trim();
+  if (v === "") return false;
+  if (v.startsWith("@")) return _CRON_MACROS.has(v.toLowerCase());
+  const fields = v.split(/\s+/);
+  if (fields.length !== 5 && fields.length !== 6) return false;
+  return fields.every((f) => _CRON_FIELD.test(f));
+}
+
+function cronRefine(value: string | null | undefined, ctx: z.RefinementCtx): void {
+  if (typeof value === "string" && !isValidCron(value)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "invalid cron expression: " + value });
+  }
+}
+
+/** POST /api/admin/notification-rules body — state/timestamps/rule_id are server-assigned. */
+export const NotificationRuleCreateRequestV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    name: z.string().min(1).max(200),
+    trigger_event: z.string().min(1).max(100),
+    filters: z.record(z.string(), z.unknown()).default({}),
+    recipients: z.array(RecipientV1).default([]),
+    schedule_cron: z.string().nullable().default(null).superRefine(cronRefine),
+  })
+  .strict();
+export type NotificationRuleCreateRequestV1 = z.infer<typeof NotificationRuleCreateRequestV1>;
+
+/** PATCH /api/admin/notification-rules/{rule_id} body — every field optional; only provided fields are
+ *  written (exclude-unset semantics enforced at the route from the raw body's keys). */
+export const NotificationRuleUpdateRequestV1 = z
+  .object({
+    schema_version: z.literal(1).optional(),
+    name: z.string().min(1).max(200).optional(),
+    trigger_event: z.string().min(1).max(100).optional(),
+    filters: z.record(z.string(), z.unknown()).optional(),
+    recipients: z.array(RecipientV1).optional(),
+    schedule_cron: z.string().nullable().optional().superRefine(cronRefine),
+    state: z.enum(["active", "paused"]).optional(),
+  })
+  .strict();
+export type NotificationRuleUpdateRequestV1 = z.infer<typeof NotificationRuleUpdateRequestV1>;
+
+/** POST /api/admin/notification-rules/{rule_id}/dry-run response — the recipients the rule WOULD fire to. */
+export const NotificationRuleDryRunResponseV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    would_dispatch_to: z.array(z.record(z.string(), z.string())),
+  })
+  .strict();
+export type NotificationRuleDryRunResponseV1 = z.infer<typeof NotificationRuleDryRunResponseV1>;
+
 // ─── LLM config reads (llm_models_router / llm_provider_config) ──────────────────────────────────
 
 /** One model in GET /api/admin/llm-models (core.llm_models). */

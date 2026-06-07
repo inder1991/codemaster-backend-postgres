@@ -378,7 +378,7 @@ export async function listIntegrationsPage(
 
 // ─── Notification rules (platform-scope; no installation_id column post-migration-0061) ───────────
 
-type NotificationRuleDbRow = {
+export type NotificationRuleDbRow = {
   rule_id: string;
   name: string;
   trigger_event: string;
@@ -391,8 +391,8 @@ type NotificationRuleDbRow = {
 };
 
 /** Map a DB row to the pre-parse contract shape; the caller validates via NotificationRuleV1.parse (which
- *  fail-closes on a malformed recipient, matching the Python). */
-function mapNotificationRule(row: NotificationRuleDbRow): Record<string, unknown> {
+ *  fail-closes on a malformed recipient, matching the Python). Exported for the write repo's RETURNING map. */
+export function mapNotificationRule(row: NotificationRuleDbRow): Record<string, unknown> {
   const filters =
     row.filters !== null && typeof row.filters === "object" && !Array.isArray(row.filters)
       ? row.filters
@@ -410,7 +410,7 @@ function mapNotificationRule(row: NotificationRuleDbRow): Record<string, unknown
   };
 }
 
-const NOTIFICATION_RULE_COLUMNS = sql`rule_id, name, trigger_event, filters, recipients, schedule_cron, state, created_at, updated_at`;
+export const NOTIFICATION_RULE_COLUMNS = sql`rule_id, name, trigger_event, filters, recipients, schedule_cron, state, created_at, updated_at`;
 
 /** GET /api/admin/notification-rules — ALL rules (active + paused), ordered by name. */
 export async function listNotificationRules(
