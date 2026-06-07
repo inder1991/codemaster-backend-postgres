@@ -15,6 +15,7 @@ import type { Clock } from "#platform/clock.js";
 
 import {
   AuditSearchResponseV1,
+  CostCapPageV1,
   DashboardSummaryV1,
   FindingListResponseV1,
   FlagListV1,
@@ -33,6 +34,7 @@ import {
 } from "#contracts/admin.v1.js";
 
 import { CursorInvalidError } from "#backend/api/admin/_keyset_cursor.js";
+import { CostCapSettingsMissingError, buildCostCapsPage } from "#backend/api/admin/cost_caps_read.js";
 import {
   getLearningWithRevisions,
   getLlmProviderConfig,
@@ -128,6 +130,22 @@ export async function registerAdminRoutes(
       async (request, reply) => {
         const orgs = await listOrgs(opts.db, request.authPrincipal!.installationId);
         return reply.code(200).send(OrgsListV1.parse({ orgs }));
+      },
+    );
+
+    scope.get(
+      "/api/admin/cost-caps",
+      { preHandler: requireRole(["super_admin", "platform_owner"]) },
+      async (_request, reply) => {
+        try {
+          const page = await buildCostCapsPage(opts.db, opts.clock.now());
+          return reply.code(200).send(CostCapPageV1.parse(page));
+        } catch (e) {
+          if (e instanceof CostCapSettingsMissingError) {
+            return reply.code(500).send({ detail: e.message });
+          }
+          throw e;
+        }
       },
     );
 

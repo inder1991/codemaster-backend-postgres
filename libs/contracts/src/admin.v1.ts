@@ -22,6 +22,64 @@ export const OrgsListV1 = z
   .strict();
 export type OrgsListV1 = z.infer<typeof OrgsListV1>;
 
+// ─── Cost caps (platform-scope governance) ───────────────────────────────────────────────────────
+
+export const CostCapSettingsV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    global_cap_cents: z.number().int().min(0),
+    per_org_default_cap_cents: z.number().int().min(0),
+    hard_ceiling_cents: z.literal(5000000).default(5000000),
+    updated_at: z.string().datetime({ offset: true }),
+    updated_by_user_id: z.string().uuid().nullable().default(null),
+  })
+  .strict();
+export type CostCapSettingsV1 = z.infer<typeof CostCapSettingsV1>;
+
+export const CostCapOverrideV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    installation_id: z.string().uuid(),
+    installation_name: z.string(),
+    cap_cents: z.number().int().min(0),
+    expires_at: z.string().datetime({ offset: true }).nullable().default(null),
+    updated_at: z.string().datetime({ offset: true }),
+    updated_by_user_id: z.string().uuid().nullable().default(null),
+  })
+  .strict();
+export type CostCapOverrideV1 = z.infer<typeof CostCapOverrideV1>;
+
+export const CostCapPendingChangeV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    pending_change_id: z.string().uuid(),
+    target_kind: z.enum(["global", "per_org_default", "per_org_override"]),
+    target_id: z.string().uuid().nullable().default(null),
+    new_cap_cents: z.number().int().min(0),
+    expires_at: z.string().datetime({ offset: true }).nullable().default(null),
+    requested_at: z.string().datetime({ offset: true }),
+    requested_by_user_id: z.string().uuid(),
+    approved_at: z.string().datetime({ offset: true }).nullable().default(null),
+    approved_by_user_id: z.string().uuid().nullable().default(null),
+    applied_at: z.string().datetime({ offset: true }).nullable().default(null),
+    state: z.enum(["pending", "approved", "applied", "rejected", "expired"]),
+  })
+  .strict();
+export type CostCapPendingChangeV1 = z.infer<typeof CostCapPendingChangeV1>;
+
+/** GET /api/admin/cost-caps — the cost-cap governance page. */
+export const CostCapPageV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    settings: CostCapSettingsV1,
+    overrides: z.array(CostCapOverrideV1),
+    todays_spend_global_cents: z.number().int().min(0),
+    todays_projected_global_cents: z.number().int().min(0),
+    pending_changes: z.array(CostCapPendingChangeV1),
+  })
+  .strict();
+export type CostCapPageV1 = z.infer<typeof CostCapPageV1>;
+
 // ─── Knowledge (learnings; tenant-scoped; in-memory keyset) ──────────────────────────────────────
 
 /** One learning in GET /api/admin/knowledge. accept_rate is app-computed (accepted/feedback). */
