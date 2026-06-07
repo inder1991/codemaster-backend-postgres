@@ -234,6 +234,67 @@ export const AddConfluenceSpaceRequestV1 = z
   .strict();
 export type AddConfluenceSpaceRequestV1 = z.infer<typeof AddConfluenceSpaceRequestV1>;
 
+// ─── Platform credentials (Vault KV-backed: confluence + embedder.qwen) ───────────────────────────
+// 1:1 port of contracts/admin/platform_credentials/v1.py. Secrets NEVER appear in any shape — GET
+// surfaces token_present:bool only.
+
+const PLATFORM_CREDENTIAL_KEY = z.enum(["confluence", "embedder.qwen"]);
+
+/** Stable probe error vocabulary (Python PlatformTestErrorCode). */
+export const PLATFORM_TEST_ERROR_CODE = z.enum([
+  "auth_error",
+  "rate_limited",
+  "connectivity_error",
+  "unknown_model",
+  "dimension_mismatch",
+  "ssrf_blocked",
+  "https_required",
+  "validation_failed",
+]);
+export type PlatformTestErrorCode = z.infer<typeof PLATFORM_TEST_ERROR_CODE>;
+
+/** GET response — NEVER carries the secret value (Python PlatformCredentialsMetaV1). last_rotated_by is
+ *  EmailStr|null in Python; ported as a loose nullable string (TS has no EmailStr; production feeds
+ *  session-resolved emails and the shim resolver emits a valid one). */
+export const PlatformCredentialsMetaV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    credential_key: PLATFORM_CREDENTIAL_KEY,
+    base_url: z.string().nullable(),
+    token_present: z.boolean(),
+    last_rotated_at: z.string().datetime({ offset: true }).nullable(),
+    last_rotated_by: z.string().nullable(),
+    last_validated_at: z.string().datetime({ offset: true }).nullable(),
+    last_validation_error: z.string().nullable(),
+  })
+  .strict();
+export type PlatformCredentialsMetaV1 = z.infer<typeof PlatformCredentialsMetaV1>;
+
+/** PATCH body — base_url + token independently rotatable (both default null). The "≥1 supplied" +
+ *  "complete credential" rules live in the HANDLER (Python defers them to the route), not here. */
+export const PatchPlatformCredentialsRequestV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    base_url: z.string().min(1).max(512).nullable().default(null),
+    token: z.string().max(4096).nullable().default(null),
+  })
+  .strict();
+export type PatchPlatformCredentialsRequestV1 = z.infer<typeof PatchPlatformCredentialsRequestV1>;
+
+/** POST /test response (Python TestPlatformCredentialsResponseV1). 200 even on probe failure. */
+export const TestPlatformCredentialsResponseV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    ok: z.boolean(),
+    error: PLATFORM_TEST_ERROR_CODE.nullable(),
+    error_detail: z.string().nullable(),
+    latency_ms: z.number().int().nullable(),
+    detected_dimension: z.number().int().nullable(),
+    corpus_dimension: z.number().int().nullable(),
+  })
+  .strict();
+export type TestPlatformCredentialsResponseV1 = z.infer<typeof TestPlatformCredentialsResponseV1>;
+
 // ─── Notification rules (platform-scope) ─────────────────────────────────────────────────────────
 
 const SlackRecipientV1 = z

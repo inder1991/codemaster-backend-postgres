@@ -51,6 +51,8 @@ import {
   NotificationRuleUpdateRequestV1,
   NotificationRuleV1,
   OrgsListV1,
+  PatchPlatformCredentialsRequestV1,
+  PlatformCredentialsMetaV1,
   ProposalListPageV1,
   PullRequestListResponseV1,
   PutFlagRequestV1,
@@ -66,6 +68,7 @@ import {
   FindingFeedbackResponseV1,
   SubmitFindingFeedbackRequestV1,
   TaxonomyGapListV1,
+  TestPlatformCredentialsResponseV1,
   TaxonomySuggestionAcceptedV1,
   TaxonomySuggestionV1,
 } from "#contracts/admin.v1.js";
@@ -140,6 +143,21 @@ import {
   IntegrationValidationError,
 } from "#backend/api/admin/integrations_write.js";
 import { type GetConfluenceValidator } from "#backend/integrations/confluence/confluence_validator.js";
+import { PostgresPlatformCredentialsMetaRepo } from "#backend/api/admin/platform_credentials_repo.js";
+import {
+  type GetPlatformCredentialProbe,
+  type UserEmailResolverPort,
+  shimUserEmailResolver,
+} from "#backend/api/admin/platform_credentials_probe.js";
+import {
+  getCredential,
+  patchCredential,
+  PlatformCredentialError,
+  type PlatformCredentialKey,
+  type PlatformCredentialsDeps,
+  testCredential,
+} from "#backend/api/admin/platform_credentials_write.js";
+import { type DnsResolver } from "#backend/security/url_validator.js";
 import { type VaultPort } from "#backend/adapters/vault_port.js";
 import { PostgresLlmProviderSettingsRepo } from "#backend/integrations/llm/llm_provider_settings_repo.js";
 import { type GetPreflightValidator } from "#backend/integrations/llm/preflight_validator.js";
@@ -226,6 +244,13 @@ export type AdminRoutesOptions = {
   /** Injected Confluence space-validator factory. Undefined → the integrations CREATE route 503. Production
    *  wires the real Confluence v2 adapter (deferred — live-untested surface); tests inject a stub. */
   getConfluenceValidator?: GetConfluenceValidator;
+  /** Injected platform-credential probe factory. Undefined → the platform-credentials PATCH/test routes 503.
+   *  Real Confluence/Qwen probe adapters deferred; tests inject a stub. */
+  getPlatformCredentialProbe?: GetPlatformCredentialProbe;
+  /** Resolves an actor user_id → email for the credential-rotation audit. Defaults to the shim resolver. */
+  userEmailResolver?: UserEmailResolverPort;
+  /** Injected DNS resolver for the SSRF URL validator (platform-credentials base_url). Defaults to node:dns. */
+  dnsResolver?: DnsResolver;
 };
 
 /** The static dashboard summary (1:1 with the shipped Python: _HealthyProbe for the 4 services +
@@ -882,6 +907,82 @@ export async function registerAdminRoutes(
         }
       },
     );
+
+    // ─── Platform credentials (Vault KV-backed: confluence + embedder/qwen) ────────────────────────
+    // 1:1 with platform_credentials.py. platform_owner+. GET (meta only — never the secret) / PATCH
+    // (probe-first-then-write, ?force=true override) / POST /test (probe the existing Vault credential).
+    // 503 when the vault/probe seam is unwired at the composition root.
+    const PLATFORM_CRED_ROUTES: ReadonlyArray<{ key: PlatformCredentialKey; segment: string }> = [
+      { key: "confluence", segment: "confluence" },
+      { key: "embedder.qwen", segment: "embedder/qwen" },
+    ];
+    for (const { key, segment } of PLATFORM_CRED_ROUTES) {
+      const base = `/api/admin/platform-credentials/${segment}`;
+      scope.get(base, { preHandler: requireRole(["platform_owner", "super_admin"]) }, async (_request, reply) => {
+        if (opts.vault === undefined) {
+          return reply.code(503).send({ detail: "platform-credentials not configured (vault unwired)" });
+        }
+        const meta = await getCredential(
+          { vault: opts.vault, metaRepo: new PostgresPlatformCredentialsMetaRepo(opts.db) },
+          key,
+        );
+        return reply.code(200).send(PlatformCredentialsMetaV1.parse(meta));
+      });
+
+      scope.patch(base, { preHandler: requireRole(["platform_owner", "super_admin"]) }, async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const parsed = PatchPlatformCredentialsRequestV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        if (opts.vault === undefined || opts.getPlatformCredentialProbe === undefined) {
+          return reply.code(503).send({ detail: "platform-credentials write not configured (vault + probe unwired)" });
+        }
+        const force = (request.query as { force?: string }).force === "true";
+        const deps: PlatformCredentialsDeps = {
+          db: opts.db,
+          vault: opts.vault,
+          probe: opts.getPlatformCredentialProbe(),
+          metaRepo: new PostgresPlatformCredentialsMetaRepo(opts.db),
+          userEmailResolver: opts.userEmailResolver ?? shimUserEmailResolver,
+          clock: opts.clock,
+          audit: opts.audit,
+          ...(opts.dnsResolver ? { dnsResolver: opts.dnsResolver } : {}),
+        };
+        try {
+          const meta = await patchCredential(deps, key, parsed.data, principal.userId, force);
+          return reply.code(200).send(PlatformCredentialsMetaV1.parse(meta));
+        } catch (err) {
+          if (err instanceof PlatformCredentialError) {
+            return reply.code(422).send({ error: err.errorCode, msg: err.msg });
+          }
+          throw err;
+        }
+      });
+
+      scope.post(`${base}/test`, { preHandler: requireRole(["platform_owner", "super_admin"]) }, async (_request, reply) => {
+        if (opts.vault === undefined || opts.getPlatformCredentialProbe === undefined) {
+          return reply.code(503).send({ detail: "platform-credentials probe not configured" });
+        }
+        try {
+          const res = await testCredential(
+            {
+              vault: opts.vault,
+              probe: opts.getPlatformCredentialProbe(),
+              metaRepo: new PostgresPlatformCredentialsMetaRepo(opts.db),
+              clock: opts.clock,
+            },
+            key,
+          );
+          return reply.code(200).send(TestPlatformCredentialsResponseV1.parse(res));
+        } catch (err) {
+          if (err instanceof PlatformCredentialError) {
+            return reply.code(422).send({ error: err.errorCode, msg: err.msg });
+          }
+          throw err;
+        }
+      });
+    }
 
     scope.get(
       "/api/admin/notification-rules",
