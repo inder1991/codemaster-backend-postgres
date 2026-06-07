@@ -12,12 +12,22 @@
 
 import { type Kysely, sql } from "kysely";
 
-import { OUTBOX_PAYLOAD_SCHEMA_VERSION, PostgresOutboxRepo } from "#backend/domain/repos/outbox_repo.js";
+import {
+  OUTBOX_PAYLOAD_SCHEMA_VERSION,
+  RECONCILE_PAYLOAD_SCHEMA_VERSION,
+  PostgresOutboxRepo,
+} from "#backend/domain/repos/outbox_repo.js";
 import { derivePrId } from "#backend/ingest/_pr_id.js";
 import { safePersistPr } from "#backend/ingest/_pr_persistence.js";
+import {
+  buildInstallationPayloadFromWebhook,
+  buildRepositoriesPayloadFromWebhook,
+} from "#backend/ingest/_reconcile_payload_builder.js";
+import { maybeEnqueueRepair } from "#backend/ingest/_repair_dispatcher.js";
 import { allocateRun, type AllocationOutcome } from "#backend/ingest/_review_run_allocator.js";
 import { upsertReview } from "#backend/ingest/_reviews_repository.js";
 import {
+  extractAction,
   extractInstallationId,
   extractPrMetadata,
   extractPrNodeId,
@@ -28,6 +38,7 @@ import {
   resolveInternalInstallationId,
   resolveInternalRepositoryId,
 } from "#backend/ingest/_webhook_resolvers.js";
+import { recordReconcilePayloadMissingRequiredFields } from "#backend/observability/reconcile_metrics.js";
 
 import { type Clock } from "#platform/clock.js";
 import { uuid4 } from "#platform/randomness.js";
@@ -42,6 +53,28 @@ import { uuid4 } from "#platform/randomness.js";
  */
 const REVIEW_WORKFLOW_TYPE = "reviewPullRequest";
 const REVIEW_TASK_QUEUE = "review-default";
+
+/**
+ * Reconcile workflow TYPE strings + task queue (the auto-registration emitters). DELIBERATE RENAME +
+ * RE-TARGET vs the frozen Python (`ReconcileInstallationWorkflow` / `ReconcileRepositoriesWorkflow` on the
+ * "ingest" queue): the combined-pod review worker registers these workflows under their camelCase exported
+ * function names (`reconcileInstallation` / `reconcileRepositories`) and polls REVIEW_TASK_QUEUE, so the
+ * dispatched outbox row MUST carry those type strings + that queue (Temporal starts a workflow by its
+ * REGISTERED type name on the queue a worker polls). Project-owner directive: reuse the review worker, no
+ * separate "ingest" worker.
+ */
+const RECONCILE_INSTALLATION_WORKFLOW_TYPE = "reconcileInstallation";
+const RECONCILE_REPOSITORIES_WORKFLOW_TYPE = "reconcileRepositories";
+
+/** Installation-event actions that trigger reconcile (1:1 with `_RECONCILE_INSTALLATION_ACTIONS`). */
+const RECONCILE_INSTALLATION_ACTIONS: ReadonlySet<string> = new Set([
+  "created",
+  "deleted",
+  "suspend",
+  "unsuspend",
+]);
+/** installation_repositories actions that trigger reconcile (1:1 with `_RECONCILE_INSTALLATION_REPOSITORIES_ACTIONS`). */
+const RECONCILE_INSTALLATION_REPOSITORIES_ACTIONS: ReadonlySet<string> = new Set(["added", "removed"]);
 /** Fix D1 — explicit 1800s execution+run timeout (overrides the 900s payload default) so hung reviews
  *  terminate before the reaper threshold. */
 const REVIEW_TIMEOUT_SECONDS = 1800;
@@ -181,6 +214,136 @@ async function allocateRunForPrWebhook(
   return { outcome, reviewId };
 }
 
+// ─── reconcile emitters (auto-registration) ──────────────────────────────────────────────────────────
+
+/**
+ * Emit an `installation_reconcile` outbox row targeting `reconcileRepositories` for an
+ * installation_repositories event (1:1 with the Python `_emit_repositories_reconcile`). Body interpretation
+ * delegates to the shared builder; a structured skip_reason emits the drift counter and skips enqueue.
+ */
+async function emitRepositoriesReconcile(
+  tx: Kysely<unknown>,
+  args: { body: Uint8Array; githubIid: number; triggeringAction: string; deliveryId: string },
+): Promise<void> {
+  const buildResult = buildRepositoriesPayloadFromWebhook({
+    rawBody: args.body,
+    triggeringAction: args.triggeringAction,
+  });
+  if (buildResult.skipReason !== undefined) {
+    recordReconcilePayloadMissingRequiredFields({
+      eventType: "installation_repositories",
+      missingField: buildResult.skipReason,
+    });
+    return;
+  }
+
+  const envelope = {
+    workflow_type: RECONCILE_REPOSITORIES_WORKFLOW_TYPE,
+    workflow_id: `reconcile-repositories/${args.githubIid}`,
+    task_queue: REVIEW_TASK_QUEUE,
+    args: [buildResult.payload],
+    id_reuse_policy: "ALLOW_DUPLICATE",
+    id_conflict_policy: "USE_EXISTING",
+  };
+  await new PostgresOutboxRepo().appendReconcile({
+    db: tx,
+    payload: envelope,
+    schemaVersion: RECONCILE_PAYLOAD_SCHEMA_VERSION,
+    deliveryId: args.deliveryId,
+  });
+}
+
+/**
+ * Emit an `installation_reconcile` outbox row when an installation event / PR-backfill / repositories event
+ * warrants reconciliation (1:1 with the Python `_maybe_emit_installation_reconcile`). Three cases:
+ *   1. Back-fill — a pull_request event for a github_installation_id with no core.installations row yet →
+ *      seed the installation row (reconcileInstallation). The current PR is lost (its review dispatch was
+ *      skipped because internalIid was null); the next PR webhook goes through normally.
+ *   2. Forward (installation event) — created seeds; deleted/suspend/unsuspend update (reconcileInstallation).
+ *   3. Forward (installation_repositories event) — added/removed (reconcileRepositories).
+ *
+ * Gated on signature_valid by the caller. Re-deliveries (deduped) skip — the idempotency row proves the
+ * reconcile outbox was already enqueued.
+ */
+async function maybeEmitInstallationReconcile(args: {
+  tx: Kysely<unknown>;
+  eventType: string;
+  body: Uint8Array;
+  githubIid: number | null;
+  internalIid: string | null;
+  deliveryId: string;
+  deduped: boolean;
+}): Promise<void> {
+  if (args.deduped) {
+    return;
+  }
+
+  const action = extractAction(args.body);
+
+  // Branch A — installation_repositories events route to reconcileRepositories (separate workflow + table).
+  if (
+    args.eventType === "installation_repositories" &&
+    action !== null &&
+    RECONCILE_INSTALLATION_REPOSITORIES_ACTIONS.has(action) &&
+    args.githubIid !== null
+  ) {
+    await emitRepositoriesReconcile(args.tx, {
+      body: args.body,
+      githubIid: args.githubIid,
+      triggeringAction: action,
+      deliveryId: args.deliveryId,
+    });
+    return;
+  }
+
+  // Branch B — installation events + PR back-fill route to reconcileInstallation.
+  let triggersReconcile = false;
+  if (args.eventType === "pull_request" && args.internalIid === null && args.githubIid !== null) {
+    triggersReconcile = true;
+  } else if (
+    args.eventType === "installation" &&
+    action !== null &&
+    RECONCILE_INSTALLATION_ACTIONS.has(action)
+  ) {
+    triggersReconcile = true;
+  }
+  if (!triggersReconcile) {
+    return;
+  }
+  // github_iid is required for the reconcile workflow; defend against malformed payloads.
+  if (args.githubIid === null) {
+    return;
+  }
+
+  const buildResult = buildInstallationPayloadFromWebhook({
+    eventType: args.eventType,
+    rawBody: args.body,
+    triggeringAction: action ?? "",
+  });
+  if (buildResult.skipReason !== undefined) {
+    recordReconcilePayloadMissingRequiredFields({
+      eventType: args.eventType,
+      missingField: buildResult.skipReason,
+    });
+    return;
+  }
+
+  const envelope = {
+    workflow_type: RECONCILE_INSTALLATION_WORKFLOW_TYPE,
+    workflow_id: `reconcile-installation/${args.githubIid}`,
+    task_queue: REVIEW_TASK_QUEUE,
+    args: [buildResult.payload],
+    id_reuse_policy: "ALLOW_DUPLICATE",
+    id_conflict_policy: "USE_EXISTING",
+  };
+  await new PostgresOutboxRepo().appendReconcile({
+    db: args.tx,
+    payload: envelope,
+    schemaVersion: RECONCILE_PAYLOAD_SCHEMA_VERSION,
+    deliveryId: args.deliveryId,
+  });
+}
+
 // ─── the public entry ─────────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -256,9 +419,14 @@ export async function persistWebhook(args: {
             });
           }
           if (internalRepoId === null || internalIid === null) {
-            // Drift: known installation, unknown repo. STAGE-1 STUB for maybeEnqueueRepair (Stage 2 wires
-            // RepairInstallationRepositoriesWorkflow via the shared dispatcher; ADR-0054 / invariant 16
-            // forbid mutating core.repositories inline). The PR is "lost" for review (fail-open).
+            // Drift: known installation, unknown repo. Enqueue the RepairInstallationRepositoriesWorkflow via
+            // the shared dispatcher (it hydrates core.repositories from the canonical GitHub API — ADR-0054 /
+            // invariant 16 forbid mutating core.repositories inline here). The cooldown/blocked gate inside
+            // maybeEnqueueRepair throttles repair-spam during outages. FAIL-OPEN: a dispatcher fault must
+            // never poison the webhook tx / fail the 204 (mirrors safePersistPr), so we wrap + swallow. When
+            // the INSTALLATION itself is unknown (internalIid === null) the unconditional reconcile emit
+            // below seeds it (reconcileInstallation back-fill); the repair hydrates repos once it exists.
+            // The PR is "lost" for review on this delivery (fail-open); the next webhook goes through.
             console.warn(
               JSON.stringify({
                 event: "webhook.pr_repo_unresolved_drift",
@@ -266,6 +434,30 @@ export async function persistWebhook(args: {
                 github_repo_id: prMeta.githubRepoId,
               }),
             );
+            if (githubIid !== null) {
+              // SAVEPOINT-wrapped fail-open (mirrors safePersistPr): a dispatcher fault rolls back ONLY the
+              // repair writes (the outbox append + repair-state markAttempted) without poisoning the outer
+              // webhook transaction (which would otherwise enter an aborted state and fail the 204).
+              await sql`SAVEPOINT sp_pr_repair`.execute(tx);
+              try {
+                await maybeEnqueueRepair(tx, {
+                  githubInstallationId: githubIid,
+                  triggerSource: "pr_webhook",
+                  deliveryId,
+                });
+                await sql`RELEASE SAVEPOINT sp_pr_repair`.execute(tx);
+              } catch (e) {
+                await sql`ROLLBACK TO SAVEPOINT sp_pr_repair`.execute(tx);
+                await sql`RELEASE SAVEPOINT sp_pr_repair`.execute(tx);
+                console.warn(
+                  JSON.stringify({
+                    event: "webhook.pr_repair_enqueue_failed",
+                    delivery_id: deliveryId,
+                    error: e instanceof Error ? e.message : String(e),
+                  }),
+                );
+              }
+            }
           } else if (prMeta.action === "closed") {
             // STAGE-1 STUB: the pr.closed forensic audit (emitAuditEvent on the encrypted audit_events
             // table) wires in Stage 3 — it needs the pg-client AuditQueryClient seam, deferred under the
@@ -308,8 +500,20 @@ export async function persistWebhook(args: {
           // edited / converted_to_draft: not review-triggering + not closed → no enqueue (correct).
         }
       }
-      // STAGE-4 STUB: installation_reconcile / sync_code_owners / refresh_semantic_docs emitters (their
-      // downstream workflows are not yet registered in TS — faithful-but-dormant; deferred).
+      // Auto-registration emit (1:1 with the Python unconditional `_maybe_emit_installation_reconcile` call
+      // after the pull_request path): installation events → reconcileInstallation; installation_repositories
+      // events → reconcileRepositories; a pull_request for an unknown installation → reconcileInstallation
+      // back-fill. Skips on deduped / missing github_iid internally. The sync_code_owners /
+      // refresh_semantic_docs emitters remain deferred (their workflows are not ported).
+      await maybeEmitInstallationReconcile({
+        tx,
+        eventType,
+        body: args.body,
+        githubIid,
+        internalIid,
+        deliveryId,
+        deduped,
+      });
     }
 
     return { schemaVersion: 1, deduped, webhookEventId, installationId: internalIid, deliveryId };

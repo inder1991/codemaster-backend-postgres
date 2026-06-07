@@ -14,6 +14,7 @@ import { NativeConnection, Worker } from "@temporalio/worker";
 
 import { RealTemporalClient } from "#backend/adapters/real_temporal_client.js";
 import { registerTemporalWorkflowStartSink } from "#backend/outbox/sinks/temporal_workflow_start.js";
+import { registerInstallationReconcileSink } from "#backend/outbox/sinks/installation_reconcile.js";
 
 import { buildOutboxActivities } from "./build_outbox_activities.js";
 import { ensureOutboxDispatcherSingleton } from "./outbox_dispatcher_singleton.js";
@@ -57,8 +58,14 @@ export async function runOutboxDispatcherWorker(): Promise<void> {
   });
 
   // Wire the previously-inert temporal_workflow_start sink to a REAL client (dispatched review rows now
-  // actually start workflows), then ensure the singleton is running (self-heals across pod rolls).
-  registerTemporalWorkflowStartSink(new RealTemporalClient(client));
+  // actually start workflows). ALSO dual-register the SAME handler under the `installation_reconcile` sink
+  // name: reconcile/repair outbox rows carry sink="installation_reconcile" (the NULL-installation_id schema
+  // exemption), so without this registration getSink("installation_reconcile") throws → the row dead-letters.
+  // 1:1 with Python, which ships a dedicated installation_reconcile sink (codemaster/worker/main.py:990) —
+  // we register the identical temporal_workflow_start handler instance under both sink names.
+  const temporalPort = new RealTemporalClient(client);
+  registerTemporalWorkflowStartSink(temporalPort);
+  registerInstallationReconcileSink(temporalPort);
   await ensureOutboxDispatcherSingleton(client, { taskQueue });
 
   await worker.run();

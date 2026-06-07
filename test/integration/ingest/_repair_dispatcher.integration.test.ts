@@ -93,9 +93,11 @@ describeDb("maybeEnqueueRepair (integration, disposable PG)", () => {
 
     // The outbox payload is the TemporalWorkflowStartPayloadV1 envelope; it parses + carries the repair shape.
     const env = TemporalWorkflowStartPayloadV1.parse(row!.payload);
-    expect(env.workflow_type).toBe("RepairInstallationRepositoriesWorkflow");
+    // Combined-pod worker reuse (project-owner directive): the repair workflow registers on the review
+    // worker under its camelCase exported name, and its outbox task_queue is the review worker's queue.
+    expect(env.workflow_type).toBe("repairInstallationRepositories");
     expect(env.workflow_id).toBe(`repair-installation-repositories/${gid}`);
-    expect(env.task_queue).toBe("ingest");
+    expect(env.task_queue).toBe("review-default");
     expect(env.id_reuse_policy).toBe("ALLOW_DUPLICATE");
     expect(env.id_conflict_policy).toBe("USE_EXISTING");
     expect(env.args).toHaveLength(1);

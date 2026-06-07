@@ -144,6 +144,13 @@ import {
 } from "#backend/activities/fetch_manifest_snapshots.activity.js";
 import { ParseManifestDependenciesActivity } from "#backend/activities/parse_manifest_dependencies.activity.js";
 import { loadParentReviewFindingsActivity } from "#backend/activities/load_parent_review_findings.activity.js";
+// Auto-registration activities (combined-pod worker reuse — project-owner directive). Registered under their
+// snake_case Temporal NAMES below so the reconcile/repair workflows (all_workflows.ts bundle) dispatch them.
+// Each resolves its own DSN/pool/GitHub client inside the activity body (like enrichPrFilesV2) — no deps to
+// thread through buildActivities.
+import { reconcileInstallation } from "#backend/activities/reconcile_installation.activity.js";
+import { reconcileRepositories } from "#backend/activities/reconcile_repositories.activity.js";
+import { hydrateInstallationRepositories } from "#backend/activities/hydrate_installation_repositories.activity.js";
 import { GitHubApiReviewClient } from "#backend/integrations/github/review_client.js";
 
 import { GitHubIssueClient } from "#backend/integrations/github/issue_client.js";
@@ -653,5 +660,14 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     applyArbitrationActivity,
     recordToolRuns,
     generateFixPrompt: fixPromptActivities.generateFixPrompt,
+    // ── Auto-registration activities (combined-pod worker reuse — project-owner directive) ──
+    // Registered under their snake_case TEMPORAL NAMES (NOT camelCase) because the reconcile/repair
+    // workflows (reconcile.workflow.ts) proxy them by those exact names — a camelCase key would dispatch
+    // `ActivityNotRegistered`. Each is a self-wiring 1-arg activity (resolves CODEMASTER_PG_CORE_DSN + its
+    // own pool / GitHub client inside the body), so it's registered bare. The bracketed-string keys mirror
+    // the Python `@activity.defn(name="...")` registration names.
+    ["reconcile_installation_activity"]: reconcileInstallation,
+    ["reconcile_repositories_activity"]: reconcileRepositories,
+    ["hydrate_installation_repositories_activity"]: hydrateInstallationRepositories,
   } as Record<string, (input: never) => Promise<unknown>>;
 }

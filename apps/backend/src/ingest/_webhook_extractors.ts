@@ -98,6 +98,17 @@ export function extractPrNodeId(body: Uint8Array): string | null {
   return null;
 }
 
+/**
+ * GitHub's top-level `action` field (present on every event we route on — installation /
+ * installation_repositories / pull_request) or null on malformed JSON / missing-or-non-string action.
+ * 1:1 with the Python `_extract_action` (github_webhook_persistence.py).
+ */
+export function extractAction(body: Uint8Array): string | null {
+  const payload = parseJsonObject(body);
+  const action = payload?.["action"];
+  return typeof action === "string" ? action : null;
+}
+
 /** The pre-resolution slice of ReviewPullRequestPayloadV1 (1:1 with the Python `_PrMetadata` dataclass). */
 export type PrMetadata = {
   action: string;

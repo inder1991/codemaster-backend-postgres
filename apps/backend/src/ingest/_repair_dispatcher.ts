@@ -43,15 +43,20 @@ import {
 /** A Kysely instance or an open Transaction — the executor the outbox INSERT + repair-state writes join. */
 type Executor = Kysely<unknown>;
 
-// Repair-workflow dispatch constants — 1:1 with the frozen Python
-// `workflows/repair_installation_repositories.py` module constants. The Python dispatcher imports these
-// from the workflow module; the TS repair-workflow module does not exist yet (it is a separate port), so
-// the dispatcher is the single home for these values until that module lands and can re-import them.
+// Repair-workflow dispatch constants — RE-TARGETED onto the combined-pod review worker (project-owner
+// directive: reuse the review worker, no separate "ingest" worker). DELIBERATE DIVERGENCE from the frozen
+// Python `workflows/repair_installation_repositories.py` (which pins "ingest" + the PascalCase
+// `RepairInstallationRepositoriesWorkflow` class name):
 //
-//   * RepairInstallationRepositoriesWorkflow runs on the "ingest" task queue (the combined-pod worker that
-//     also hosts the reconcile workflows + the OutboxDispatcher singleton).
-export const REPAIR_INSTALLATION_REPOSITORIES_TASK_QUEUE = "ingest";
-export const REPAIR_INSTALLATION_REPOSITORIES_WORKFLOW_TYPE = "RepairInstallationRepositoriesWorkflow";
+//   * workflow_type = "repairInstallationRepositories" — the camelCase EXPORTED function name the combined
+//     worker registers (reconcile.workflow.ts), since RealTemporalClient.startWorkflow dispatches by the
+//     registered TS function name.
+//   * task_queue = "review-default" (REVIEW_TASK_QUEUE in github_webhook_persistence.ts) — the queue the
+//     combined-pod review worker polls. The repair workflow + the hydrate activity register on THAT worker,
+//     so the dispatched outbox row must carry that queue. Inlined as the literal here (rather than imported)
+//     to avoid a cycle through github_webhook_persistence; the two MUST stay in lockstep.
+export const REPAIR_INSTALLATION_REPOSITORIES_TASK_QUEUE = "review-default";
+export const REPAIR_INSTALLATION_REPOSITORIES_WORKFLOW_TYPE = "repairInstallationRepositories";
 
 /**
  * Producer-side gated repair-dispatch (1:1 with the Python `maybe_enqueue_repair`).
