@@ -33,19 +33,28 @@ RUN apt-get update \
 ARG RUFF_VERSION=0.6.9
 ARG GITLEAKS_VERSION=8.18.4
 ARG ESLINT_VERSION=10.4.1
-# ruff: the standalone release binary — node:*-slim has no python/pip, so NOT `pip install ruff`.
-RUN curl -fsSL "https://github.com/astral-sh/ruff/releases/download/${RUFF_VERSION}/ruff-x86_64-unknown-linux-gnu.tar.gz" -o /tmp/ruff.tar.gz \
-  && tar -xzf /tmp/ruff.tar.gz -C /tmp \
-  && find /tmp -maxdepth 2 -type f -name ruff -exec mv {} /usr/local/bin/ruff \; \
-  && rm -rf /tmp/ruff.tar.gz /tmp/ruff-x86_64-unknown-linux-gnu \
-  && chmod +x /usr/local/bin/ruff \
-  && ruff --version
-# gitleaks: pinned release tarball.
-RUN curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -o /tmp/gitleaks.tar.gz \
-  && tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks \
-  && rm /tmp/gitleaks.tar.gz \
-  && chmod +x /usr/local/bin/gitleaks \
-  && gitleaks version
+# TARGETARCH is auto-supplied by BuildKit (amd64 on prod x86, arm64 on Apple-Silicon kind). Map it to each
+# tool's release-asset arch tag so the image is multi-arch (a hardcoded x86_64 binary crashes on arm64 with
+# "rosetta error … exit 133" at the --version verify). ruff: standalone release binary (node:*-slim has no
+# python/pip, so NOT `pip install ruff`). gitleaks: pinned release tarball.
+ARG TARGETARCH
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) RUFF_ARCH=x86_64; GL_ARCH=x64 ;; \
+      arm64) RUFF_ARCH=aarch64; GL_ARCH=arm64 ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/astral-sh/ruff/releases/download/${RUFF_VERSION}/ruff-${RUFF_ARCH}-unknown-linux-gnu.tar.gz" -o /tmp/ruff.tar.gz; \
+    tar -xzf /tmp/ruff.tar.gz -C /tmp; \
+    find /tmp -maxdepth 2 -type f -name ruff -exec mv {} /usr/local/bin/ruff \; ; \
+    rm -rf /tmp/ruff.tar.gz /tmp/ruff-*; \
+    chmod +x /usr/local/bin/ruff; \
+    ruff --version; \
+    curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${GL_ARCH}.tar.gz" -o /tmp/gitleaks.tar.gz; \
+    tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks; \
+    rm /tmp/gitleaks.tar.gz; \
+    chmod +x /usr/local/bin/gitleaks; \
+    gitleaks version
 # eslint: the bundled flat config (config/static_analysis/eslint/eslint.config.mjs) is plugin-FREE
 # (built-in rules only), so the eslint binary alone suffices. Installed GLOBALLY (on PATH) because the
 # review repo's own eslint is a devDependency that `npm ci --omit=dev` strips.
