@@ -531,6 +531,7 @@ function makeCtx(
     },
     pr: {
       prMeta: PR_META,
+      githubInstallationId: 4815162342,
       // 40-char git SHA — the confluence-context build (pickPrContext → PRContext.parse) validates
       // head_sha min_length=40/max_length=40 (Sub-spec B T17), so the per-chunk PRContext requires a
       // real-shaped SHA. Production always supplies one (typed_payload.head_sha).

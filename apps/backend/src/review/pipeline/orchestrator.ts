@@ -164,6 +164,12 @@ export type ReviewPipelineRepoCtx = {
 export type ReviewPipelinePrCtx = {
   /** The walkthrough/post PR metadata envelope (pr_id, installation_id, repo, pr_title, pr_description). */
   readonly prMeta: PrMetaV1;
+  /** github_installation_id — the NUMERIC GitHub-App installation id every GitHub-touching stage (clone +
+   *  post + check-run + fix-prompt + pr-description) mints its token for (per-review routing; ADR — replaces
+   *  the removed CODEMASTER_GITHUB_INSTALLATION_ID env pin). Distinct from prMeta.installation_id (the
+   *  internal UUID tenant FK). Nullable: sourced from the workflow payload's nullable github_installation_id;
+   *  the clone fail-closes on null, the GitHub posts skip/guard. */
+  readonly githubInstallationId: number | null;
   /** head_sha — the commit under review (post deep-links, persist, post stages). */
   readonly headSha: string;
   /** run_id — the ephemeral workflow execution id (persist + degradation pivot). UUID wire string. */
@@ -349,6 +355,7 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
     handle: repo.workspaceHandle,
     repo_url: repo.repoUrl,
     head_sha: headSha,
+    github_installation_id: pr.githubInstallationId,
     changed_paths: [...repo.changedPaths],
     pr_number: pr.prNumber,
   });
@@ -1345,6 +1352,7 @@ async function postCheckRun(
   await ports.postCheckRun({
     schema_version: 1,
     pr_meta: pr.prMeta,
+    github_installation_id: pr.githubInstallationId,
     head_sha: headSha,
     summary,
     owner: ownerOf(pr.prMeta.repo),

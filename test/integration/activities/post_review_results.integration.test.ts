@@ -235,6 +235,7 @@ function makeInput(args: {
     walkthrough,
     aggregated,
     pr_meta: prMeta,
+    github_installation_id: 4815162342,
     head_sha: "abc123",
     walkthrough_md: "## Walkthrough\n\nAdds a feature.",
     owner: "octo",
@@ -583,6 +584,7 @@ describeDb("post_review_results doPost (integration, disposable PG)", () => {
 
     const pr: ReviewPipelinePrCtx = {
       prMeta: input.pr_meta,
+      githubInstallationId: input.github_installation_id,
       headSha: input.head_sha,
       runId: input.run_id,
       reviewId: input.review_id,

@@ -10,13 +10,35 @@ afterAll(() => shutdownRef());
 // `<Model>(**payload).model_dump(mode="json")`) and through Zod (`<Model>.parse(payload)`), then diff
 // canonical JSON. Accept/reject must also agree. Follows the markdown_chunk.v1 / aggregated_findings.v1
 // template.
+//
+// PER-REVIEW ROUTING DIVERGENCE (ADR — remove the CODEMASTER_GITHUB_INSTALLATION_ID env pin): the TS
+// contract carries a numeric `github_installation_id` (the fix-prompt advisory comment's installation) the
+// frozen Python model does NOT — the Python pinned the id at worker construction; the port threads it
+// per-review through the activity input. The oracle is called with the Python-shaped payload; the Zod
+// contract is parsed with the same payload PLUS the numeric id (via `zodParse`); `stripGhId` removes that
+// one field from the Zod canonical JSON before the diff so every SHARED field stays byte-identical. A
+// dedicated test pins that the TS-only field round-trips.
 const PY = "contracts.generate_fix_prompt.v1";
+
+const GH_ID = 4815162342;
 
 // Lowercase UUIDs: Pydantic uuid.UUID model_dump emits the canonical lowercase form, so a payload
 // passing UPPERCASE would round-trip to lowercase and the canonical diff would still hold via the
 // Zod .toLowerCase() transform — but we use lowercase here to keep the round-trip a pure identity.
 const REVIEW_ID = "11111111-2222-3333-4444-555555555555";
 const INSTALLATION_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+// Parse a Python-shaped payload through the TS contract, supplying the TS-only numeric id (required field).
+function zodParse(pythonShaped: Record<string, unknown>): unknown {
+  return GenerateFixPromptInputV1.parse({ ...pythonShaped, github_installation_id: GH_ID });
+}
+
+// Drop the TS-only top-level github_installation_id from a Zod canonical string (the oracle never had it).
+function stripGhId(canon: string): string {
+  const o = JSON.parse(canon) as Record<string, unknown>;
+  delete o.github_installation_id;
+  return canonicalize(o);
+}
 
 // The nested AggregatedFindingsV1 nests ReviewFindingV1, whose bare Python `float` `confidence`
 // serializes `1.0` on Pydantic vs `1` on JS — the canonicalizer REJECTS bare floats, so it can never
@@ -76,7 +98,7 @@ const AGGREGATED_EMPTY = {
 } as const;
 
 describe("GenerateFixPromptInputV1 parity (Pydantic ↔ Zod)", () => {
-  it("validates + dumps a full payload identically (nested confidence excepted)", async () => {
+  it("validates + dumps a full payload identically (nested confidence + ts-only github id excepted)", async () => {
     const payload = {
       schema_version: 1,
       review_id: REVIEW_ID,
@@ -88,7 +110,7 @@ describe("GenerateFixPromptInputV1 parity (Pydantic ↔ Zod)", () => {
     };
     const r = await pyRef({ pyModule: PY, pyCallable: "GenerateFixPromptInputV1", kwargs: payload });
     expect(r.ok, r.err).toBe(true);
-    const zodCanon = canonicalize(GenerateFixPromptInputV1.parse(payload));
+    const zodCanon = stripGhId(canonicalize(zodParse(payload)));
     // Every field except each nested float `confidence` is byte-equal between Pydantic and Zod.
     expect(dropNestedConfidence(zodCanon)).toBe(dropNestedConfidence(r.out!));
     // confidence still round-trips structurally in the nested finding.
@@ -102,6 +124,18 @@ describe("GenerateFixPromptInputV1 parity (Pydantic ↔ Zod)", () => {
     expect(pf?.confidence).toBe(1);
   }, 30_000);
 
+  it("threads the TS-only github_installation_id (absent from the frozen Python — per-review routing ADR)", () => {
+    const payload = {
+      review_id: REVIEW_ID,
+      installation_id: INSTALLATION_ID,
+      pr_number: 42,
+      owner: "o",
+      repo: "r",
+      aggregated: AGGREGATED_EMPTY,
+    };
+    expect((zodParse(payload) as { github_installation_id: number }).github_installation_id).toBe(GH_ID);
+  });
+
   it("applies the same schema_version default (1) when omitted (empty findings)", async () => {
     const payload = {
       review_id: REVIEW_ID,
@@ -113,7 +147,7 @@ describe("GenerateFixPromptInputV1 parity (Pydantic ↔ Zod)", () => {
     };
     const r = await pyRef({ pyModule: PY, pyCallable: "GenerateFixPromptInputV1", kwargs: payload });
     expect(r.ok, r.err).toBe(true);
-    const zodCanon = canonicalize(GenerateFixPromptInputV1.parse(payload));
+    const zodCanon = stripGhId(canonicalize(zodParse(payload)));
     // No nested float when findings is empty — full byte-equality holds.
     expect(zodCanon).toBe(r.out);
     const z = JSON.parse(zodCanon) as Record<string, unknown>;
@@ -133,7 +167,7 @@ describe("GenerateFixPromptInputV1 parity (Pydantic ↔ Zod)", () => {
     };
     const r = await pyRef({ pyModule: PY, pyCallable: "GenerateFixPromptInputV1", kwargs: payload });
     expect(r.ok, r.err).toBe(true);
-    expect(canonicalize(GenerateFixPromptInputV1.parse(payload))).toBe(r.out);
+    expect(stripGhId(canonicalize(zodParse(payload)))).toBe(r.out);
   }, 30_000);
 
   it("lowercases UUIDs identically (Pydantic canonical form ↔ Zod .toLowerCase())", async () => {
@@ -147,7 +181,7 @@ describe("GenerateFixPromptInputV1 parity (Pydantic ↔ Zod)", () => {
     };
     const r = await pyRef({ pyModule: PY, pyCallable: "GenerateFixPromptInputV1", kwargs: payload });
     expect(r.ok, r.err).toBe(true);
-    const zodCanon = canonicalize(GenerateFixPromptInputV1.parse(payload));
+    const zodCanon = stripGhId(canonicalize(zodParse(payload)));
     expect(zodCanon).toBe(r.out);
     const z = JSON.parse(zodCanon) as { review_id: string; installation_id: string };
     expect(z.review_id).toBe(REVIEW_ID);
@@ -165,7 +199,7 @@ describe("GenerateFixPromptInputV1 parity (Pydantic ↔ Zod)", () => {
     };
     const r = await pyRef({ pyModule: PY, pyCallable: "GenerateFixPromptInputV1", kwargs: bad });
     expect(r.ok).toBe(false); // Pydantic ValidationError
-    expect(() => GenerateFixPromptInputV1.parse(bad)).toThrow();
+    expect(() => zodParse(bad)).toThrow();
   }, 30_000);
 
   it("both REJECT a non-integer pr_number", async () => {
@@ -179,7 +213,7 @@ describe("GenerateFixPromptInputV1 parity (Pydantic ↔ Zod)", () => {
     };
     const r = await pyRef({ pyModule: PY, pyCallable: "GenerateFixPromptInputV1", kwargs: bad });
     expect(r.ok).toBe(false);
-    expect(() => GenerateFixPromptInputV1.parse(bad)).toThrow();
+    expect(() => zodParse(bad)).toThrow();
   }, 30_000);
 
   it("both REJECT a missing required field (aggregated)", async () => {
@@ -192,7 +226,7 @@ describe("GenerateFixPromptInputV1 parity (Pydantic ↔ Zod)", () => {
     };
     const r = await pyRef({ pyModule: PY, pyCallable: "GenerateFixPromptInputV1", kwargs: bad });
     expect(r.ok).toBe(false);
-    expect(() => GenerateFixPromptInputV1.parse(bad)).toThrow();
+    expect(() => zodParse(bad)).toThrow();
   }, 30_000);
 
   it("both REJECT an invalid nested aggregated (policy_revision < 0 propagates)", async () => {
@@ -209,7 +243,7 @@ describe("GenerateFixPromptInputV1 parity (Pydantic ↔ Zod)", () => {
     };
     const r = await pyRef({ pyModule: PY, pyCallable: "GenerateFixPromptInputV1", kwargs: bad });
     expect(r.ok).toBe(false);
-    expect(() => GenerateFixPromptInputV1.parse(bad)).toThrow();
+    expect(() => zodParse(bad)).toThrow();
   }, 30_000);
 
   it("both REJECT an unknown extra field (extra=forbid ↔ .strict())", async () => {
@@ -224,6 +258,6 @@ describe("GenerateFixPromptInputV1 parity (Pydantic ↔ Zod)", () => {
     };
     const r = await pyRef({ pyModule: PY, pyCallable: "GenerateFixPromptInputV1", kwargs: bad });
     expect(r.ok).toBe(false);
-    expect(() => GenerateFixPromptInputV1.parse(bad)).toThrow();
+    expect(() => zodParse(bad)).toThrow();
   }, 30_000);
 });

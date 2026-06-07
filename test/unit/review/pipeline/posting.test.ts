@@ -40,6 +40,7 @@ const PR_META: PrMetaV1 = PrMetaV1.parse({
 
 const PR: ReviewPipelinePrCtx = {
   prMeta: PR_META,
+  githubInstallationId: 4815162342,
   headSha: "a".repeat(40),
   runId: uuidFor(4),
   reviewId: uuidFor(5),

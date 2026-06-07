@@ -63,6 +63,11 @@ export const PostCheckRunInputV1 = z
   .object({
     schema_version: z.number().int().default(1),
     pr_meta: PrMetaV1,
+    // NUMERIC GitHub-App installation id the check-run posts under (per-review routing — distinct from
+    // pr_meta.installation_id, the internal UUID tenant FK). NULLABLE (faithful to the nullable workflow
+    // payload; the activity enforces presence). `.default(null)` keeps the KEY required at construction so
+    // every dispatch site threads the per-review id explicitly (replacing the removed env pin — no silent omit).
+    github_installation_id: z.number().int().gte(0).nullable().default(null),
     head_sha: z.string(),
     summary: z.string(),
     owner: z.string(),

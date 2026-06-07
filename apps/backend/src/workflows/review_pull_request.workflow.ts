@@ -454,6 +454,7 @@ export async function reviewPullRequest(
           run_id: payload.run_id,
           review_id: payload.review_id,
           installation_id: payload.installation_id,
+          github_installation_id: payload.github_installation_id,
           owner: payload.gh_owner,
           repo_name: payload.gh_repo_name,
           pr_number: payload.pr_number,
@@ -712,6 +713,9 @@ export async function reviewPullRequest(
       },
       pr: {
         prMeta: buildPrMeta(payload),
+        // Per-review routing: the NUMERIC GitHub installation id every GitHub-touching stage mints its token
+        // for (clone/post/check-run/fix-prompt/pr-description). Nullable — the clone fail-closes on null.
+        githubInstallationId: payload.github_installation_id,
         headSha: payload.head_sha,
         runId: payload.run_id,
         reviewId: payload.review_id,
@@ -769,6 +773,7 @@ export async function reviewPullRequest(
               run_id: payload.run_id,
               review_id: payload.review_id,
               installation_id: payload.installation_id,
+              github_installation_id: payload.github_installation_id,
               owner: payload.gh_owner,
               repo_name: payload.gh_repo_name,
               pr_number: payload.pr_number,

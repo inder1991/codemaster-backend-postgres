@@ -23,6 +23,12 @@ export const CloneRepoIntoWorkspaceInput = z
     handle: WorkspaceHandle,
     repo_url: z.string(),
     head_sha: z.string(),
+    // NUMERIC GitHub-App installation id the clone mints its token for (per-review routing). NULLABLE here
+    // ALONE among the GitHub activity inputs: the clone is dispatched UNCONDITIONALLY on the spine and the
+    // workflow payload's github_installation_id is itself nullable — so the contract accepts null and the
+    // clone ACTIVITY fail-closes (CloneFailedError) on a null id rather than the contract rejecting it.
+    // TS-only field, absent in the frozen Python CloneRepoIntoWorkspaceInput; the parity test strips it.
+    github_installation_id: z.number().int().gte(0).nullable().default(null),
     changed_paths: z.array(z.string()),
     pr_number: z.number().int().nullable().default(null),
   })
