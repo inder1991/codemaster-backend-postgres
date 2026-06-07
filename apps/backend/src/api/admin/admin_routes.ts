@@ -44,6 +44,8 @@ import {
   PullRequestListResponseV1,
   RetrievalAggregatePRListV1,
   RetrievalAggregateV1,
+  RepositoryEnableUpdateV1,
+  RepositoryV1,
   RetrievalTraceListPageV1,
   ReviewsListPageV1,
   RoleChangePendingV1,
@@ -96,6 +98,7 @@ import {
   getByReview,
   listByPr,
 } from "#backend/api/admin/retrieval_aggregate_read.js";
+import { setEnabled } from "#backend/api/admin/repositories_write.js";
 import {
   getRetrievalTrace,
   listRetrievalTraces,
@@ -617,6 +620,48 @@ export async function registerAdminRoutes(
           if (costCapPendingErrorReply(e, reply)) return reply;
           throw e;
         }
+      },
+    );
+
+    scope.put(
+      "/api/admin/repositories/:github_repo_id/enable",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const raw = (request.params as { github_repo_id: string }).github_repo_id;
+        if (!/^\d+$/.test(raw)) {
+          return reply.code(422).send({ detail: "github_repo_id must be a positive integer" });
+        }
+        const githubRepoId = Number(raw);
+        const parsed = RepositoryEnableUpdateV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        const now = opts.clock.now();
+        const { repo, changed } = await setEnabled(opts.db, {
+          githubRepoId,
+          enabled: parsed.data.enabled,
+          now,
+        });
+        if (repo === null) {
+          return reply.code(404).send({
+            detail: `repository github_repo_id=${githubRepoId} not found; it must be seen via a webhook before enable applies`,
+          });
+        }
+        if (changed) {
+          // The audit's installation_id is the REPO's (tenant-affected), not the actor's session.
+          await opts.audit?.({
+            actorUserId: principal.userId,
+            installationId: repo.installation_id,
+            action: "repository.enabled.set",
+            targetKind: "repository",
+            targetId: repo.repository_id,
+            before: { enabled: !parsed.data.enabled },
+            after: { enabled: parsed.data.enabled },
+            now,
+          });
+        }
+        return reply.code(200).send(RepositoryV1.parse(repo));
       },
     );
 

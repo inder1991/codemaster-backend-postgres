@@ -879,3 +879,31 @@ export const ProposalListPageV1 = z
   })
   .strict();
 export type ProposalListPageV1 = z.infer<typeof ProposalListPageV1>;
+
+// ─── Repositories enable (PUT /api/admin/repositories/{github_repo_id}/enable) ───────────────────────
+// 1:1 with contracts/admin/repositories/v1.py.
+
+/** A repository row (the PUT-enable response). github_repo_id is bigint → coerced to number. */
+export const RepositoryV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    repository_id: z.string().uuid(),
+    installation_id: z.string().uuid(),
+    github_repo_id: z.number().int().gt(0),
+    full_name: z.string().min(1).max(512),
+    default_branch: z.string().min(1).max(255),
+    enabled: z.boolean(),
+    archived: z.boolean(),
+    updated_at: z.string().datetime({ offset: true }),
+  })
+  .strict();
+export type RepositoryV1 = z.infer<typeof RepositoryV1>;
+
+/** PUT /api/admin/repositories/{github_repo_id}/enable body — flips core.repositories.enabled. */
+export const RepositoryEnableUpdateV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    enabled: z.boolean(),
+  })
+  .strict();
+export type RepositoryEnableUpdateV1 = z.infer<typeof RepositoryEnableUpdateV1>;
