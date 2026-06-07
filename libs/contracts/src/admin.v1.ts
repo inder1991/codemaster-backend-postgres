@@ -113,6 +113,22 @@ export const CostCapPageV1 = z
   .strict();
 export type CostCapPageV1 = z.infer<typeof CostCapPageV1>;
 
+/** Cap ceiling enforced at the contract boundary (1:1 with HARD_CEILING_CENTS). */
+export const COST_CAP_HARD_CEILING_CENTS = 5_000_000;
+
+/** POST /api/admin/cost-caps/changes body — stage a cap change (two-person approval). The structural
+ *  target_kind/target_id consistency rules are enforced at the route helper, not the schema. */
+export const CostCapChangeRequestV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    target_kind: z.enum(["global", "per_org_default", "per_org_override"]),
+    target_id: z.string().uuid().nullable().default(null),
+    new_cap_cents: z.number().int().min(0).max(COST_CAP_HARD_CEILING_CENTS),
+    expires_at: z.string().datetime({ offset: true }).nullable().default(null),
+  })
+  .strict();
+export type CostCapChangeRequestV1 = z.infer<typeof CostCapChangeRequestV1>;
+
 // ─── Knowledge (learnings; tenant-scoped; in-memory keyset) ──────────────────────────────────────
 
 /** One learning in GET /api/admin/knowledge. accept_rate is app-computed (accepted/feedback). */
