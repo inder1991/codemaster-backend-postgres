@@ -239,4 +239,60 @@ export class PostgresLlmProviderSettingsRepo {
     }
     return row.last_rotated_at;
   }
+
+  /**
+   * Admin-side credential write — 1:1 port of `write_settings_atomic` MINUS the in-transaction audit
+   * callback. The Python emits the dual rotation-audit rows inside the same transaction; in the TS port the
+   * admin route emits them post-write through the dormant `AdminRoutesOptions.audit` no-op seam (matching
+   * every other ported admin write), so this method is a single self-atomic UPSERT.
+   *
+   * Encrypts the plaintext token via the REAL Vault Transit key `"llm_provider_settings"` and UPSERTs the
+   * platform-scope row (scope='platform', installation_id=NULL) on the
+   * `(scope, role, COALESCE(installation_id, zero-uuid))` expression-index conflict target. Returns the
+   * 4-char fingerprint (last 4 plaintext chars; the length-4 CHECK) the route surfaces in its response.
+   */
+  public async writeSettings(args: {
+    role: LlmProviderRole;
+    provider: string;
+    apiKeyPlaintext: string;
+    modelId: string;
+    region: string | null;
+    enabled: boolean;
+    validatedAt: Date | null;
+    validationStatus: "ok" | "failed" | null;
+    rotatedAt: Date;
+    rotatedByUserId: string;
+  }): Promise<{ fingerprint: string }> {
+    const ciphertext = await this.vault.transitEncrypt({
+      keyName: VAULT_KEY_NAME,
+      plaintext: new TextEncoder().encode(args.apiKeyPlaintext),
+    });
+    const fingerprint = args.apiKeyPlaintext.slice(-4);
+    // tenant:exempt reason=platform-config follow_up=PERMANENT-EXEMPTION-platform-llm-config
+    await sql`
+      INSERT INTO core.llm_provider_settings
+        (scope, role, installation_id, provider, model_id, region,
+         api_key_ciphertext, api_key_fingerprint, enabled,
+         last_validated_at, last_validation_status,
+         last_rotated_at, last_rotated_by_user_id)
+      VALUES
+        ('platform', ${args.role}, NULL, ${args.provider}, ${args.modelId}, ${args.region},
+         ${ciphertext}, ${fingerprint}, ${args.enabled},
+         ${args.validatedAt}, ${args.validationStatus},
+         ${args.rotatedAt}, ${args.rotatedByUserId})
+      ON CONFLICT (scope, role, COALESCE(installation_id, '00000000-0000-0000-0000-000000000000'::uuid))
+      DO UPDATE SET
+         provider = EXCLUDED.provider,
+         model_id = EXCLUDED.model_id,
+         region = EXCLUDED.region,
+         api_key_ciphertext = EXCLUDED.api_key_ciphertext,
+         api_key_fingerprint = EXCLUDED.api_key_fingerprint,
+         enabled = EXCLUDED.enabled,
+         last_validated_at = EXCLUDED.last_validated_at,
+         last_validation_status = EXCLUDED.last_validation_status,
+         last_rotated_at = EXCLUDED.last_rotated_at,
+         last_rotated_by_user_id = EXCLUDED.last_rotated_by_user_id
+    `.execute(this.db);
+    return { fingerprint };
+  }
 }
