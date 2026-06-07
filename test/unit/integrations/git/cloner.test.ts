@@ -46,6 +46,8 @@ type FakeProcConfig = {
   stderr?: string;
   /** When true the fake process NEVER emits `close` — drives the timeout path. */
   hang?: boolean;
+  /** When set, the fake emits an `error` event (NOT `close`) — models a spawn failure (e.g. ENOENT). */
+  spawnError?: string;
 };
 
 class FakeStream extends EventEmitter {}
@@ -62,6 +64,11 @@ class FakeProcess extends EventEmitter {
     this.cfg = cfg;
     // Emit synchronously-but-async so listeners (attached right after spawn) are in place.
     queueMicrotask(() => {
+      if (this.cfg.spawnError) {
+        // A real spawn failure (ENOENT etc.) emits `error` and never `close`.
+        this.emit("error", new Error(this.cfg.spawnError));
+        return;
+      }
       if (this.cfg.stdout) this.stdout.emit("data", Buffer.from(this.cfg.stdout));
       if (this.cfg.stderr) this.stderr.emit("data", Buffer.from(this.cfg.stderr));
       if (!this.cfg.hang) {
@@ -556,4 +563,25 @@ describe("GitSubprocessCloner failure taxonomy", () => {
     expect(hangProc?.killCount).toBeGreaterThanOrEqual(1);
     expect(hangProc?.killSignals[0]).toBe("SIGTERM");
   }, 15_000);
+
+  it("surfaces a spawn FAILURE (ENOENT) as a catchable GitCloneFailedError, not an uncaught crash", async () => {
+    // `git` absent from the runtime image's PATH → spawn emits an `error` event, NOT `close`. WITHOUT an
+    // `error` listener the unhandled event becomes an uncaught exception that crashes the fail-loud process —
+    // one missing binary would take down the WHOLE pod instead of failing this one review. The cloner MUST
+    // map the spawn failure to a catchable GitCloneFailedError so the clone activity degrades gracefully.
+    const recorder = new SpawnRecorder([{ spawnError: "spawn git ENOENT" }]);
+    const { provider } = fakeTokenProvider();
+    const cloner = new GitSubprocessCloner({ tokenProvider: provider, spawnFn: recorder.spawn });
+    const workspace = await makeWorkspace();
+
+    await expect(
+      cloner.clone({
+        workspace,
+        repoUrl: "https://github.com/acme/widget.git",
+        headSha: VALID_SHA,
+        installationId: INSTALLATION_ID,
+        paths: [],
+      }),
+    ).rejects.toThrow(new GitCloneFailedError("git clone failed to spawn: spawn git ENOENT"));
+  });
 });

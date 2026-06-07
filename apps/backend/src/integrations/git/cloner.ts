@@ -222,7 +222,17 @@ export class GitSubprocessCloner implements GitCloner {
     proc.stdout?.on("data", (d: Buffer) => stdoutChunks.push(d));
     proc.stderr?.on("data", (d: Buffer) => stderrChunks.push(d));
 
-    const exitCode = await this.awaitWithTimeout(proc, verb);
+    // A spawn FAILURE (e.g. `git` not on PATH → ENOENT, or a permission error) emits an 'error' event, NOT
+    // 'close'. WITHOUT this listener the unhandled 'error' becomes an uncaught exception that crashes the
+    // (fail-loud) process — a missing/unspawnable git would take down the WHOLE pod instead of failing this
+    // one review. Reject with a catchable GitCloneFailedError so the clone activity degrades gracefully.
+    const spawnFailed = new Promise<never>((_resolve, reject) => {
+      proc.on("error", (err: Error) =>
+        reject(new GitCloneFailedError(`git ${verb} failed to spawn: ${err.message}`)),
+      );
+    });
+
+    const exitCode = await Promise.race([this.awaitWithTimeout(proc, verb), spawnFailed]);
 
     if (exitCode !== 0) {
       const stderrText = Buffer.concat(stderrChunks).toString("utf8");
