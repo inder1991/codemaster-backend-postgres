@@ -335,9 +335,13 @@ export const RETRY_POLICIES = {
 
   // post_check_run (review_pull_request.py:2865-2868): start_to_close 30s,
   // retry initial_interval=2s, max_attempts=3.
+  // DIVERGENCE from the frozen Python (which has no nonRetryableErrorTypes here): a GitHub 403 "Resource
+  // not accessible by integration" is a PERMANENT permission gap (the App lacks checks:write), not a
+  // transient fault — and the check-run is an ADVISORY surface (CLAUDE.md invariant 9, event=COMMENT only).
+  // Retrying it 3× wastes ~6s of backoff on a guaranteed-to-fail call, so we fail fast on attempt 1.
   postCheckRun: {
     startToCloseTimeout: "30s",
-    retry: { initialInterval: "2s", maximumAttempts: 3 },
+    retry: { initialInterval: "2s", maximumAttempts: 3, nonRetryableErrorTypes: ["GitHubForbiddenError"] },
   },
 
   // release_workspace_activity (review_pull_request.py:3253-3256): start_to_close 30s,

@@ -192,11 +192,20 @@ export async function buildFixPrompt(args: {
       mode = "llm";
     }
     // else: no themes block returned → mode stays "deterministic_fallback".
-  } catch {
+  } catch (err) {
     // Advisory artifact — LLM enrichment is best-effort. Any enrichment-path failure (LLM invocation,
     // budget, output-safety, OR the infra reads inside forRole — DB/Vault) degrades to the deterministic
-    // base, which is always a correct, complete prompt. Degrade silently to it. 1:1 with the Python bare
-    // `except Exception:` (which warns + continues; the WARN log is an off-observable side-effect).
+    // base, which is always a correct, complete prompt. We degrade to it — but emit a structured WARN so a
+    // `deterministic_fallback` caused by an LLM/infra error is distinguishable from one caused by the model
+    // simply returning no themes block (no silent degradation; the frozen Python's bare `except` also warns).
+    console.warn(
+      JSON.stringify({
+        event: "fix_prompt.theme_synthesis_failed",
+        review_id: args.reviewId,
+        error_class: err instanceof Error ? err.constructor.name : "unknown",
+        error_msg: (err instanceof Error ? err.message : String(err)).slice(0, 512),
+      }),
+    );
   }
   return FixPromptV1.parse({
     review_id: args.reviewId,
