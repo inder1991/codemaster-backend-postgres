@@ -224,6 +224,22 @@ function optStr(value: unknown): string | null {
   return typeof value === "string" && value !== "" ? value : null;
 }
 
+/** Coerce a boolean query param the way FastAPI/pydantic-v2 does — absent → false; truthy/falsy token sets
+ *  (case-insensitive) → the bool; any other present value → "invalid" (the route 422s). */
+function coerceBoolQueryParam(raw: string | undefined): boolean | "invalid" {
+  if (raw === undefined) {
+    return false;
+  }
+  const v = raw.toLowerCase();
+  if (["true", "1", "yes", "on", "t", "y"].includes(v)) {
+    return true;
+  }
+  if (["false", "0", "no", "off", "f", "n"].includes(v)) {
+    return false;
+  }
+  return "invalid";
+}
+
 export type AdminRoutesOptions = {
   db: Kysely<unknown>;
   signingKey: Buffer | Uint8Array;
@@ -935,10 +951,14 @@ export async function registerAdminRoutes(
         if (!parsed.success) {
           return reply.code(422).send({ detail: "request body failed schema validation" });
         }
+        // FastAPI parses the `force: bool` query param before the handler — a non-boolean token 422s.
+        const force = coerceBoolQueryParam((request.query as { force?: string }).force);
+        if (force === "invalid") {
+          return reply.code(422).send({ detail: "force query param must be a boolean" });
+        }
         if (opts.vault === undefined || opts.getPlatformCredentialProbe === undefined) {
           return reply.code(503).send({ detail: "platform-credentials write not configured (vault + probe unwired)" });
         }
-        const force = (request.query as { force?: string }).force === "true";
         const deps: PlatformCredentialsDeps = {
           db: opts.db,
           vault: opts.vault,

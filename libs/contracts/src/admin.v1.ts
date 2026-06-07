@@ -258,7 +258,7 @@ export type PlatformTestErrorCode = z.infer<typeof PLATFORM_TEST_ERROR_CODE>;
  *  session-resolved emails and the shim resolver emits a valid one). */
 export const PlatformCredentialsMetaV1 = z
   .object({
-    schema_version: z.literal(1).default(1),
+    schema_version: z.number().int().default(1), // Python `int = 1` (not Literal[1]); value ignored
     credential_key: PLATFORM_CREDENTIAL_KEY,
     base_url: z.string().nullable(),
     token_present: z.boolean(),
@@ -274,7 +274,7 @@ export type PlatformCredentialsMetaV1 = z.infer<typeof PlatformCredentialsMetaV1
  *  "complete credential" rules live in the HANDLER (Python defers them to the route), not here. */
 export const PatchPlatformCredentialsRequestV1 = z
   .object({
-    schema_version: z.literal(1).default(1),
+    schema_version: z.number().int().default(1), // Python `int = 1`; a body with schema_version:2 is accepted
     base_url: z.string().min(1).max(512).nullable().default(null),
     token: z.string().max(4096).nullable().default(null),
   })
@@ -284,7 +284,7 @@ export type PatchPlatformCredentialsRequestV1 = z.infer<typeof PatchPlatformCred
 /** POST /test response (Python TestPlatformCredentialsResponseV1). 200 even on probe failure. */
 export const TestPlatformCredentialsResponseV1 = z
   .object({
-    schema_version: z.literal(1).default(1),
+    schema_version: z.number().int().default(1), // Python `int = 1`
     ok: z.boolean(),
     error: PLATFORM_TEST_ERROR_CODE.nullable(),
     error_detail: z.string().nullable(),

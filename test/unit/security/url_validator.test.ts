@@ -69,13 +69,23 @@ describe("validateExternalUrl — scheme / syntax rejections", () => {
     );
   });
 
-  it("rejects userinfo (user:pass@ and user@)", async () => {
-    await expect(validateExternalUrl("https://u:p@host.example.com", { resolver: resolveTo(PUBLIC_V4) })).rejects.toBeInstanceOf(
-      UserInfoNotAllowedError,
-    );
-    await expect(validateExternalUrl("https://u@host.example.com", { resolver: resolveTo(PUBLIC_V4) })).rejects.toBeInstanceOf(
-      UserInfoNotAllowedError,
-    );
+  it("rejects userinfo — user:pass@, user@, and bare @ (empty userinfo, matching Python urlsplit)", async () => {
+    for (const u of ["https://u:p@host.example.com", "https://u@host.example.com", "https://@host.example.com"]) {
+      await expect(validateExternalUrl(u, { resolver: resolveTo(PUBLIC_V4) })).rejects.toBeInstanceOf(
+        UserInfoNotAllowedError,
+      );
+    }
+  });
+
+  it("canonicalizes obfuscated IPv4 literals BEFORE resolving (TS-stricter than Python urlsplit)", async () => {
+    // WHATWG new URL canonicalizes 0177.0.0.1 → 127.0.0.1, so the deny-list check sees the loopback literal.
+    let seen = "";
+    const capture = async (host: string): Promise<Array<string>> => {
+      seen = host;
+      return [PUBLIC_V4];
+    };
+    await validateExternalUrl("https://0177.0.0.1/", { resolver: capture });
+    expect(seen).toBe("127.0.0.1");
   });
 
   it("rejects a hostname not in the allowlist", async () => {

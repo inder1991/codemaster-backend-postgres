@@ -354,4 +354,38 @@ describeDb("admin platform-credentials (disposable :5434)", () => {
       await app3.close();
     }
   });
+
+  it("PATCH ?force coercion: True/1/yes enable the override (probe-fail → write); a non-boolean → 422", async () => {
+    const probe = stubProbe({ ok: false, errorCode: "auth_error", errorDetail: "401" });
+    for (const tok of ["True", "1", "yes"]) {
+      const vault = new InMemoryVault();
+      const app = await makeApp({ vault, probe, dnsResolver: dnsTo("93.184.216.34") });
+      try {
+        const res = await app.inject({
+          method: "PATCH",
+          url: `${CONF}?force=${tok}`,
+          cookies: cookie("platform_owner"),
+          payload: { base_url: "https://x.example.com", token: "forced" },
+        });
+        expect(res.statusCode).toBe(200); // override honored despite the failing probe (FastAPI bool parity)
+        expect((await vault.kvRead({ path: CONFLUENCE_PATH })).token).toBe("forced");
+      } finally {
+        await app.close();
+      }
+    }
+    // a non-boolean token → 422 (matches FastAPI bool_parsing)
+    const vault = new InMemoryVault();
+    const app = await makeApp({ vault, probe, dnsResolver: dnsTo("93.184.216.34") });
+    try {
+      const res = await app.inject({
+        method: "PATCH",
+        url: `${CONF}?force=bogus`,
+        cookies: cookie("platform_owner"),
+        payload: { base_url: "https://x.example.com", token: "t" },
+      });
+      expect(res.statusCode).toBe(422);
+    } finally {
+      await app.close();
+    }
+  });
 });

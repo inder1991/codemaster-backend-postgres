@@ -4,13 +4,23 @@
  * platform-credentials PATCH boundary so a mis-typed or malicious operator URL cannot trigger SSRF against
  * internal services (Vault, Postgres, the K8s API, the cloud metadata endpoint, etc.).
  *
- * Divergences from the Python (both forced by Node, not behavioral):
+ * Divergences from the Python (Node-forced or TS-is-the-safer-side; the parity oracle should treat these as
+ * intended, NOT weaken the TS to mirror the weaker Python behavior):
  *  - `validateExternalUrl` is ASYNC (Node DNS is async; Python's socket.getaddrinfo is sync). Callers await.
  *  - CIDR membership is hand-rolled with BigInt (no `ipaddr.js` dep → no spine-dependency ADR). The exact
  *    private/reserved network lists + the IPv4-mapped-IPv6 unwrap + the all-addresses DNS-rebind check are
  *    ported verbatim.
  *  - The injected `resolver` returns address strings (vs Python's getaddrinfo tuples) — a cleaner shape; the
  *    default wraps node:dns lookup with { all: true } and checks EVERY returned address.
+ *  - HOST CANONICALIZATION (TS-stricter, accepted): `new URL` applies WHATWG host parsing, so obfuscated IPv4
+ *    literals (`0177.0.0.1`, `2130706433`, trailing-dot `127.0.0.1.`) are canonicalized to dotted form BEFORE
+ *    the deny-list check → TS blocks them fail-closed, whereas Python's `urlsplit` hands the raw literal to
+ *    getaddrinfo (which may resolve `0177.0.0.1` to a PUBLIC `177.0.0.1` and pass). TS is the safer verdict.
+ *  - OUT-OF-RANGE PORT (TS-correct, accepted): a bad port (`:99999`) → `new URL` throws → MalformedUrlError →
+ *    422 `malformed_url`, where Python's `parts.port` raises a bare ValueError → unhandled 500 (a Python bug).
+ *  - EXTREME-MALFORMED 422 CODE (accepted): for a few degenerate inputs (`https:///x`, host-with-space) the
+ *    WHATWG vs urlsplit host extraction differs, so the 422 `error` code can be `malformed_url` vs
+ *    `dns_resolution_failed`. Both still 422; only the machine-readable code flips.
  */
 
 import { promises as dnsPromises } from "node:dns";
@@ -223,7 +233,13 @@ export async function validateExternalUrl(
   if (scheme === "http" && !allowHttp) {
     throw new HttpsRequiredError(`https:// required (got ${scheme}://); set allowHttp only for dev/test`);
   }
-  if (parsed.username !== "" || parsed.password !== "") {
+  // Reject ANY userinfo, including a bare '@' (empty user:pass). `new URL` collapses empty userinfo to "", so
+  // parsed.username/password can't distinguish `@host` from `host`; scan the raw authority for '@' to match
+  // Python's urlsplit (which reports username='' → rejected) 1:1.
+  const afterScheme = url.slice(url.indexOf("://") + 3);
+  const authorityEnd = afterScheme.search(/[/?#]/);
+  const authority = authorityEnd === -1 ? afterScheme : afterScheme.slice(0, authorityEnd);
+  if (authority.includes("@")) {
     throw new UserInfoNotAllowedError("URL must not contain userinfo (user:pass@)");
   }
   const port = parsed.port !== "" ? Number(parsed.port) : scheme === "https" ? 443 : 80;
