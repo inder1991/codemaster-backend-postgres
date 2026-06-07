@@ -30,6 +30,8 @@ import {
   LearningDetailV1,
   LearningListPageV1,
   LlmModelListV1,
+  LlmModelUpsertV1,
+  LlmModelV1,
   LlmProviderConfigV1,
   LlmPurposeAssignmentUpdateV1,
   LlmPurposeModelListV1,
@@ -100,7 +102,12 @@ import {
   getByReview,
   listByPr,
 } from "#backend/api/admin/retrieval_aggregate_read.js";
-import { upsertPurposeModel } from "#backend/api/admin/llm_catalog_write.js";
+import {
+  BEDROCK_MODELS,
+  deleteModel,
+  upsertModel,
+  upsertPurposeModel,
+} from "#backend/api/admin/llm_catalog_write.js";
 import { setEnabled } from "#backend/api/admin/repositories_write.js";
 import {
   getRetrievalTrace,
@@ -922,6 +929,66 @@ export async function registerAdminRoutes(
       { preHandler: requireRole([...READER_ROLES]) },
       async (_request, reply) =>
         reply.code(200).send(LlmModelListV1.parse({ models: await listLlmModels(opts.db) })),
+    );
+
+    scope.put(
+      "/api/admin/llm-models",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const parsed = LlmModelUpsertV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        const b = parsed.data;
+        // ADR-0060 guardrail: reject at config time a model the engine can't invoke (provider-agnostic).
+        if (!BEDROCK_MODELS.has(b.model_id)) {
+          return reply.code(422).send({
+            detail: {
+              code: "llm_model_not_supported",
+              message: `model '${b.model_id}' is not in the engine's accepted set ${JSON.stringify([...BEDROCK_MODELS].sort())}`,
+            },
+          });
+        }
+        await upsertModel(opts.db, {
+          provider: b.provider,
+          modelId: b.model_id,
+          displayName: b.display_name,
+          enabled: b.enabled,
+          createdByUserId: principal.userId,
+        });
+        // Re-read so the response reflects persisted status (untested on a fresh row — preflight is /test).
+        const row = (await listLlmModels(opts.db)).find(
+          (m) => m.provider === b.provider && m.model_id === b.model_id,
+        );
+        if (row === undefined) {
+          return reply.code(500).send({ detail: "internal: model upsert succeeded but read returned no row" });
+        }
+        return reply.code(200).send(LlmModelV1.parse(row));
+      },
+    );
+
+    scope.delete(
+      "/api/admin/llm-models/:provider/:model_id",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const params = request.params as { provider: string; model_id: string };
+        // Dependents check: any purpose routing to this model_id blocks the delete (match model_id only).
+        const dependents = (await listLlmPurposeModels(opts.db))
+          .filter((m) => m.model_id === params.model_id)
+          .map((m) => m.purpose)
+          .sort();
+        if (dependents.length > 0) {
+          return reply.code(409).send({
+            detail: { code: "llm_model_in_use", message: `model in use by: ${dependents.join(", ")}`, purposes: dependents },
+          });
+        }
+        const deleted = await deleteModel(opts.db, { provider: params.provider, modelId: params.model_id });
+        if (!deleted) {
+          return reply.code(404).send({ detail: `no such model: ${params.provider}/${params.model_id}` });
+        }
+        return reply.code(204).send();
+      },
     );
 
     scope.get(

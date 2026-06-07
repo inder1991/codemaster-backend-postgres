@@ -345,6 +345,19 @@ export const LlmModelV1 = z
   .strict();
 export type LlmModelV1 = z.infer<typeof LlmModelV1>;
 
+/** PUT /api/admin/llm-models body — upsert a catalog model. model_id is guarded against BEDROCK_MODELS at
+ *  the route (the engine rejects anything outside that set, regardless of provider). */
+export const LlmModelUpsertV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    provider: z.enum(["anthropic_direct", "bedrock"]),
+    model_id: z.string().min(1).max(128),
+    display_name: z.string().nullable().default(null),
+    enabled: z.boolean().default(true),
+  })
+  .strict();
+export type LlmModelUpsertV1 = z.infer<typeof LlmModelUpsertV1>;
+
 export const LlmModelListV1 = z
   .object({ schema_version: z.literal(1).default(1), models: z.array(LlmModelV1).default([]) })
   .strict();
