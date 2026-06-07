@@ -7,6 +7,9 @@ import { type Kysely, sql } from "kysely";
 import type {
   FindingRowV1,
   FlagDetailV1,
+  LlmModelV1,
+  LlmProviderConfigV1,
+  LlmPurposeModelV1,
   PullRequestRowV1,
   ReviewListItemV1,
   TaxonomyGapEntryV1,
@@ -152,6 +155,84 @@ export async function searchReviews(
   }));
   const total = r.rows.length > 0 ? Number(r.rows[0]!.total_count) : 0;
   return { items, total };
+}
+
+// ─── LLM config reads (platform-scope; core.llm_models has no installation_id) ────────────────────
+
+/** GET /api/admin/llm-models — the full model catalog, ordered by (provider, model_id). */
+export async function listLlmModels(db: Kysely<unknown>): Promise<Array<LlmModelV1>> {
+  const r = await sql<{
+    provider: "anthropic_direct" | "bedrock";
+    model_id: string;
+    display_name: string | null;
+    enabled: boolean;
+    last_validation_status: "untested" | "ok" | "failed";
+    last_validation_error: string | null;
+    last_validated_at: Date | null;
+  }>`
+    SELECT provider, model_id, display_name, enabled, last_validation_status, last_validation_error,
+           last_validated_at
+    FROM core.llm_models ORDER BY provider, model_id
+  `.execute(db);
+  return r.rows.map((row) => ({
+    schema_version: 1 as const,
+    provider: row.provider,
+    model_id: row.model_id,
+    display_name: row.display_name,
+    enabled: row.enabled,
+    last_validation_status: row.last_validation_status,
+    last_validation_error: row.last_validation_error,
+    last_validated_at: row.last_validated_at === null ? null : new Date(row.last_validated_at).toISOString(),
+  }));
+}
+
+/** GET /api/admin/llm-purpose-routing — purpose→model assignments, sorted by purpose (app-side). */
+export async function listLlmPurposeModels(db: Kysely<unknown>): Promise<Array<LlmPurposeModelV1>> {
+  const r = await sql<{ purpose: LlmPurposeModelV1["purpose"]; model_id: string }>`
+    SELECT purpose, model_id FROM core.llm_purpose_model
+  `.execute(db);
+  return r.rows
+    .map((row) => ({ schema_version: 1 as const, purpose: row.purpose, model_id: row.model_id }))
+    .sort((a, b) => (a.purpose < b.purpose ? -1 : a.purpose > b.purpose ? 1 : 0));
+}
+
+/** GET /api/admin/llm-provider-config — the active per-role provider metadata (role='primary'); null when
+ *  unconfigured (route → 404). Selects api_key_fingerprint (cleartext last-4), NOT the ciphertext. */
+export async function getLlmProviderConfig(
+  db: Kysely<unknown>,
+  role = "primary",
+): Promise<LlmProviderConfigV1 | null> {
+  const r = await sql<{
+    provider: "bedrock" | "anthropic_direct";
+    model_id: string;
+    region: string | null;
+    api_key_fingerprint: string;
+    enabled: boolean;
+    last_validated_at: Date | null;
+    last_validation_status: "ok" | "failed" | null;
+    last_rotated_at: Date;
+    last_rotated_by_user_id: string;
+  }>`
+    SELECT provider, model_id, region, api_key_fingerprint, enabled, last_validated_at,
+           last_validation_status, last_rotated_at, last_rotated_by_user_id
+    FROM core.llm_provider_settings WHERE scope = 'platform' AND role = ${role} LIMIT 1
+  `.execute(db);
+  const row = r.rows[0];
+  if (row === undefined) {
+    return null;
+  }
+  return {
+    schema_version: 1 as const,
+    provider: row.provider,
+    model_id: row.model_id,
+    region: row.region,
+    api_key_fingerprint: row.api_key_fingerprint,
+    enabled: row.enabled,
+    last_validated_at: row.last_validated_at === null ? null : new Date(row.last_validated_at).toISOString(),
+    last_validation_status: row.last_validation_status,
+    last_rotated_at: new Date(row.last_rotated_at).toISOString(),
+    last_rotated_by_user_id: row.last_rotated_by_user_id,
+  };
 }
 
 type FlagDbRow = {

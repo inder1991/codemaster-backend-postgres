@@ -22,6 +22,73 @@ export const OrgsListV1 = z
   .strict();
 export type OrgsListV1 = z.infer<typeof OrgsListV1>;
 
+// ─── LLM config reads (llm_models_router / llm_provider_config) ──────────────────────────────────
+
+/** One model in GET /api/admin/llm-models (core.llm_models). */
+export const LlmModelV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    provider: z.enum(["anthropic_direct", "bedrock"]),
+    model_id: z.string().min(1).max(128),
+    display_name: z.string().nullable().default(null),
+    enabled: z.boolean().default(true),
+    last_validation_status: z.enum(["untested", "ok", "failed"]).default("untested"),
+    last_validation_error: z.string().nullable().default(null),
+    last_validated_at: z.string().datetime({ offset: true }).nullable().default(null),
+  })
+  .strict();
+export type LlmModelV1 = z.infer<typeof LlmModelV1>;
+
+export const LlmModelListV1 = z
+  .object({ schema_version: z.literal(1).default(1), models: z.array(LlmModelV1).default([]) })
+  .strict();
+export type LlmModelListV1 = z.infer<typeof LlmModelListV1>;
+
+/** One purpose→model assignment in GET /api/admin/llm-purpose-routing.
+ *  FAITHFUL-PORT: the enum mirrors the Python contract's 7 values; the DB CHECK also admits 'fix_prompt'
+ *  (8th) — a row with that value would fail validation identically to the Python (parity preserved). */
+export const LlmPurposeModelV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    purpose: z.enum([
+      "review_summary",
+      "review_finding",
+      "chat_reply",
+      "walkthrough",
+      "redaction_check",
+      "cost_estimate",
+      "analysis_curator",
+    ]),
+    model_id: z.string().min(1).max(128),
+  })
+  .strict();
+export type LlmPurposeModelV1 = z.infer<typeof LlmPurposeModelV1>;
+
+export const LlmPurposeModelListV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    assignments: z.array(LlmPurposeModelV1).default([]),
+  })
+  .strict();
+export type LlmPurposeModelListV1 = z.infer<typeof LlmPurposeModelListV1>;
+
+/** GET /api/admin/llm-provider-config (the active per-role provider metadata; 404 when unconfigured). */
+export const LlmProviderConfigV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    provider: z.enum(["bedrock", "anthropic_direct"]),
+    model_id: z.string().min(1).max(128),
+    region: z.string().min(1).max(32).nullable().default(null),
+    api_key_fingerprint: z.string().length(4),
+    enabled: z.boolean(),
+    last_validated_at: z.string().datetime({ offset: true }).nullable(),
+    last_validation_status: z.enum(["ok", "failed"]).nullable(),
+    last_rotated_at: z.string().datetime({ offset: true }),
+    last_rotated_by_user_id: z.string().uuid(),
+  })
+  .strict();
+export type LlmProviderConfigV1 = z.infer<typeof LlmProviderConfigV1>;
+
 /** One feature flag in GET /api/admin/flags (incl. pending two-person-approval state). */
 export const FlagDetailV1 = z
   .object({

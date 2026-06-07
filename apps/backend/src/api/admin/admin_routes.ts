@@ -18,6 +18,9 @@ import {
   DashboardSummaryV1,
   FindingListResponseV1,
   FlagListV1,
+  LlmModelListV1,
+  LlmProviderConfigV1,
+  LlmPurposeModelListV1,
   OrgsListV1,
   PullRequestListResponseV1,
   ReviewsListPageV1,
@@ -25,8 +28,11 @@ import {
 } from "#contracts/admin.v1.js";
 
 import {
+  getLlmProviderConfig,
   listFindings,
   listFlags,
+  listLlmModels,
+  listLlmPurposeModels,
   listOrgs,
   listPullRequests,
   listTaxonomyGaps,
@@ -53,6 +59,9 @@ const REVIEWS_DEFAULT_SIZE = 50;
 const REVIEWS_MAX_SIZE = 100;
 
 type AdminQuery = Record<string, unknown>;
+
+/** The common "any signed-in admin" read allow-set (reader through super_admin). */
+const READER_ROLES = ["reader", "platform_operator", "platform_owner", "super_admin"] as const;
 
 /** Clamp a ?limit param to [1, max] with a default (the paginated reads). */
 function clampLimit(raw: unknown, fallback: number, max: number): number {
@@ -107,6 +116,36 @@ export async function registerAdminRoutes(
       async (request, reply) => {
         const orgs = await listOrgs(opts.db, request.authPrincipal!.installationId);
         return reply.code(200).send(OrgsListV1.parse({ orgs }));
+      },
+    );
+
+    scope.get(
+      "/api/admin/llm-models",
+      { preHandler: requireRole([...READER_ROLES]) },
+      async (_request, reply) =>
+        reply.code(200).send(LlmModelListV1.parse({ models: await listLlmModels(opts.db) })),
+    );
+
+    scope.get(
+      "/api/admin/llm-purpose-routing",
+      { preHandler: requireRole([...READER_ROLES]) },
+      async (_request, reply) =>
+        reply
+          .code(200)
+          .send(LlmPurposeModelListV1.parse({ assignments: await listLlmPurposeModels(opts.db) })),
+    );
+
+    scope.get(
+      "/api/admin/llm-provider-config",
+      { preHandler: requireRole([...READER_ROLES]) },
+      async (_request, reply) => {
+        const config = await getLlmProviderConfig(opts.db);
+        if (config === null) {
+          return reply
+            .code(404)
+            .send({ detail: "LLM provider not configured; PUT /api/admin/llm-provider-config to seed." });
+        }
+        return reply.code(200).send(LlmProviderConfigV1.parse(config));
       },
     );
 
