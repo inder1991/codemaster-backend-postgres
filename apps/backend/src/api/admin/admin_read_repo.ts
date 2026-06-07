@@ -157,6 +157,64 @@ export async function searchReviews(
   return { items, total };
 }
 
+// ─── Notification rules (platform-scope; no installation_id column post-migration-0061) ───────────
+
+type NotificationRuleDbRow = {
+  rule_id: string;
+  name: string;
+  trigger_event: string;
+  filters: unknown; // jsonb (node-pg parses to a JS object)
+  recipients: unknown; // jsonb (parses to a JS array)
+  schedule_cron: string | null;
+  state: "active" | "paused";
+  created_at: Date;
+  updated_at: Date;
+};
+
+/** Map a DB row to the pre-parse contract shape; the caller validates via NotificationRuleV1.parse (which
+ *  fail-closes on a malformed recipient, matching the Python). */
+function mapNotificationRule(row: NotificationRuleDbRow): Record<string, unknown> {
+  const filters =
+    row.filters !== null && typeof row.filters === "object" && !Array.isArray(row.filters)
+      ? row.filters
+      : {};
+  return {
+    rule_id: row.rule_id,
+    name: row.name,
+    trigger_event: row.trigger_event,
+    filters,
+    recipients: Array.isArray(row.recipients) ? row.recipients : [],
+    schedule_cron: row.schedule_cron,
+    state: row.state,
+    created_at: new Date(row.created_at).toISOString(),
+    updated_at: new Date(row.updated_at).toISOString(),
+  };
+}
+
+const NOTIFICATION_RULE_COLUMNS = sql`rule_id, name, trigger_event, filters, recipients, schedule_cron, state, created_at, updated_at`;
+
+/** GET /api/admin/notification-rules — ALL rules (active + paused), ordered by name. */
+export async function listNotificationRules(
+  db: Kysely<unknown>,
+): Promise<Array<Record<string, unknown>>> {
+  const r = await sql<NotificationRuleDbRow>`
+    SELECT ${NOTIFICATION_RULE_COLUMNS} FROM core.notification_rules ORDER BY name
+  `.execute(db);
+  return r.rows.map(mapNotificationRule);
+}
+
+/** GET /api/admin/notification-rules/{rule_id} — one rule by PK, or null (route → 404). */
+export async function getNotificationRule(
+  db: Kysely<unknown>,
+  ruleId: string,
+): Promise<Record<string, unknown> | null> {
+  const r = await sql<NotificationRuleDbRow>`
+    SELECT ${NOTIFICATION_RULE_COLUMNS} FROM core.notification_rules WHERE rule_id = ${ruleId}
+  `.execute(db);
+  const row = r.rows[0];
+  return row === undefined ? null : mapNotificationRule(row);
+}
+
 // ─── LLM config reads (platform-scope; core.llm_models has no installation_id) ────────────────────
 
 /** GET /api/admin/llm-models — the full model catalog, ordered by (provider, model_id). */

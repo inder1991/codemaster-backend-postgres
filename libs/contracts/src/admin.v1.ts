@@ -22,6 +22,61 @@ export const OrgsListV1 = z
   .strict();
 export type OrgsListV1 = z.infer<typeof OrgsListV1>;
 
+// ─── Notification rules (platform-scope) ─────────────────────────────────────────────────────────
+
+const SlackRecipientV1 = z
+  .object({ schema_version: z.literal(1).default(1), type: z.literal("slack"), channel: z.string().min(1).max(80).regex(/^[#C]/) })
+  .strict();
+const EmailRecipientV1 = z
+  .object({ schema_version: z.literal(1).default(1), type: z.literal("email"), address: z.string().email() })
+  .strict();
+const WebhookRecipientV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    type: z.literal("webhook"),
+    url: z.string().url(),
+    secret_vault_path: z.string().min(1).max(512),
+  })
+  .strict();
+const JiraRecipientV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    type: z.literal("jira"),
+    project_key: z.string().regex(/^[A-Z]{1,10}$/),
+    issue_type: z.enum(["Bug", "Task", "Story"]),
+  })
+  .strict();
+/** A notification recipient — discriminated union on `type` (Pydantic Discriminator('type')). */
+export const RecipientV1 = z.discriminatedUnion("type", [
+  SlackRecipientV1,
+  EmailRecipientV1,
+  WebhookRecipientV1,
+  JiraRecipientV1,
+]);
+export type RecipientV1 = z.infer<typeof RecipientV1>;
+
+/** One rule from GET /api/admin/notification-rules[/{id}]. */
+export const NotificationRuleV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    rule_id: z.string().uuid(),
+    name: z.string().min(1).max(200),
+    trigger_event: z.string().min(1).max(100),
+    filters: z.record(z.string(), z.unknown()),
+    recipients: z.array(RecipientV1),
+    schedule_cron: z.string().nullable().default(null),
+    state: z.enum(["active", "paused"]),
+    created_at: z.string().datetime({ offset: true }),
+    updated_at: z.string().datetime({ offset: true }),
+  })
+  .strict();
+export type NotificationRuleV1 = z.infer<typeof NotificationRuleV1>;
+
+export const NotificationRulesPageV1 = z
+  .object({ schema_version: z.literal(1).default(1), rules: z.array(NotificationRuleV1) })
+  .strict();
+export type NotificationRulesPageV1 = z.infer<typeof NotificationRulesPageV1>;
+
 // ─── LLM config reads (llm_models_router / llm_provider_config) ──────────────────────────────────
 
 /** One model in GET /api/admin/llm-models (core.llm_models). */

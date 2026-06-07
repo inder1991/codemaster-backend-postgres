@@ -21,6 +21,8 @@ import {
   LlmModelListV1,
   LlmProviderConfigV1,
   LlmPurposeModelListV1,
+  NotificationRulesPageV1,
+  NotificationRuleV1,
   OrgsListV1,
   PullRequestListResponseV1,
   ReviewsListPageV1,
@@ -29,10 +31,12 @@ import {
 
 import {
   getLlmProviderConfig,
+  getNotificationRule,
   listFindings,
   listFlags,
   listLlmModels,
   listLlmPurposeModels,
+  listNotificationRules,
   listOrgs,
   listPullRequests,
   listTaxonomyGaps,
@@ -62,6 +66,7 @@ type AdminQuery = Record<string, unknown>;
 
 /** The common "any signed-in admin" read allow-set (reader through super_admin). */
 const READER_ROLES = ["reader", "platform_operator", "platform_owner", "super_admin"] as const;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Clamp a ?limit param to [1, max] with a default (the paginated reads). */
 function clampLimit(raw: unknown, fallback: number, max: number): number {
@@ -116,6 +121,37 @@ export async function registerAdminRoutes(
       async (request, reply) => {
         const orgs = await listOrgs(opts.db, request.authPrincipal!.installationId);
         return reply.code(200).send(OrgsListV1.parse({ orgs }));
+      },
+    );
+
+    scope.get(
+      "/api/admin/notification-rules",
+      { preHandler: requireRole(["super_admin", "platform_owner", "platform_operator"]) },
+      async (request, reply) => {
+        // Notification rules are platform-scope since migration 0061 — a legacy installation_id param 422s.
+        if ((request.query as AdminQuery).installation_id !== undefined) {
+          return reply
+            .code(422)
+            .send({ detail: "installation_id query param removed — notification rules are platform-scope" });
+        }
+        const rules = await listNotificationRules(opts.db);
+        return reply.code(200).send(NotificationRulesPageV1.parse({ rules }));
+      },
+    );
+
+    scope.get(
+      "/api/admin/notification-rules/:rule_id",
+      { preHandler: requireRole(["super_admin", "platform_owner", "platform_operator"]) },
+      async (request, reply) => {
+        const ruleId = (request.params as { rule_id: string }).rule_id;
+        if (!UUID_RE.test(ruleId)) {
+          return reply.code(422).send({ detail: "rule_id must be a UUID" });
+        }
+        const rule = await getNotificationRule(opts.db, ruleId);
+        if (rule === null) {
+          return reply.code(404).send({ detail: `rule ${ruleId} not found` });
+        }
+        return reply.code(200).send(NotificationRuleV1.parse(rule));
       },
     );
 
