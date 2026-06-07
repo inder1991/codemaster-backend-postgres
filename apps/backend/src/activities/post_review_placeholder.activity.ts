@@ -33,12 +33,13 @@
  * filter short-circuits subsequent calls so exactly one placeholder comment exists per PR (covers both a
  * Temporal retry of this activity AND a re-trigger workflow on the same PR).
  *
- * ## Feature flag (read at invocation, fail-safe default OFF)
+ * ## Feature flag (read at invocation, default ON — opt-out)
  *
- * `CODEMASTER_REVIEW_PLACEHOLDER_ENABLED` MUST equal `"1"` to enable the placeholder; ANY other value
- * (including unset) disables it. The flag is read INSIDE {@link postReviewPlaceholder} (not at module
- * import) so a Helm value flip takes effect on the next workflow without a worker restart — 1:1 with the
- * Python `os.getenv` placement inside the activity body.
+ * `CODEMASTER_REVIEW_PLACEHOLDER_ENABLED` is enabled by DEFAULT; only an explicit `"0"` disables it
+ * (unset / "1" / any other value enables). The flag is read INSIDE {@link postReviewPlaceholder} (not at
+ * module import) so a Helm value flip takes effect on the next workflow without a worker restart. NOTE:
+ * the default-ON polarity INTENTIONALLY DIVERGES from the frozen Python (`os.getenv(...) != "1"`, opt-in)
+ * per the platform-owner "enabled everytime" directive — see {@link placeholderEnabled}.
  *
  * ## DI idiom (matches the sibling `allocate_workspace` / `post_review_results` ports)
  *
@@ -256,12 +257,16 @@ export function makePlaceholderAuditEmit(dsn: string, clock: Clock): Placeholder
 // ─── Temporal activity entry point ───────────────────────────────────────────────────────────────────
 
 /**
- * Read the feature flag. `CODEMASTER_REVIEW_PLACEHOLDER_ENABLED === "1"` enables; ANY other value
- * (including unset) disables — fail-safe default OFF, 1:1 with the Python `os.getenv(...) != "1"`. Static
- * `process.env.X` access (no dynamic indexing) so no object-injection sink is introduced.
+ * Read the feature flag. The placeholder is core UX (engineers see life on the PR within seconds), so it is
+ * enabled by DEFAULT: only an explicit `CODEMASTER_REVIEW_PLACEHOLDER_ENABLED === "0"` disables it (opt-out);
+ * unset / "1" / any other value enables. Static `process.env.X` access (no dynamic indexing) so no
+ * object-injection sink is introduced.
+ *
+ * INTENTIONAL DIVERGENCE from the frozen Python (`os.getenv(...) != "1"` → opt-in, default OFF): platform-owner
+ * product decision (2026-06-07) — "enabled everytime". Same sensible-default family as default-enable repos.
  */
-function placeholderEnabled(): boolean {
-  return process.env.CODEMASTER_REVIEW_PLACEHOLDER_ENABLED === "1";
+export function placeholderEnabled(): boolean {
+  return process.env.CODEMASTER_REVIEW_PLACEHOLDER_ENABLED !== "0";
 }
 
 /**
