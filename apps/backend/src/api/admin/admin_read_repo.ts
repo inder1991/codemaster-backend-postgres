@@ -14,6 +14,7 @@ import type {
   LlmModelV1,
   LlmProviderConfigV1,
   LlmPurposeModelV1,
+  ProposalListItemV1,
   PullRequestRowV1,
   ReviewListItemV1,
   TaxonomyGapEntryV1,
@@ -217,6 +218,52 @@ export async function listLearningsPage(
   const { page, nextCursor } = keysetSlice(
     all,
     (row) => ({ ts: row.last_fired_at ?? "", id: row.learning_id }),
+    cursor,
+    clamped,
+  );
+  return { rows: page, nextCursor };
+}
+
+type ProposalDbRow = {
+  proposal_id: string;
+  title: string;
+  body_markdown: string;
+  repo: string | null;
+  proposed_by_user_id: string;
+  created_at: Date;
+};
+
+/** GET /api/admin/knowledge/proposals — 1:1 with PostgresProposalsRepo.list_pending + the router's keyset
+ *  slice. Tenant-scoped to state='pending_approval'; in-memory keyset DESC by (created_at, proposal_id).
+ *  created_at is NOT NULL here, so the keyset's null-ts branch is never exercised. `state` is dropped from
+ *  the wire shape (the queue only shows pending rows). size clamped [1,200]. */
+export async function listProposalsPage(
+  db: Kysely<unknown>,
+  installationId: string,
+  cursor: string | null,
+  size: number,
+): Promise<{ rows: Array<ProposalListItemV1>; nextCursor: string | null }> {
+  const clamped = Math.min(Math.max(size, 1), 200);
+  // body column → body_markdown field; repo from a LEFT JOIN to repositories.
+  const r = await sql<ProposalDbRow>`
+    SELECT p.proposal_id, p.title, p.body AS body_markdown, r.full_name AS repo,
+           p.proposed_by_user_id, p.created_at
+    FROM core.learning_proposals p
+    LEFT JOIN core.repositories r ON r.repository_id = p.repo_id
+    WHERE p.installation_id = ${installationId} AND p.state = 'pending_approval'
+    ORDER BY p.created_at DESC
+  `.execute(db);
+  const all: Array<ProposalListItemV1> = r.rows.map((row) => ({
+    proposal_id: row.proposal_id,
+    title: row.title,
+    body_markdown: row.body_markdown,
+    repo: row.repo,
+    proposed_by_user_id: row.proposed_by_user_id,
+    created_at: row.created_at.toISOString(),
+  }));
+  const { page, nextCursor } = keysetSlice(
+    all,
+    (row) => ({ ts: row.created_at, id: row.proposal_id }),
     cursor,
     clamped,
   );

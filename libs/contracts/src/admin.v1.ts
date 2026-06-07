@@ -750,3 +750,30 @@ export const RetrievalAggregatePRListV1 = z
   })
   .strict();
 export type RetrievalAggregatePRListV1 = z.infer<typeof RetrievalAggregatePRListV1>;
+
+// ─── Pending proposals list (GET /api/admin/knowledge/proposals) ─────────────────────────────────────
+// 1:1 with knowledge.py's private _ProposalHTTP / _ProposalListPageV1 wire models (no schema_version, to
+// match the sibling LearningListItemV1 port). `state` is deliberately OMITTED from the wire shape — the
+// queue only ever shows pending_approval rows, so the field carries no information.
+
+/** One pending learning proposal (body column → body_markdown; repo from a LEFT JOIN to repositories). */
+export const ProposalListItemV1 = z
+  .object({
+    proposal_id: z.string().uuid(),
+    title: z.string(),
+    body_markdown: z.string(),
+    repo: z.string().nullable().default(null),
+    proposed_by_user_id: z.string().uuid(),
+    created_at: z.string().datetime({ offset: true }),
+  })
+  .strict();
+export type ProposalListItemV1 = z.infer<typeof ProposalListItemV1>;
+
+/** GET /api/admin/knowledge/proposals — keyset-paginated pending-approval queue (DESC by created_at). */
+export const ProposalListPageV1 = z
+  .object({
+    rows: z.array(ProposalListItemV1),
+    next_cursor: z.string().nullable().default(null),
+  })
+  .strict();
+export type ProposalListPageV1 = z.infer<typeof ProposalListPageV1>;

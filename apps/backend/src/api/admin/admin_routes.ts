@@ -34,6 +34,7 @@ import {
   NotificationRulesPageV1,
   NotificationRuleV1,
   OrgsListV1,
+  ProposalListPageV1,
   PullRequestListResponseV1,
   RetrievalAggregatePRListV1,
   RetrievalAggregateV1,
@@ -73,6 +74,7 @@ import {
   listLlmPurposeModels,
   listNotificationRules,
   listOrgs,
+  listProposalsPage,
   listPullRequests,
   listTaxonomyGaps,
   searchReviews,
@@ -332,6 +334,30 @@ export async function registerAdminRoutes(
         } catch (e) {
           if (e instanceof CostCapSettingsMissingError) {
             return reply.code(500).send({ detail: e.message });
+          }
+          throw e;
+        }
+      },
+    );
+
+    // Static path → Fastify matches this before the parametric /api/admin/knowledge/:learning_id below.
+    scope.get(
+      "/api/admin/knowledge/proposals",
+      { preHandler: requireRole([...READER_ROLES]) },
+      async (request, reply) => {
+        const q = request.query as AdminQuery;
+        const size = clampLimit(q.size, 50, 200);
+        try {
+          const { rows, nextCursor } = await listProposalsPage(
+            opts.db,
+            request.authPrincipal!.installationId,
+            optStr(q.cursor),
+            size,
+          );
+          return reply.code(200).send(ProposalListPageV1.parse({ rows, next_cursor: nextCursor }));
+        } catch (e) {
+          if (e instanceof CursorInvalidError) {
+            return reply.code(400).send({ detail: "invalid cursor" });
           }
           throw e;
         }
