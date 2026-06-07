@@ -155,6 +155,21 @@ import { mutexJanitorActivity } from "#backend/activities/mutex_janitor.activity
 import { reviewRunReaperActivity } from "#backend/activities/review_run_reaper.activity.js";
 import { GitHubApiReviewClient } from "#backend/integrations/github/review_client.js";
 
+// ── Wave-4 Confluence ingest activities (combined-pod worker reuse — ADR-0075). Registered under their
+// snake_case Temporal NAMES below so the 3 confluence workflows (all_workflows.ts bundle) dispatch them. ──
+import {
+  ConfluenceSyncActivities,
+  PoolExistingChunkRowsReader,
+  type ConfluenceChunkClient,
+} from "#backend/activities/confluence_sync.activity.js";
+import { ListActiveConfluenceSpacesActivity } from "#backend/activities/list_active_confluence_spaces.activity.js";
+import { MarkStaleChunksActivity } from "#backend/activities/mark_stale_chunks.activity.js";
+import { PostgresConfluenceChunksRepo } from "#backend/domain/repos/confluence_chunks_repo.js";
+import { PostgresConfluencePageApprovalsRepo } from "#backend/domain/repos/confluence_page_approvals_repo.js";
+import { ConfluenceClient } from "#backend/integrations/confluence/client.js";
+import { ConfluenceTokenProvider } from "#backend/integrations/confluence/token_provider.js";
+import { tenantKysely } from "#platform/db/database.js";
+
 import { GitHubIssueClient } from "#backend/integrations/github/issue_client.js";
 import { PostgresLinkedIssuesRepo } from "#backend/domain/repos/pr_issue_links_repo.js";
 import { PostgresGithubIssuesCacheRepo } from "#backend/domain/repos/github_issues_cache_repo.js";
@@ -473,6 +488,65 @@ function makeLazyManifestContentsClient(): GithubContentsPort {
   };
 }
 
+// ─── lazy ConfluenceClient (the confluence-sync read seam — deferred-Vault, fail-open) ────────────
+//
+// The Confluence Vault token is ABSENT in dev (ADR-0075): there is no `codemaster/confluence/token` KV
+// secret. `ConfluenceTokenProvider.fromVault` is fail-HARD (it rejects on a missing/invalid Vault secret),
+// so building the real ConfluenceClient EAGERLY at worker boot would crash a dev pod that never even has a
+// Confluence space configured. The lazy adapter below defers the entire Vault → token-provider → client
+// construction to the FIRST `listPages`/`getPage` call and memoizes it. In dev,
+// `list_active_confluence_spaces_activity` returns ZERO spaces (no `core.integrations` confluence_space
+// rows), so the sync workflow never reaches a per-space `fetch_space_pages` → the client is NEVER built →
+// the absent Vault token never trips boot. In prod (token present, spaces configured), the first sync tick
+// builds the real client through the same Vault-backed token-provider the Python worker uses.
+
+/**
+ * Build the REAL {@link ConfluenceClient} from the Vault-backed {@link ConfluenceTokenProvider}. Mirrors
+ * the deferred-Vault pattern the GitHub clients use: `ConfluenceTokenProvider.fromVault` reads the
+ * `codemaster/confluence/token` KV secret (base_url + token [+ optional email]) and is fail-HARD on a
+ * missing/invalid secret — so this is called LAZILY on first use, never at boot. The provider's
+ * `tokenProvider` (`getToken`) is invoked per request so a rotated token propagates without restart; its
+ * `baseUrl` + optional Cloud `authEmail` (HTTP-Basic vs Bearer) select the auth scheme. The background
+ * refresh loop is started so the cached token stays fresh across the 6h sync cadence.
+ */
+async function buildConfluenceClient(): Promise<ConfluenceClient> {
+  const vault = VaultHttpPort.fromEnv();
+  const clock = new WallClock();
+  const tokenProvider = await ConfluenceTokenProvider.fromVault({ vault, clock });
+  tokenProvider.startRefreshLoop();
+  // `authEmail` selects HTTP-Basic (Atlassian Cloud) vs Bearer (Server/DC PAT). It is OMITTED (not set to
+  // `undefined`) when the provider has no Cloud email, per exactOptionalPropertyTypes — a `null` email keeps
+  // the Bearer scheme.
+  const authEmail = tokenProvider.authEmail;
+  return new ConfluenceClient({
+    baseUrl: tokenProvider.baseUrl,
+    tokenProvider: tokenProvider.getToken.bind(tokenProvider),
+    ...(authEmail !== null ? { authEmail } : {}),
+    clock,
+  });
+}
+
+/**
+ * A {@link ConfluenceChunkClient} (the narrow `listPages`/`getPage` slice {@link ConfluenceClient}
+ * satisfies structurally) that builds the real client on first use (the deferred-Vault, fail-open
+ * pattern) and memoizes it. Construction is deferred to the moment a sync actually touches Confluence —
+ * which in dev (no configured spaces) NEVER happens, so the absent Vault token can't crash boot. A
+ * faithful, fully-real client seam: no stub, just construction deferred + memoized.
+ */
+function makeLazyConfluenceClient(): ConfluenceChunkClient {
+  let memo: Promise<ConfluenceClient> | undefined;
+  const lazy = (): Promise<ConfluenceClient> => {
+    if (memo === undefined) {
+      memo = buildConfluenceClient();
+    }
+    return memo;
+  };
+  return {
+    listPages: async (args) => (await lazy()).listPages(args),
+    getPage: async (args) => (await lazy()).getPage(args),
+  };
+}
+
 export function buildActivities(): Record<string, (input: never) => Promise<unknown>> {
   const dsn = requireCoreDsn();
   // Per-review routing: the worker composition root NO LONGER reads CODEMASTER_GITHUB_INSTALLATION_ID. Every
@@ -577,6 +651,36 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
   });
   const parseManifestDependenciesHolder = new ParseManifestDependenciesActivity({ clock });
 
+  // ── Wave-4 Confluence ingest holders (combined-pod worker reuse — ADR-0075) ──
+  // The 8 confluence activities run on THIS review worker (queue "review-default"); the 3 confluence
+  // workflows (all_workflows.ts bundle) proxy them by their snake_case Temporal names. The sync holder is
+  // wired with: the LAZY fail-open ConfluenceClient (the narrow listPages/getPage slice — built on first
+  // Confluence touch, NEVER at boot, so the dev-absent Vault token can't crash startup); the SHARED real
+  // embedder (the same EmbeddingsPort the review path resolves) + its model name (the same
+  // "qwen3-embed-0.6b" the embed_query activity uses); the PostgresConfluenceChunksRepo over the shared
+  // ADR-0062 pool (satisfies BOTH the idempotency-lookup `findExistingChunkEmbedding` AND the
+  // upsert/reconcile writer slices); the PostgresConfluencePageApprovalsRepo (the `getActiveApproval`
+  // reader); and the PoolExistingChunkRowsReader (the hard-limit candidate-row fetcher). embedderCache is
+  // NOT wired (ADR-0075): upsert writes ONLY the legacy embedding column (the dual-write stays dormant).
+  const confluenceChunksRepo = new PostgresConfluenceChunksRepo({ db: tenantKysely(dsn), clock });
+  const confluencePageApprovalsRepo = new PostgresConfluencePageApprovalsRepo({
+    db: tenantKysely(dsn),
+  });
+  const confluenceSyncActivities = new ConfluenceSyncActivities({
+    client: makeLazyConfluenceClient(),
+    embeddings: embedder,
+    modelName: "qwen3-embed-0.6b",
+    chunkEmbeddingLookup: confluenceChunksRepo,
+    chunksWriter: confluenceChunksRepo,
+    approvalsReader: confluencePageApprovalsRepo,
+    existingChunkRowsReader: new PoolExistingChunkRowsReader({ dsn }),
+  });
+  // The entry-point + staleness holders self-resolve the shared pool from the injected dsn (lazy pool —
+  // no connection at construction). In dev, listActiveSpaces returns ZERO rows (no configured spaces), so
+  // the sync loop never reaches the lazy ConfluenceClient.
+  const listActiveConfluenceSpacesActivity = new ListActiveConfluenceSpacesActivity({ dsn });
+  const markStaleChunksActivity = new MarkStaleChunksActivity({ dsn });
+
   return {
     // ── 1-arg activities, ready as-is ──
     persistReviewFindings,
@@ -678,5 +782,24 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     // (resolve CODEMASTER_PG_CORE_DSN + clock inside the body), registered bare.
     ["mutex_janitor_activity"]: mutexJanitorActivity,
     ["review_run_reaper_activity"]: reviewRunReaperActivity,
+    // ── Wave-4 Confluence ingest activities (combined-pod worker reuse — ADR-0075) ──
+    // Registered under their snake_case TEMPORAL NAMES because the 3 confluence workflows
+    // (confluence_ingest / mark_stale_chunks / trigger_page_resync, all in all_workflows.ts) proxy them by
+    // those exact names — a camelCase key would dispatch `ActivityNotRegistered`. The bound-method holders
+    // are bound (`.bind(holder)`) so the `this` stays wired when destructured into the map.
+    ["list_active_confluence_spaces_activity"]:
+      listActiveConfluenceSpacesActivity.listActiveSpaces.bind(listActiveConfluenceSpacesActivity),
+    ["fetch_space_pages_activity"]:
+      confluenceSyncActivities.fetchSpacePages.bind(confluenceSyncActivities),
+    ["fetch_page_body_activity"]:
+      confluenceSyncActivities.fetchPageBody.bind(confluenceSyncActivities),
+    ["sanitize_page_activity"]: confluenceSyncActivities.sanitizePage.bind(confluenceSyncActivities),
+    ["chunk_and_embed_activity"]:
+      confluenceSyncActivities.chunkAndEmbed.bind(confluenceSyncActivities),
+    ["upsert_chunks_activity"]: confluenceSyncActivities.upsertChunks.bind(confluenceSyncActivities),
+    ["reconcile_deletions_activity"]:
+      confluenceSyncActivities.reconcileDeletions.bind(confluenceSyncActivities),
+    ["mark_stale_chunks_activity"]:
+      markStaleChunksActivity.markStaleChunks.bind(markStaleChunksActivity),
   } as Record<string, (input: never) => Promise<unknown>>;
 }

@@ -17,7 +17,12 @@ import { registerTemporalWorkflowStartSink } from "#backend/outbox/sinks/tempora
 import { registerInstallationReconcileSink } from "#backend/outbox/sinks/installation_reconcile.js";
 
 import { buildOutboxActivities } from "./build_outbox_activities.js";
-import { ensureCronSchedule, type EnsureCronScheduleArgs } from "./ensure_schedule.js";
+import {
+  ensureCronSchedule,
+  ensureIntervalSchedule,
+  type EnsureCronScheduleArgs,
+  type EnsureIntervalScheduleArgs,
+} from "./ensure_schedule.js";
 import { ensureOutboxDispatcherSingleton } from "./outbox_dispatcher_singleton.js";
 import { resolveWorkerTemporalConfig } from "./temporal_config.js";
 
@@ -55,6 +60,39 @@ const WAVE1_LIVENESS_SCHEDULES: ReadonlyArray<EnsureCronScheduleArgs> = [
     workflowId: "codemaster-review-run-reaper-workflow",
     taskQueue: REVIEW_TASK_QUEUE,
     cronExpression: "*/10 * * * *",
+  },
+];
+
+/**
+ * Wave-4 Confluence ingest INTERVAL schedules (combined-pod worker reuse — ADR-0075). Cadence + schedule/
+ * workflow ids are byte-faithful with the frozen Python (confluence_sync_workflow.py /
+ * mark_stale_chunks_workflow.py); the workflowType strings are the registered camelCase TS function names.
+ * The taskQueue is OVERRIDDEN to the review queue (the ported `CONFLUENCE_SYNC_TASK_QUEUE` "confluence-sync"
+ * const is vestigial in the combined-pod port — the 3 confluence workflows are bundled into THIS pod's
+ * `all_workflows.ts` and registered on "review-default"). There is NO schedule for triggerPageResync — it is
+ * admin-triggered on approval revocation, not periodic.
+ *   - refresh-confluence-corpus    → confluenceIngestWorkflow, every 6h  (21600s).
+ *   - mark-stale-confluence-chunks → markStaleChunksWorkflow,  every 24h (86400s).
+ */
+const CONFLUENCE_INTERVAL_SCHEDULES: ReadonlyArray<EnsureIntervalScheduleArgs> = [
+  {
+    scheduleId: "refresh-confluence-corpus",
+    workflowType: "confluenceIngestWorkflow",
+    workflowId: "refresh-confluence-corpus-workflow",
+    taskQueue: REVIEW_TASK_QUEUE,
+    intervalSeconds: 6 * 60 * 60,
+    // RefreshConfluenceInputV1() default-constructs to { schema_version: 1 } (1:1 with the Python action).
+    actionInput: { schema_version: 1 },
+  },
+  {
+    scheduleId: "mark-stale-confluence-chunks",
+    workflowType: "markStaleChunksWorkflow",
+    workflowId: "mark-stale-confluence-chunks-workflow",
+    taskQueue: REVIEW_TASK_QUEUE,
+    intervalSeconds: 24 * 60 * 60,
+    // MarkStaleChunksInputV1() default-constructs to { schema_version: 1 }. WITHOUT this the activity's
+    // MarkStaleChunksInputV1.parse(undefined) throws ZodError and the 24h sweep retries forever.
+    actionInput: { schema_version: 1 },
   },
 ];
 
@@ -108,6 +146,20 @@ export async function runOutboxDispatcherWorker(): Promise<void> {
       console.info(`schedule ensured: ${schedule.scheduleId}`);
     } catch (err) {
       console.error(`ensureCronSchedule(${schedule.scheduleId}) failed; worker continues`, err);
+    }
+  }
+
+  // ── Wave-4 Confluence ingest INTERVAL Temporal Schedules (combined-pod, ADR-0075) ──
+  // Idempotently register the corpus-sync (every 6h) + stale-sweep (every 24h) interval schedules. Same
+  // FAIL-OPEN posture as the Wave-1 block: a registration failure (Temporal transient / RBAC) MUST NOT
+  // crash worker startup — the next pod's idempotent ensure retries; `ensureIntervalSchedule` swallows
+  // `ScheduleAlreadyRunning` so an already-registered (or operator-paused) schedule is never clobbered.
+  for (const schedule of CONFLUENCE_INTERVAL_SCHEDULES) {
+    try {
+      await ensureIntervalSchedule(client, schedule);
+      console.info(`schedule ensured: ${schedule.scheduleId}`);
+    } catch (err) {
+      console.error(`ensureIntervalSchedule(${schedule.scheduleId}) failed; worker continues`, err);
     }
   }
 

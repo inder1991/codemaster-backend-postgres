@@ -55,6 +55,20 @@ const MUTEX_JANITOR_WORKFLOW_PATH = fileURLToPath(
 const REVIEW_RUN_REAPER_WORKFLOW_PATH = fileURLToPath(
   new URL("../../../apps/backend/src/workflows/review_run_reaper.workflow.ts", import.meta.url),
 );
+// Wave-4 Confluence ingest workflows (combined-pod worker reuse — ADR-0075). The full-sync fan-out proxies
+// 7 confluence activities; the stale-sweep proxies the 8th; the single-page resync proxies 4 of the 7. Each
+// is bundled into the SAME pod's `all_workflows.ts` and dispatches its activities by their REGISTERED
+// snake_case Temporal names — registering by-name must hold or the schedule (6h/24h) dies with
+// ActivityNotRegistered at fire time. Parsed here so the source-derived coverage assertion PINS them.
+const CONFLUENCE_INGEST_WORKFLOW_PATH = fileURLToPath(
+  new URL("../../../apps/backend/src/workflows/confluence_ingest.workflow.ts", import.meta.url),
+);
+const MARK_STALE_CHUNKS_WORKFLOW_PATH = fileURLToPath(
+  new URL("../../../apps/backend/src/workflows/mark_stale_chunks.workflow.ts", import.meta.url),
+);
+const TRIGGER_PAGE_RESYNC_WORKFLOW_PATH = fileURLToPath(
+  new URL("../../../apps/backend/src/workflows/trigger_page_resync.workflow.ts", import.meta.url),
+);
 
 /**
  * Parse the REGISTERED activity names from every `proxyActivities<{ <name>(...)` block in a workflow-side
@@ -81,6 +95,9 @@ const PROXIED_ACTIVITY_NAMES: ReadonlyArray<string> = [
     ...parseProxiedActivityNames(ACTIVITY_PROXY_PATH),
     ...parseProxiedActivityNames(MUTEX_JANITOR_WORKFLOW_PATH),
     ...parseProxiedActivityNames(REVIEW_RUN_REAPER_WORKFLOW_PATH),
+    ...parseProxiedActivityNames(CONFLUENCE_INGEST_WORKFLOW_PATH),
+    ...parseProxiedActivityNames(MARK_STALE_CHUNKS_WORKFLOW_PATH),
+    ...parseProxiedActivityNames(TRIGGER_PAGE_RESYNC_WORKFLOW_PATH),
   ]),
 ];
 
@@ -150,6 +167,18 @@ const EXPECTED_ACTIVITY_NAMES = [
   // Temporal names (the MutexJanitor/ReviewRunReaper workflows proxy them by these exact keys).
   "mutex_janitor_activity",
   "review_run_reaper_activity",
+  // Wave-4 Confluence ingest activities (combined-pod worker reuse — ADR-0075), registered under their
+  // snake_case Temporal names (the 3 confluence workflows proxy them by these exact keys). The 8: the
+  // entry-point space enumeration, the 6 sync-holder methods (fetch_space_pages/fetch_page_body/
+  // sanitize_page/chunk_and_embed/upsert_chunks/reconcile_deletions), and the staleness sweep.
+  "list_active_confluence_spaces_activity",
+  "fetch_space_pages_activity",
+  "fetch_page_body_activity",
+  "sanitize_page_activity",
+  "chunk_and_embed_activity",
+  "upsert_chunks_activity",
+  "reconcile_deletions_activity",
+  "mark_stale_chunks_activity",
 ] as const;
 
 describe("buildActivities() composition root", () => {
