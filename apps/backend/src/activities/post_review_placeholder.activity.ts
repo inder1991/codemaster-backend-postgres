@@ -267,7 +267,8 @@ function placeholderEnabled(): boolean {
 /**
  * The registered `post_review_placeholder` Temporal activity (single typed-input envelope per CLAUDE.md
  * invariant 11). Reads the feature flag (returns early when disabled); resolves the DSN from
- * `CODEMASTER_PG_CORE_DSN` + the numeric GitHub installation id from `CODEMASTER_GITHUB_INSTALLATION_ID`;
+ * `CODEMASTER_PG_CORE_DSN` + the per-review numeric installation id from the input's `github_installation_id`
+ * (per-review routing — replaces the removed `CODEMASTER_GITHUB_INSTALLATION_ID` env pin; a null id skips);
  * constructs the production {@link GitHubApiReviewClient} (Vault token provider → GitHubApiClient → wrapped
  * client) — the SAME wiring the `post_review_results` activity uses — and delegates to
  * {@link doPostPlaceholder} with the production audit-emit closure. Mirrors the frozen Python

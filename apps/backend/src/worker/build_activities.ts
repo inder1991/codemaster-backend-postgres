@@ -45,7 +45,8 @@
  *
  *   - `CODEMASTER_PG_CORE_DSN`            — the ADR-0062 core pool DSN (cloner has no DB; the LLM cache,
  *                                           retrievers, and ledger need it).
- *   - `CODEMASTER_GITHUB_INSTALLATION_ID` — the numeric GitHub App installation id the cloner clones as.
+ *   - (per-review routing: NO `CODEMASTER_GITHUB_INSTALLATION_ID` — the per-PR numeric installation id is
+ *     threaded through each GitHub activity's input; the cloner + fix-prompt seam mint per-call.)
  *   - `CODEMASTER_QWEN_DSN` / `CODEMASTER_EMBEDDINGS_PROVIDER` (+ openai_compat vars) — read transitively
  *                                           by `resolveEmbeddingsConsumer()` (fail-loud per ADR-0059).
  *

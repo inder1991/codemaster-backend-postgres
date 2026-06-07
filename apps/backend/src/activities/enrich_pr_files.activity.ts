@@ -265,9 +265,9 @@ function gitHubPrFilesAdapter(api: GitHubApiClient): GitHubPrFilesPort {
 
 /**
  * The registered `enrich_pr_files_activity_v2` Temporal activity (single typed-input envelope per
- * CLAUDE.md invariant 11). Resolves the DSN from `CODEMASTER_PG_CORE_DSN` + the numeric GitHub
- * installation id from `CODEMASTER_GITHUB_INSTALLATION_ID`, constructs the production
- * {@link GitHubApiClient} (Vault deferred-token provider over the shared GitHub HTTP transport — the
+ * CLAUDE.md invariant 11). Resolves the DSN from `CODEMASTER_PG_CORE_DSN`; the files-fetch is scoped to the
+ * input's per-review `github_installation_id` (per-review routing — no pod-wide env id). Constructs the
+ * production {@link GitHubApiClient} (Vault deferred-token provider over the shared GitHub HTTP transport — the
  * SAME wiring as `post_review_results`), builds the shared-pool {@link PostgresPrFilesRepo}, and
  * delegates to the pure {@link doEnrichPrFiles}. 1:1 in intent with the frozen Python
  * `EnrichPrFilesActivityV2.enrich_pr_files_v2`.
