@@ -1154,7 +1154,7 @@ export async function registerAdminRoutes(
           error: result.errorMessage,
           validatedAt: opts.clock.now(),
         });
-        return reply.code(200).send(LlmConnectionTestResultV1.parse({ ok: result.ok, message: result.errorMessage ?? "validated" }));
+        return reply.code(200).send(LlmConnectionTestResultV1.parse({ ok: result.ok, message: result.errorMessage || "validated" }));
       },
     );
 
@@ -1247,7 +1247,7 @@ export async function registerAdminRoutes(
             .validate({ apiKey: body.api_key, modelId: body.model_id, region: body.region });
           if (!result.ok) {
             return reply.code(400).send({
-              detail: { code: "llm_provider_preflight_failed", message: result.errorMessage ?? "preflight failed" },
+              detail: { code: "llm_provider_preflight_failed", message: result.errorMessage || "preflight failed" },
             });
           }
         }
@@ -1291,7 +1291,10 @@ export async function registerAdminRoutes(
             now: rotatedAt,
           });
         }
-        const meta = await getLlmProviderConfig(opts.db, body.role);
+        // Re-read the PRIMARY slot unconditionally — 1:1 with Python read_metadata_for_ui() (no role arg →
+        // defaults role='primary'; docstring "Return the primary slot's metadata"). So a role='secondary'
+        // PUT returns the primary slot's body (a Python latent quirk), and 500s when no primary row exists.
+        const meta = await getLlmProviderConfig(opts.db);
         if (meta === null) {
           return reply.code(500).send({ detail: "internal: write succeeded but read returned no row" });
         }
@@ -1316,7 +1319,7 @@ export async function registerAdminRoutes(
         const result = await opts
           .getPreflightValidator(body.provider)
           .validate({ apiKey: body.api_key, modelId: body.model_id, region: body.region });
-        return reply.code(200).send(LlmConnectionTestResultV1.parse({ ok: result.ok, message: result.errorMessage ?? "ok" }));
+        return reply.code(200).send(LlmConnectionTestResultV1.parse({ ok: result.ok, message: result.errorMessage || "ok" }));
       },
     );
 
@@ -1336,7 +1339,7 @@ export async function registerAdminRoutes(
         const result = await opts
           .getPreflightValidator(body.provider)
           .validateCredentials({ apiKey: body.api_key, region: body.region });
-        return reply.code(200).send(LlmConnectionTestResultV1.parse({ ok: result.ok, message: result.errorMessage ?? "ok" }));
+        return reply.code(200).send(LlmConnectionTestResultV1.parse({ ok: result.ok, message: result.errorMessage || "ok" }));
       },
     );
 
@@ -1379,7 +1382,7 @@ export async function registerAdminRoutes(
           if (!result.ok) {
             // DIVERGENCE from the canonical route: the legacy code is `bedrock_preflight_failed` (Python :219).
             return reply.code(400).send({
-              detail: { code: "bedrock_preflight_failed", message: result.errorMessage ?? "preflight failed" },
+              detail: { code: "bedrock_preflight_failed", message: result.errorMessage || "preflight failed" },
             });
           }
         }

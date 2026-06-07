@@ -162,14 +162,20 @@ export async function insertConfluenceSpace(
     throw new IntegrationValidationError(code, d);
   }
 
-  // 3. Persist. config_json keys ALPHABETICAL (1:1 with the Python json.dumps(..., sort_keys=True)).
+  // 3. Persist. config_json formatted to MATCH Python json.dumps(..., sort_keys=True): alphabetical keys +
+  //    ": "/", " separators — used for BOTH the DB write (jsonb normalizes it anyway) AND the 201 response,
+  //    so the response body is byte-identical to Python (which returns the in-memory dumps string, NOT a
+  //    jsonb round-trip; a jsonb::text round-trip would re-order keys by length). Caveat: Python's default
+  //    ensure_ascii=True escapes non-ASCII; space_key is ASCII (regex-constrained) and space_name realistically so.
   const integrationId = randomUUID();
-  const configJson = JSON.stringify({
-    page_tree_root_id: args.pageTreeRootId,
-    scope: args.scope,
-    space_key: args.spaceKey,
-    space_name: args.spaceName,
-  });
+  // Alphabetical key order (no dynamic indexing — avoids the object-injection lint sink).
+  const configEntries: Array<[string, string | null]> = [
+    ["page_tree_root_id", args.pageTreeRootId],
+    ["scope", args.scope],
+    ["space_key", args.spaceKey],
+    ["space_name", args.spaceName],
+  ];
+  const configJson = "{" + configEntries.map(([k, v]) => `${JSON.stringify(k)}: ${JSON.stringify(v)}`).join(", ") + "}";
   const inserted = await sql<IntegrationInsertRow>`
     INSERT INTO core.integrations
       (integration_id, kind, config_json, enabled, last_validated_at, last_validation_error,
@@ -207,7 +213,7 @@ export async function insertConfluenceSpace(
   return {
     integration_id: row.integration_id,
     kind: "confluence_space",
-    config_json: row.config_json,
+    config_json: configJson, // the in-memory sort_keys string (1:1 with Python), not the jsonb round-trip
     enabled: row.enabled,
     last_validated_at: row.last_validated_at === null ? null : new Date(row.last_validated_at).toISOString(),
     last_validation_error: row.last_validation_error,

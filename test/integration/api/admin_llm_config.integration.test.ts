@@ -161,11 +161,13 @@ describeDb("admin llm-config (disposable :5434)", () => {
     try {
       const res = await app.inject({ method: "PUT", url: "/api/admin/llm-provider-config", cookies: superCookie(), payload: PUT_BODY });
       expect(res.statusCode).toBe(200);
-      const body = res.json<{ api_key_fingerprint: string; provider: string; enabled: boolean; last_validation_status: string }>();
-      expect(body.api_key_fingerprint).toBe("6789");
+      // The PUT re-reads the PRIMARY slot unconditionally (1:1 with Python read_metadata_for_ui(primary)), so
+      // a role='secondary' PUT returns the seeded PRIMARY row's metadata — NOT the secondary we just wrote.
+      const body = res.json<{ api_key_fingerprint: string; provider: string; model_id: string }>();
       expect(body.provider).toBe("bedrock");
-      expect(body.last_validation_status).toBe("ok");
-      // The persisted ciphertext decrypts back to the plaintext under the production key via the same Vault.
+      expect(body.model_id).toBe("itest-prov-model"); // primary seed, not the written secondary
+      expect(body.api_key_fingerprint).toBe("ab12"); // primary seed fingerprint
+      // But the SECONDARY slot WAS written — its ciphertext decrypts back to the plaintext under the same Vault.
       const row = await sql<{ api_key_ciphertext: string }>`SELECT api_key_ciphertext FROM core.llm_provider_settings WHERE scope='platform' AND role='secondary'`.execute(db);
       const dec = await vault.transitDecrypt({ keyName: VAULT_KEY_NAME, ciphertext: row.rows[0]!.api_key_ciphertext });
       expect(new TextDecoder().decode(dec)).toBe(PUT_BODY.api_key);
@@ -198,7 +200,9 @@ describeDb("admin llm-config (disposable :5434)", () => {
     try {
       const res = await app.inject({ method: "PUT", url: "/api/admin/llm-provider-config", cookies: superCookie(), payload: { ...PUT_BODY, enabled: false } });
       expect(res.statusCode).toBe(200);
-      expect(res.json<{ enabled: boolean }>().enabled).toBe(false);
+      // The response reflects the PRIMARY slot (re-read quirk); assert the SECONDARY row was written enabled=false.
+      const row = await sql<{ enabled: boolean }>`SELECT enabled FROM core.llm_provider_settings WHERE scope='platform' AND role='secondary'`.execute(db);
+      expect(row.rows[0]!.enabled).toBe(false);
     } finally {
       await deleteSecondary();
       await app.close();

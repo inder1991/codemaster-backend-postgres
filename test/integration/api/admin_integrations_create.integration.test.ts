@@ -119,6 +119,7 @@ describeDb("admin integrations CREATE (disposable :5434)", () => {
       const item = res.json<{
         integration_id: string;
         kind: string;
+        config_json: string;
         enabled: boolean;
         last_validated_at: string | null;
         last_validation_error: string | null;
@@ -127,6 +128,11 @@ describeDb("admin integrations CREATE (disposable :5434)", () => {
         visibility: string;
         strict_label_mode: boolean;
       }>();
+      // 201 config_json is the in-memory json.dumps(sort_keys=True) string (1:1 with Python): alphabetical
+      // keys + ": "/", " separators — NOT the jsonb-storage round-trip (which would re-order by key length).
+      expect(item.config_json).toBe(
+        '{"page_tree_root_id": "123", "scope": "page_tree", "space_key": "FWCREATEOK", "space_name": "Engineering"}',
+      );
       expect(item.kind).toBe("confluence_space");
       expect(item.enabled).toBe(true);
       expect(item.last_validated_at).toBe(NOW.toISOString());
