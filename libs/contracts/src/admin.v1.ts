@@ -542,6 +542,27 @@ export const MembersPageV1 = z
   .strict();
 export type MembersPageV1 = z.infer<typeof MembersPageV1>;
 
+/** POST /api/admin/members/{subject_kind}/{subject_id}/role-changes body — stage a grant/revoke. */
+export const RoleChangeRequestV1 = z
+  .object({
+    schema_version: z.literal(2).default(2),
+    subject_kind: z.enum(["user", "team"]),
+    subject_id: z.string().uuid(),
+    role: z.enum(["platform_owner", "platform_operator", "reader"]),
+    action: z.enum(["grant", "revoke"]),
+    scope: z.enum(["platform", "installation"]).default("installation"),
+  })
+  .strict();
+export type RoleChangeRequestV1 = z.infer<typeof RoleChangeRequestV1>;
+
+/** POST body for the approve / reject role-change routes — carries the SECOND user for the two-person rule. */
+export const MemberApproverBodyV1 = z
+  .object({
+    approver_user_id: z.string().uuid(),
+  })
+  .strict();
+export type MemberApproverBodyV1 = z.infer<typeof MemberApproverBodyV1>;
+
 // ─── Embedder (GET /api/admin/embedder/{state,coverage,reembed/status}) ──────────────────────────────
 // 1:1 with contracts/admin/embedder/v1.py. created_by_email/updated_by_email are EmailStr|None in
 // Python; the API layer pre-coerces non-email strings (incl. the 'migration-seed' sentinel) to null via

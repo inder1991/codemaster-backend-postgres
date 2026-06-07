@@ -11,7 +11,20 @@
 
 import { type Kysely, sql } from "kysely";
 
-import { MISSING_PENDING_ID_FALLBACK_UUID } from "#backend/infra/sentinels.js";
+import {
+  ExpiredApprovalError,
+  SelfApprovalError,
+  StalePendingStateError,
+  checkNotExpired,
+  checkPendingState,
+  checkSelfApproval,
+} from "#backend/api/admin/two_person_approval.js";
+import {
+  MISSING_PENDING_ID_FALLBACK_UUID,
+  PLATFORM_SCOPE_AUDIT_INSTALLATION_ID,
+} from "#backend/infra/sentinels.js";
+
+import type { RoleChangePendingV1, RoleChangeRequestV1 } from "#contracts/admin.v1.js";
 
 /** No row with the given pending_id. Route → 404. */
 export class MemberRoleChangePendingNotFoundError extends Error {
@@ -36,6 +49,24 @@ export class MemberConcurrentPendingChangeError extends Error {
     super(`a pending role change for the same subject already exists: ${existingPendingId}`);
     this.name = "MemberConcurrentPendingChangeError";
     this.existingPendingId = existingPendingId;
+  }
+}
+
+/** The approver is the same user who requested the change (two-person rule). Route → 403. */
+export class MemberSelfApprovalError extends Error {
+  public constructor() {
+    super("the approver must be a different user than the requester (two-person rule)");
+    this.name = "MemberSelfApprovalError";
+  }
+}
+
+/** The pending row's TTL has elapsed. Route → 410 Gone. */
+export class MemberExpiredApprovalError extends Error {
+  public readonly expiresAt: Date;
+  public constructor(expiresAt: Date) {
+    super(`pending change expired at ${expiresAt.toISOString()}; resubmit the request`);
+    this.name = "MemberExpiredApprovalError";
+    this.expiresAt = expiresAt;
   }
 }
 
@@ -243,4 +274,199 @@ export async function rejectChange(
     }
     return mapPendingRow(updatedRow);
   });
+}
+
+// ─── Orchestration (request / approve / reject) + audit seam ────────────────────────────────────────
+// 1:1 with members.py's _request_role_change / _approve_role_change / _reject_role_change. Audit is an
+// OPTIONAL seam (undefined → no-op): the TS audit-emit pg-client wiring is dormant (FOLLOW-UP), so the
+// endpoints are structurally complete and audit can be threaded in one place later. Mirrors login.ts.
+
+/** Optional audit-emit callback. Shape mirrors the Python AuditEmitPort.emit kwargs. */
+export type MemberAuditEmitter = (e: {
+  actorUserId: string;
+  installationId: string;
+  action: string;
+  targetKind: string;
+  targetId: string;
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+  now: Date;
+}) => Promise<void>;
+
+const AUDIT_TARGET_KIND = "role_grant_pending";
+const AUDIT_ACTION_REQUEST = "member.role_change.requested";
+const AUDIT_ACTION_APPLY = "member.role_change.applied";
+const AUDIT_ACTION_REJECT = "member.role_change.rejected";
+
+/** Map the internal pending row to the wire contract (drops installation_id; ISO timestamps). */
+function toPendingWire(row: MemberPendingRow): RoleChangePendingV1 {
+  return {
+    schema_version: 2,
+    pending_id: row.pending_id,
+    subject_kind: row.subject_kind as RoleChangePendingV1["subject_kind"],
+    subject_id: row.subject_id,
+    role: row.role as RoleChangePendingV1["role"],
+    action: row.action as RoleChangePendingV1["action"],
+    requested_at: row.requested_at.toISOString(),
+    requested_by_user_id: row.requested_by_user_id,
+    expires_at: row.expires_at.toISOString(),
+    approved_at: row.approved_at === null ? null : row.approved_at.toISOString(),
+    approved_by_user_id: row.approved_by_user_id,
+    applied_at: row.applied_at === null ? null : row.applied_at.toISOString(),
+    state: row.state as RoleChangePendingV1["state"],
+    scope: row.scope as RoleChangePendingV1["scope"],
+  };
+}
+
+/** Stage a pending grant/revoke. Platform-scope routes the repo install to NULL + audit install to the
+ *  PLATFORM_SCOPE_AUDIT sentinel. Concurrent in-flight change → MemberConcurrentPendingChangeError (409). */
+export async function requestRoleChange(args: {
+  db: Kysely<unknown>;
+  body: RoleChangeRequestV1;
+  installationId: string;
+  requesterUserId: string;
+  now: Date;
+  expiresInMs: number;
+  audit?: MemberAuditEmitter | undefined;
+}): Promise<RoleChangePendingV1> {
+  const expiresAt = new Date(args.now.getTime() + args.expiresInMs);
+  const repoInstall = args.body.scope === "platform" ? null : args.installationId;
+  const auditInstall =
+    args.body.scope === "platform" ? PLATFORM_SCOPE_AUDIT_INSTALLATION_ID : args.installationId;
+  const row = await insertPendingChange(args.db, {
+    installationId: repoInstall,
+    subjectKind: args.body.subject_kind,
+    subjectId: args.body.subject_id,
+    role: args.body.role,
+    action: args.body.action,
+    requestedAt: args.now,
+    requestedByUserId: args.requesterUserId,
+    expiresAt,
+    scope: args.body.scope,
+  });
+  await args.audit?.({
+    actorUserId: args.requesterUserId,
+    installationId: auditInstall,
+    action: AUDIT_ACTION_REQUEST,
+    targetKind: AUDIT_TARGET_KIND,
+    targetId: row.pending_id,
+    before: null,
+    after: {
+      subject_kind: args.body.subject_kind,
+      subject_id: args.body.subject_id,
+      role: args.body.role,
+      action: args.body.action,
+      expires_at: expiresAt.toISOString(),
+      state: "pending",
+      scope: args.body.scope,
+    },
+    now: args.now,
+  });
+  return toPendingWire(row);
+}
+
+/** Two-person + TTL + state checks (in that order), then atomically apply. Each predicate failure is
+ *  re-raised as the route-mappable Member* error. */
+export async function approveRoleChange(args: {
+  db: Kysely<unknown>;
+  pendingId: string;
+  installationId: string;
+  approverUserId: string;
+  now: Date;
+  audit?: MemberAuditEmitter | undefined;
+}): Promise<RoleChangePendingV1> {
+  const row = await getPendingChange(args.db, args.pendingId);
+  if (row === null) {
+    throw new MemberRoleChangePendingNotFoundError(args.pendingId);
+  }
+  try {
+    checkSelfApproval({ requesterUserId: row.requested_by_user_id, approverUserId: args.approverUserId });
+  } catch (e) {
+    if (e instanceof SelfApprovalError) throw new MemberSelfApprovalError();
+    throw e;
+  }
+  try {
+    checkNotExpired({ expiresAt: row.expires_at, now: args.now });
+  } catch (e) {
+    if (e instanceof ExpiredApprovalError) throw new MemberExpiredApprovalError(e.expiresAt);
+    throw e;
+  }
+  try {
+    checkPendingState({ state: row.state });
+  } catch (e) {
+    if (e instanceof StalePendingStateError) throw new MemberRoleChangePendingStaleError(args.pendingId);
+    throw e;
+  }
+  const applied = await applyChange(args.db, {
+    pendingId: args.pendingId,
+    approvedByUserId: args.approverUserId,
+    approvedAt: args.now,
+    appliedAt: args.now,
+  });
+  const auditInstall =
+    row.scope === "platform" ? PLATFORM_SCOPE_AUDIT_INSTALLATION_ID : args.installationId;
+  await args.audit?.({
+    actorUserId: args.approverUserId,
+    installationId: auditInstall,
+    action: AUDIT_ACTION_APPLY,
+    targetKind: AUDIT_TARGET_KIND,
+    targetId: args.pendingId,
+    before: { state: "pending", subject_kind: row.subject_kind, subject_id: row.subject_id, role: row.role, action: row.action },
+    after: {
+      state: "applied",
+      applied_at: applied.applied_at === null ? null : applied.applied_at.toISOString(),
+      subject_kind: row.subject_kind,
+      subject_id: row.subject_id,
+      role: row.role,
+      action: row.action,
+    },
+    now: args.now,
+  });
+  return toPendingWire(applied);
+}
+
+/** Reject a pending change. NOT subject to the two-person rule (a requester may cancel their own draft);
+ *  only TTL + state checks apply. */
+export async function rejectRoleChange(args: {
+  db: Kysely<unknown>;
+  pendingId: string;
+  installationId: string;
+  approverUserId: string;
+  now: Date;
+  audit?: MemberAuditEmitter | undefined;
+}): Promise<RoleChangePendingV1> {
+  const row = await getPendingChange(args.db, args.pendingId);
+  if (row === null) {
+    throw new MemberRoleChangePendingNotFoundError(args.pendingId);
+  }
+  try {
+    checkNotExpired({ expiresAt: row.expires_at, now: args.now });
+  } catch (e) {
+    if (e instanceof ExpiredApprovalError) throw new MemberExpiredApprovalError(e.expiresAt);
+    throw e;
+  }
+  try {
+    checkPendingState({ state: row.state });
+  } catch (e) {
+    if (e instanceof StalePendingStateError) throw new MemberRoleChangePendingStaleError(args.pendingId);
+    throw e;
+  }
+  const rejected = await rejectChange(args.db, {
+    pendingId: args.pendingId,
+    approvedByUserId: args.approverUserId,
+    approvedAt: args.now,
+  });
+  const auditInstall =
+    row.scope === "platform" ? PLATFORM_SCOPE_AUDIT_INSTALLATION_ID : args.installationId;
+  await args.audit?.({
+    actorUserId: args.approverUserId,
+    installationId: auditInstall,
+    action: AUDIT_ACTION_REJECT,
+    targetKind: AUDIT_TARGET_KIND,
+    targetId: args.pendingId,
+    before: { state: "pending", subject_kind: row.subject_kind, subject_id: row.subject_id, role: row.role, action: row.action },
+    after: { state: "rejected" },
+    now: args.now,
+  });
+  return toPendingWire(rejected);
 }

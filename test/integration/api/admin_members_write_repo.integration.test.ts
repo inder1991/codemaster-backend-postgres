@@ -24,6 +24,7 @@ import { describeDb, INTEGRATION_DSN } from "../_db.js";
 
 const INST = "ac000000-0000-0000-0000-000000000001";
 const SUBJ_A = "ac000000-0000-0000-0000-00000000000a";
+const SUBJ_AP = "ac000000-0000-0000-0000-00000000000d"; // dedicated to the apply test (order-independent)
 const SUBJ_B = "ac000000-0000-0000-0000-00000000000b";
 const SUBJ_P = "ac000000-0000-0000-0000-00000000000c";
 const REQ = "ac000000-0000-0000-0000-000000000010"; // requester
@@ -35,8 +36,8 @@ let pool: Pool;
 let db: Kysely<unknown>;
 
 async function cleanup(): Promise<void> {
-  await sql`DELETE FROM core.role_grant_pending WHERE subject_id IN (${SUBJ_A}, ${SUBJ_B}, ${SUBJ_P})`.execute(db);
-  await sql`DELETE FROM core.role_grants WHERE subject_id IN (${SUBJ_A}, ${SUBJ_B}, ${SUBJ_P})`.execute(db);
+  await sql`DELETE FROM core.role_grant_pending WHERE subject_id IN (${SUBJ_A}, ${SUBJ_AP}, ${SUBJ_B}, ${SUBJ_P})`.execute(db);
+  await sql`DELETE FROM core.role_grants WHERE subject_id IN (${SUBJ_A}, ${SUBJ_AP}, ${SUBJ_B}, ${SUBJ_P})`.execute(db);
   await sql`DELETE FROM core.users WHERE user_id IN (${REQ}, ${APP})`.execute(db);
   await sql`DELETE FROM core.installations WHERE installation_id = ${INST}`.execute(db);
 }
@@ -94,9 +95,10 @@ describeDb("members write repo (disposable :5434)", () => {
   });
 
   it("applyChange: CAS pending→applied + writes role_grants; re-apply → stale 409", async () => {
-    const pending = await getPendingChange(db, (await firstPendingFor(SUBJ_A)).pending_id);
+    // Self-contained: insert this test's own pending row (no dependency on test execution order).
+    const pending = await insertPendingChange(db, baseArgs(SUBJ_AP, "installation"));
     const applied = await applyChange(db, {
-      pendingId: pending!.pending_id,
+      pendingId: pending.pending_id,
       approvedByUserId: APP,
       approvedAt: T0,
       appliedAt: T0,
@@ -106,13 +108,13 @@ describeDb("members write repo (disposable :5434)", () => {
     // the grant is now an active role_grants row (granted_by_user_id column does NOT exist in prod schema)
     const grants = await sql<{ role: string; scope: string }>`
       SELECT role, scope FROM core.role_grants
-      WHERE subject_kind='user' AND subject_id=${SUBJ_A} AND installation_id=${INST}
+      WHERE subject_kind='user' AND subject_id=${SUBJ_AP} AND installation_id=${INST}
     `.execute(db);
     expect(grants.rows).toHaveLength(1);
     expect(grants.rows[0]).toEqual({ role: "reader", scope: "installation" });
 
     await expect(
-      applyChange(db, { pendingId: pending!.pending_id, approvedByUserId: APP, approvedAt: T0, appliedAt: T0 }),
+      applyChange(db, { pendingId: pending.pending_id, approvedByUserId: APP, approvedAt: T0, appliedAt: T0 }),
     ).rejects.toBeInstanceOf(MemberRoleChangePendingStaleError);
   });
 
@@ -142,12 +144,3 @@ describeDb("members write repo (disposable :5434)", () => {
     expect(grants.rows[0]!.installation_id).toBeNull();
   });
 });
-
-/** Helper: re-select the (single) in-flight pending row for a subject under INST. */
-async function firstPendingFor(subjectId: string): Promise<{ pending_id: string }> {
-  const r = await sql<{ pending_id: string }>`
-    SELECT pending_id FROM core.role_grant_pending
-    WHERE subject_id=${subjectId} AND installation_id=${INST} AND state='pending' LIMIT 1
-  `.execute(db);
-  return r.rows[0]!;
-}

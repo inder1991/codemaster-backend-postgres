@@ -9,7 +9,7 @@
 
 import cookie from "@fastify/cookie";
 import { type Kysely } from "kysely";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 
 import type { Clock } from "#platform/clock.js";
 import type { KeyRegistry } from "#platform/crypto/key_registry.js";
@@ -30,6 +30,7 @@ import {
   LlmModelListV1,
   LlmProviderConfigV1,
   LlmPurposeModelListV1,
+  MemberApproverBodyV1,
   MembersPageV1,
   NotificationRulesPageV1,
   NotificationRuleV1,
@@ -40,6 +41,8 @@ import {
   RetrievalAggregateV1,
   RetrievalTraceListPageV1,
   ReviewsListPageV1,
+  RoleChangePendingV1,
+  RoleChangeRequestV1,
   TaxonomyGapListV1,
 } from "#contracts/admin.v1.js";
 
@@ -52,6 +55,17 @@ import {
   getGeneration,
 } from "#backend/api/admin/embedder_read.js";
 import { buildMembersPage } from "#backend/api/admin/members_read.js";
+import {
+  MemberConcurrentPendingChangeError,
+  MemberExpiredApprovalError,
+  MemberRoleChangePendingNotFoundError,
+  MemberRoleChangePendingStaleError,
+  MemberSelfApprovalError,
+  type MemberAuditEmitter,
+  approveRoleChange,
+  rejectRoleChange,
+  requestRoleChange,
+} from "#backend/api/admin/members_write.js";
 import {
   RetrievalAggregateDataIntegrityError,
   RetrievalAggregateTraceNotFoundError,
@@ -126,6 +140,9 @@ export type AdminRoutesOptions = {
   /** Field-encryption registry for decrypting core.users.email in the members read. server.ts always
    *  provides it; the field is optional only so endpoint tests that don't exercise members need no crypto. */
   registry?: KeyRegistry;
+  /** Optional audit-emit seam for the admin WRITE endpoints (members role-changes). Undefined → no-op
+   *  (the TS audit-emit pg-client wiring is dormant — FOLLOW-UP). Mirrors login.ts's audit callback. */
+  audit?: MemberAuditEmitter;
 };
 
 /** The static dashboard summary (1:1 with the shipped Python: _HealthyProbe for the 4 services +
@@ -185,6 +202,137 @@ export async function registerAdminRoutes(
         }
         const page = await buildMembersPage({ db: opts.db, registry: opts.registry, installationId });
         return reply.code(200).send(MembersPageV1.parse(page));
+      },
+    );
+
+    const MEMBER_MUTATION_ROLES = ["super_admin", "platform_owner"] as const;
+    const ROLE_CHANGE_EXPIRES_MS = 7 * 24 * 60 * 60 * 1000; // 7-day TTL (Python _DEFAULT_EXPIRES_IN).
+
+    // Translate the orchestration's typed errors to HTTP (shared by approve + reject).
+    function pendingChangeErrorReply(e: unknown, reply: FastifyReply): boolean {
+      if (e instanceof MemberRoleChangePendingNotFoundError) {
+        void reply.code(404).send({ detail: e.message });
+        return true;
+      }
+      if (e instanceof MemberRoleChangePendingStaleError) {
+        void reply.code(409).send({ detail: e.message });
+        return true;
+      }
+      if (e instanceof MemberSelfApprovalError) {
+        void reply.code(403).send({ detail: e.message });
+        return true;
+      }
+      if (e instanceof MemberExpiredApprovalError) {
+        void reply.code(410).send({ detail: e.message });
+        return true;
+      }
+      return false;
+    }
+
+    scope.post(
+      "/api/admin/members/:subject_kind/:subject_id/role-changes",
+      { preHandler: requireRole([...MEMBER_MUTATION_ROLES]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const params = request.params as { subject_kind: string; subject_id: string };
+        if (params.subject_kind !== "user" && params.subject_kind !== "team") {
+          return reply.code(422).send({ detail: "subject_kind must be 'user' or 'team'" });
+        }
+        if (!UUID_RE.test(params.subject_id)) {
+          return reply.code(422).send({ detail: "subject_id must be a UUID" });
+        }
+        const parsed = RoleChangeRequestV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        const body = parsed.data;
+        // Path subject_kind / subject_id MUST agree with the body — reject inconsistency at 400.
+        if (body.subject_kind !== params.subject_kind || body.subject_id !== params.subject_id) {
+          return reply.code(400).send({ detail: "path subject_kind / subject_id must match the request body" });
+        }
+        // Platform-scope grants cross every installation; only super_admin may stage them.
+        if (body.scope === "platform" && principal.role !== "super_admin") {
+          return reply.code(403).send({
+            detail: "platform-scope grants require super_admin; platform_owner is scoped to a single installation",
+          });
+        }
+        try {
+          const row = await requestRoleChange({
+            db: opts.db,
+            body,
+            installationId: principal.installationId,
+            requesterUserId: principal.userId,
+            now: opts.clock.now(),
+            expiresInMs: ROLE_CHANGE_EXPIRES_MS,
+            audit: opts.audit,
+          });
+          return reply.code(201).send(RoleChangePendingV1.parse(row));
+        } catch (e) {
+          if (e instanceof MemberConcurrentPendingChangeError) {
+            return reply.code(409).send({ detail: { existing_pending_id: e.existingPendingId } });
+          }
+          throw e;
+        }
+      },
+    );
+
+    scope.post(
+      "/api/admin/members/role-changes/:pending_id/approve",
+      { preHandler: requireRole([...MEMBER_MUTATION_ROLES]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const pendingId = (request.params as { pending_id: string }).pending_id;
+        if (!UUID_RE.test(pendingId)) {
+          return reply.code(422).send({ detail: "pending_id must be a UUID" });
+        }
+        const parsed = MemberApproverBodyV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        try {
+          const row = await approveRoleChange({
+            db: opts.db,
+            pendingId,
+            installationId: principal.installationId,
+            approverUserId: parsed.data.approver_user_id,
+            now: opts.clock.now(),
+            audit: opts.audit,
+          });
+          return reply.code(200).send(RoleChangePendingV1.parse(row));
+        } catch (e) {
+          if (pendingChangeErrorReply(e, reply)) return reply;
+          throw e;
+        }
+      },
+    );
+
+    scope.post(
+      "/api/admin/members/role-changes/:pending_id/reject",
+      { preHandler: requireRole([...MEMBER_MUTATION_ROLES]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const pendingId = (request.params as { pending_id: string }).pending_id;
+        if (!UUID_RE.test(pendingId)) {
+          return reply.code(422).send({ detail: "pending_id must be a UUID" });
+        }
+        const parsed = MemberApproverBodyV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        try {
+          const row = await rejectRoleChange({
+            db: opts.db,
+            pendingId,
+            installationId: principal.installationId,
+            approverUserId: parsed.data.approver_user_id,
+            now: opts.clock.now(),
+            audit: opts.audit,
+          });
+          return reply.code(200).send(RoleChangePendingV1.parse(row));
+        } catch (e) {
+          if (pendingChangeErrorReply(e, reply)) return reply;
+          throw e;
+        }
       },
     );
 
