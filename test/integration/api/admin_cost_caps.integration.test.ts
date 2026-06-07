@@ -28,7 +28,9 @@ let pool: Pool;
 let db: Kysely<unknown>;
 
 async function cleanup(): Promise<void> {
-  await sql`DELETE FROM core.cost_cap_settings WHERE scope IN ('global', 'per_org_default')`.execute(db);
+  // NB: we do NOT delete the global / per_org_default settings singletons — they are shared infra that the
+  // cost-caps WRITE test's approve guard also reads; deleting them races that test. beforeAll force-sets
+  // their values via upsert instead, so this test's value assertions still hold deterministically.
   await sql`DELETE FROM core.cost_cap_overrides WHERE installation_id = ${OV_INST}`.execute(db);
   await sql`DELETE FROM core.cost_cap_pending_changes WHERE requested_by_user_id = ${USER}`.execute(db);
   await sql`DELETE FROM telemetry.cost_daily WHERE today = '2026-06-07' AND scope = 'global'`.execute(db);
@@ -39,9 +41,13 @@ beforeAll(async () => {
   pool = new Pool({ connectionString: INTEGRATION_DSN, max: 4 });
   db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) });
   await cleanup();
+  // Upsert (force the values) rather than insert-on-clean — the singletons are never deleted (shared infra).
   await sql`INSERT INTO core.cost_cap_settings (scope, cap_cents, updated_at, updated_by_user_id)
             VALUES ('global', 1000000, '2026-06-01T00:00:00Z', ${USER}),
-                   ('per_org_default', 500000, '2026-06-02T00:00:00Z', ${USER})`.execute(db);
+                   ('per_org_default', 500000, '2026-06-02T00:00:00Z', ${USER})
+            ON CONFLICT (scope) DO UPDATE SET
+              cap_cents = EXCLUDED.cap_cents, updated_at = EXCLUDED.updated_at,
+              updated_by_user_id = EXCLUDED.updated_by_user_id`.execute(db);
   await sql`INSERT INTO core.cost_cap_overrides (installation_id, cap_cents, expires_at, updated_by_user_id)
             VALUES (${OV_INST}, 300000, NULL, ${USER})`.execute(db);
   await sql`INSERT INTO core.cost_cap_pending_changes (target_kind, new_cap_cents, requested_by_user_id, state)
