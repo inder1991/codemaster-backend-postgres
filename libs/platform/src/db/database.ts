@@ -35,7 +35,7 @@
  */
 
 import { Kysely, PostgresDialect } from "kysely";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 
 import { TenancyPlugin } from "#platform/db/tenancy_plugin.js";
 
@@ -129,4 +129,47 @@ export async function disposePool(dsn: string): Promise<void> {
 export async function disposeAllPools(): Promise<void> {
   const dsns = [...POOLS.keys()];
   await Promise.all(dsns.map(async (dsn) => disposePool(dsn)));
+}
+
+/**
+ * Roll back the transaction WITHOUT masking the error that triggered it. A failing `ROLLBACK` (e.g. a
+ * dead connection) must not replace the original application error on the throw path — that would hide
+ * the real cause. The rollback failure is logged separately and swallowed; the caller re-throws the
+ * original error. (Mirrors `concurrency/pr_mutex.ts::safeRollback`.)
+ */
+async function safeRollback(client: PoolClient): Promise<void> {
+  try {
+    await client.query("ROLLBACK");
+  } catch (rollbackError) {
+    console.error("withPgTransaction: ROLLBACK failed; preserving the original transaction error", rollbackError);
+  }
+}
+
+/**
+ * Generic pooled-connection transaction bracket: acquire a client from the shared (ADR-0062) pool,
+ * `BEGIN`, run `fn`, `COMMIT` on success; on any throw `ROLLBACK` (without masking the original error)
+ * and re-raise; ALWAYS release the client. The caller passes the shared `pool` from {@link getPool} —
+ * this helper never builds its own pool (honoring the ADR-0062 pool-memoization invariant).
+ *
+ * This is the schema-agnostic sibling of `concurrency/pr_mutex.ts::withMutexTransaction` (kept separate
+ * so the spine-critical mutex path is untouched). Used by the cron-sweep activities (mutex_janitor,
+ * review_run_reaper) which run raw `text(...)`-style SQL on a single transaction and need the same
+ * audit-emit-in-the-same-tx guarantee.
+ */
+export async function withPgTransaction<T>(
+  pool: Pool,
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await safeRollback(client);
+    throw err;
+  } finally {
+    client.release();
+  }
 }

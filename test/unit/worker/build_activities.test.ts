@@ -45,6 +45,16 @@ const WORKFLOW_BODY_PATH = fileURLToPath(
 const ACTIVITY_PROXY_PATH = fileURLToPath(
   new URL("../../../apps/backend/src/workflows/activity_proxy.ts", import.meta.url),
 );
+// Wave-1 liveness-backstop cron workflows (ADR-0074 / ADR-0064). Each proxies ONE snake_case activity
+// (mutex_janitor_activity / review_run_reaper_activity); registering by-name must hold or the 5-min/10-min
+// cron dies with ActivityNotRegistered at fire time — exactly when the backstop is needed. Parsed here so
+// the source-derived coverage assertion below PINS those registrations against a future drop.
+const MUTEX_JANITOR_WORKFLOW_PATH = fileURLToPath(
+  new URL("../../../apps/backend/src/workflows/mutex_janitor.workflow.ts", import.meta.url),
+);
+const REVIEW_RUN_REAPER_WORKFLOW_PATH = fileURLToPath(
+  new URL("../../../apps/backend/src/workflows/review_run_reaper.workflow.ts", import.meta.url),
+);
 
 /**
  * Parse the REGISTERED activity names from every `proxyActivities<{ <name>(...)` block in a workflow-side
@@ -69,6 +79,8 @@ const PROXIED_ACTIVITY_NAMES: ReadonlyArray<string> = [
   ...new Set([
     ...parseProxiedActivityNames(WORKFLOW_BODY_PATH),
     ...parseProxiedActivityNames(ACTIVITY_PROXY_PATH),
+    ...parseProxiedActivityNames(MUTEX_JANITOR_WORKFLOW_PATH),
+    ...parseProxiedActivityNames(REVIEW_RUN_REAPER_WORKFLOW_PATH),
   ]),
 ];
 
@@ -134,6 +146,10 @@ const EXPECTED_ACTIVITY_NAMES = [
   "applyArbitrationActivity",
   "recordToolRuns",
   "generateFixPrompt",
+  // Wave-1 liveness-backstop cron activities (ADR-0074 / ADR-0064), registered under their snake_case
+  // Temporal names (the MutexJanitor/ReviewRunReaper workflows proxy them by these exact keys).
+  "mutex_janitor_activity",
+  "review_run_reaper_activity",
 ] as const;
 
 describe("buildActivities() composition root", () => {

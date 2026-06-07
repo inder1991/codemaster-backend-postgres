@@ -17,6 +17,7 @@ import { registerTemporalWorkflowStartSink } from "#backend/outbox/sinks/tempora
 import { registerInstallationReconcileSink } from "#backend/outbox/sinks/installation_reconcile.js";
 
 import { buildOutboxActivities } from "./build_outbox_activities.js";
+import { ensureCronSchedule, type EnsureCronScheduleArgs } from "./ensure_schedule.js";
 import { ensureOutboxDispatcherSingleton } from "./outbox_dispatcher_singleton.js";
 import { resolveWorkerTemporalConfig } from "./temporal_config.js";
 
@@ -29,6 +30,33 @@ function dispatcherTaskQueue(): string {
   const q = process.env["CODEMASTER_OUTBOX_TASK_QUEUE"];
   return q !== undefined && q !== "" ? q : "outbox-dispatcher";
 }
+
+/** The combined-pod REVIEW worker's task queue. The Wave-1 liveness schedules target this queue (NOT the
+ *  dispatcher's) because the review worker's `workflowsPath` bundle (all_workflows.ts) re-exports the
+ *  mutex-janitor + review-run-reaper workflows — so a fired schedule lands a start this pod can run. */
+const REVIEW_TASK_QUEUE = "review-default";
+
+/**
+ * Wave-1 liveness-backstop cron schedules (ADR-0074 / ADR-0064). Cadence + schedule/workflow ids are
+ * byte-faithful with the frozen Python (mutex_janitor.py / review_run_reaper.py); the workflowType strings
+ * are the registered camelCase TS function names (combined-pod-worker decision, ADR-0074 §3).
+ */
+const WAVE1_LIVENESS_SCHEDULES: ReadonlyArray<EnsureCronScheduleArgs> = [
+  {
+    scheduleId: "codemaster-mutex-janitor",
+    workflowType: "mutexJanitorWorkflow",
+    workflowId: "codemaster-mutex-janitor-workflow",
+    taskQueue: REVIEW_TASK_QUEUE,
+    cronExpression: "*/5 * * * *",
+  },
+  {
+    scheduleId: "codemaster-review-run-reaper",
+    workflowType: "reviewRunReaperWorkflow",
+    workflowId: "codemaster-review-run-reaper-workflow",
+    taskQueue: REVIEW_TASK_QUEUE,
+    cronExpression: "*/10 * * * *",
+  },
+];
 
 /** Bring up the outbox-dispatcher worker + singleton and run until shutdown. */
 export async function runOutboxDispatcherWorker(): Promise<void> {
@@ -67,6 +95,21 @@ export async function runOutboxDispatcherWorker(): Promise<void> {
   registerTemporalWorkflowStartSink(temporalPort);
   registerInstallationReconcileSink(temporalPort);
   await ensureOutboxDispatcherSingleton(client, { taskQueue });
+
+  // ── Wave-1 liveness-backstop Temporal Schedules (ADR-0074 / ADR-0064) ──
+  // Idempotently register the mutex-janitor (every 5 min) + review-run-reaper (every 10 min) cron
+  // schedules. FAIL-OPEN (log + continue) per the Python `worker/main.py` boot block: a registration
+  // failure (Temporal transient / RBAC) MUST NOT crash worker startup — the next pod's idempotent ensure
+  // retries. `ensureCronSchedule` itself swallows `ScheduleAlreadyRunning`, so an already-registered
+  // schedule (incl. one an operator paused for an incident) is never clobbered.
+  for (const schedule of WAVE1_LIVENESS_SCHEDULES) {
+    try {
+      await ensureCronSchedule(client, schedule);
+      console.info(`schedule ensured: ${schedule.scheduleId}`);
+    } catch (err) {
+      console.error(`ensureCronSchedule(${schedule.scheduleId}) failed; worker continues`, err);
+    }
+  }
 
   await worker.run();
 }

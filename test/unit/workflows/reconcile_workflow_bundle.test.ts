@@ -78,12 +78,16 @@ describe("reconcile.workflow.ts — three thin pass-through workflows", () => {
 });
 
 describe("all_workflows.ts — combined-pod bundle barrel", () => {
-  it("re-exports ALL FOUR workflow functions for the single workflowsPath bundle", () => {
+  it("re-exports ALL SIX workflow functions for the single workflowsPath bundle", () => {
     expect(ALL_WORKFLOWS_SRC).toContain("reviewPullRequest");
     expect(ALL_WORKFLOWS_SRC).toContain("reconcileInstallation");
     expect(ALL_WORKFLOWS_SRC).toContain("reconcileRepositories");
     expect(ALL_WORKFLOWS_SRC).toContain("repairInstallationRepositories");
-    // Exactly two re-export statements: the review spine + the three reconcile/repair workflows.
-    expect(ALL_WORKFLOWS_SRC.split("export {").length - 1).toBe(2);
+    // Wave-1 liveness-backstop cron workflows (ADR-0074 / ADR-0064).
+    expect(ALL_WORKFLOWS_SRC).toContain("mutexJanitorWorkflow");
+    expect(ALL_WORKFLOWS_SRC).toContain("reviewRunReaperWorkflow");
+    // Four re-export statements: the review spine + the three reconcile/repair + the two Wave-1 backstops
+    // (the latter two each in their own `export { … } from` statement).
+    expect(ALL_WORKFLOWS_SRC.split("export {").length - 1).toBe(4);
   });
 });

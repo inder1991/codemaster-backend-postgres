@@ -151,6 +151,8 @@ import { loadParentReviewFindingsActivity } from "#backend/activities/load_paren
 import { reconcileInstallation } from "#backend/activities/reconcile_installation.activity.js";
 import { reconcileRepositories } from "#backend/activities/reconcile_repositories.activity.js";
 import { hydrateInstallationRepositories } from "#backend/activities/hydrate_installation_repositories.activity.js";
+import { mutexJanitorActivity } from "#backend/activities/mutex_janitor.activity.js";
+import { reviewRunReaperActivity } from "#backend/activities/review_run_reaper.activity.js";
 import { GitHubApiReviewClient } from "#backend/integrations/github/review_client.js";
 
 import { GitHubIssueClient } from "#backend/integrations/github/issue_client.js";
@@ -669,5 +671,12 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     ["reconcile_installation_activity"]: reconcileInstallation,
     ["reconcile_repositories_activity"]: reconcileRepositories,
     ["hydrate_installation_repositories_activity"]: hydrateInstallationRepositories,
+    // ── Wave-1 liveness-backstop activities (ADR-0074 / ADR-0064) ──
+    // Cron-scheduled sweeps (mutex janitor every 5 min, review-run reaper every 10 min) registered under
+    // their snake_case TEMPORAL NAMES because the MutexJanitor/ReviewRunReaper workflows proxy them by those
+    // exact names (a camelCase key would dispatch `ActivityNotRegistered`). Self-wiring 0-arg activities
+    // (resolve CODEMASTER_PG_CORE_DSN + clock inside the body), registered bare.
+    ["mutex_janitor_activity"]: mutexJanitorActivity,
+    ["review_run_reaper_activity"]: reviewRunReaperActivity,
   } as Record<string, (input: never) => Promise<unknown>>;
 }
