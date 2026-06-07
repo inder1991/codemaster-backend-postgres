@@ -244,16 +244,16 @@ function readGithubInstallationId(): number {
  * token provider) and memoized, so the build stays off `VAULT_ADDR` / GitHub round-trips at worker boot,
  * matching the post_* activities that construct `VaultHttpPort.fromEnv()` inside the activity body.
  */
-async function buildClonerDeps(githubInstallationId: number): Promise<CloneRepoIntoWorkspaceDeps> {
+async function buildClonerDeps(): Promise<CloneRepoIntoWorkspaceDeps> {
   const clock = new WallClock();
   const githubHttp = new FetchGitHubHttpClient({});
   const vault = VaultHttpPort.fromEnv();
   const tokenProvider = await GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
   // The cloner shells out to git with the minted installation token; it needs only the bound `getToken`
-  // (a `(installationId) => Promise<string>` — the `TokenProvider` shape) + the env installation id.
+  // (a `(installationId) => Promise<string>` — the `TokenProvider` shape). Per-review routing: the cloner is
+  // NO LONGER bound to one installation id — the clone activity passes the per-PR id to `cloner.clone()`.
   const cloner = new GitSubprocessCloner({
     tokenProvider: tokenProvider.getToken.bind(tokenProvider),
-    githubInstallationId,
   });
   return { cloner };
 }
@@ -262,14 +262,13 @@ async function buildClonerDeps(githubInstallationId: number): Promise<CloneRepoI
  * Lazily build the cloner deps once, memoized across dispatches. The first `cloneRepoIntoWorkspace` call
  * constructs the real token provider (the deferred-Vault pattern); subsequent calls reuse it. A single
  * in-flight build is shared via the promise memo so concurrent first-dispatches don't double-construct.
+ * The cloner is installation-agnostic (per-review routing); the per-PR id is threaded through each clone call.
  */
-function makeClonerDepsResolver(
-  githubInstallationId: number,
-): () => Promise<CloneRepoIntoWorkspaceDeps> {
+function makeClonerDepsResolver(): () => Promise<CloneRepoIntoWorkspaceDeps> {
   let memo: Promise<CloneRepoIntoWorkspaceDeps> | undefined;
   return () => {
     if (memo === undefined) {
-      memo = buildClonerDeps(githubInstallationId);
+      memo = buildClonerDeps();
     }
     return memo;
   };
@@ -511,7 +510,7 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
 
   // The lazy real cloner-deps (deferred-Vault pattern; constructed on first dispatch). The shared LLM cache
   // (llmCache) is built earlier (above the retrieve-knowledge activity, which now also consumes it for E).
-  const resolveClonerDeps = makeClonerDepsResolver(githubInstallationId);
+  const resolveClonerDeps = makeClonerDepsResolver();
 
   // generate_walkthrough bound-method holder — 1:1 with the frozen Python `WalkthroughActivities(cache=…)`.
   // It SHARES the same lazy ledger-wired LlmClientCache the review-chunk activity uses (the cache is

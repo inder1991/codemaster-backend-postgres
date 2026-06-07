@@ -189,6 +189,17 @@ export async function cloneRepoIntoWorkspace(
       reason: "missing head_sha",
     });
   }
+  // Per-review routing: the clone mints its installation token for the per-PR numeric id from the input
+  // (replacing the removed CODEMASTER_GITHUB_INSTALLATION_ID env pin). FAIL-CLOSED on a null id — the clone
+  // is the spine core loop, so a silent skip would produce an empty workspace + a false-clean review.
+  const githubInstallationId = req.github_installation_id;
+  if (githubInstallationId === null) {
+    throw new CloneFailedError({
+      repo: req.repo_url,
+      headSha: req.head_sha,
+      reason: "missing github_installation_id",
+    });
+  }
 
   // Heartbeat BEFORE the clone shell-out so a stalled subprocess is detectable within the heartbeat
   // window. Mirrors the Python `activity.heartbeat({phase: "clone_started"})`.
@@ -198,6 +209,7 @@ export async function cloneRepoIntoWorkspace(
       workspace: workspacePath,
       repoUrl: req.repo_url,
       headSha: req.head_sha,
+      installationId: githubInstallationId,
       paths: req.changed_paths,
       prNumber: req.pr_number,
     });
@@ -255,6 +267,7 @@ export class StubCloner implements GitCloner {
     workspace: string;
     repoUrl: string;
     headSha: string;
+    installationId: number;
     paths: ReadonlyArray<string>;
     prNumber?: number | null;
   }): Promise<void> {
