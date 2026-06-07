@@ -9,12 +9,17 @@
 
 import { type Kysely, sql } from "kysely";
 
+import { CostCapSettingsMissingError } from "#backend/api/admin/cost_caps_read.js";
 import {
   SelfApprovalError,
   checkSelfApproval,
 } from "#backend/api/admin/two_person_approval.js";
 
 import type { CostCapChangeRequestV1, CostCapPendingChangeV1 } from "#contracts/admin.v1.js";
+
+// Re-export so the write surface stays cohesive; it's the SAME class the READ path throws (the Python has
+// one CostCapSettingsMissingError used by both build_cost_caps_page and approve).
+export { CostCapSettingsMissingError };
 
 export const LOWERING_GRACE_MINUTES = 60;
 
@@ -63,15 +68,7 @@ export class CostCapInvalidRequestError extends Error {
     this.name = "CostCapInvalidRequestError";
   }
 }
-export class CostCapSettingsMissingError extends Error {
-  public constructor() {
-    super(
-      "core.cost_cap_settings is missing required rows; seed_default_settings_if_absent must run before " +
-        "the cost-cap router is mounted (bootstrap-order regression)",
-    );
-    this.name = "CostCapSettingsMissingError";
-  }
-}
+// (CostCapSettingsMissingError is imported from cost_caps_read + re-exported above — one shared class.)
 
 // ─── Lowering-grace (pure) ──────────────────────────────────────────────────────────────────────────
 

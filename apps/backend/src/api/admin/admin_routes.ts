@@ -16,7 +16,9 @@ import type { KeyRegistry } from "#platform/crypto/key_registry.js";
 
 import {
   AuditSearchResponseV1,
+  CostCapChangeRequestV1,
   CostCapPageV1,
+  CostCapPendingChangeV1,
   DashboardSummaryV1,
   DefaultCorpusHealthV1,
   EmbedderCoverageV1,
@@ -51,6 +53,16 @@ import {
 
 import { CursorInvalidError } from "#backend/api/admin/_keyset_cursor.js";
 import { CostCapSettingsMissingError, buildCostCapsPage } from "#backend/api/admin/cost_caps_read.js";
+import {
+  CostCapConcurrentPendingChangeError,
+  CostCapInvalidRequestError,
+  CostCapPendingChangeNotFoundError,
+  CostCapPendingChangeStaleError,
+  CostCapSelfApprovalError,
+  approveCostCapChange,
+  rejectCostCapChange,
+  requestCostCapChange,
+} from "#backend/api/admin/cost_caps_write.js";
 import { buildDefaultCorpusHealth } from "#backend/api/admin/default_corpus_read.js";
 import {
   buildEmbedderCoverage,
@@ -495,6 +507,114 @@ export async function registerAdminRoutes(
           if (e instanceof CostCapSettingsMissingError) {
             return reply.code(500).send({ detail: e.message });
           }
+          throw e;
+        }
+      },
+    );
+
+    // ── cost-caps WRITE (two-person; super_admin / platform_owner) ──
+    const CC_MUTATION_ROLES = ["super_admin", "platform_owner"] as const;
+
+    // approve + reject share this error→HTTP mapping.
+    function costCapPendingErrorReply(e: unknown, reply: FastifyReply): boolean {
+      if (e instanceof CostCapPendingChangeNotFoundError) {
+        void reply.code(404).send({ detail: e.message });
+        return true;
+      }
+      if (e instanceof CostCapPendingChangeStaleError) {
+        void reply.code(409).send({ detail: e.message });
+        return true;
+      }
+      if (e instanceof CostCapSelfApprovalError) {
+        void reply.code(403).send({ detail: e.message });
+        return true;
+      }
+      if (e instanceof CostCapSettingsMissingError) {
+        void reply.code(500).send({ detail: e.message });
+        return true;
+      }
+      return false;
+    }
+
+    scope.post(
+      "/api/admin/cost-caps/changes",
+      { preHandler: requireRole([...CC_MUTATION_ROLES]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const parsed = CostCapChangeRequestV1.safeParse(request.body);
+        if (!parsed.success) {
+          // new_cap_cents outside [0, HARD_CEILING] etc.
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        try {
+          const row = await requestCostCapChange({
+            db: opts.db,
+            body: parsed.data,
+            installationId: principal.installationId,
+            requesterUserId: principal.userId,
+            now: opts.clock.now(),
+            audit: opts.audit,
+          });
+          return reply.code(202).send(CostCapPendingChangeV1.parse(row)); // 202 ACCEPTED (staged, not applied)
+        } catch (e) {
+          if (e instanceof CostCapInvalidRequestError) {
+            return reply.code(400).send({ detail: e.message });
+          }
+          if (e instanceof CostCapConcurrentPendingChangeError) {
+            return reply.code(409).send({ detail: { existing_pending_change_id: e.existingPendingChangeId } });
+          }
+          throw e;
+        }
+      },
+    );
+
+    scope.post(
+      "/api/admin/cost-caps/changes/:pending_change_id/approve",
+      { preHandler: requireRole([...CC_MUTATION_ROLES]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const id = (request.params as { pending_change_id: string }).pending_change_id;
+        if (!UUID_RE.test(id)) {
+          return reply.code(422).send({ detail: "pending_change_id must be a UUID" });
+        }
+        try {
+          const row = await approveCostCapChange({
+            db: opts.db,
+            pendingChangeId: id,
+            installationId: principal.installationId,
+            approverUserId: principal.userId,
+            now: opts.clock.now(),
+            audit: opts.audit,
+          });
+          return reply.code(200).send(CostCapPendingChangeV1.parse(row));
+        } catch (e) {
+          if (costCapPendingErrorReply(e, reply)) return reply;
+          throw e;
+        }
+      },
+    );
+
+    scope.post(
+      "/api/admin/cost-caps/changes/:pending_change_id/reject",
+      { preHandler: requireRole([...CC_MUTATION_ROLES]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const id = (request.params as { pending_change_id: string }).pending_change_id;
+        if (!UUID_RE.test(id)) {
+          return reply.code(422).send({ detail: "pending_change_id must be a UUID" });
+        }
+        try {
+          const row = await rejectCostCapChange({
+            db: opts.db,
+            pendingChangeId: id,
+            installationId: principal.installationId,
+            approverUserId: principal.userId,
+            now: opts.clock.now(),
+            audit: opts.audit,
+          });
+          return reply.code(200).send(CostCapPendingChangeV1.parse(row));
+        } catch (e) {
+          if (costCapPendingErrorReply(e, reply)) return reply;
           throw e;
         }
       },
