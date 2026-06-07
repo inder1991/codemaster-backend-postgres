@@ -46,6 +46,8 @@ import {
   OrgsListV1,
   ProposalListPageV1,
   PullRequestListResponseV1,
+  PutFlagRequestV1,
+  PutFlagResponseV1,
   RetrievalAggregatePRListV1,
   RetrievalAggregateV1,
   RepositoryEnableUpdateV1,
@@ -114,6 +116,14 @@ import {
 } from "#backend/api/admin/llm_catalog_write.js";
 import { setEnabled } from "#backend/api/admin/repositories_write.js";
 import { submitFindingFeedback } from "#backend/api/admin/finding_feedback_write.js";
+import {
+  FlagNotFoundError,
+  FlagStaleWriteError,
+  putFlag,
+  SelfSecondApproverError,
+  TypedConfirmRequiredError,
+  typedConfirmPhraseFor,
+} from "#backend/api/admin/flags_write.js";
 import { insertTaxonomySuggestion } from "#backend/api/admin/taxonomy_write.js";
 import {
   getRetrievalTrace,
@@ -1068,6 +1078,67 @@ export async function registerAdminRoutes(
       async (request, reply) => {
         const flags = await listFlags(opts.db, request.authPrincipal!.installationId);
         return reply.code(200).send(FlagListV1.parse(flags));
+      },
+    );
+
+    scope.put(
+      "/api/admin/flags/:flag_name",
+      { preHandler: requireRole(["platform_owner", "super_admin"]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const flagName = (request.params as { flag_name: string }).flag_name;
+        const parsed = PutFlagRequestV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        // Optimistic-concurrency token. If-Match is REQUIRED on every PUT (428 if absent) and parsed as an
+        // ISO-8601 timestamp (ETag-style surrounding quotes tolerated) — 400 if unparseable. 1:1 with put_route.
+        const ifMatchRaw = request.headers["if-match"];
+        const ifMatch = Array.isArray(ifMatchRaw) ? ifMatchRaw[0] : ifMatchRaw;
+        if (ifMatch === undefined) {
+          return reply.code(428).send({ detail: "If-Match header is required (locked-time-iso)" });
+        }
+        const ifMatchChangedAt = new Date(ifMatch.replace(/^"|"$/g, ""));
+        if (Number.isNaN(ifMatchChangedAt.getTime())) {
+          return reply.code(400).send({ detail: "If-Match must be an ISO-8601 timestamp" });
+        }
+        const typedConfirmRaw = request.headers["x-typed-confirm-phrase"];
+        const typedConfirm = (Array.isArray(typedConfirmRaw) ? typedConfirmRaw[0] : typedConfirmRaw) ?? null;
+        try {
+          const result = await putFlag(opts.db, {
+            flagName,
+            installationId: principal.installationId,
+            newValueJson: parsed.data.value_json,
+            ifMatchChangedAt,
+            actorUserId: principal.userId,
+            typedConfirmPhrase: typedConfirm,
+            now: opts.clock.now(),
+            audit: opts.audit,
+          });
+          return reply.code(200).send(PutFlagResponseV1.parse(result));
+        } catch (err) {
+          if (err instanceof FlagNotFoundError) {
+            return reply.code(404).send({ detail: "flag not found" });
+          }
+          if (err instanceof TypedConfirmRequiredError) {
+            return reply
+              .code(400)
+              .send({ detail: { code: "typed_confirm_required", expected_phrase: typedConfirmPhraseFor(flagName) } });
+          }
+          if (err instanceof SelfSecondApproverError) {
+            return reply.code(409).send({ detail: { code: "self_second_approver" } });
+          }
+          if (err instanceof FlagStaleWriteError) {
+            return reply.code(409).send({
+              detail: {
+                code: "stale_write",
+                current_value_json: err.currentValueJson,
+                current_changed_at: err.currentChangedAt.toISOString(),
+              },
+            });
+          }
+          throw err;
+        }
       },
     );
 

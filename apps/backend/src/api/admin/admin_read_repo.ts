@@ -512,7 +512,7 @@ export async function getLlmProviderConfig(
   };
 }
 
-type FlagDbRow = {
+export type FlagDbRow = {
   flag_name: string;
   scope: "global" | "installation" | "repository";
   scope_id: string | null;
@@ -525,20 +525,16 @@ type FlagDbRow = {
   pending_set_at: Date | null;
 };
 
-/** Flags visible to the session: global + the caller's own installation, ordered by name. 1:1 with
- *  postgres_flags_repo.list. */
-export async function listFlags(
-  db: Kysely<unknown>,
-  installationId: string,
-): Promise<Array<FlagDetailV1>> {
-  const r = await sql<FlagDbRow>`
-    SELECT flag_name, scope, scope_id, value_json, last_changed_at, last_changed_by_user_id,
-           pending_second_approver, pending_first_approver_user_id, pending_value_json, pending_set_at
-    FROM core.flags
-    WHERE scope = 'global' OR (scope = 'installation' AND scope_id = ${installationId})
-    ORDER BY flag_name
-  `.execute(db);
-  return r.rows.map((row) => ({
+/** Single-source SELECT projection for core.flags — keeps listFlags (read) and flags_write (CAS / commit
+ *  re-reads) in lock-step. 1:1 with postgres_flags_repo._FLAG_COLUMNS. */
+export const FLAG_SELECT_COLUMNS = sql`flag_name, scope, scope_id, value_json, last_changed_at,
+  last_changed_by_user_id, pending_second_approver, pending_first_approver_user_id,
+  pending_value_json, pending_set_at`;
+
+/** Decode a core.flags row (in FLAG_SELECT_COLUMNS order) into the wire contract. 1:1 with
+ *  postgres_flags_repo._row_to_flag. timestamptz → ISO; NULLs preserved. */
+export function mapFlagRow(row: FlagDbRow): FlagDetailV1 {
+  return {
     flag_name: row.flag_name,
     scope: row.scope,
     scope_id: row.scope_id,
@@ -549,7 +545,23 @@ export async function listFlags(
     pending_first_approver_user_id: row.pending_first_approver_user_id,
     pending_value_json: row.pending_value_json,
     pending_set_at: row.pending_set_at === null ? null : new Date(row.pending_set_at).toISOString(),
-  }));
+  };
+}
+
+/** Flags visible to the session: global + the caller's own installation, ordered by name. 1:1 with
+ *  postgres_flags_repo.list (the repository-scope branch is consistently omitted across the TS read+write
+ *  paths; no repository-scoped flags exist in the seeded set). */
+export async function listFlags(
+  db: Kysely<unknown>,
+  installationId: string,
+): Promise<Array<FlagDetailV1>> {
+  const r = await sql<FlagDbRow>`
+    SELECT ${FLAG_SELECT_COLUMNS}
+    FROM core.flags
+    WHERE scope = 'global' OR (scope = 'installation' AND scope_id = ${installationId})
+    ORDER BY flag_name
+  `.execute(db);
+  return r.rows.map(mapFlagRow);
 }
 
 type TaxonomyGapRow = {

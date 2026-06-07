@@ -448,6 +448,24 @@ export type FlagDetailV1 = z.infer<typeof FlagDetailV1>;
 export const FlagListV1 = z.array(FlagDetailV1);
 export type FlagListV1 = z.infer<typeof FlagListV1>;
 
+/** PUT /api/admin/flags/{flag_name} request body. 1:1 with flags.py `_PutFlagV1` (no schema_version). */
+export const PutFlagRequestV1 = z
+  .object({
+    value_json: z.string().min(1).max(8192),
+  })
+  .strict();
+export type PutFlagRequestV1 = z.infer<typeof PutFlagRequestV1>;
+
+/** PUT /api/admin/flags/{flag_name} response — the post-write flag + which two-person approval path ran.
+ *  1:1 with flags.py `_PutFlagResponseV1` (no schema_version). */
+export const PutFlagResponseV1 = z
+  .object({
+    flag: FlagDetailV1,
+    path: z.enum(["staged_first", "committed"]),
+  })
+  .strict();
+export type PutFlagResponseV1 = z.infer<typeof PutFlagResponseV1>;
+
 /** One row in GET /api/admin/audit-events (decrypted excerpts; no schema_version, matching the Python
  *  internal HTTP type). */
 export const AuditEventListItemV1 = z
