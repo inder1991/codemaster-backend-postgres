@@ -967,3 +967,24 @@ export const TaxonomySuggestionAcceptedV1 = z
   })
   .strict();
 export type TaxonomySuggestionAcceptedV1 = z.infer<typeof TaxonomySuggestionAcceptedV1>;
+
+// ─── Finding feedback (POST /api/admin/reviews/{review_id}/findings/{finding_id}/feedback) ───────────
+// 1:1 with contracts/admin/v1.py. verb maps to core.feedback_events.kind (helpful→thumbs_up,
+// not_helpful/wrong→thumbs_down); the verb is preserved only in the encrypted raw_payload.
+
+export const SubmitFindingFeedbackRequestV1 = z
+  .object({
+    schema_version: z.number().int().default(1),
+    verb: z.enum(["helpful", "not_helpful", "wrong"]),
+  })
+  .strict();
+export type SubmitFindingFeedbackRequestV1 = z.infer<typeof SubmitFindingFeedbackRequestV1>;
+
+/** 201 response — the persisted feedback event id. */
+export const FindingFeedbackResponseV1 = z
+  .object({
+    schema_version: z.number().int().default(1),
+    feedback_event_id: z.string().uuid(),
+  })
+  .strict();
+export type FindingFeedbackResponseV1 = z.infer<typeof FindingFeedbackResponseV1>;

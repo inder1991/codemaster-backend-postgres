@@ -54,6 +54,8 @@ import {
   ReviewsListPageV1,
   RoleChangePendingV1,
   RoleChangeRequestV1,
+  FindingFeedbackResponseV1,
+  SubmitFindingFeedbackRequestV1,
   TaxonomyGapListV1,
   TaxonomySuggestionAcceptedV1,
   TaxonomySuggestionV1,
@@ -111,6 +113,7 @@ import {
   upsertPurposeModel,
 } from "#backend/api/admin/llm_catalog_write.js";
 import { setEnabled } from "#backend/api/admin/repositories_write.js";
+import { submitFindingFeedback } from "#backend/api/admin/finding_feedback_write.js";
 import { insertTaxonomySuggestion } from "#backend/api/admin/taxonomy_write.js";
 import {
   getRetrievalTrace,
@@ -1097,6 +1100,42 @@ export async function registerAdminRoutes(
           now: opts.clock.now(),
         });
         return reply.code(201).send(TaxonomySuggestionAcceptedV1.parse(accepted));
+      },
+    );
+
+    scope.post(
+      "/api/admin/reviews/:review_id/findings/:finding_id/feedback",
+      { preHandler: requireRole(["platform_operator", "platform_owner", "super_admin"]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const { review_id: reviewId, finding_id: findingId } = request.params as {
+          review_id: string;
+          finding_id: string;
+        };
+        if (!UUID_RE.test(reviewId) || !UUID_RE.test(findingId)) {
+          return reply.code(422).send({ detail: "review_id and finding_id must be UUIDs" });
+        }
+        const parsed = SubmitFindingFeedbackRequestV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        if (opts.registry === undefined) {
+          throw new Error("finding-feedback endpoint requires a key registry (server misconfiguration)");
+        }
+        const feedbackEventId = await submitFindingFeedback(opts.db, {
+          reviewId,
+          findingId,
+          installationId: principal.installationId,
+          verb: parsed.data.verb,
+          actorUserId: principal.userId,
+          now: opts.clock.now(),
+          registry: opts.registry,
+          audit: opts.audit,
+        });
+        if (feedbackEventId === null) {
+          return reply.code(404).send({ detail: "finding not found in this tenant" });
+        }
+        return reply.code(201).send(FindingFeedbackResponseV1.parse({ feedback_event_id: feedbackEventId }));
       },
     );
 
