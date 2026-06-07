@@ -541,3 +541,92 @@ export const MembersPageV1 = z
   })
   .strict();
 export type MembersPageV1 = z.infer<typeof MembersPageV1>;
+
+// ─── Embedder (GET /api/admin/embedder/{state,coverage,reembed/status}) ──────────────────────────────
+// 1:1 with contracts/admin/embedder/v1.py. created_by_email/updated_by_email are EmailStr|None in
+// Python; the API layer pre-coerces non-email strings (incl. the 'migration-seed' sentinel) to null via
+// _coerce_email_or_none before they reach the contract. We mirror EmailStr with z.string().email() — real
+// emails pass both; the only theoretical divergence is the email regex on pathological has-@-but-invalid
+// strings, which the coercion + real data make unreachable.
+
+/** Doubly-nested compatibility-validation report, parsed from embedding_generations.validation_report_json. */
+export const ValidationReportV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    sample_size: z.number().int().min(1),
+    tokenization_drift: z.record(z.string(), z.number()),
+    norm_distribution_old: z.record(z.string(), z.number()),
+    norm_distribution_new: z.record(z.string(), z.number()),
+    truncation_count: z.number().int().min(0),
+    retrieval_overlap: z.record(z.string(), z.number()),
+    warnings: z.array(z.string()).max(20).default([]),
+    passed: z.boolean(),
+  })
+  .strict();
+export type ValidationReportV1 = z.infer<typeof ValidationReportV1>;
+
+/** One row of core.embedding_generations (shared by /state's generations[] and /reembed/status). */
+export const EmbeddingGenerationV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    generation_id: z.number().int().min(1),
+    state: z.enum(["backfilling", "ready", "active", "retired"]),
+    generation_label: z.string().nullable(),
+    generation_reason: z.string().nullable(),
+    provider_name: z.string(),
+    provider_version: z.string().nullable(),
+    model_name: z.string(),
+    embedding_dimension: z.number().int().min(1),
+    created_from_generation: z.number().int().nullable(),
+    chunker_version: z.string(),
+    preprocessing_version: z.string(),
+    normalization_version: z.string(),
+    created_at: z.string().datetime({ offset: true }),
+    created_by_email: z.string().email().nullable(),
+    backfill_started_at: z.string().datetime({ offset: true }).nullable(),
+    backfill_completed_at: z.string().datetime({ offset: true }).nullable(),
+    validation_started_at: z.string().datetime({ offset: true }).nullable(),
+    validation_completed_at: z.string().datetime({ offset: true }).nullable(),
+    validation_passed: z.boolean().nullable(),
+    validation_report: ValidationReportV1.nullable().default(null),
+    activated_at: z.string().datetime({ offset: true }).nullable(),
+    retired_at: z.string().datetime({ offset: true }).nullable(),
+    retire_reason: z.enum(["cancelled", "demoted", "manual_retire"]).nullable().default(null),
+    gc_started_at: z.string().datetime({ offset: true }).nullable(),
+    gc_completed_at: z.string().datetime({ offset: true }).nullable(),
+    total_chunks: z.number().int().min(0),
+    chunks_backfilled: z.number().int().min(0),
+    chunks_failed: z.number().int().min(0),
+    last_error: z.string().nullable(),
+  })
+  .strict();
+export type EmbeddingGenerationV1 = z.infer<typeof EmbeddingGenerationV1>;
+
+/** GET /api/admin/embedder/state — runtime-state singleton + the 20 most-recent generations. */
+export const EmbedderStateV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    active_generation: z.number().int(),
+    active_model_name: z.string(),
+    pending_generation: z.number().int().nullable(),
+    pending_model_name: z.string().nullable(),
+    config_version: z.number().int(),
+    retrieval_mode: z.enum(["fallback", "generation_only"]).default("fallback"),
+    updated_at: z.string().datetime({ offset: true }),
+    updated_by_email: z.string().email().nullable(),
+    generations: z.array(EmbeddingGenerationV1).max(20).default([]),
+  })
+  .strict();
+export type EmbedderStateV1 = z.infer<typeof EmbedderStateV1>;
+
+/** GET /api/admin/embedder/coverage — re-embed coverage gate (gates the retrieval_mode flip). */
+export const EmbedderCoverageV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    confluence_missing: z.number().int().min(0),
+    knowledge_missing: z.number().int().min(0),
+    total_missing: z.number().int().min(0),
+    active_generation: z.number().int().min(1),
+  })
+  .strict();
+export type EmbedderCoverageV1 = z.infer<typeof EmbedderCoverageV1>;

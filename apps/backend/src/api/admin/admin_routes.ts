@@ -19,6 +19,9 @@ import {
   CostCapPageV1,
   DashboardSummaryV1,
   DefaultCorpusHealthV1,
+  EmbedderCoverageV1,
+  EmbedderStateV1,
+  EmbeddingGenerationV1,
   FindingListResponseV1,
   FlagListV1,
   IntegrationListPageV1,
@@ -39,6 +42,11 @@ import {
 import { CursorInvalidError } from "#backend/api/admin/_keyset_cursor.js";
 import { CostCapSettingsMissingError, buildCostCapsPage } from "#backend/api/admin/cost_caps_read.js";
 import { buildDefaultCorpusHealth } from "#backend/api/admin/default_corpus_read.js";
+import {
+  buildEmbedderCoverage,
+  buildEmbedderState,
+  getGeneration,
+} from "#backend/api/admin/embedder_read.js";
 import { buildMembersPage } from "#backend/api/admin/members_read.js";
 import {
   getLearningWithRevisions,
@@ -162,6 +170,42 @@ export async function registerAdminRoutes(
         }
         const page = await buildMembersPage({ db: opts.db, registry: opts.registry, installationId });
         return reply.code(200).send(MembersPageV1.parse(page));
+      },
+    );
+
+    const EMBEDDER_ROLES = ["platform_owner", "super_admin"] as const;
+
+    scope.get(
+      "/api/admin/embedder/state",
+      { preHandler: requireRole([...EMBEDDER_ROLES]) },
+      async (_request, reply) =>
+        reply.code(200).send(EmbedderStateV1.parse(await buildEmbedderState(opts.db))),
+    );
+
+    scope.get(
+      "/api/admin/embedder/coverage",
+      { preHandler: requireRole([...EMBEDDER_ROLES]) },
+      async (_request, reply) =>
+        reply.code(200).send(EmbedderCoverageV1.parse(await buildEmbedderCoverage(opts.db))),
+    );
+
+    scope.get(
+      "/api/admin/embedder/reembed/status",
+      { preHandler: requireRole([...EMBEDDER_ROLES]) },
+      async (request, reply) => {
+        const raw = optStr((request.query as AdminQuery).generation_id);
+        // Required int query param (FastAPI 422s on missing / non-int) — mirror with strict int parsing.
+        const generationId = raw !== null && /^\d+$/.test(raw) ? Number(raw) : null;
+        if (generationId === null) {
+          return reply.code(422).send({ detail: "generation_id must be an integer" });
+        }
+        const gen = await getGeneration(opts.db, generationId);
+        if (gen === null) {
+          return reply.code(404).send({
+            detail: { error: "generation_not_found", msg: `generation_id=${generationId} does not exist` },
+          });
+        }
+        return reply.code(200).send(EmbeddingGenerationV1.parse(gen));
       },
     );
 
