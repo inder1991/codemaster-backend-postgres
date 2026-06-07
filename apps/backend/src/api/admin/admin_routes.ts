@@ -32,7 +32,10 @@ import {
   LlmPurposeModelListV1,
   MemberApproverBodyV1,
   MembersPageV1,
+  NotificationRuleCreateRequestV1,
+  NotificationRuleDryRunResponseV1,
   NotificationRulesPageV1,
+  NotificationRuleUpdateRequestV1,
   NotificationRuleV1,
   OrgsListV1,
   ProposalListPageV1,
@@ -55,6 +58,15 @@ import {
   getGeneration,
 } from "#backend/api/admin/embedder_read.js";
 import { buildMembersPage } from "#backend/api/admin/members_read.js";
+import {
+  NotificationRuleNotFoundError,
+  type NotificationRulePatch,
+  createRule,
+  deleteRule,
+  recipientSummary,
+  ruleAuditPayload,
+  updateRule,
+} from "#backend/api/admin/notification_rules_write.js";
 import {
   MemberConcurrentPendingChangeError,
   MemberExpiredApprovalError,
@@ -601,6 +613,139 @@ export async function registerAdminRoutes(
           return reply.code(404).send({ detail: `rule ${ruleId} not found` });
         }
         return reply.code(200).send(NotificationRuleV1.parse(rule));
+      },
+    );
+
+    // ── notification-rules WRITE (super_admin / platform_owner only) ──
+    const NR_MUTATION_ROLES = ["super_admin", "platform_owner"] as const;
+
+    scope.post(
+      "/api/admin/notification-rules",
+      { preHandler: requireRole([...NR_MUTATION_ROLES]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const parsed = NotificationRuleCreateRequestV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        const b = parsed.data;
+        const row = await createRule(opts.db, {
+          name: b.name,
+          triggerEvent: b.trigger_event,
+          filters: b.filters,
+          recipients: b.recipients,
+          scheduleCron: b.schedule_cron,
+          now: opts.clock.now(),
+        });
+        const rule = NotificationRuleV1.parse(row);
+        await opts.audit?.({
+          actorUserId: principal.userId,
+          installationId: principal.installationId,
+          action: "notification_rule.created",
+          targetKind: "notification_rule",
+          targetId: rule.rule_id,
+          before: null,
+          after: ruleAuditPayload(rule),
+          now: opts.clock.now(),
+        });
+        return reply.code(201).send(rule);
+      },
+    );
+
+    scope.patch(
+      "/api/admin/notification-rules/:rule_id",
+      { preHandler: requireRole([...NR_MUTATION_ROLES]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const ruleId = (request.params as { rule_id: string }).rule_id;
+        if (!UUID_RE.test(ruleId)) {
+          return reply.code(422).send({ detail: "rule_id must be a UUID" });
+        }
+        const parsed = NotificationRuleUpdateRequestV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        const beforeRow = await getNotificationRule(opts.db, ruleId);
+        if (beforeRow === null) {
+          return reply.code(404).send({ detail: `rule ${ruleId} not found` });
+        }
+        // exclude-unset: the update schema has no defaults, so parsed.data holds only the provided keys.
+        // updateRule writes only the allowed keys (it ignores schema_version), so pass the parsed body.
+        const patch = parsed.data as NotificationRulePatch;
+        try {
+          const updated = NotificationRuleV1.parse(
+            await updateRule(opts.db, ruleId, patch, opts.clock.now()),
+          );
+          await opts.audit?.({
+            actorUserId: principal.userId,
+            installationId: principal.installationId,
+            action: "notification_rule.updated",
+            targetKind: "notification_rule",
+            targetId: ruleId,
+            before: ruleAuditPayload(NotificationRuleV1.parse(beforeRow)),
+            after: ruleAuditPayload(updated),
+            now: opts.clock.now(),
+          });
+          return reply.code(200).send(updated);
+        } catch (e) {
+          if (e instanceof NotificationRuleNotFoundError) {
+            return reply.code(404).send({ detail: e.message });
+          }
+          throw e;
+        }
+      },
+    );
+
+    scope.delete(
+      "/api/admin/notification-rules/:rule_id",
+      { preHandler: requireRole([...NR_MUTATION_ROLES]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const ruleId = (request.params as { rule_id: string }).rule_id;
+        if (!UUID_RE.test(ruleId)) {
+          return reply.code(422).send({ detail: "rule_id must be a UUID" });
+        }
+        const beforeRow = await getNotificationRule(opts.db, ruleId);
+        if (beforeRow === null) {
+          return reply.code(404).send({ detail: `rule ${ruleId} not found` });
+        }
+        const deleted = await deleteRule(opts.db, ruleId);
+        if (!deleted) {
+          // Concurrent-deletion race — surface as 404 rather than swallowing.
+          return reply.code(404).send({ detail: `rule ${ruleId} not found` });
+        }
+        await opts.audit?.({
+          actorUserId: principal.userId,
+          installationId: principal.installationId,
+          action: "notification_rule.deleted",
+          targetKind: "notification_rule",
+          targetId: ruleId,
+          before: ruleAuditPayload(NotificationRuleV1.parse(beforeRow)),
+          after: null,
+          now: opts.clock.now(),
+        });
+        return reply.code(204).send();
+      },
+    );
+
+    scope.post(
+      "/api/admin/notification-rules/:rule_id/dry-run",
+      { preHandler: requireRole([...NR_MUTATION_ROLES]) },
+      async (request, reply) => {
+        const ruleId = (request.params as { rule_id: string }).rule_id;
+        if (!UUID_RE.test(ruleId)) {
+          return reply.code(422).send({ detail: "rule_id must be a UUID" });
+        }
+        const row = await getNotificationRule(opts.db, ruleId);
+        if (row === null) {
+          return reply.code(404).send({ detail: `rule ${ruleId} not found` });
+        }
+        const rule = NotificationRuleV1.parse(row);
+        return reply.code(200).send(
+          NotificationRuleDryRunResponseV1.parse({
+            would_dispatch_to: rule.recipients.map(recipientSummary),
+          }),
+        );
       },
     );
 

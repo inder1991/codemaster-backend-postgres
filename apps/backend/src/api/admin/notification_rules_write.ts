@@ -13,7 +13,7 @@ import {
   mapNotificationRule,
 } from "#backend/api/admin/admin_read_repo.js";
 
-import type { RecipientV1 } from "#contracts/admin.v1.js";
+import type { NotificationRuleV1, RecipientV1 } from "#contracts/admin.v1.js";
 
 /** No rule with the given rule_id (concurrent DELETE race / bad id). Route → 404. */
 export class NotificationRuleNotFoundError extends Error {
@@ -108,4 +108,17 @@ export function recipientSummary(r: RecipientV1): Record<string, string> {
     case "jira":
       return { type: "jira", project_key: r.project_key, issue_type: r.issue_type };
   }
+}
+
+/** Compact audit before/after payload (recipients summarised). 1:1 with _row_to_audit_payload. */
+export function ruleAuditPayload(rule: NotificationRuleV1): Record<string, unknown> {
+  return {
+    rule_id: rule.rule_id,
+    name: rule.name,
+    trigger_event: rule.trigger_event,
+    filters: rule.filters,
+    recipients: rule.recipients.map(recipientSummary),
+    schedule_cron: rule.schedule_cron,
+    state: rule.state,
+  };
 }
