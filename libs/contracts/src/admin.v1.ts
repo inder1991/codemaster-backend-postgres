@@ -498,6 +498,28 @@ export const LlmConnectionTestResultV1 = z
   .strict();
 export type LlmConnectionTestResultV1 = z.infer<typeof LlmConnectionTestResultV1>;
 
+/** Legacy GET/PUT /api/admin/bedrock-config response — 1:1 alias of LlmProviderConfigV1
+ *  (Python: BedrockConfigV1 = LlmProviderConfigV1, bedrock_config.py:41). */
+export const BedrockConfigV1 = LlmProviderConfigV1;
+export type BedrockConfigV1 = z.infer<typeof BedrockConfigV1>;
+
+/**
+ * PUT /api/admin/bedrock-config request body — the LEGACY shim shape (Python: _LegacyBedrockConfigUpdateBody,
+ * bedrock_config.py:53-84). NOT a cross-process contract: provider/role are hardcoded by the shim to
+ * bedrock/primary; region is REQUIRED (not nullable, unlike LlmProviderConfigUpdateV1); model_id uses the
+ * bedrock pattern unconditionally. .strict() ⇔ Python extra="forbid" (a stray provider/role field → 422).
+ */
+export const LegacyBedrockConfigUpdateBodyV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    model_id: z.string().min(1).max(128).regex(/^(anthropic\.|claude-)/),
+    region: z.string().min(1).max(32).regex(LLM_REGION_RE),
+    api_key: z.string().min(20),
+    enabled: z.boolean().default(true),
+  })
+  .strict();
+export type LegacyBedrockConfigUpdateBodyV1 = z.infer<typeof LegacyBedrockConfigUpdateBodyV1>;
+
 /** One feature flag in GET /api/admin/flags (incl. pending two-person-approval state). */
 export const FlagDetailV1 = z
   .object({

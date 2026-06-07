@@ -16,6 +16,7 @@ import type { KeyRegistry } from "#platform/crypto/key_registry.js";
 
 import {
   AuditSearchResponseV1,
+  BedrockConfigV1,
   CostCapChangeRequestV1,
   CostCapPageV1,
   CostCapPendingChangeV1,
@@ -29,6 +30,7 @@ import {
   IntegrationListPageV1,
   LearningDetailV1,
   LearningListPageV1,
+  LegacyBedrockConfigUpdateBodyV1,
   LlmModelListV1,
   LlmModelUpsertV1,
   LlmModelV1,
@@ -1272,6 +1274,95 @@ export async function registerAdminRoutes(
           .getPreflightValidator(body.provider)
           .validateCredentials({ apiKey: body.api_key, region: body.region });
         return reply.code(200).send(LlmConnectionTestResultV1.parse({ ok: result.ok, message: result.errorMessage ?? "ok" }));
+      },
+    );
+
+    // ─── Legacy bedrock-config GET/PUT — DEPRECATED compat shim over the llm-provider-config machinery,
+    // hardcoding provider='bedrock', role='primary'. 1:1 with bedrock_config.py. Migrate callers to
+    // /api/admin/llm-provider-config.
+    scope.get(
+      "/api/admin/bedrock-config",
+      { preHandler: requireRole([...READER_ROLES]) },
+      async (_request, reply) => {
+        const config = await getLlmProviderConfig(opts.db);
+        if (config === null) {
+          return reply.code(404).send({ detail: "Bedrock not configured; PUT /api/admin/bedrock-config to seed." });
+        }
+        return reply.code(200).send(BedrockConfigV1.parse(config));
+      },
+    );
+
+    scope.put(
+      "/api/admin/bedrock-config",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const parsed = LegacyBedrockConfigUpdateBodyV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        if (opts.vault === undefined || opts.getPreflightValidator === undefined) {
+          return reply.code(503).send({ detail: "bedrock-config write not configured (vault + preflight validator unwired)" });
+        }
+        request.log.warn(
+          { rule: "bedrock-config-deprecated", installation_id: principal.installationId },
+          "DEPRECATED: PUT /api/admin/bedrock-config is a compat shim; migrate callers to PUT /api/admin/llm-provider-config",
+        );
+        const body = parsed.data;
+        if (body.enabled) {
+          const result = await opts
+            .getPreflightValidator("bedrock")
+            .validate({ apiKey: body.api_key, modelId: body.model_id, region: body.region });
+          if (!result.ok) {
+            // DIVERGENCE from the canonical route: the legacy code is `bedrock_preflight_failed` (Python :219).
+            return reply.code(400).send({
+              detail: { code: "bedrock_preflight_failed", message: result.errorMessage ?? "preflight failed" },
+            });
+          }
+        }
+        const rotatedAt = opts.clock.now();
+        const repo = new PostgresLlmProviderSettingsRepo({ db: opts.db, vault: opts.vault, clock: opts.clock });
+        await repo.writeSettings({
+          role: "primary",
+          provider: "bedrock",
+          apiKeyPlaintext: body.api_key,
+          modelId: body.model_id,
+          region: body.region,
+          enabled: body.enabled,
+          validatedAt: rotatedAt,
+          validationStatus: "ok",
+          rotatedAt,
+          rotatedByUserId: principal.userId,
+        });
+        const after = {
+          provider: "bedrock",
+          role: "primary",
+          model_id: body.model_id,
+          region: body.region,
+          enabled: body.enabled,
+          rotated_at: rotatedAt.toISOString(),
+          validation_status: "ok",
+        };
+        for (const [action, targetKind] of [
+          ["bedrock_credential.rotated", "bedrock_credential"],
+          ["llm_provider_credential.rotated", "llm_provider_credential"],
+        ] as const) {
+          await opts.audit?.({
+            actorUserId: principal.userId,
+            installationId: PLATFORM_SCOPE_AUDIT_INSTALLATION_ID,
+            action,
+            targetKind,
+            targetId: "global",
+            before: null,
+            after,
+            now: rotatedAt,
+          });
+        }
+        const meta = await getLlmProviderConfig(opts.db, "primary");
+        if (meta === null) {
+          return reply.code(500).send({ detail: "internal: write succeeded but read returned no row" });
+        }
+        return reply.code(200).send(BedrockConfigV1.parse(meta));
       },
     );
 

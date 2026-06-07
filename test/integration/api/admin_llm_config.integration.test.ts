@@ -352,4 +352,99 @@ describeDb("admin llm-config (disposable :5434)", () => {
       await app.close();
     }
   });
+
+  // ─── legacy bedrock-config GET/PUT shim ──────────────────────────────────────────────────────────
+  // The PUT writes the SAME (scope='platform', role='primary') row this file seeds (itest-prov-model), so
+  // every write test restores the seed in finally to keep the read assertions (getLlmProviderConfig primary)
+  // valid under the file's shuffled sequential execution.
+  const BEDROCK_BODY = { model_id: "anthropic.claude-sonnet-4-6", region: "us-east-1", api_key: "sk-ant-bedrock-0123456789" }; // last4 "6789"
+  const restorePrimarySeed = async (): Promise<void> => {
+    await sql`INSERT INTO core.llm_provider_settings
+                (role, provider, model_id, region, api_key_ciphertext, api_key_fingerprint,
+                 enabled, last_validation_status, last_validated_at, last_rotated_by_user_id, scope)
+              VALUES ('primary','bedrock','itest-prov-model',NULL,'kms2:1:x','ab12',true,NULL,NULL,${ROTATOR},'platform')
+              ON CONFLICT (scope, role, COALESCE(installation_id,'00000000-0000-0000-0000-000000000000'::uuid))
+              DO UPDATE SET provider=EXCLUDED.provider, model_id=EXCLUDED.model_id, region=EXCLUDED.region,
+                api_key_ciphertext=EXCLUDED.api_key_ciphertext, api_key_fingerprint=EXCLUDED.api_key_fingerprint,
+                enabled=EXCLUDED.enabled, last_validation_status=EXCLUDED.last_validation_status,
+                last_validated_at=EXCLUDED.last_validated_at, last_rotated_by_user_id=EXCLUDED.last_rotated_by_user_id,
+                last_rotated_at=now()`.execute(db);
+  };
+
+  it("bedrock-config GET: 200 returns the primary bedrock config; 403 for org_owner", async () => {
+    const app = await makeApp();
+    try {
+      const ok = await app.inject({ method: "GET", url: "/api/admin/bedrock-config", cookies: { [SESSION_COOKIE_NAME]: mintCookie("reader") } });
+      expect(ok.statusCode).toBe(200);
+      expect(ok.json<{ provider: string; model_id: string }>().model_id).toBe("itest-prov-model");
+      expect(
+        (await app.inject({ method: "GET", url: "/api/admin/bedrock-config", cookies: { [SESSION_COOKIE_NAME]: mintCookie("org_owner") } })).statusCode,
+      ).toBe(403);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("bedrock-config PUT: happy → 200 + Vault round-trip + dual rotation audit (restores seed)", async () => {
+    const vault = new InMemoryVault();
+    const audited: Array<AuditEv> = [];
+    const app = await makeAppWithVault({ vault, ok: true, audited });
+    try {
+      const res = await app.inject({ method: "PUT", url: "/api/admin/bedrock-config", cookies: superCookie(), payload: BEDROCK_BODY });
+      expect(res.statusCode).toBe(200);
+      const body = res.json<{ provider: string; model_id: string; api_key_fingerprint: string; last_validation_status: string }>();
+      expect(body.provider).toBe("bedrock");
+      expect(body.model_id).toBe("anthropic.claude-sonnet-4-6");
+      expect(body.api_key_fingerprint).toBe("6789");
+      expect(body.last_validation_status).toBe("ok");
+      const row = await sql<{ api_key_ciphertext: string }>`SELECT api_key_ciphertext FROM core.llm_provider_settings WHERE scope='platform' AND role='primary'`.execute(db);
+      const dec = await vault.transitDecrypt({ keyName: VAULT_KEY_NAME, ciphertext: row.rows[0]!.api_key_ciphertext });
+      expect(new TextDecoder().decode(dec)).toBe(BEDROCK_BODY.api_key);
+      expect(audited.map((e) => e.action)).toEqual(["bedrock_credential.rotated", "llm_provider_credential.rotated"]);
+    } finally {
+      await restorePrimarySeed();
+      await app.close();
+    }
+  });
+
+  it("bedrock-config PUT: enabled=false skips preflight (writes; restores seed)", async () => {
+    const vault = new InMemoryVault();
+    const app = await makeAppWithVault({ vault, ok: false, message: "would fail if pinged" });
+    try {
+      const res = await app.inject({ method: "PUT", url: "/api/admin/bedrock-config", cookies: superCookie(), payload: { ...BEDROCK_BODY, enabled: false } });
+      expect(res.statusCode).toBe(200);
+      expect(res.json<{ enabled: boolean }>().enabled).toBe(false);
+    } finally {
+      await restorePrimarySeed();
+      await app.close();
+    }
+  });
+
+  it("bedrock-config PUT: 400 bedrock_preflight_failed (no write); 422 extra/missing field; 503 unwired", async () => {
+    const vault = new InMemoryVault();
+    const app = await makeAppWithVault({ vault, ok: false, message: "upstream 401" });
+    try {
+      const res = await app.inject({ method: "PUT", url: "/api/admin/bedrock-config", cookies: superCookie(), payload: BEDROCK_BODY });
+      expect(res.statusCode).toBe(400);
+      expect(res.json<{ detail: { code: string } }>().detail.code).toBe("bedrock_preflight_failed");
+      // no write: the seed row is untouched
+      expect((await sql<{ model_id: string }>`SELECT model_id FROM core.llm_provider_settings WHERE scope='platform' AND role='primary'`.execute(db)).rows[0]?.model_id).toBe("itest-prov-model");
+      // 422 — a stray provider field is rejected by .strict()
+      expect(
+        (await app.inject({ method: "PUT", url: "/api/admin/bedrock-config", cookies: superCookie(), payload: { ...BEDROCK_BODY, provider: "bedrock" } })).statusCode,
+      ).toBe(422);
+      // 422 — region is REQUIRED in the legacy shape
+      expect(
+        (await app.inject({ method: "PUT", url: "/api/admin/bedrock-config", cookies: superCookie(), payload: { model_id: "anthropic.claude-sonnet-4-6", api_key: "sk-ant-bedrock-0123456789" } })).statusCode,
+      ).toBe(422);
+    } finally {
+      await app.close();
+    }
+    const bare = await makeApp();
+    try {
+      expect((await bare.inject({ method: "PUT", url: "/api/admin/bedrock-config", cookies: superCookie(), payload: BEDROCK_BODY })).statusCode).toBe(503);
+    } finally {
+      await bare.close();
+    }
+  });
 });
