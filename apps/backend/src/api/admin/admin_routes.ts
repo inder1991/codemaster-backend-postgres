@@ -32,6 +32,9 @@ import {
   LlmModelListV1,
   LlmModelUpsertV1,
   LlmModelV1,
+  LlmConnectionTestResultV1,
+  LlmCredentialsTestV1,
+  LlmProviderConfigUpdateV1,
   LlmProviderConfigV1,
   LlmPurposeAssignmentUpdateV1,
   LlmPurposeModelListV1,
@@ -125,6 +128,10 @@ import {
   typedConfirmPhraseFor,
 } from "#backend/api/admin/flags_write.js";
 import { deleteIntegration, IntegrationNotFoundError } from "#backend/api/admin/integrations_write.js";
+import { type VaultPort } from "#backend/adapters/vault_port.js";
+import { PostgresLlmProviderSettingsRepo } from "#backend/integrations/llm/llm_provider_settings_repo.js";
+import { type GetPreflightValidator } from "#backend/integrations/llm/preflight_validator.js";
+import { PLATFORM_SCOPE_AUDIT_INSTALLATION_ID } from "#backend/infra/sentinels.js";
 import { insertTaxonomySuggestion } from "#backend/api/admin/taxonomy_write.js";
 import {
   getRetrievalTrace,
@@ -197,6 +204,13 @@ export type AdminRoutesOptions = {
   /** Optional audit-emit seam for the admin WRITE endpoints (members role-changes). Undefined → no-op
    *  (the TS audit-emit pg-client wiring is dormant — FOLLOW-UP). Mirrors login.ts's audit callback. */
   audit?: MemberAuditEmitter;
+  /** Vault Transit port for the llm-provider-config credential write (encrypt). Undefined → the
+   *  PUT/preflight/test-credentials credential-write routes 503 (unwired at the composition root). */
+  vault?: VaultPort;
+  /** Injected preflight-validator factory (1:1 with the Python get_preflight_validator). Undefined → the
+   *  llm-provider-config credential routes 503. Production wires the real Bedrock/AnthropicDirect SDK
+   *  validators; tests inject a stub. */
+  getPreflightValidator?: GetPreflightValidator;
 };
 
 /** The static dashboard summary (1:1 with the shipped Python: _HealthyProbe for the 4 services +
@@ -1094,6 +1108,125 @@ export async function registerAdminRoutes(
             .send({ detail: "LLM provider not configured; PUT /api/admin/llm-provider-config to seed." });
         }
         return reply.code(200).send(LlmProviderConfigV1.parse(config));
+      },
+    );
+
+    // PUT /llm-provider-config — rotate platform LLM credentials. super_admin only. 1:1 with
+    // llm_provider_config.py put_route: preflight (skipped when disabling) → Vault-Transit-encrypted UPSERT
+    // → dual rotation-audit (post-write seam) → re-read metadata. The credential routes 503 when the vault /
+    // validator seam is unwired at the composition root (server.ts does not yet inject them).
+    scope.put(
+      "/api/admin/llm-provider-config",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const parsed = LlmProviderConfigUpdateV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        if (opts.vault === undefined || opts.getPreflightValidator === undefined) {
+          return reply
+            .code(503)
+            .send({ detail: "llm-provider-config write not configured (vault + preflight validator unwired)" });
+        }
+        const body = parsed.data;
+        // Skip preflight when disabling — the intent is to halt traffic, not validate the token.
+        if (body.enabled) {
+          const result = await opts
+            .getPreflightValidator(body.provider)
+            .validate({ apiKey: body.api_key, modelId: body.model_id, region: body.region });
+          if (!result.ok) {
+            return reply.code(400).send({
+              detail: { code: "llm_provider_preflight_failed", message: result.errorMessage ?? "preflight failed" },
+            });
+          }
+        }
+        const rotatedAt = opts.clock.now();
+        const repo = new PostgresLlmProviderSettingsRepo({ db: opts.db, vault: opts.vault, clock: opts.clock });
+        await repo.writeSettings({
+          role: body.role,
+          provider: body.provider,
+          apiKeyPlaintext: body.api_key,
+          modelId: body.model_id,
+          region: body.region,
+          enabled: body.enabled,
+          validatedAt: rotatedAt,
+          validationStatus: "ok",
+          rotatedAt,
+          rotatedByUserId: principal.userId,
+        });
+        // Dual rotation audit (legacy + new action strings) via the post-write seam (the Python emits these
+        // in-transaction; the TS audit seam is post-action — see writeSettings divergence note).
+        const after = {
+          provider: body.provider,
+          role: body.role,
+          model_id: body.model_id,
+          region: body.region,
+          enabled: body.enabled,
+          rotated_at: rotatedAt.toISOString(),
+          validation_status: "ok",
+        };
+        for (const [action, targetKind] of [
+          ["bedrock_credential.rotated", "bedrock_credential"],
+          ["llm_provider_credential.rotated", "llm_provider_credential"],
+        ] as const) {
+          await opts.audit?.({
+            actorUserId: principal.userId,
+            installationId: PLATFORM_SCOPE_AUDIT_INSTALLATION_ID,
+            action,
+            targetKind,
+            targetId: "global",
+            before: null,
+            after,
+            now: rotatedAt,
+          });
+        }
+        const meta = await getLlmProviderConfig(opts.db, body.role);
+        if (meta === null) {
+          return reply.code(500).send({ detail: "internal: write succeeded but read returned no row" });
+        }
+        return reply.code(200).send(LlmProviderConfigV1.parse(meta));
+      },
+    );
+
+    // POST /llm-provider-config/preflight — run preflight WITHOUT writing (the save-path re-runs it). 200
+    // regardless of outcome; the UI shows {ok, message} inline. super_admin only.
+    scope.post(
+      "/api/admin/llm-provider-config/preflight",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const parsed = LlmProviderConfigUpdateV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        if (opts.getPreflightValidator === undefined) {
+          return reply.code(503).send({ detail: "preflight validator unwired" });
+        }
+        const body = parsed.data;
+        const result = await opts
+          .getPreflightValidator(body.provider)
+          .validate({ apiKey: body.api_key, modelId: body.model_id, region: body.region });
+        return reply.code(200).send(LlmConnectionTestResultV1.parse({ ok: result.ok, message: result.errorMessage ?? "ok" }));
+      },
+    );
+
+    // POST /llm-provider-config/test-credentials — model-LESS connection check (ADR-0060). super_admin only.
+    scope.post(
+      "/api/admin/llm-provider-config/test-credentials",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const parsed = LlmCredentialsTestV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        if (opts.getPreflightValidator === undefined) {
+          return reply.code(503).send({ detail: "preflight validator unwired" });
+        }
+        const body = parsed.data;
+        const result = await opts
+          .getPreflightValidator(body.provider)
+          .validateCredentials({ apiKey: body.api_key, region: body.region });
+        return reply.code(200).send(LlmConnectionTestResultV1.parse({ ok: result.ok, message: result.errorMessage ?? "ok" }));
       },
     );
 
