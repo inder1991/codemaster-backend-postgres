@@ -56,3 +56,20 @@ export async function upsertPurposeModel(
       model_id = EXCLUDED.model_id, updated_at = now(), updated_by_user_id = EXCLUDED.updated_by_user_id
   `.execute(db);
 }
+
+/** Record the outcome of a model-credential validation probe (llm-models /test). Bare UPDATE keyed by
+ *  (provider, model_id) — no rowcount check, no raise (1:1 with Python set_validation): a /test on an
+ *  unregistered model_id no-ops. `status` is narrowed to ok|failed (untested is the DDL default only). */
+export async function setValidation(
+  db: Kysely<unknown>,
+  args: { provider: string; modelId: string; status: "ok" | "failed"; error: string | null; validatedAt: Date },
+): Promise<void> {
+  await sql`
+    UPDATE core.llm_models SET
+      last_validation_status = ${args.status},
+      last_validation_error = ${args.error},
+      last_validated_at = ${args.validatedAt},
+      updated_at = now()
+    WHERE provider = ${args.provider} AND model_id = ${args.modelId}
+  `.execute(db);
+}

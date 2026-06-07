@@ -295,4 +295,44 @@ export class PostgresLlmProviderSettingsRepo {
     `.execute(this.db);
     return { fingerprint };
   }
+
+  /**
+   * Return decrypted credentials for `provider` or `null` — 1:1 port of `read_decrypted_for_provider`. Scans
+   * for an ENABLED platform-scope row whose `provider` matches, preferring `role='primary'` (the
+   * `ORDER BY (role = 'primary') DESC` makes primary win the `LIMIT 1`). Used by the llm-models `/test`
+   * per-model credential ping. The plaintext key is consumed transiently by the caller — never logged or
+   * returned. (No `enabled` post-filter: the `enabled = true` predicate is in the WHERE clause.)
+   */
+  public async readDecryptedForProvider(provider: string): Promise<LlmProviderSettings | null> {
+    // tenant:exempt reason=platform-config follow_up=PERMANENT-EXEMPTION-platform-llm-config
+    const result = await sql<ProviderCredsRow>`
+      SELECT provider, model_id, region, api_key_ciphertext, enabled
+        FROM core.llm_provider_settings
+       WHERE provider = ${provider} AND scope = 'platform' AND enabled = true
+       ORDER BY (role = 'primary') DESC
+       LIMIT 1
+    `.execute(this.db);
+
+    const row = result.rows[0];
+    if (row === undefined) {
+      return null;
+    }
+
+    const plaintextBytes = await this.vault.transitDecrypt({
+      keyName: VAULT_KEY_NAME,
+      ciphertext: row.api_key_ciphertext,
+    });
+    const apiKey = new TextDecoder("utf-8").decode(plaintextBytes);
+
+    return { provider: row.provider, modelId: row.model_id, region: row.region, apiKey, enabled: row.enabled };
+  }
 }
+
+/** Row shape of the readDecryptedForProvider SELECT (pre-decrypt — carries the ciphertext). */
+type ProviderCredsRow = {
+  readonly provider: string;
+  readonly model_id: string;
+  readonly region: string | null;
+  readonly api_key_ciphertext: string;
+  readonly enabled: boolean;
+};

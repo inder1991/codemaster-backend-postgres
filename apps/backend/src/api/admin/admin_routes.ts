@@ -114,6 +114,7 @@ import {
 import {
   BEDROCK_MODELS,
   deleteModel,
+  setValidation,
   upsertModel,
   upsertPurposeModel,
 } from "#backend/api/admin/llm_catalog_write.js";
@@ -1045,6 +1046,50 @@ export async function registerAdminRoutes(
           return reply.code(404).send({ detail: `no such model: ${params.provider}/${params.model_id}` });
         }
         return reply.code(204).send();
+      },
+    );
+
+    // POST /llm-models/{provider}/{model_id}/test — per-model credential ping. 1:1 with llm_models_router.py
+    // test_model. super_admin only. Reads DECRYPTED provider creds → validate(model_id) → persist the catalog
+    // row's validation status. Returns 200 {ok,message} in every non-auth case (no-creds, ping-ok/fail);
+    // 503 when the vault/validator seam is unwired (TS credential-route convention).
+    scope.post(
+      "/api/admin/llm-models/:provider/:model_id/test",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const params = request.params as { provider: string; model_id: string };
+        if (opts.vault === undefined || opts.getPreflightValidator === undefined) {
+          return reply.code(503).send({ detail: "llm-models preflight not configured (vault + preflight validator unwired)" });
+        }
+        const noCreds = (provider: string) =>
+          reply.code(200).send(
+            LlmConnectionTestResultV1.parse({
+              ok: false,
+              message: `no enabled credentials configured for provider ${provider}; configure /admin/llm-provider-config first`,
+            }),
+          );
+        // Provider-narrowing guard: an unknown provider has no settings row (CHECK-constrained column) →
+        // the faithful no-creds outcome, AND it avoids getPreflightValidator throwing on an unknown provider.
+        if (params.provider !== "bedrock" && params.provider !== "anthropic_direct") {
+          return noCreds(params.provider);
+        }
+        const repo = new PostgresLlmProviderSettingsRepo({ db: opts.db, vault: opts.vault, clock: opts.clock });
+        const creds = await repo.readDecryptedForProvider(params.provider);
+        if (creds === null) {
+          return noCreds(params.provider);
+        }
+        const result = await opts
+          .getPreflightValidator(params.provider)
+          .validate({ apiKey: creds.apiKey, modelId: params.model_id, region: creds.region });
+        // Persist the probe outcome on the catalog row (bare UPDATE — no-ops on an unregistered model_id).
+        await setValidation(opts.db, {
+          provider: params.provider,
+          modelId: params.model_id,
+          status: result.ok ? "ok" : "failed",
+          error: result.errorMessage,
+          validatedAt: opts.clock.now(),
+        });
+        return reply.code(200).send(LlmConnectionTestResultV1.parse({ ok: result.ok, message: result.errorMessage ?? "validated" }));
       },
     );
 

@@ -255,4 +255,101 @@ describeDb("admin llm-config (disposable :5434)", () => {
       await appFail.close();
     }
   });
+
+  // ─── llm-models /test (per-model preflight validation) ───────────────────────────────────────────
+  // Reuses makeAppWithVault + the seeded bedrock/primary settings row. The seed's api_key_ciphertext is a
+  // fake literal ('kms2:1:x') InMemoryVault can't decrypt, so the round-trip tests write a real ciphertext
+  // onto it and restore in finally. setValidation targets the seeded catalog rows M1/M2 (afterAll cleans them).
+  const testUrl = (provider: string, modelId: string): string => `/api/admin/llm-models/${provider}/${modelId}/test`;
+  const setPrimaryCiphertext = async (vault: InMemoryVault, plaintext: string): Promise<void> => {
+    const ct = await vault.transitEncrypt({ keyName: VAULT_KEY_NAME, plaintext: new TextEncoder().encode(plaintext) });
+    await sql`UPDATE core.llm_provider_settings SET api_key_ciphertext = ${ct} WHERE scope='platform' AND role='primary' AND provider='bedrock'`.execute(db);
+  };
+  const restorePrimaryCiphertext = async (): Promise<void> => {
+    await sql`UPDATE core.llm_provider_settings SET api_key_ciphertext = 'kms2:1:x' WHERE scope='platform' AND role='primary' AND provider='bedrock'`.execute(db);
+  };
+  const resetModelValidation = async (modelId: string): Promise<void> => {
+    await sql`UPDATE core.llm_models SET last_validation_status='untested', last_validation_error=NULL WHERE model_id=${modelId}`.execute(db);
+  };
+  const statusOf = async (modelId: string): Promise<string | undefined> =>
+    (await listLlmModels(db)).find((m) => m.model_id === modelId)?.last_validation_status;
+
+  it("llm-models /test: 403 reader; 503 when vault/validator unwired", async () => {
+    const vault = new InMemoryVault();
+    const app = await makeAppWithVault({ vault, ok: true });
+    try {
+      expect(
+        (await app.inject({ method: "POST", url: testUrl("bedrock", M2), cookies: { [SESSION_COOKIE_NAME]: mintCookie("reader") } })).statusCode,
+      ).toBe(403);
+    } finally {
+      await app.close();
+    }
+    const bare = await makeApp();
+    try {
+      expect((await bare.inject({ method: "POST", url: testUrl("bedrock", M2), cookies: superCookie() })).statusCode).toBe(503);
+    } finally {
+      await bare.close();
+    }
+  });
+
+  it("llm-models /test: 200 no-creds (anthropic_direct has no settings row) — no setValidation", async () => {
+    const vault = new InMemoryVault();
+    const app = await makeAppWithVault({ vault, ok: true });
+    try {
+      const res = await app.inject({ method: "POST", url: testUrl("anthropic_direct", M1), cookies: superCookie() });
+      expect(res.statusCode).toBe(200);
+      const body = res.json<{ ok: boolean; message: string }>();
+      expect(body.ok).toBe(false);
+      expect(body.message).toContain("no enabled credentials configured for provider anthropic_direct");
+      expect(await statusOf(M1)).toBe("untested"); // no validation persisted
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("llm-models /test: 200 unknown-provider → ok:false (provider-narrowing guard, no throw)", async () => {
+    const vault = new InMemoryVault();
+    const app = await makeAppWithVault({ vault, ok: true });
+    try {
+      const res = await app.inject({ method: "POST", url: testUrl("nope", M2), cookies: superCookie() });
+      expect(res.statusCode).toBe(200);
+      const body = res.json<{ ok: boolean; message: string }>();
+      expect(body.ok).toBe(false);
+      expect(body.message).toContain("nope");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("llm-models /test: ping fails → 200 {ok:false} + catalog status 'failed' (decrypt round-trip)", async () => {
+    const vault = new InMemoryVault();
+    const app = await makeAppWithVault({ vault, ok: false, message: "upstream returned 403: forbidden" });
+    try {
+      await setPrimaryCiphertext(vault, "sk-real-bedrock-0123456789");
+      const res = await app.inject({ method: "POST", url: testUrl("bedrock", M2), cookies: superCookie() });
+      expect(res.statusCode).toBe(200);
+      expect(res.json<{ ok: boolean; message: string }>()).toEqual({ ok: false, message: "upstream returned 403: forbidden" });
+      expect(await statusOf(M2)).toBe("failed");
+    } finally {
+      await restorePrimaryCiphertext();
+      await resetModelValidation(M2);
+      await app.close();
+    }
+  });
+
+  it("llm-models /test: ping ok → 200 {ok:true,message:'validated'} + catalog status 'ok'", async () => {
+    const vault = new InMemoryVault();
+    const app = await makeAppWithVault({ vault, ok: true });
+    try {
+      await setPrimaryCiphertext(vault, "sk-real-bedrock-0123456789");
+      const res = await app.inject({ method: "POST", url: testUrl("bedrock", M2), cookies: superCookie() });
+      expect(res.statusCode).toBe(200);
+      expect(res.json<{ ok: boolean; message: string }>()).toEqual({ ok: true, message: "validated" });
+      expect(await statusOf(M2)).toBe("ok");
+    } finally {
+      await restorePrimaryCiphertext();
+      await resetModelValidation(M2);
+      await app.close();
+    }
+  });
 });
