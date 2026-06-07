@@ -1,0 +1,139 @@
+# Isolated local-kind infra for the TS backend smoke: its OWN Postgres + Vault + Temporal in a dedicated
+# namespace (does NOT touch the Python `codemaster` / `codemaster-sandbox` namespaces or the shared cluster DB).
+# pg + vault + temporal manifests adapted from the Python repo's helm/local-kind (proven dev manifests).
+# DEV ONLY (ephemeral storage, dev-mode Vault root token, in-memory Temporal). Never any other environment.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: codemaster-backend
+---
+# ─── Postgres (fresh, in-namespace; image already loaded in kind) ──────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: pg-postgresql
+  namespace: codemaster-backend
+spec:
+  selector: { app: pg }
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: pg
+  namespace: codemaster-backend
+spec:
+  serviceName: pg-postgresql
+  replicas: 1
+  selector:
+    matchLabels: { app: pg }
+  template:
+    metadata:
+      labels: { app: pg }
+    spec:
+      containers:
+        - name: postgres
+          image: codemaster-postgres:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: POSTGRES_PASSWORD, value: devpass }
+            - { name: POSTGRES_DB, value: postgres }
+          ports: [{ containerPort: 5432 }]
+          readinessProbe:
+            exec: { command: [pg_isready, -U, postgres] }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+# ─── Vault (dev mode, root token 'devroot') ────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault
+  namespace: codemaster-backend
+  labels: { app.kubernetes.io/name: vault }
+spec:
+  selector: { app.kubernetes.io/name: vault }
+  ports:
+    - { name: http, port: 8200, targetPort: 8200 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vault
+  namespace: codemaster-backend
+  labels: { app.kubernetes.io/name: vault }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: vault }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: vault }
+    spec:
+      containers:
+        - name: vault
+          image: hashicorp/vault:1.18
+          args: [server, -dev, -dev-root-token-id=devroot, -dev-listen-address=0.0.0.0:8200]
+          env:
+            - { name: VAULT_ADDR, value: http://127.0.0.1:8200 }
+            - { name: VAULT_DEV_ROOT_TOKEN_ID, value: devroot }
+            - { name: SKIP_SETCAP, value: "true" }
+          ports: [{ containerPort: 8200, name: http }]
+          readinessProbe:
+            httpGet: { path: /v1/sys/health, port: 8200 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            capabilities: { add: ["IPC_LOCK"] }
+---
+# ─── Temporal (dev server, all-in-one, in-memory) ──────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-frontend
+  namespace: codemaster-backend
+  labels: { app.kubernetes.io/name: temporal }
+spec:
+  selector: { app.kubernetes.io/name: temporal }
+  ports:
+    - { name: grpc, port: 7233, targetPort: 7233 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal
+  namespace: codemaster-backend
+  labels: { app.kubernetes.io/name: temporal }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: temporal }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: temporal }
+    spec:
+      containers:
+        - name: temporal
+          # admin-tools bundles the `temporal` CLI (incl. `server start-dev`) and is already loaded in kind
+          # (the existing cluster runs Temporal 1.31). temporalio/temporal:1.27.2 does not exist on Docker Hub.
+          image: temporalio/admin-tools:1.31.0
+          imagePullPolicy: IfNotPresent
+          command: [temporal, server, start-dev, --ip=0.0.0.0, --port=7233, --ui-ip=0.0.0.0, --ui-port=8233, --namespace=default, --log-level=info]
+          ports:
+            - { containerPort: 7233, name: grpc }
+            - { containerPort: 8233, name: web }
+          readinessProbe:
+            tcpSocket: { port: 7233 }
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { cpu: "1", memory: 1Gi }
