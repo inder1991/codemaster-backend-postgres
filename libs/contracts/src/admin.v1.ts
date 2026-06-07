@@ -22,6 +22,27 @@ export const OrgsListV1 = z
   .strict();
 export type OrgsListV1 = z.infer<typeof OrgsListV1>;
 
+/** One feature flag in GET /api/admin/flags (incl. pending two-person-approval state). */
+export const FlagDetailV1 = z
+  .object({
+    flag_name: z.string(),
+    scope: z.enum(["global", "installation", "repository"]),
+    scope_id: z.string().uuid().nullable().default(null),
+    value_json: z.string(),
+    last_changed_at: z.string().datetime({ offset: true }),
+    last_changed_by_user_id: z.string().uuid().nullable().default(null),
+    pending_second_approver: z.boolean(),
+    pending_first_approver_user_id: z.string().uuid().nullable().default(null),
+    pending_value_json: z.string().nullable().default(null),
+    pending_set_at: z.string().datetime({ offset: true }).nullable().default(null),
+  })
+  .strict();
+export type FlagDetailV1 = z.infer<typeof FlagDetailV1>;
+
+/** GET /api/admin/flags — a bare array of flags visible to the session (global + own-installation). */
+export const FlagListV1 = z.array(FlagDetailV1);
+export type FlagListV1 = z.infer<typeof FlagListV1>;
+
 /** One row in GET /api/admin/audit-events (decrypted excerpts; no schema_version, matching the Python
  *  internal HTTP type). */
 export const AuditEventListItemV1 = z

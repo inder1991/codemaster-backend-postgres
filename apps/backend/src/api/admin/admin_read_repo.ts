@@ -6,6 +6,7 @@ import { type Kysely, sql } from "kysely";
 
 import type {
   FindingRowV1,
+  FlagDetailV1,
   PullRequestRowV1,
   ReviewListItemV1,
   TaxonomyGapEntryV1,
@@ -151,6 +152,46 @@ export async function searchReviews(
   }));
   const total = r.rows.length > 0 ? Number(r.rows[0]!.total_count) : 0;
   return { items, total };
+}
+
+type FlagDbRow = {
+  flag_name: string;
+  scope: "global" | "installation" | "repository";
+  scope_id: string | null;
+  value_json: string;
+  last_changed_at: Date;
+  last_changed_by_user_id: string | null;
+  pending_second_approver: boolean;
+  pending_first_approver_user_id: string | null;
+  pending_value_json: string | null;
+  pending_set_at: Date | null;
+};
+
+/** Flags visible to the session: global + the caller's own installation, ordered by name. 1:1 with
+ *  postgres_flags_repo.list. */
+export async function listFlags(
+  db: Kysely<unknown>,
+  installationId: string,
+): Promise<Array<FlagDetailV1>> {
+  const r = await sql<FlagDbRow>`
+    SELECT flag_name, scope, scope_id, value_json, last_changed_at, last_changed_by_user_id,
+           pending_second_approver, pending_first_approver_user_id, pending_value_json, pending_set_at
+    FROM core.flags
+    WHERE scope = 'global' OR (scope = 'installation' AND scope_id = ${installationId})
+    ORDER BY flag_name
+  `.execute(db);
+  return r.rows.map((row) => ({
+    flag_name: row.flag_name,
+    scope: row.scope,
+    scope_id: row.scope_id,
+    value_json: row.value_json,
+    last_changed_at: new Date(row.last_changed_at).toISOString(),
+    last_changed_by_user_id: row.last_changed_by_user_id,
+    pending_second_approver: row.pending_second_approver,
+    pending_first_approver_user_id: row.pending_first_approver_user_id,
+    pending_value_json: row.pending_value_json,
+    pending_set_at: row.pending_set_at === null ? null : new Date(row.pending_set_at).toISOString(),
+  }));
 }
 
 type TaxonomyGapRow = {

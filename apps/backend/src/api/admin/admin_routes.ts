@@ -17,6 +17,7 @@ import {
   AuditSearchResponseV1,
   DashboardSummaryV1,
   FindingListResponseV1,
+  FlagListV1,
   OrgsListV1,
   PullRequestListResponseV1,
   ReviewsListPageV1,
@@ -25,6 +26,7 @@ import {
 
 import {
   listFindings,
+  listFlags,
   listOrgs,
   listPullRequests,
   listTaxonomyGaps,
@@ -105,6 +107,17 @@ export async function registerAdminRoutes(
       async (request, reply) => {
         const orgs = await listOrgs(opts.db, request.authPrincipal!.installationId);
         return reply.code(200).send(OrgsListV1.parse({ orgs }));
+      },
+    );
+
+    scope.get(
+      "/api/admin/flags",
+      {
+        preHandler: requireRole(["reader", "platform_operator", "platform_owner", "super_admin"]),
+      },
+      async (request, reply) => {
+        const flags = await listFlags(opts.db, request.authPrincipal!.installationId);
+        return reply.code(200).send(FlagListV1.parse(flags));
       },
     );
 
