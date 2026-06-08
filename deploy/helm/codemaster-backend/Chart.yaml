@@ -1,0 +1,35 @@
+apiVersion: v2
+name: codemaster-backend
+description: >-
+  Production Helm chart for the codemaster TypeScript backend — the single
+  combined pod that runs the HTTP API + the Temporal review worker + the
+  outbox-dispatcher worker in one fail-loud process. Secrets are injected via
+  HashiCorp Vault Agent (never cleartext); the schema migration runs as a
+  pre-install/pre-upgrade Helm hook. Self-contained (no library-chart
+  dependency) so it ships from this repo without the frozen Python tree.
+type: application
+
+# Chart version — bump on every chart change (SemVer, independent of the app).
+version: 0.1.0
+
+# Tracks the application image this chart was written against. CI overrides the
+# running image via `image.tag` / `image.digest`; this is the default + the
+# value surfaced in app.kubernetes.io/version.
+appVersion: "0.1.0"
+
+kubeVersion: ">=1.25.0-0"
+
+home: https://github.com/inder1991/codemaster-backend
+sources:
+  - https://github.com/inder1991/codemaster-backend
+keywords:
+  - codemaster
+  - code-review
+  - temporal
+  - backend
+maintainers:
+  - name: codemaster platform team
+
+annotations:
+  # Surfaced by `helm show chart` / chart registries.
+  category: ApplicationServer

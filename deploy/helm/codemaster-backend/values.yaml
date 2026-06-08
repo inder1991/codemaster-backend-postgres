@@ -1,0 +1,319 @@
+# =============================================================================
+# codemaster-backend — PRODUCTION-HARDENED defaults.
+#
+# This chart deploys ONE combined pod (HTTP API + Temporal review worker +
+# outbox-dispatcher worker, single fail-loud process). Override per environment;
+# `values-kind.yaml` is the dev overlay that relaxes these for a kind cluster.
+#
+# SECRETS: never put a credential in this file or the ConfigMap. Secrets are
+# injected by HashiCorp Vault Agent (see `vault:` below). The only exception is
+# `vault.token.*` / dev mode, which is for kind/local ONLY.
+# =============================================================================
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Applied to every rendered object.
+commonLabels: {}
+commonAnnotations: {}
+
+image:
+  # CI publishes the app image here; override per environment.
+  repository: nexus.acme.com/codemaster/codemaster-backend
+  # Pin by digest in production (immutable). If `digest` is set it wins over `tag`.
+  tag: ""            # defaults to .Chart.AppVersion when empty
+  digest: ""         # e.g. sha256:abc123... (preferred for prod)
+  pullPolicy: IfNotPresent
+  pullSecrets: []    # [{ name: regcred }]
+
+# Replicas. With the PDB (minAvailable:1) + RollingUpdate(maxUnavailable:0), a
+# rollout/drain stays invisible to webhook->review latency at >=2.
+replicaCount: 2
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  # The pod talks to Postgres/Temporal/Vault, never the K8s API, so the token
+  # is not mounted (least privilege). Flip only if you add K8s-API access.
+  automountServiceAccountToken: false
+
+# RBAC Role/RoleBinding for in-cluster K8s Job dispatch (heavy sandboxed
+# linters). This build runs in-worker linters only, so no Role is needed.
+rbac:
+  create: false
+
+podAnnotations: {}
+podLabels: {}
+
+# Roll pods when the rendered ConfigMap changes (checksum annotation).
+rollOnConfigChange: true
+
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+
+# SIGTERM lets the Temporal worker drain in-flight review activities
+# (clone+analyze+LLM+post) before the pod is killed. Raise if your longest
+# review exceeds this.
+terminationGracePeriodSeconds: 300
+# preStop sleep: lets kube-proxy deregister the endpoint before SIGTERM, so no
+# new HTTP/webhook lands on a terminating pod. 0 disables.
+preStopSleepSeconds: 5
+
+# /readyz is shallow (returns Ready once HTTP binds — BEFORE the Temporal review
+# worker connects + polls). With maxUnavailable:0 a rollout would otherwise advance
+# the instant a new pod's socket binds; minReadySeconds makes the pod prove it
+# survives the worker-connect window first. Tune to your observed worker-connect time.
+minReadySeconds: 20
+
+# ---- Security context -------------------------------------------------------
+# Hardened by default. NOTE: runAsNonRoot:true requires an image built from the
+# updated Dockerfile (USER 1001); the dev overlay relaxes this for the current
+# root dev image. The app writes ONLY to the mounted scratch volumes, so
+# readOnlyRootFilesystem:true is safe.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  fsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+# Writable scratch (REQUIRED with readOnlyRootFilesystem:true). The app writes
+# ONLY to these three paths. `medium: Memory` makes a tmpfs (counts against the
+# memory limit). Mount paths are taken from config.workspaceRoot / cloneCacheRoot.
+scratch:
+  workspace:
+    sizeLimit: 5Gi
+    medium: ""
+  cloneCache:
+    sizeLimit: 5Gi
+    medium: ""
+  tmp:
+    sizeLimit: 256Mi
+    medium: ""
+
+service:
+  type: ClusterIP
+  port: 80           # service port -> targets the container's http port
+  annotations: {}
+
+ports:
+  http: 8080         # MUST equal config.api.port
+
+# ---- Probes -----------------------------------------------------------------
+# /healthz binds as soon as the HTTP server listens; /readyz is shallow.
+# The startup probe gives a generous budget for the blocking boot work
+# (Vault field-key fetch when auth routes are on + tree-sitter verify +
+# Temporal connect) so a slow-but-healthy boot is not liveness-killed.
+probes:
+  startup:
+    enabled: true
+    path: /healthz
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 30   # ~150s boot budget
+  readiness:
+    enabled: true
+    path: /readyz
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 6
+  liveness:
+    enabled: true
+    path: /healthz
+    periodSeconds: 15
+    timeoutSeconds: 3
+    failureThreshold: 6
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 75
+  targetMemoryUtilizationPercentage: 0   # 0 = disabled
+  behavior: {}
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Scheduling
+nodeSelector: {}
+tolerations: []
+affinity: {}
+# Default soft spread across hostnames; set to [] to disable, or override.
+topologySpreadConstraints: []
+priorityClassName: ""
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []          # [{ host: codemaster.acme.com, paths: [{ path: /, pathType: Prefix }] }]
+  tls: []            # [{ secretName: codemaster-tls, hosts: [codemaster.acme.com] }]
+
+# Schema migration as a pre-install/pre-upgrade Helm hook. Runs `npm run
+# migrate:up` (node-pg-migrate) against CODEMASTER_PG_CORE_DSN before the
+# rollout. Inherits the same Vault secret injection as the app.
+migrate:
+  enabled: true
+  backoffLimit: 3
+  hookWeight: -5
+  hookDeletePolicy: before-hook-creation,hook-succeeded
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+# =============================================================================
+# Application configuration (NON-SECRET) -> ConfigMap.
+# =============================================================================
+config:
+  # Forces the worker's real-cluster guard (explicit TEMPORAL_NAMESPACE +
+  # TEMPORAL_TASK_QUEUE required). Keep "production".
+  nodeEnv: production
+
+  # Cap V8 old-space (MB) under the container memory limit so it GCs before the
+  # kernel OOM-kills the single combined process (tree-sitter + LLM buffers). 0
+  # disables (V8 default ≈ container limit). ~75% of resources.limits.memory.
+  nodeMaxOldSpaceSizeMb: 1536
+
+  api:
+    host: "0.0.0.0"
+    port: 8080
+    authRoutesEnabled: true   # eagerly loads field-encryption keys from Vault at boot
+    secureCookies: true       # HTTPS-only session cookies (PROD)
+
+  temporal:
+    address: ""               # REQUIRED, e.g. temporal-frontend.temporal.svc:7233
+    namespace: ""             # REQUIRED in production
+    taskQueue: review-default
+    outboxTaskQueue: outbox-dispatcher
+    tls: false
+
+  embeddings:
+    provider: platform        # platform | openai_compat
+    # provider=platform reads the Qwen DSN. If it carries credentials, move it
+    # to vault.agent.envSecrets and clear this.
+    qwenDsn: ""
+    openaiCompat:
+      baseUrl: ""
+      modelName: ""
+      # ONLY for a NON-secret key (e.g. Ollama's literal "ollama"). For a real key,
+      # leave empty and inject CODEMASTER_EMBEDDER_API_KEY via vault.agent.envSecrets.
+      apiKey: ""
+
+  workspaceRoot: /var/lib/codemaster/workspaces
+  cloneCacheRoot: /clone-cache
+
+  outbox:
+    maxAttempts: 5
+
+  review:
+    placeholderEnabled: true
+    mutexLeaseTtlSeconds: 1800          # floored at 600 in-app
+    runReaperStaleAfterSeconds: 3600    # floored at 300 in-app
+
+  repairCooldownSeconds: 300
+
+  # Dormant-by-default feature flags (operators flip at Helm).
+  features:
+    lifecycleWritesEnabled: false
+    carryForwardEnabled: false
+    llmRerankEnabled: false
+
+  langfuse:
+    exportEnabled: true       # only active when host + key (Vault) are both set
+    host: ""
+
+  # Injected by CI; also surfaces at GET /version.
+  buildSha: ""
+
+  # Arbitrary extra non-secret env, as a flat string map. Escape hatch for keys
+  # not yet first-classed above.
+  extra: {}
+
+# Raw extra env / envFrom / volumes (e.g. external-secrets, downward API).
+extraEnv: []
+extraEnvFrom: []
+extraVolumes: []
+extraVolumeMounts: []
+
+# `helm test` config (curl /healthz + /readyz through the Service).
+tests:
+  image: curlimages/curl:8.10.1
+
+# =============================================================================
+# Secrets — Vault Agent injection (no cleartext anywhere).
+# =============================================================================
+vault:
+  # agent    -> HashiCorp Vault Agent Injector (PROD default; ADR-0071).
+  #             File secrets read natively (agent-file); env secrets sourced
+  #             from a rendered env-file by the container entrypoint.
+  # token    -> vault-api mode with a static VAULT_TOKEN (DEV/kind ONLY).
+  # external -> nothing injected here; bring your own via extraEnv/extraEnvFrom
+  #             /extraVolumes (e.g. external-secrets-operator syncing Vault->Secret).
+  mode: agent
+
+  # VAULT_ADDR. REQUIRED in agent mode too: the field-encryption keyset is a nested
+  # payload that cannot be agent-file-flattened, so the app reads it over the Vault
+  # HTTP API at boot (when config.api.authRoutesEnabled=true). The injector supplies
+  # the TOKEN (agent-inject-token), but the ADDRESS must be in env. e.g. http://vault.vault:8200
+  addr: ""
+  secretsDir: /vault/secrets            # CODEMASTER_VAULT_SECRETS_DIR (agent renders here)
+  tokenPath: /var/run/secrets/vault/token  # VAULT_AGENT_TOKEN_PATH for token/vault-api mode (agent mode uses {secretsDir}/token)
+
+  agent:
+    role: codemaster-backend
+    # KV secrets the app reads NATIVELY as files. `file` MUST equal the app's
+    # sanitized filename (KV logical path with every non-alphanumeric char ->
+    # '_'). `path` is the Vault KV-v2 API path.
+    fileSecrets:
+      - file: codemaster_github_app
+        path: secret/data/codemaster/github/app
+      - file: codemaster_field_encryption_keys
+        path: secret/data/codemaster/field-encryption/keys
+      - file: codemaster_api_auth
+        path: secret/data/codemaster/api/auth
+      - file: codemaster_confluence_token
+        path: secret/data/codemaster/confluence/token
+    # Secrets the app reads from ENV (PG DSN etc.). Each maps an env var to a
+    # Vault path+key; all are rendered into one sourced `runtime-env` file.
+    envSecrets:
+      - env: CODEMASTER_PG_CORE_DSN
+        path: secret/data/codemaster/postgres/app
+        key: dsn
+      # - { env: CODEMASTER_PG_MAINT_DSN, path: secret/data/codemaster/postgres/maint, key: dsn }
+      # - { env: CODEMASTER_EMBEDDER_API_KEY, path: secret/data/codemaster/embedder, key: api_key }
+      # - { env: LANGFUSE_API_KEY, path: secret/data/codemaster/langfuse, key: api_key }
+    extraAnnotations: {}
+
+  # DEV/kind ONLY. When mode=token, the chart wires VAULT_TOKEN + the PG DSN
+  # from a Secret. Either reference an existing Secret or (kind) let the chart
+  # create one from these literals. NEVER use create:true in a real environment.
+  token:
+    existingSecret: ""        # Secret holding VAULT_TOKEN + CODEMASTER_PG_CORE_DSN
+    create: false
+    vaultToken: ""
+    pgCoreDsn: ""

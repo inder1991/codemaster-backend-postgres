@@ -1,0 +1,58 @@
+codemaster-backend {{ .Chart.AppVersion }} — release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+This release runs ONE combined pod: HTTP API + Temporal review worker + outbox-dispatcher worker.
+
+Image:      {{ include "codemaster-backend.image" . }}
+Replicas:   {{ if .Values.autoscaling.enabled }}HPA {{ .Values.autoscaling.minReplicas }}–{{ .Values.autoscaling.maxReplicas }}{{ else }}{{ .Values.replicaCount }}{{ end }}
+Secrets:    vault.mode={{ .Values.vault.mode }}
+Migration:  {{ if .Values.migrate.enabled }}ran as a pre-install/pre-upgrade hook (npm run migrate:up){{ else }}DISABLED — run migrations out-of-band{{ end }}
+
+Reach the API:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "codemaster-backend.fullname" . }} 8080:{{ .Values.service.port }}
+  curl localhost:8080/healthz && curl localhost:8080/readyz
+
+Verify the rollout:
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "codemaster-backend.fullname" . }}
+
+{{- if .Values.ingress.enabled }}
+
+Ingress hosts:
+{{- range .Values.ingress.hosts }}
+  - http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- end }}
+
+{{- /* ----- Loud production pre-flight warnings ----- */ -}}
+{{- $warnings := list -}}
+{{- if eq .Values.config.nodeEnv "production" -}}
+  {{- if not .Values.config.temporal.address -}}{{- $warnings = append $warnings "config.temporal.address is EMPTY — the worker's real-cluster guard will fail boot. Set it (e.g. temporal-frontend.temporal.svc:7233)." -}}{{- end -}}
+  {{- if not .Values.config.temporal.namespace -}}{{- $warnings = append $warnings "config.temporal.namespace is EMPTY — REQUIRED when nodeEnv=production." -}}{{- end -}}
+{{- end -}}
+{{- if eq .Values.config.embeddings.provider "platform" -}}
+  {{- if not .Values.config.embeddings.qwenDsn -}}{{- $warnings = append $warnings "embeddings.provider=platform but config.embeddings.qwenDsn is empty — set it, or move it to vault.agent.envSecrets if it carries credentials." -}}{{- end -}}
+{{- else if eq .Values.config.embeddings.provider "openai_compat" -}}
+  {{- if not .Values.config.embeddings.openaiCompat.baseUrl -}}{{- $warnings = append $warnings "embeddings.provider=openai_compat but openaiCompat.baseUrl is empty — fail-loud at boot." -}}{{- end -}}
+{{- end -}}
+{{- if and (eq .Values.vault.mode "token") .Values.vault.token.create -}}{{- $warnings = append $warnings "vault.mode=token + vault.token.create=true materializes a cleartext Secret — DEV/kind ONLY. Use vault.mode=agent in real environments." -}}{{- end -}}
+{{- if eq .Values.vault.mode "agent" -}}
+  {{- if and .Values.config.api.authRoutesEnabled (not .Values.vault.addr) -}}{{- $warnings = append $warnings "vault.mode=agent + authRoutesEnabled=true but vault.addr is EMPTY — the field-encryption keyset loads over the Vault HTTP API at boot (it can't be agent-file-flattened) and REQUIRES VAULT_ADDR, or the pod crashloops. Set vault.addr (e.g. http://vault.vault:8200)." -}}{{- end -}}
+{{- end -}}
+{{- if .Values.podSecurityContext.runAsNonRoot -}}
+  {{- if not .Values.image.digest -}}{{- end -}}
+{{- end -}}
+
+{{- if $warnings }}
+
+⚠️  PRE-FLIGHT WARNINGS:
+{{- range $warnings }}
+  - {{ . }}
+{{- end }}
+{{- end }}
+
+{{- if .Values.podSecurityContext.runAsNonRoot }}
+
+NOTE: podSecurityContext.runAsNonRoot=true requires an image built with USER 1001
+(the updated Dockerfile). If your image still runs as root with no app-user, the
+git cloner may fail (no $HOME/passwd entry for uid 1001). For the current dev
+image use `-f values-kind.yaml`.
+{{- end }}
