@@ -505,6 +505,34 @@ describeDb("embedder write lifecycle (disposable :5439)", () => {
     expect(audited.some((a) => a.action === "embedder.generation.rolled_back")).toBe(true);
     await app.close();
   });
+
+  it("POST /reembed/manual-retire: retires a 'ready' generation, 409 on the active generation", async () => {
+    const { app, audited } = await makeApp();
+    const genId = await seedReadyWithChunks("manual-retire-test", 1);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/admin/embedder/reembed/manual-retire",
+      cookies: owner(),
+      payload: { schema_version: 1, generation_id: genId },
+    });
+    expect(res.statusCode).toBe(200);
+    const retired = res.json<{ state: string; retire_reason: string }>();
+    expect(retired.state).toBe("retired");
+    expect(retired.retire_reason).toBe("manual_retire");
+    expect(audited.some((a) => a.action === "embedder.generation.manual_retired")).toBe(true);
+
+    // Active seed gen 1 is not 'ready' → 409.
+    const res2 = await app.inject({
+      method: "POST",
+      url: "/api/admin/embedder/reembed/manual-retire",
+      cookies: owner(),
+      payload: { schema_version: 1, generation_id: SEED_ACTIVE_GENERATION },
+    });
+    expect(res2.statusCode).toBe(409);
+    expect(res2.json<{ detail: { error: string } }>().detail.error).toBe("invalid_state_transition");
+    await app.close();
+  });
 });
 
 export { makeApp, owner, seedBackfilling, seedReadyWithChunks };
