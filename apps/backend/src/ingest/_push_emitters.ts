@@ -16,6 +16,7 @@ import {
   PostgresOutboxRepo,
 } from "#backend/domain/repos/outbox_repo.js";
 import { resolveInternalRepositoryId } from "#backend/ingest/_webhook_resolvers.js";
+import { resolveReviewTaskQueue } from "#backend/worker/temporal_config.js";
 
 // ─── constants (1:1 with the Python module-level Finals) ─────────────────────────────────────────────
 
@@ -24,7 +25,7 @@ import { resolveInternalRepositoryId } from "#backend/ingest/_webhook_resolvers.
  *  carrying the Python PascalCase string would dead-letter ("workflow type not registered"). Mirrors the
  *  R1 review-workflow-type rename in github_webhook_persistence.ts. */
 const SYNC_CODE_OWNERS_WORKFLOW_TYPE = "syncCodeOwners";
-const SYNC_CODE_OWNERS_TASK_QUEUE = "review-default";
+const SYNC_CODE_OWNERS_TASK_QUEUE = resolveReviewTaskQueue();
 const SYNC_CODE_OWNERS_PAYLOAD_SCHEMA_VERSION = 1;
 
 /** Temporal type the RefreshSemanticDocs dispatch carries. RENAME vs Python `RefreshSemanticDocsWorkflow`
@@ -33,7 +34,7 @@ const SYNC_CODE_OWNERS_PAYLOAD_SCHEMA_VERSION = 1;
  *  review worker on `review-default` (project-owner directive: no separate worker pools), matching the
  *  reconcile/sync emitters in github_webhook_persistence.ts. */
 const REFRESH_SEMANTIC_DOCS_WORKFLOW_TYPE = "refreshSemanticDocs";
-const REFRESH_SEMANTIC_DOCS_TASK_QUEUE = "review-default";
+const REFRESH_SEMANTIC_DOCS_TASK_QUEUE = resolveReviewTaskQueue();
 const REFRESH_SEMANTIC_DOCS_PAYLOAD_SCHEMA_VERSION = 1;
 
 // ─── push-payload extractor (1:1 with `_extract_push_default_branch_metadata`) ───────────────────────

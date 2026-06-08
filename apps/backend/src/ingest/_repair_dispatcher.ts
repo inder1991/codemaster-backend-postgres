@@ -33,6 +33,7 @@ import {
   recordRepositoryBootstrapRepairBlockedSkip,
   recordRepositoryBootstrapRepairCooldownSkip,
 } from "#backend/observability/reconcile_metrics.js";
+import { resolveReviewTaskQueue } from "#backend/worker/temporal_config.js";
 
 import { TemporalWorkflowStartPayloadV1 } from "#contracts/outbox_payloads.v1.js";
 import {
@@ -55,7 +56,7 @@ type Executor = Kysely<unknown>;
 //     combined-pod review worker polls. The repair workflow + the hydrate activity register on THAT worker,
 //     so the dispatched outbox row must carry that queue. Inlined as the literal here (rather than imported)
 //     to avoid a cycle through github_webhook_persistence; the two MUST stay in lockstep.
-export const REPAIR_INSTALLATION_REPOSITORIES_TASK_QUEUE = "review-default";
+export const REPAIR_INSTALLATION_REPOSITORIES_TASK_QUEUE = resolveReviewTaskQueue();
 export const REPAIR_INSTALLATION_REPOSITORIES_WORKFLOW_TYPE = "repairInstallationRepositories";
 
 /**

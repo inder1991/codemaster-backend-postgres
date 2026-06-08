@@ -13,6 +13,7 @@ import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 
 import { RealTemporalClient } from "#backend/adapters/real_temporal_client.js";
+import { resolveReviewTaskQueue } from "#backend/worker/temporal_config.js";
 import { registerTemporalWorkflowStartSink } from "#backend/outbox/sinks/temporal_workflow_start.js";
 import { registerInstallationReconcileSink } from "#backend/outbox/sinks/installation_reconcile.js";
 
@@ -40,7 +41,7 @@ function dispatcherTaskQueue(): string {
 /** The combined-pod REVIEW worker's task queue. The Wave-1 liveness schedules target this queue (NOT the
  *  dispatcher's) because the review worker's `workflowsPath` bundle (all_workflows.ts) re-exports the
  *  mutex-janitor + review-run-reaper workflows — so a fired schedule lands a start this pod can run. */
-const REVIEW_TASK_QUEUE = "review-default";
+const REVIEW_TASK_QUEUE = resolveReviewTaskQueue();
 
 /**
  * Wave-1 liveness-backstop cron schedules (ADR-0074 / ADR-0064). Cadence + schedule/workflow ids are
