@@ -45,6 +45,57 @@ const WORKFLOW_BODY_PATH = fileURLToPath(
 const ACTIVITY_PROXY_PATH = fileURLToPath(
   new URL("../../../apps/backend/src/workflows/activity_proxy.ts", import.meta.url),
 );
+// Wave-1 liveness-backstop cron workflows (ADR-0074 / ADR-0064). Each proxies ONE snake_case activity
+// (mutex_janitor_activity / review_run_reaper_activity); registering by-name must hold or the 5-min/10-min
+// cron dies with ActivityNotRegistered at fire time — exactly when the backstop is needed. Parsed here so
+// the source-derived coverage assertion below PINS those registrations against a future drop.
+const MUTEX_JANITOR_WORKFLOW_PATH = fileURLToPath(
+  new URL("../../../apps/backend/src/workflows/mutex_janitor.workflow.ts", import.meta.url),
+);
+const REVIEW_RUN_REAPER_WORKFLOW_PATH = fileURLToPath(
+  new URL("../../../apps/backend/src/workflows/review_run_reaper.workflow.ts", import.meta.url),
+);
+// Wave-4 Confluence ingest workflows (combined-pod worker reuse — ADR-0075). The full-sync fan-out proxies
+// 7 confluence activities; the stale-sweep proxies the 8th; the single-page resync proxies 4 of the 7. Each
+// is bundled into the SAME pod's `all_workflows.ts` and dispatches its activities by their REGISTERED
+// snake_case Temporal names — registering by-name must hold or the schedule (6h/24h) dies with
+// ActivityNotRegistered at fire time. Parsed here so the source-derived coverage assertion PINS them.
+const CONFLUENCE_INGEST_WORKFLOW_PATH = fileURLToPath(
+  new URL("../../../apps/backend/src/workflows/confluence_ingest.workflow.ts", import.meta.url),
+);
+const MARK_STALE_CHUNKS_WORKFLOW_PATH = fileURLToPath(
+  new URL("../../../apps/backend/src/workflows/mark_stale_chunks.workflow.ts", import.meta.url),
+);
+const TRIGGER_PAGE_RESYNC_WORKFLOW_PATH = fileURLToPath(
+  new URL("../../../apps/backend/src/workflows/trigger_page_resync.workflow.ts", import.meta.url),
+);
+// Wave-2 retention cron workflows (combined-pod worker reuse). The run_id retention workflow proxies its 3
+// snake_case sweep activities; the partition-maintenance workflow proxies 1; the workspace-retention
+// workflow proxies its 3 snake_case sweeps + `releaseWorkspace`. Each is bundled into the SAME pod's
+// `all_workflows.ts` and dispatches its activities by their REGISTERED names — registering by-name must hold
+// or the schedule (daily / 5-min) dies with ActivityNotRegistered at fire time. Parsed here so the
+// source-derived coverage assertion PINS them.
+const RUN_ID_RETENTION_WORKFLOW_PATH = fileURLToPath(
+  new URL("../../../apps/backend/src/workflows/run_id_retention.workflow.ts", import.meta.url),
+);
+const PARTITION_MAINTENANCE_WORKFLOW_PATH = fileURLToPath(
+  new URL("../../../apps/backend/src/workflows/partition_maintenance.workflow.ts", import.meta.url),
+);
+const WORKSPACE_RETENTION_WORKFLOW_PATH = fileURLToPath(
+  new URL("../../../apps/backend/src/workflows/workspace_retention.workflow.ts", import.meta.url),
+);
+// Wave-3 spine workflows (clone-backed semantic-docs refresh + CODEOWNERS sync). The refresh workflow
+// proxies TWO snake_case activities (clone_repository_activity Step 1 + refresh_semantic_docs_activity
+// Step 2); the sync workflow proxies one (sync_code_owners_activity). Each is bundled into the SAME pod's
+// `all_workflows.ts` and dispatches its activities by their REGISTERED names — registering by-name must hold
+// or an event-driven start dies with ActivityNotRegistered at dispatch. Parsed here so the source-derived
+// coverage assertion PINS all three (clone_repository_activity is ONLY proxied by the refresh workflow).
+const SYNC_CODE_OWNERS_WORKFLOW_PATH = fileURLToPath(
+  new URL("../../../apps/backend/src/workflows/sync_code_owners.workflow.ts", import.meta.url),
+);
+const REFRESH_SEMANTIC_DOCS_WORKFLOW_PATH = fileURLToPath(
+  new URL("../../../apps/backend/src/workflows/refresh_semantic_docs.workflow.ts", import.meta.url),
+);
 
 /**
  * Parse the REGISTERED activity names from every `proxyActivities<{ <name>(...)` block in a workflow-side
@@ -69,6 +120,16 @@ const PROXIED_ACTIVITY_NAMES: ReadonlyArray<string> = [
   ...new Set([
     ...parseProxiedActivityNames(WORKFLOW_BODY_PATH),
     ...parseProxiedActivityNames(ACTIVITY_PROXY_PATH),
+    ...parseProxiedActivityNames(MUTEX_JANITOR_WORKFLOW_PATH),
+    ...parseProxiedActivityNames(REVIEW_RUN_REAPER_WORKFLOW_PATH),
+    ...parseProxiedActivityNames(CONFLUENCE_INGEST_WORKFLOW_PATH),
+    ...parseProxiedActivityNames(MARK_STALE_CHUNKS_WORKFLOW_PATH),
+    ...parseProxiedActivityNames(TRIGGER_PAGE_RESYNC_WORKFLOW_PATH),
+    ...parseProxiedActivityNames(RUN_ID_RETENTION_WORKFLOW_PATH),
+    ...parseProxiedActivityNames(PARTITION_MAINTENANCE_WORKFLOW_PATH),
+    ...parseProxiedActivityNames(WORKSPACE_RETENTION_WORKFLOW_PATH),
+    ...parseProxiedActivityNames(SYNC_CODE_OWNERS_WORKFLOW_PATH),
+    ...parseProxiedActivityNames(REFRESH_SEMANTIC_DOCS_WORKFLOW_PATH),
   ]),
 ];
 
@@ -134,6 +195,41 @@ const EXPECTED_ACTIVITY_NAMES = [
   "applyArbitrationActivity",
   "recordToolRuns",
   "generateFixPrompt",
+  // Wave-1 liveness-backstop cron activities (ADR-0074 / ADR-0064), registered under their snake_case
+  // Temporal names (the MutexJanitor/ReviewRunReaper workflows proxy them by these exact keys).
+  "mutex_janitor_activity",
+  "review_run_reaper_activity",
+  // Wave-4 Confluence ingest activities (combined-pod worker reuse — ADR-0075), registered under their
+  // snake_case Temporal names (the 3 confluence workflows proxy them by these exact keys). The 8: the
+  // entry-point space enumeration, the 6 sync-holder methods (fetch_space_pages/fetch_page_body/
+  // sanitize_page/chunk_and_embed/upsert_chunks/reconcile_deletions), and the staleness sweep.
+  "list_active_confluence_spaces_activity",
+  "fetch_space_pages_activity",
+  "fetch_page_body_activity",
+  "sanitize_page_activity",
+  "chunk_and_embed_activity",
+  "upsert_chunks_activity",
+  "reconcile_deletions_activity",
+  "mark_stale_chunks_activity",
+  // Wave-2 retention cron activities (combined-pod worker reuse), registered under their snake_case Temporal
+  // names (the 3 Wave-2 retention workflows proxy them by these exact keys). The run_id retention workflow
+  // proxies 3 (close-stale-PRs / retire-old-runs / delete-old-events); partition-maintenance proxies 1; the
+  // workspace-retention workflow proxies 3 (orphan-sweep / reap / released-retention) + releaseWorkspace
+  // (camelCase, already listed above).
+  "run_id_close_stale_prs",
+  "run_id_retire_old_runs",
+  "run_id_delete_old_events",
+  "run_pg_partman_maintenance",
+  "run_workspace_orphan_sweep_activity",
+  "run_workspace_reap_activity",
+  "run_workspace_released_retention_activity",
+  // Wave-3 spine activities (clone primitive + CODEOWNERS sync + semantic-docs refresh), registered under
+  // their snake_case Temporal names (the 2 Wave-3 workflows proxy them by these exact keys; the refresh
+  // workflow proxies BOTH clone_repository_activity as Step 1 AND refresh_semantic_docs_activity as Step 2,
+  // the sync workflow proxies sync_code_owners_activity).
+  "clone_repository_activity",
+  "sync_code_owners_activity",
+  "refresh_semantic_docs_activity",
 ] as const;
 
 describe("buildActivities() composition root", () => {

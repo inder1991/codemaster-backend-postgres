@@ -42,5 +42,6 @@ export type {
   Histogram,
   Meter,
   ObservableGauge,
+  ObservableResult,
   UpDownCounter,
 } from "@opentelemetry/api";

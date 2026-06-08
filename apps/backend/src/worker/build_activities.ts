@@ -151,13 +151,56 @@ import { loadParentReviewFindingsActivity } from "#backend/activities/load_paren
 import { reconcileInstallation } from "#backend/activities/reconcile_installation.activity.js";
 import { reconcileRepositories } from "#backend/activities/reconcile_repositories.activity.js";
 import { hydrateInstallationRepositories } from "#backend/activities/hydrate_installation_repositories.activity.js";
+import { mutexJanitorActivity } from "#backend/activities/mutex_janitor.activity.js";
+import { reviewRunReaperActivity } from "#backend/activities/review_run_reaper.activity.js";
 import { GitHubApiReviewClient } from "#backend/integrations/github/review_client.js";
+
+// ── Wave-2 retention cron activities (combined-pod worker reuse). Registered under their snake_case
+// Temporal NAMES below so the 3 Wave-2 retention workflows (all_workflows.ts bundle) dispatch them. The
+// run_id PR-closer needs a GitHubApiClient (the close-stale-PRs sweep); the other six self-resolve their
+// DSN (+ clock) inside the activity body. ──
+import { RunIdRetentionActivities } from "#backend/activities/run_id_retention.activity.js";
+import { runPgPartmanMaintenanceActivity } from "#backend/activities/partition_maintenance.activity.js";
+import {
+  runWorkspaceOrphanSweepActivity,
+  runWorkspaceReapActivity,
+  runWorkspaceReleasedRetentionActivity,
+} from "#backend/activities/workspace_retention.activity.js";
+
+// ── Wave-4 Confluence ingest activities (combined-pod worker reuse — ADR-0075). Registered under their
+// snake_case Temporal NAMES below so the 3 confluence workflows (all_workflows.ts bundle) dispatch them. ──
+import {
+  ConfluenceSyncActivities,
+  PoolExistingChunkRowsReader,
+  type ConfluenceChunkClient,
+} from "#backend/activities/confluence_sync.activity.js";
+import { ListActiveConfluenceSpacesActivity } from "#backend/activities/list_active_confluence_spaces.activity.js";
+import { MarkStaleChunksActivity } from "#backend/activities/mark_stale_chunks.activity.js";
+import { PostgresConfluenceChunksRepo } from "#backend/domain/repos/confluence_chunks_repo.js";
+import { PostgresConfluencePageApprovalsRepo } from "#backend/domain/repos/confluence_page_approvals_repo.js";
+import { ConfluenceClient } from "#backend/integrations/confluence/client.js";
+import { ConfluenceTokenProvider } from "#backend/integrations/confluence/token_provider.js";
+import { tenantKysely } from "#platform/db/database.js";
 
 import { GitHubIssueClient } from "#backend/integrations/github/issue_client.js";
 import { PostgresLinkedIssuesRepo } from "#backend/domain/repos/pr_issue_links_repo.js";
 import { PostgresGithubIssuesCacheRepo } from "#backend/domain/repos/github_issues_cache_repo.js";
 import { PostgresPrFilesRepo } from "#backend/domain/repos/pr_files_repo.js";
 import { PostgresCodeOwnersRepo } from "#backend/domain/repos/code_owners_repo.js";
+
+// ── Wave-3 spine activities (clone primitive + CODEOWNERS sync + semantic-docs refresh) ──
+// The refresh_semantic_docs workflow (all_workflows.ts bundle) proxies clone_repository_activity (Step 1) +
+// refresh_semantic_docs_activity (Step 2); the sync_code_owners workflow proxies sync_code_owners_activity.
+// All three resolve their real collaborators here (the lazy deferred-Vault token provider / GitHub contents
+// client + the shared embedder + the Postgres repos over the ADR-0062 pool).
+import { cloneRepositoryActivity } from "#backend/activities/clone_repository.activity.js";
+import {
+  SyncCodeOwnersActivity,
+  type CodeOwnersFilePort,
+} from "#backend/activities/sync_code_owners.activity.js";
+import { RefreshSemanticDocsActivity } from "#backend/activities/refresh_semantic_docs.activity.js";
+import { PostgresKnowledgeChunkRepo } from "#backend/domain/repos/knowledge_chunks_repo.js";
+import { type TokenProvider } from "#backend/integrations/github/api_client.js";
 
 import { resolveEmbeddingsConsumer } from "#backend/adapters/resolve_embeddings.js";
 import { VaultHttpPort } from "#backend/adapters/vault_http.js";
@@ -362,6 +405,45 @@ function makeLazyFixPromptIssueClient(): FixPromptIssueCommentClientShape {
   };
 }
 
+// ─── lazy GitHubApiClient (the run_id retention PR-closer seam — deferred-Vault, fail-open) ───────
+//
+// The Wave-2 `run_id_close_stale_prs` sweep closes ephemeral smoke PRs via a real {@link GitHubApiClient}
+// (it calls `.get` to list open PRs by branch + `.patch` to close them). `RunIdRetentionActivities`
+// fail-CLOSES if its `githubClient` is undefined (it throws at method entry, BEFORE any DB query) — so the
+// holder MUST be handed a client object. We hand it a LAZY {@link GitHubApiClient} (the same deferred-Vault
+// shape the issue / fix-prompt / manifest clients use): the underlying real client is built on the FIRST
+// `.get`/`.patch` call and memoized, so worker boot stays off `VAULT_ADDR` / GitHub round-trips. In dev the
+// candidate SQL returns ZERO ephemeral runs (none are stale), so the sweep never reaches a `.get`/`.patch`
+// → the lazy client is NEVER built → an absent dev GitHub-App Vault token can't crash the daily 3am sweep.
+// Only `.get` and `.patch` are reachable from the PR-closer, so the lazy structural proxy exposing exactly
+// those two methods is a faithful, fully-real client seam (no stub).
+
+/**
+ * A {@link GitHubApiClient} that builds the real client on first `.get`/`.patch` (the deferred-Vault,
+ * fail-open pattern) and memoizes it. The PR-closer (`runIdCloseStalePrsActivity`) only ever calls `.get`
+ * (list open PRs by head) + `.patch` (close a PR), so exposing exactly those two lazily-resolving methods is
+ * a faithful real seam. Cast to {@link GitHubApiClient} (the ctor field type) — the rest of the class
+ * surface is unreachable from the PR-closer code path.
+ */
+function makeLazyRetentionGithubClient(): GitHubApiClient {
+  let memo: Promise<GitHubApiClient> | undefined;
+  const lazy = (): Promise<GitHubApiClient> => {
+    if (memo === undefined) {
+      // Same deferred-Vault wiring buildFixPromptApi / buildManifestContentsClient use.
+      memo = buildFixPromptApi();
+    }
+    return memo;
+  };
+  return {
+    get: async (path: Parameters<GitHubApiClient["get"]>[0], opts: Parameters<GitHubApiClient["get"]>[1]) =>
+      (await lazy()).get(path, opts),
+    patch: async (
+      path: Parameters<GitHubApiClient["patch"]>[0],
+      opts: Parameters<GitHubApiClient["patch"]>[1],
+    ) => (await lazy()).patch(path, opts),
+  } as unknown as GitHubApiClient;
+}
+
 // ─── real LlmClientCache (ledger-wired client factory — ADR-0068) ────────────────────────────────
 
 /**
@@ -471,6 +553,140 @@ function makeLazyManifestContentsClient(): GithubContentsPort {
   };
 }
 
+// ─── lazy GitHubAppTokenProvider (the clone_repository_activity getToken seam — deferred-Vault) ────
+//
+// `clone_repository_activity` REQUIRES a `getToken: TokenProvider` (numeric installation id → install
+// token) — there is no production default in the activity module (no Vault-backed provider lives there),
+// so the integrator wires it here. It is the SAME token-provider construction the review cloner +
+// issue/fix-prompt/manifest clients use (one shared GitHub HTTP transport + a Vault adapter from env + a
+// {@link GitHubAppTokenProvider}). Deferred to the first clone dispatch (async `fromEnv`-build) + memoized,
+// so worker boot stays off `VAULT_ADDR` / GitHub round-trips — mirroring the deferred-Vault pattern the
+// other GitHub seams use.
+
+/**
+ * A {@link TokenProvider} that builds the real {@link GitHubAppTokenProvider} on first call (the
+ * deferred-Vault pattern) and memoizes it, then mints the installation token for the per-call NUMERIC
+ * installation id. `clone_repository_activity` calls this with `githubInstallationId` resolved at the
+ * activity boundary. A faithful, fully-real token seam — no stub, just construction deferred + memoized.
+ */
+function makeLazyTokenProvider(): TokenProvider {
+  let memo: Promise<GitHubAppTokenProvider> | undefined;
+  const lazy = (): Promise<GitHubAppTokenProvider> => {
+    if (memo === undefined) {
+      memo = (async (): Promise<GitHubAppTokenProvider> => {
+        const clock = new WallClock();
+        const githubHttp = new FetchGitHubHttpClient({});
+        const vault = VaultHttpPort.fromEnv();
+        return GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
+      })();
+    }
+    return memo;
+  };
+  return async (installationId: number): Promise<string> => (await lazy()).getToken(installationId);
+}
+
+// ─── CODEOWNERS file port (the sync_code_owners_activity GitHub seam — deferred-Vault, 3-path lookup) ──
+//
+// 1:1 with the Python `_SpineCodeOwnersAdapter` (worker/main.py:2565-2589): wrap a lazy deferred-Vault
+// GitHubApiClient.getContents behind the activity's narrow {@link CodeOwnersFilePort}. Tries the three
+// CODEOWNERS lookup paths in order (`.github/CODEOWNERS`, `CODEOWNERS`, `docs/CODEOWNERS`) per GitHub's
+// documented resolution; returns the first one that exists (base64-ASCII bytes + blob SHA), or null when
+// none of the conventional paths host a CODEOWNERS file (the activity treats null as a no-op → returns 0).
+
+/** The three conventional CODEOWNERS paths, tried in order (1:1 with the Python `_CODEOWNERS_LOOKUP_PATHS`). */
+const CODEOWNERS_LOOKUP_PATHS = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"] as const;
+
+/**
+ * A {@link CodeOwnersFilePort} that wraps the lazy deferred-Vault {@link GithubContentsPort} (the SAME
+ * `getContents` seam the manifest fetch uses) with the 3-path CODEOWNERS lookup. 1:1 with the Python
+ * `_SpineCodeOwnersAdapter.fetch_codeowners`. `getContents` additionally takes a telemetry-only
+ * `installationUuid` (NOT consumed by `_request`); the port only carries the numeric id, so the stringified
+ * numeric id is supplied for that unused parameter.
+ */
+function makeCodeOwnersFilePort(): CodeOwnersFilePort {
+  const contents = makeLazyManifestContentsClient();
+  return {
+    fetchCodeowners: async (args): Promise<readonly [Uint8Array, string] | null> => {
+      for (const path of CODEOWNERS_LOOKUP_PATHS) {
+        const result = await contents.getContents({
+          installationId: args.installationId,
+          // Telemetry-only param the GitHub `_request` does not consume; the port carries only the numeric
+          // id, so the stringified numeric id stands in for the unused UUID telemetry slot.
+          installationUuid: String(args.installationId),
+          owner: args.owner,
+          repo: args.repo,
+          path,
+          ref: args.ref,
+        });
+        if (result !== null) {
+          return result;
+        }
+      }
+      // None of the conventional paths host a CODEOWNERS file — no-op (the activity returns 0).
+      return null;
+    },
+  };
+}
+
+// ─── lazy ConfluenceClient (the confluence-sync read seam — deferred-Vault, fail-open) ────────────
+//
+// The Confluence Vault token is ABSENT in dev (ADR-0075): there is no `codemaster/confluence/token` KV
+// secret. `ConfluenceTokenProvider.fromVault` is fail-HARD (it rejects on a missing/invalid Vault secret),
+// so building the real ConfluenceClient EAGERLY at worker boot would crash a dev pod that never even has a
+// Confluence space configured. The lazy adapter below defers the entire Vault → token-provider → client
+// construction to the FIRST `listPages`/`getPage` call and memoizes it. In dev,
+// `list_active_confluence_spaces_activity` returns ZERO spaces (no `core.integrations` confluence_space
+// rows), so the sync workflow never reaches a per-space `fetch_space_pages` → the client is NEVER built →
+// the absent Vault token never trips boot. In prod (token present, spaces configured), the first sync tick
+// builds the real client through the same Vault-backed token-provider the Python worker uses.
+
+/**
+ * Build the REAL {@link ConfluenceClient} from the Vault-backed {@link ConfluenceTokenProvider}. Mirrors
+ * the deferred-Vault pattern the GitHub clients use: `ConfluenceTokenProvider.fromVault` reads the
+ * `codemaster/confluence/token` KV secret (base_url + token [+ optional email]) and is fail-HARD on a
+ * missing/invalid secret — so this is called LAZILY on first use, never at boot. The provider's
+ * `tokenProvider` (`getToken`) is invoked per request so a rotated token propagates without restart; its
+ * `baseUrl` + optional Cloud `authEmail` (HTTP-Basic vs Bearer) select the auth scheme. The background
+ * refresh loop is started so the cached token stays fresh across the 6h sync cadence.
+ */
+async function buildConfluenceClient(): Promise<ConfluenceClient> {
+  const vault = VaultHttpPort.fromEnv();
+  const clock = new WallClock();
+  const tokenProvider = await ConfluenceTokenProvider.fromVault({ vault, clock });
+  tokenProvider.startRefreshLoop();
+  // `authEmail` selects HTTP-Basic (Atlassian Cloud) vs Bearer (Server/DC PAT). It is OMITTED (not set to
+  // `undefined`) when the provider has no Cloud email, per exactOptionalPropertyTypes — a `null` email keeps
+  // the Bearer scheme.
+  const authEmail = tokenProvider.authEmail;
+  return new ConfluenceClient({
+    baseUrl: tokenProvider.baseUrl,
+    tokenProvider: tokenProvider.getToken.bind(tokenProvider),
+    ...(authEmail !== null ? { authEmail } : {}),
+    clock,
+  });
+}
+
+/**
+ * A {@link ConfluenceChunkClient} (the narrow `listPages`/`getPage` slice {@link ConfluenceClient}
+ * satisfies structurally) that builds the real client on first use (the deferred-Vault, fail-open
+ * pattern) and memoizes it. Construction is deferred to the moment a sync actually touches Confluence —
+ * which in dev (no configured spaces) NEVER happens, so the absent Vault token can't crash boot. A
+ * faithful, fully-real client seam: no stub, just construction deferred + memoized.
+ */
+function makeLazyConfluenceClient(): ConfluenceChunkClient {
+  let memo: Promise<ConfluenceClient> | undefined;
+  const lazy = (): Promise<ConfluenceClient> => {
+    if (memo === undefined) {
+      memo = buildConfluenceClient();
+    }
+    return memo;
+  };
+  return {
+    listPages: async (args) => (await lazy()).listPages(args),
+    getPage: async (args) => (await lazy()).getPage(args),
+  };
+}
+
 export function buildActivities(): Record<string, (input: never) => Promise<unknown>> {
   const dsn = requireCoreDsn();
   // Per-review routing: the worker composition root NO LONGER reads CODEMASTER_GITHUB_INSTALLATION_ID. Every
@@ -575,6 +791,72 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
   });
   const parseManifestDependenciesHolder = new ParseManifestDependenciesActivity({ clock });
 
+  // ── Wave-4 Confluence ingest holders (combined-pod worker reuse — ADR-0075) ──
+  // The 8 confluence activities run on THIS review worker (queue "review-default"); the 3 confluence
+  // workflows (all_workflows.ts bundle) proxy them by their snake_case Temporal names. The sync holder is
+  // wired with: the LAZY fail-open ConfluenceClient (the narrow listPages/getPage slice — built on first
+  // Confluence touch, NEVER at boot, so the dev-absent Vault token can't crash startup); the SHARED real
+  // embedder (the same EmbeddingsPort the review path resolves) + its model name (the same
+  // "qwen3-embed-0.6b" the embed_query activity uses); the PostgresConfluenceChunksRepo over the shared
+  // ADR-0062 pool (satisfies BOTH the idempotency-lookup `findExistingChunkEmbedding` AND the
+  // upsert/reconcile writer slices); the PostgresConfluencePageApprovalsRepo (the `getActiveApproval`
+  // reader); and the PoolExistingChunkRowsReader (the hard-limit candidate-row fetcher). embedderCache is
+  // NOT wired (ADR-0075): upsert writes ONLY the legacy embedding column (the dual-write stays dormant).
+  const confluenceChunksRepo = new PostgresConfluenceChunksRepo({ db: tenantKysely(dsn), clock });
+  const confluencePageApprovalsRepo = new PostgresConfluencePageApprovalsRepo({
+    db: tenantKysely(dsn),
+  });
+  const confluenceSyncActivities = new ConfluenceSyncActivities({
+    client: makeLazyConfluenceClient(),
+    embeddings: embedder,
+    modelName: "qwen3-embed-0.6b",
+    chunkEmbeddingLookup: confluenceChunksRepo,
+    chunksWriter: confluenceChunksRepo,
+    approvalsReader: confluencePageApprovalsRepo,
+    existingChunkRowsReader: new PoolExistingChunkRowsReader({ dsn }),
+  });
+  // The entry-point + staleness holders self-resolve the shared pool from the injected dsn (lazy pool —
+  // no connection at construction). In dev, listActiveSpaces returns ZERO rows (no configured spaces), so
+  // the sync loop never reaches the lazy ConfluenceClient.
+  const listActiveConfluenceSpacesActivity = new ListActiveConfluenceSpacesActivity({ dsn });
+  const markStaleChunksActivity = new MarkStaleChunksActivity({ dsn });
+
+  // ── Wave-2 retention cron holder (run_id close-stale-PRs / retire-runs / delete-events) ──
+  // The PR-closer needs a GitHubApiClient (the close-stale-PRs sweep lists + closes ephemeral smoke PRs);
+  // it's handed the LAZY deferred-Vault client (built on first GitHub touch — never at boot, and never at
+  // all in dev where the candidate SQL returns zero stale ephemeral runs). The retire-runs / delete-events
+  // sweeps self-resolve the shared pool + clock from env inside the activity body (the holder injects
+  // neither dsn nor clock → each sweep reads CODEMASTER_PG_CORE_DSN + WallClock). The 3 bound methods are
+  // registered under their snake_case Temporal names below (the runIdRetentionWorkflow proxies them by
+  // those exact keys). The other 4 Wave-2 activities (partition + the 3 workspace sweeps) are bare 0-arg
+  // self-resolving functions — registered directly.
+  const runIdRetentionActivities = new RunIdRetentionActivities({
+    githubClient: makeLazyRetentionGithubClient(),
+  });
+
+  // ── Wave-3 spine holders (clone primitive + CODEOWNERS sync + semantic-docs refresh) ──
+  // clone_repository_activity REQUIRES `getToken` (no production default in the module) — wired to the lazy
+  // deferred-Vault token provider (the SAME GitHubAppTokenProvider mint the review cloner uses; called with
+  // the per-PR NUMERIC installation id resolved at the activity boundary); `cloner`/`resolveRepo` fall to
+  // their real production defaults. sync_code_owners_activity is wired with: the 3-path CODEOWNERS file port
+  // (lazy deferred-Vault getContents — 1:1 with the Python `_SpineCodeOwnersAdapter`); PostgresCodeOwnersRepo
+  // over the shared ADR-0062 pool; and `isEnabled` DEFAULT-OFF (the `code_owners_v1` flag reader is unported
+  // — FOLLOW-UP-code-owners-v1-flag-reader, same default-off precedent as fetch_suggested_reviewers). The
+  // refresh_semantic_docs holder shares the SAME real embedder + model name ("qwen3-embed-0.6b") the
+  // confluence chunk_and_embed / embed_query path uses, over a PostgresKnowledgeChunkRepo on the shared pool.
+  const cloneRepositoryGetToken = makeLazyTokenProvider();
+  const syncCodeOwnersActivity = new SyncCodeOwnersActivity({
+    github: makeCodeOwnersFilePort(),
+    repo: PostgresCodeOwnersRepo.fromDsn(dsn),
+    isEnabled: async (): Promise<boolean> => false,
+    clock,
+  });
+  const refreshSemanticDocsActivity = new RefreshSemanticDocsActivity({
+    embeddings: embedder,
+    chunkRepo: PostgresKnowledgeChunkRepo.fromDsn(dsn),
+    modelName: "qwen3-embed-0.6b",
+  });
+
   return {
     // ── 1-arg activities, ready as-is ──
     persistReviewFindings,
@@ -669,5 +951,61 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     ["reconcile_installation_activity"]: reconcileInstallation,
     ["reconcile_repositories_activity"]: reconcileRepositories,
     ["hydrate_installation_repositories_activity"]: hydrateInstallationRepositories,
+    // ── Wave-1 liveness-backstop activities (ADR-0074 / ADR-0064) ──
+    // Cron-scheduled sweeps (mutex janitor every 5 min, review-run reaper every 10 min) registered under
+    // their snake_case TEMPORAL NAMES because the MutexJanitor/ReviewRunReaper workflows proxy them by those
+    // exact names (a camelCase key would dispatch `ActivityNotRegistered`). Self-wiring 0-arg activities
+    // (resolve CODEMASTER_PG_CORE_DSN + clock inside the body), registered bare.
+    ["mutex_janitor_activity"]: mutexJanitorActivity,
+    ["review_run_reaper_activity"]: reviewRunReaperActivity,
+    // ── Wave-4 Confluence ingest activities (combined-pod worker reuse — ADR-0075) ──
+    // Registered under their snake_case TEMPORAL NAMES because the 3 confluence workflows
+    // (confluence_ingest / mark_stale_chunks / trigger_page_resync, all in all_workflows.ts) proxy them by
+    // those exact names — a camelCase key would dispatch `ActivityNotRegistered`. The bound-method holders
+    // are bound (`.bind(holder)`) so the `this` stays wired when destructured into the map.
+    ["list_active_confluence_spaces_activity"]:
+      listActiveConfluenceSpacesActivity.listActiveSpaces.bind(listActiveConfluenceSpacesActivity),
+    ["fetch_space_pages_activity"]:
+      confluenceSyncActivities.fetchSpacePages.bind(confluenceSyncActivities),
+    ["fetch_page_body_activity"]:
+      confluenceSyncActivities.fetchPageBody.bind(confluenceSyncActivities),
+    ["sanitize_page_activity"]: confluenceSyncActivities.sanitizePage.bind(confluenceSyncActivities),
+    ["chunk_and_embed_activity"]:
+      confluenceSyncActivities.chunkAndEmbed.bind(confluenceSyncActivities),
+    ["upsert_chunks_activity"]: confluenceSyncActivities.upsertChunks.bind(confluenceSyncActivities),
+    ["reconcile_deletions_activity"]:
+      confluenceSyncActivities.reconcileDeletions.bind(confluenceSyncActivities),
+    ["mark_stale_chunks_activity"]:
+      markStaleChunksActivity.markStaleChunks.bind(markStaleChunksActivity),
+    // ── Wave-2 retention cron activities (combined-pod worker reuse) ──
+    // Registered under their snake_case TEMPORAL NAMES because the 3 Wave-2 retention workflows
+    // (runIdRetentionWorkflow / partitionMaintenanceWorkflow / workspaceRetentionWorkflow, all in
+    // all_workflows.ts) proxy them by those exact names — a camelCase key would dispatch
+    // ActivityNotRegistered. The 3 run_id sweeps are bound methods of the RunIdRetentionActivities holder
+    // (the PR-closer carries the lazy deferred-Vault GitHubApiClient); partition + the 3 workspace sweeps
+    // are bare 0-arg self-resolving functions.
+    ["run_id_close_stale_prs"]:
+      runIdRetentionActivities.runIdCloseStalePrs.bind(runIdRetentionActivities),
+    ["run_id_retire_old_runs"]:
+      runIdRetentionActivities.runIdRetireOldRuns.bind(runIdRetentionActivities),
+    ["run_id_delete_old_events"]:
+      runIdRetentionActivities.runIdDeleteOldEvents.bind(runIdRetentionActivities),
+    ["run_pg_partman_maintenance"]: runPgPartmanMaintenanceActivity,
+    ["run_workspace_orphan_sweep_activity"]: runWorkspaceOrphanSweepActivity,
+    ["run_workspace_reap_activity"]: runWorkspaceReapActivity,
+    ["run_workspace_released_retention_activity"]: runWorkspaceReleasedRetentionActivity,
+    // ── Wave-3 spine activities (clone primitive + CODEOWNERS sync + semantic-docs refresh) ──
+    // Registered under their snake_case TEMPORAL NAMES because the 2 Wave-3 workflows (sync_code_owners +
+    // refresh_semantic_docs, both in all_workflows.ts) proxy them by those exact names — a camelCase key
+    // would dispatch ActivityNotRegistered (the refresh workflow proxies BOTH clone_repository_activity as
+    // Step 1 AND refresh_semantic_docs_activity as Step 2). clone_repository_activity(input, deps) is
+    // CURRIED with the lazy deferred-Vault token provider so the registered value is genuinely 1-arg; the
+    // sync + refresh holders are bound (`.bind(holder)`) so `this` stays wired when destructured.
+    ["clone_repository_activity"]: (input: Parameters<typeof cloneRepositoryActivity>[0]) =>
+      cloneRepositoryActivity(input, { getToken: cloneRepositoryGetToken }),
+    ["sync_code_owners_activity"]:
+      syncCodeOwnersActivity.syncCodeOwners.bind(syncCodeOwnersActivity),
+    ["refresh_semantic_docs_activity"]:
+      refreshSemanticDocsActivity.refreshSemanticDocs.bind(refreshSemanticDocsActivity),
   } as Record<string, (input: never) => Promise<unknown>>;
 }
