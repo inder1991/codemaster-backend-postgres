@@ -5,7 +5,7 @@
 import { type StartWorkflowCall, type TemporalClientPort } from "#backend/adapters/temporal_port.js";
 import { type IdReusePolicy } from "#contracts/outbox_payloads.v1.js";
 
-export interface AdminTemporalPort {
+export type AdminTemporalPort = {
   dispatchWorkflow(a: {
     workflowType: string;
     workflowId: string;
@@ -18,7 +18,7 @@ export interface AdminTemporalPort {
     signalName: string;
     input?: unknown;
   }): Promise<void>;
-}
+};
 
 const NO_TIMEOUT_SECONDS = 0;
 
