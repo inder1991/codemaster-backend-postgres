@@ -179,6 +179,39 @@ export const LearningDetailV1 = z
   .strict();
 export type LearningDetailV1 = z.infer<typeof LearningDetailV1>;
 
+// ─── Knowledge write (PUT body, stale-write 409 envelope, proposal reject body) ──────────────────
+// 1:1 with codemaster/api/admin/knowledge.py (_UpdateLearningBody / _StaleWrite / _RejectProposal).
+
+/** PUT /api/admin/knowledge/{learning_id} request body — new body markdown. */
+export const UpdateLearningBodyV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    body_markdown: z.string().min(1).max(8192),
+  })
+  .strict();
+export type UpdateLearningBodyV1 = z.infer<typeof UpdateLearningBodyV1>;
+
+/** 409 Conflict — optimistic-concurrency mismatch (If-Match version stale). Carries current state
+ *  so the frontend renders a collision-diff modal. */
+export const StaleWriteV1 = z
+  .object({
+    code: z.literal("stale_write"),
+    current_body: z.string(),
+    current_version: z.number().int(),
+  })
+  .strict();
+export type StaleWriteV1 = z.infer<typeof StaleWriteV1>;
+
+/** POST /api/admin/knowledge/proposals/{proposal_id}/reject request body — rejection reason,
+ *  bounded 10–2048 chars (trimmed). */
+export const RejectProposalV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    reason: z.string().min(10).max(2048),
+  })
+  .strict();
+export type RejectProposalV1 = z.infer<typeof RejectProposalV1>;
+
 // ─── Integrations (platform-scope; in-memory keyset pagination) ──────────────────────────────────
 
 /** One integration in GET /api/admin/integrations (config_json kept as an opaque raw JSON string). */
