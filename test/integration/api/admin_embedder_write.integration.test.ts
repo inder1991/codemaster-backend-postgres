@@ -288,6 +288,60 @@ describeDb("embedder write lifecycle (disposable :5439)", () => {
       await app.close();
     }
   });
+
+  it("POST /reembed/cancel: cancels pending backfill (signal recorded), 409 invalid_state_transition on re-cancel", async () => {
+    const { app, inner, audited } = await makeApp();
+
+    const startRes = await app.inject({
+      method: "POST",
+      url: "/api/admin/embedder/reembed/start",
+      cookies: owner(),
+      payload: { schema_version: 1, target_model_name: "cancel-test", generation_label: null, generation_reason: null },
+    });
+    expect(startRes.statusCode).toBe(200);
+    const genId = startRes.json<{ generation_id: number }>().generation_id;
+
+    const cancelRes = await app.inject({
+      method: "POST",
+      url: "/api/admin/embedder/reembed/cancel",
+      cookies: owner(),
+      payload: { schema_version: 1, generation_id: genId },
+    });
+    expect(cancelRes.statusCode).toBe(200);
+    const cancelled = cancelRes.json<{ state: string; retire_reason: string }>();
+    expect(cancelled.state).toBe("retired");
+    expect(cancelled.retire_reason).toBe("cancelled");
+
+    // Best-effort cancel signal recorded against the reembed workflow id.
+    expect(
+      inner.signals.some(([wfId, signal]) => wfId === `reembed-generation-${genId}` && signal === "cancel"),
+    ).toBe(true);
+    expect(audited.some((a) => a.action === "embedder.generation.cancelled")).toBe(true);
+
+    // Re-cancel (already retired) → 409.
+    const res2 = await app.inject({
+      method: "POST",
+      url: "/api/admin/embedder/reembed/cancel",
+      cookies: owner(),
+      payload: { schema_version: 1, generation_id: genId },
+    });
+    expect(res2.statusCode).toBe(409);
+    expect(res2.json<{ detail: { error: string } }>().detail.error).toBe("invalid_state_transition");
+    await app.close();
+  });
+
+  it("POST /reembed/cancel: 404 generation_not_found", async () => {
+    const { app } = await makeApp();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/admin/embedder/reembed/cancel",
+      cookies: owner(),
+      payload: { schema_version: 1, generation_id: 9_999_999 },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json<{ detail: { error: string } }>().detail.error).toBe("generation_not_found");
+    await app.close();
+  });
 });
 
 export { makeApp, owner, seedBackfilling, seedReadyWithChunks };
