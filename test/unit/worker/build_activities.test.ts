@@ -69,6 +69,21 @@ const MARK_STALE_CHUNKS_WORKFLOW_PATH = fileURLToPath(
 const TRIGGER_PAGE_RESYNC_WORKFLOW_PATH = fileURLToPath(
   new URL("../../../apps/backend/src/workflows/trigger_page_resync.workflow.ts", import.meta.url),
 );
+// Wave-2 retention cron workflows (combined-pod worker reuse). The run_id retention workflow proxies its 3
+// snake_case sweep activities; the partition-maintenance workflow proxies 1; the workspace-retention
+// workflow proxies its 3 snake_case sweeps + `releaseWorkspace`. Each is bundled into the SAME pod's
+// `all_workflows.ts` and dispatches its activities by their REGISTERED names — registering by-name must hold
+// or the schedule (daily / 5-min) dies with ActivityNotRegistered at fire time. Parsed here so the
+// source-derived coverage assertion PINS them.
+const RUN_ID_RETENTION_WORKFLOW_PATH = fileURLToPath(
+  new URL("../../../apps/backend/src/workflows/run_id_retention.workflow.ts", import.meta.url),
+);
+const PARTITION_MAINTENANCE_WORKFLOW_PATH = fileURLToPath(
+  new URL("../../../apps/backend/src/workflows/partition_maintenance.workflow.ts", import.meta.url),
+);
+const WORKSPACE_RETENTION_WORKFLOW_PATH = fileURLToPath(
+  new URL("../../../apps/backend/src/workflows/workspace_retention.workflow.ts", import.meta.url),
+);
 
 /**
  * Parse the REGISTERED activity names from every `proxyActivities<{ <name>(...)` block in a workflow-side
@@ -98,6 +113,9 @@ const PROXIED_ACTIVITY_NAMES: ReadonlyArray<string> = [
     ...parseProxiedActivityNames(CONFLUENCE_INGEST_WORKFLOW_PATH),
     ...parseProxiedActivityNames(MARK_STALE_CHUNKS_WORKFLOW_PATH),
     ...parseProxiedActivityNames(TRIGGER_PAGE_RESYNC_WORKFLOW_PATH),
+    ...parseProxiedActivityNames(RUN_ID_RETENTION_WORKFLOW_PATH),
+    ...parseProxiedActivityNames(PARTITION_MAINTENANCE_WORKFLOW_PATH),
+    ...parseProxiedActivityNames(WORKSPACE_RETENTION_WORKFLOW_PATH),
   ]),
 ];
 
@@ -179,6 +197,18 @@ const EXPECTED_ACTIVITY_NAMES = [
   "upsert_chunks_activity",
   "reconcile_deletions_activity",
   "mark_stale_chunks_activity",
+  // Wave-2 retention cron activities (combined-pod worker reuse), registered under their snake_case Temporal
+  // names (the 3 Wave-2 retention workflows proxy them by these exact keys). The run_id retention workflow
+  // proxies 3 (close-stale-PRs / retire-old-runs / delete-old-events); partition-maintenance proxies 1; the
+  // workspace-retention workflow proxies 3 (orphan-sweep / reap / released-retention) + releaseWorkspace
+  // (camelCase, already listed above).
+  "run_id_close_stale_prs",
+  "run_id_retire_old_runs",
+  "run_id_delete_old_events",
+  "run_pg_partman_maintenance",
+  "run_workspace_orphan_sweep_activity",
+  "run_workspace_reap_activity",
+  "run_workspace_released_retention_activity",
 ] as const;
 
 describe("buildActivities() composition root", () => {

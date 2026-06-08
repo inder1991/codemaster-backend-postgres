@@ -31,6 +31,16 @@ export type EnsureCronScheduleArgs = {
   readonly taskQueue: string;
   /** A 5-field cron expression (e.g. the every-5-minutes form used by the mutex janitor). */
   readonly cronExpression: string;
+  /**
+   * OPTIONAL single positional input the started workflow receives. OMIT for 0-arg workflows (the
+   * Wave-1 mutex/reaper + the Wave-2 partition-maintenance sweeps take no input → `args: []`). SUPPLY a
+   * default-constructed input object for workflows whose body reads `input.<field>` with no internal
+   * default (the Wave-2 run_id retention workflow reads `input.prTtlDays/runTtlDays/eventTtlDays`, so its
+   * schedule MUST pass `RUN_ID_RETENTION_DEFAULT_INPUT` — `{ prTtlDays: 7, runTtlDays: 30, eventTtlDays: 90 }`
+   * — 1:1 with the Python `args=[7, 30, 90]`; without it `undefined.prTtlDays` throws and the daily sweep
+   * retries forever). When omitted the action emits `args: []`; when present it emits `args: [actionInput]`.
+   */
+  readonly actionInput?: Record<string, unknown>;
 };
 
 /**
@@ -50,17 +60,21 @@ export type EnsureIntervalScheduleArgs = {
   readonly workflowId: string;
   /** The task queue the workflow is registered on (Wave 4 combined-pod: "review-default"). */
   readonly taskQueue: string;
-  /** The interval cadence, in SECONDS (e.g. 21600 = 6h, 86400 = 24h). */
+  /** The interval cadence, in SECONDS (e.g. 21600 = 6h, 86400 = 24h, 300 = 5min). */
   readonly intervalSeconds: number;
   /**
-   * The single positional input the started workflow receives. The Python schedule actions pass a
-   * DEFAULT-CONSTRUCTED input object (`args=[RefreshConfluenceInputV1()]` / `[MarkStaleChunksInputV1()]`),
-   * NOT an empty list — a fired schedule that started the workflow with no arg would hand the activity
-   * `undefined`, and `MarkStaleChunksInputV1.parse(undefined)` THROWS (a Zod `.default()` only fills a
-   * missing KEY in a PRESENT object, not `undefined`), retrying forever. So this MUST carry the default
-   * input (e.g. `{ schema_version: 1 }`).
+   * OPTIONAL single positional input the started workflow receives. The Confluence Wave-4 schedule actions
+   * pass a DEFAULT-CONSTRUCTED input object (`args=[RefreshConfluenceInputV1()]` /
+   * `[MarkStaleChunksInputV1()]`), NOT an empty list — a fired schedule that started the workflow with no
+   * arg would hand the activity `undefined`, and `MarkStaleChunksInputV1.parse(undefined)` THROWS (a Zod
+   * `.default()` only fills a missing KEY in a PRESENT object, not `undefined`), retrying forever. So those
+   * MUST carry the default input (e.g. `{ schema_version: 1 }`).
+   *
+   * OMIT it for a 0-arg interval workflow whose Python schedule passes `args=[]` — the Wave-2
+   * `workspaceRetentionWorkflow` takes NO input (the Python `ensure_workspace_retention_schedule` registers
+   * `args=[]`). When omitted the action emits `args: []`; when present it emits `args: [actionInput]`.
    */
-  readonly actionInput: Record<string, unknown>;
+  readonly actionInput?: Record<string, unknown>;
 };
 
 /**
@@ -92,7 +106,9 @@ export async function ensureCronSchedule(
         workflowType: args.workflowType,
         taskQueue: args.taskQueue,
         workflowId: args.workflowId,
-        args: [],
+        // 0-arg workflows (mutex/reaper/partition) omit actionInput → []; the run_id retention workflow
+        // supplies its default TTL input → [actionInput]. 1:1 with the Python (args=[] vs args=[7,30,90]).
+        args: args.actionInput !== undefined ? [args.actionInput] : [],
       },
       policies: { overlap: ScheduleOverlapPolicy.SKIP },
     });
@@ -130,9 +146,10 @@ export async function ensureIntervalSchedule(
         workflowType: args.workflowType,
         taskQueue: args.taskQueue,
         workflowId: args.workflowId,
-        // Pass the default-constructed input (NOT [] — see EnsureIntervalScheduleArgs.actionInput). 1:1
-        // with the Python `args=[RefreshConfluenceInputV1()]` / `[MarkStaleChunksInputV1()]`.
-        args: [args.actionInput],
+        // Pass the default-constructed input when present (the Confluence schedules — 1:1 with the Python
+        // `args=[RefreshConfluenceInputV1()]` / `[MarkStaleChunksInputV1()]`); omit it for a 0-arg interval
+        // workflow (workspace_retention — 1:1 with the Python `args=[]`), emitting `args: []`.
+        args: args.actionInput !== undefined ? [args.actionInput] : [],
       },
       policies: { overlap: ScheduleOverlapPolicy.SKIP },
     });

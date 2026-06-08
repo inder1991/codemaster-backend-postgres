@@ -1,0 +1,331 @@
+/**
+ * Workspace-retention janitor activities — REAL de-stubbed ports of the frozen Python
+ * `@activity.defn run_workspace_orphan_sweep_activity` / `run_workspace_reap_activity` /
+ * `run_workspace_released_retention_activity`
+ * (vendor/codemaster-py/codemaster/activities/workspace_retention.py — Phase 6 spec §10).
+ *
+ * The three sweeps the {@link workspaceRetentionWorkflow} composes (orphan → reap → purge):
+ *
+ *  1. {@link runWorkspaceOrphanSweepActivity} (registered `run_workspace_orphan_sweep_activity`)
+ *     Detects `ALLOCATED` leases whose owning worker is dead (its `core.worker_heartbeats.last_seen_at`
+ *     is older than `worker_dead_after`) AND whose `orphan_check_after` grace window has elapsed, and
+ *     transitions each `ALLOCATED → ORPHANED` via {@link transitionLease} (emitting `WORKSPACE_ORPHANED`
+ *     in the same txn). `FOR UPDATE OF l SKIP LOCKED` lets concurrent janitor runs take disjoint slices.
+ *     A per-row {@link StateDrift} (a concurrent transition raced us) is logged + skipped — the next
+ *     sweep re-picks it up if still eligible; the outer transaction is NOT rolled back so surviving
+ *     candidates still flip.
+ *
+ *  2. {@link runWorkspaceReapActivity} (registered `run_workspace_reap_activity`)
+ *     Returns the `workspace_id` list eligible for a release-activity retry — NO side effects on the
+ *     lease rows (the workflow body iterates the list + invokes `release_workspace_activity` per id, each
+ *     with its own Temporal RetryPolicy). Eligibility (spec §10.1): `ORPHANED` always; `RELEASE_REQUESTED`
+ *     past `release_grace`; `FAILED_CLEANUP` with `cleanup_attempts < cleanup_max_attempts` AND the
+ *     per-attempt `cleanup_backoff_schedule[attempts]` backoff elapsed. The result is a SORTED tuple
+ *     (deterministic test assertions + stable Temporal histories).
+ *
+ *  3. {@link runWorkspaceReleasedRetentionActivity} (registered `run_workspace_released_retention_activity`)
+ *     Hard-deletes `RELEASED` leases whose `released_at` is past `released_lease_retention` (default 7d).
+ *     The row's forensic value is gone (audit trail lives in `audit.workflow_events`); the DELETE reclaims
+ *     PK + index entries. NO archive-before-DELETE: these are terminal lifecycle rows, NOT recoverable
+ *     business state — 1:1 with the frozen Python's outright DELETE (this is the runtime janitor, not the
+ *     archive-before-DELETE *migration* pattern).
+ *
+ * ── worker_heartbeats CAVEAT — orphan branch is PORTED-FAITHFULLY-BUT-DEAD in production ──
+ *
+ * The orphan-sweep SQL JOINs `core.worker_heartbeats`, whose producer is the live WorkspaceManager
+ * heartbeat loop (`preflight()` upsert + `_run_heartbeat_loop()` touch). That producer is UNPORTED in
+ * TypeScript — there is NO `WorkspaceManager` port and NO TS code WRITES `core.worker_heartbeats` (the
+ * table exists in the squashed baseline + is seeded EMPTY). Consequently, in production the orphan-sweep
+ * `JOIN core.worker_heartbeats` matches ZERO rows, so `run_workspace_orphan_sweep_activity` is a
+ * STRUCTURAL NO-OP today (it always returns `orphaned_count = 0`). This is ported BYTE-FAITHFULLY (the
+ * SQL is 1:1 with the Python) so that once the heartbeat producer is ported, the branch fires unchanged —
+ * the integration test seeds a `core.worker_heartbeats` row directly to prove that. We deliberately do
+ * NOT re-base the dead-worker detection onto `workspace_leases.heartbeat_at` (a tempting but DIVERGENT
+ * shortcut): that would change the liveness semantics (per-lease last-touch vs per-WORKER last-seen) and
+ * silently fork from the frozen Python. The TTL-expiry reap + released-row purge (the main janitor paths)
+ * work regardless of the heartbeat producer. Tracked: FOLLOW-UP-port-workspace-manager-heartbeat.
+ *
+ * ── Config thresholds (divergence from the Python — TS constants, not WorkspaceManager._config) ──
+ *
+ * The frozen Python reads the timing thresholds (`worker_dead_after`, `release_grace`,
+ * `cleanup_backoff_schedule`, `cleanup_max_attempts`, `released_lease_retention`) from
+ * `manager._config` (a `WorkspaceConfig`). No `WorkspaceManager` / `WorkspaceConfig` is ported, so — as
+ * the `run_id_retention` / `review_run_reaper` Wave-1 ports established — the thresholds are sourced as
+ * module constants holding the EXACT `WorkspaceConfig` defaults (`codemaster/workspace/_config.py`),
+ * overridable via the injected {@link WorkspaceRetentionDeps} for tests. Re-basing onto a ported
+ * `WorkspaceConfig` is FOLLOW-UP-port-workspace-config.
+ *
+ * ## Cross-tenant by design (Python @privileged_path — the sweeps carry NO installation_id filter)
+ *
+ * All three sweeps are cross-tenant liveness/retention scans (the Python guards them inside the
+ * privileged janitor workflow). The raw-SQL tenancy gate accepts the inline
+ * `// tenant:exempt reason=… follow_up=…` marker on each touching query.
+ *
+ * ## Clock authority
+ *
+ * Every cutoff (`clock.now() - threshold`) comes from the INJECTED {@link Clock} (default
+ * {@link WallClock}) — 1:1 with the Python `clock.now() - cfg.threshold`. The Python computes BOTH
+ * cutoffs in Python and binds them as timestamptz parameters (avoiding the asyncpg numeric→interval
+ * coercion gotcha); this port does the same (bound `Date` parameters, never SQL `now() - interval`).
+ *
+ * ## Runtime context / shared-wiring boundary
+ *
+ * Runs in the NORMAL Node runtime (DB access sanctioned). Exports the three registered activity functions
+ * only; the Integrate/Workflow phase binds them under their snake_case Temporal names + owns the worker
+ * registry — NOT this module.
+ */
+
+import { CompiledQuery, type Transaction } from "kysely";
+
+import { StateDrift } from "#backend/workspace/errors.js";
+import { transitionLease } from "#backend/workspace/transition.js";
+
+import { getPool, tenantKysely, withPgTransaction } from "#platform/db/database.js";
+import { type Clock, WallClock } from "#platform/clock.js";
+
+import {
+  WorkspaceOrphanSweepResultV1,
+  WorkspaceReapEligibleResultV1,
+  WorkspaceRetentionPurgeResultV1,
+} from "#contracts/workspace_retention_result.v1.js";
+
+// ─── WorkspaceConfig defaults (1:1 with codemaster/workspace/_config.py) ──────────────────────────────
+
+/** worker_dead_after default — 5 minutes. A worker whose heartbeat is older than this is dead. */
+const WORKER_DEAD_AFTER_MS = 5 * 60 * 1000;
+/** release_grace default — 5 minutes. A RELEASE_REQUESTED lease older than this is reap-eligible. */
+const RELEASE_GRACE_MS = 5 * 60 * 1000;
+/** cleanup_max_attempts default — 5. FAILED_CLEANUP rows at/over this are NOT reaped (operator alert). */
+const CLEANUP_MAX_ATTEMPTS = 5;
+/** cleanup_backoff_schedule default — 1m, 5m, 30m, 2h, 12h (per-attempt backoff before the next retry). */
+const CLEANUP_BACKOFF_SCHEDULE_MS: ReadonlyArray<number> = [
+  1 * 60 * 1000,
+  5 * 60 * 1000,
+  30 * 60 * 1000,
+  2 * 60 * 60 * 1000,
+  12 * 60 * 60 * 1000,
+];
+/** released_lease_retention default — 7 days. RELEASED rows older than this are hard-deleted. */
+const RELEASED_LEASE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+// ─── Shared deps ─────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Injected collaborators shared by all three sweeps. All OPTIONAL — production resolves the shared pool
+ * from `CODEMASTER_PG_CORE_DSN` (the ADR-0062 pool) + stamps every cutoff from a {@link WallClock};
+ * tests inject a disposable-PG `dsn` + a {@link FakeClock}.
+ */
+export type WorkspaceRetentionDeps = {
+  /** DSN for the shared pool; default `CODEMASTER_PG_CORE_DSN`. */
+  dsn?: string;
+  /** Time seam for every cutoff; default {@link WallClock} (1:1 with the Python `clock.now()`). */
+  clock?: Clock;
+};
+
+/** Resolve the DSN for the shared pool: the injected one, else `CODEMASTER_PG_CORE_DSN`. */
+function resolveDsn(deps: WorkspaceRetentionDeps): string {
+  if (deps.dsn !== undefined && deps.dsn !== "") {
+    return deps.dsn;
+  }
+  const dsn = process.env.CODEMASTER_PG_CORE_DSN;
+  if (dsn === undefined || dsn === "") {
+    throw new Error(
+      "CODEMASTER_PG_CORE_DSN is not set and no dsn injected; cannot run the workspace-retention sweep",
+    );
+  }
+  return dsn;
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════
+//  Activity 1 — orphan sweep
+// ════════════════════════════════════════════════════════════════════════════════════════════════════
+
+/** A candidate the orphan-sweep SELECT returned. */
+type OrphanCandidateRow = { workspace_id: string };
+
+/**
+ * `runWorkspaceOrphanSweepActivity` (registered `run_workspace_orphan_sweep_activity`). Sweeps ALLOCATED
+ * leases whose owning worker is dead + whose orphan grace elapsed, flipping each to ORPHANED. 1:1 with
+ * the Python `run_workspace_orphan_sweep_activity`.
+ *
+ * The candidate SELECT (FOR UPDATE OF l SKIP LOCKED) + every per-row {@link transitionLease} run inside
+ * ONE Kysely transaction so concurrent janitors / workflow cancellations don't double-transition. Both
+ * timestamp cutoffs are computed in TS and bound as timestamptz parameters (mirrors the Python — avoids
+ * the asyncpg numeric→interval coercion gotcha).
+ *
+ * Returns `WorkspaceOrphanSweepResultV1{orphaned_count}`. NOTE (see module header): in production the
+ * `JOIN core.worker_heartbeats` matches zero rows (heartbeat producer unported), so this returns 0 —
+ * the byte-faithful SQL fires once the producer is ported.
+ */
+export async function runWorkspaceOrphanSweepActivity(
+  deps: WorkspaceRetentionDeps = {},
+): Promise<WorkspaceOrphanSweepResultV1> {
+  const dsn = resolveDsn(deps);
+  const clock: Clock = deps.clock ?? new WallClock();
+  const db = tenantKysely<unknown>(dsn);
+
+  const now = clock.now();
+  const workerDeadCutoff = new Date(now.getTime() - WORKER_DEAD_AFTER_MS);
+
+  let orphaned = 0;
+  await db.transaction().execute(async (tx: Transaction<unknown>) => {
+    // Step 1 — find candidates under FOR UPDATE so concurrent janitors / cancellations don't
+    // double-transition. INNER JOIN to core.worker_heartbeats (not LEFT): every active lease's worker_id
+    // is registered at preflight; a missing row is itself an anomaly the platform should observe, NOT
+    // silently treat as "worker dead". 1:1 with the Python `WITH dead_workers` + INNER JOIN form.
+    // tenant:exempt reason=cross-tenant-orphan-liveness-sweep follow_up=PERMANENT-EXEMPTION-workspace-retention
+    const candidateResult = await tx.executeQuery<OrphanCandidateRow>(
+      CompiledQuery.raw(
+        "WITH dead_workers AS (" +
+          "    SELECT worker_id" +
+          "    FROM core.worker_heartbeats" +
+          "    WHERE last_seen_at < $1" +
+          ") " +
+          "SELECT l.workspace_id " +
+          "FROM core.workspace_leases l " +
+          "JOIN dead_workers d ON l.worker_id = d.worker_id " +
+          "WHERE l.state = 'ALLOCATED' " +
+          "  AND l.orphan_check_after < $2 " +
+          "FOR UPDATE OF l SKIP LOCKED",
+        [workerDeadCutoff, now],
+      ),
+    );
+
+    for (const row of candidateResult.rows) {
+      const workspaceId = row.workspace_id;
+      try {
+        await transitionLease({
+          tx,
+          workspaceId,
+          fromState: "ALLOCATED",
+          toState: "ORPHANED",
+          activity: "run_workspace_orphan_sweep_activity",
+          reason: "worker_dead_after_threshold",
+          clock,
+        });
+        orphaned += 1;
+      } catch (e) {
+        // A concurrent transition won the race (StateDrift) OR a DB-side race fired. Leave the row for
+        // the next sweep — do NOT roll back the outer transaction (surviving candidates still flip
+        // ORPHANED). The exception is logged so silent suppression is observable. 1:1 with the Python
+        // `except Exception: _LOG.info(...); continue` (which catches StateDrift among others).
+        if (e instanceof StateDrift) {
+          console.info(`orphan sweep skipped workspace ${workspaceId}: ${e.message}`);
+          continue;
+        }
+        // Non-StateDrift errors are unexpected here; surface the cause but keep sweeping (the Python's
+        // bare `except Exception` is fail-open per-row — a single bad row must not poison the sweep).
+        console.info(`orphan sweep skipped workspace ${workspaceId}: ${e instanceof Error ? e.message : String(e)}`);
+        continue;
+      }
+    }
+  });
+
+  return WorkspaceOrphanSweepResultV1.parse({ orphaned_count: orphaned });
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════
+//  Activity 2 — reap-eligible
+// ════════════════════════════════════════════════════════════════════════════════════════════════════
+
+/** A FAILED_CLEANUP row the reap activity applies the Python-side backoff filter to. */
+type FailedCleanupRow = {
+  workspace_id: string;
+  cleanup_attempts: number;
+  last_cleanup_attempt_at: Date | null;
+};
+
+/**
+ * `runWorkspaceReapActivity` (registered `run_workspace_reap_activity`). Returns the SORTED `workspace_id`
+ * tuple of leases eligible for a release retry — NO side effects on the lease rows. 1:1 with the Python
+ * `run_workspace_reap_activity`: three SELECTs (ORPHANED always; aged RELEASE_REQUESTED; FAILED_CLEANUP
+ * pulled then backoff-filtered in TS), unioned + sorted.
+ */
+export async function runWorkspaceReapActivity(
+  deps: WorkspaceRetentionDeps = {},
+): Promise<WorkspaceReapEligibleResultV1> {
+  const dsn = resolveDsn(deps);
+  const clock: Clock = deps.clock ?? new WallClock();
+  const pool = getPool(dsn);
+
+  const now = clock.now();
+  const releaseGraceCutoff = new Date(now.getTime() - RELEASE_GRACE_MS);
+
+  const eligible: Array<string> = [];
+
+  await withPgTransaction(pool, async (client) => {
+    // ORPHANED → always eligible.
+    // tenant:exempt reason=cross-tenant-reap-eligibility-scan follow_up=PERMANENT-EXEMPTION-workspace-retention
+    const orphanedRows = await client.query<{ workspace_id: string }>(
+      "SELECT workspace_id FROM core.workspace_leases WHERE state = 'ORPHANED'",
+    );
+    for (const r of orphanedRows.rows) eligible.push(r.workspace_id);
+
+    // RELEASE_REQUESTED past release_grace. Cutoff computed in TS + bound as timestamptz (1:1).
+    // tenant:exempt reason=cross-tenant-reap-eligibility-scan follow_up=PERMANENT-EXEMPTION-workspace-retention
+    const releaseRequestedRows = await client.query<{ workspace_id: string }>(
+      "SELECT workspace_id FROM core.workspace_leases " +
+        "WHERE state = 'RELEASE_REQUESTED' AND release_requested_at < $1",
+      [releaseGraceCutoff],
+    );
+    for (const r of releaseRequestedRows.rows) eligible.push(r.workspace_id);
+
+    // FAILED_CLEANUP — pull the rows + apply the per-attempt backoff in TS (the backoff is a
+    // tuple-indexed value; expressing it inline in SQL is more brittle than the TS form for a sweep that
+    // touches at most ~dozens of rows per cycle). 1:1 with the Python.
+    // tenant:exempt reason=cross-tenant-reap-eligibility-scan follow_up=PERMANENT-EXEMPTION-workspace-retention
+    const failedRows = await client.query<FailedCleanupRow>(
+      "SELECT workspace_id, cleanup_attempts, last_cleanup_attempt_at " +
+        "FROM core.workspace_leases " +
+        "WHERE state = 'FAILED_CLEANUP' AND cleanup_attempts < $1",
+      [CLEANUP_MAX_ATTEMPTS],
+    );
+    for (const r of failedRows.rows) {
+      const attempts = r.cleanup_attempts ?? 0;
+      const lastAttempt = r.last_cleanup_attempt_at;
+      // Index clamp: attempts past the schedule length use the last entry. The cleanup_max_attempts
+      // filter above bounds this. 1:1 with the Python `min(attempts, len(schedule) - 1)`.
+      const backoffIdx = Math.min(attempts, CLEANUP_BACKOFF_SCHEDULE_MS.length - 1);
+      // eslint-disable-next-line security/detect-object-injection -- backoffIdx is a clamped numeric index into a fixed module-level array, not external/object-key input
+      const backoffMs = CLEANUP_BACKOFF_SCHEDULE_MS[backoffIdx]!;
+      if (lastAttempt === null || new Date(lastAttempt).getTime() + backoffMs < now.getTime()) {
+        eligible.push(r.workspace_id);
+      }
+    }
+  });
+
+  // Sort for deterministic test assertions + stable Temporal histories (1:1 with the Python `sorted(...)`).
+  const sorted = [...eligible].sort();
+  return WorkspaceReapEligibleResultV1.parse({ workspace_ids: sorted });
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════
+//  Activity 3 — released-row retention purge
+// ════════════════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * `runWorkspaceReleasedRetentionActivity` (registered `run_workspace_released_retention_activity`).
+ * Hard-deletes RELEASED leases whose `released_at` is past `released_lease_retention` (default 7d). 1:1
+ * with the Python `run_workspace_released_retention_activity`. Returns
+ * `WorkspaceRetentionPurgeResultV1{deleted_count}` (the DELETE rowcount).
+ */
+export async function runWorkspaceReleasedRetentionActivity(
+  deps: WorkspaceRetentionDeps = {},
+): Promise<WorkspaceRetentionPurgeResultV1> {
+  const dsn = resolveDsn(deps);
+  const clock: Clock = deps.clock ?? new WallClock();
+  const pool = getPool(dsn);
+
+  const retentionCutoff = new Date(clock.now().getTime() - RELEASED_LEASE_RETENTION_MS);
+
+  const deleted = await withPgTransaction(pool, async (client) => {
+    // tenant:exempt reason=cross-tenant-released-row-retention-purge follow_up=PERMANENT-EXEMPTION-workspace-retention
+    const result = await client.query(
+      "DELETE FROM core.workspace_leases WHERE state = 'RELEASED' AND released_at < $1",
+      [retentionCutoff],
+    );
+    return result.rowCount ?? 0;
+  });
+
+  return WorkspaceRetentionPurgeResultV1.parse({ deleted_count: deleted });
+}

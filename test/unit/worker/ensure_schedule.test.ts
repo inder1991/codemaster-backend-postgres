@@ -57,6 +57,36 @@ describe("ensureCronSchedule", () => {
     });
   });
 
+  it("threads the default-constructed actionInput when present (the run_id retention TTL input)", async () => {
+    // The Wave-2 run_id retention cron passes a default TTL input {prTtlDays,runTtlDays,eventTtlDays} — the
+    // workflow body reads those fields with NO internal default, so the schedule MUST emit args=[input] (1:1
+    // with the Python args=[7,30,90]). A 0-arg cron (mutex/reaper/partition) omits actionInput → args:[].
+    const { created, client } = fakeClient();
+    const actionInput = { prTtlDays: 7, runTtlDays: 30, eventTtlDays: 90 };
+    await ensureCronSchedule(client, {
+      scheduleId: "codemaster-run-id-retention",
+      workflowType: "runIdRetentionWorkflow",
+      workflowId: "codemaster-run-id-retention-workflow",
+      taskQueue: "review-default",
+      cronExpression: "0 3 * * *",
+      actionInput,
+    });
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({
+      scheduleId: "codemaster-run-id-retention",
+      spec: { cronExpressions: ["0 3 * * *"] },
+      action: {
+        type: "startWorkflow",
+        workflowType: "runIdRetentionWorkflow",
+        taskQueue: "review-default",
+        workflowId: "codemaster-run-id-retention-workflow",
+        // When actionInput is present, the action emits args:[actionInput] (NOT []).
+        args: [actionInput],
+      },
+      policies: { overlap: ScheduleOverlapPolicy.SKIP },
+    });
+  });
+
   it("is idempotent — swallows ScheduleAlreadyRunning (never overwrites operator tuning)", async () => {
     const { client } = fakeClient({
       throwOnCreate: new ScheduleAlreadyRunning("schedule already running", ARGS.scheduleId),
@@ -98,6 +128,36 @@ describe("ensureIntervalSchedule", () => {
         workflowId: INTERVAL_ARGS.workflowId,
         // The default-constructed workflow input MUST be threaded (not []), else parse(undefined) throws.
         args: [{ schema_version: 1 }],
+      },
+      policies: { overlap: ScheduleOverlapPolicy.SKIP },
+    });
+  });
+
+  it("emits args:[] for a 0-arg interval workflow (workspace_retention — actionInput omitted)", async () => {
+    // The Wave-2 workspace-retention workflow takes NO input — the Python `ensure_workspace_retention_schedule`
+    // registers `args=[]`. So the TS schedule omits actionInput and the action MUST emit args:[] (NOT
+    // args:[undefined], which would hand the 0-arg workflow a spurious positional + drift from the Python).
+    const { created, client } = fakeClient();
+    await ensureIntervalSchedule(client, {
+      scheduleId: "codemaster-workspace-retention",
+      workflowType: "workspaceRetentionWorkflow",
+      workflowId: "codemaster-workspace-retention-workflow",
+      taskQueue: "review-default",
+      intervalSeconds: 5 * 60,
+      // actionInput intentionally OMITTED — 0-arg workflow.
+    });
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({
+      scheduleId: "codemaster-workspace-retention",
+      // 5min → 300s → 300_000 ms.
+      spec: { intervals: [{ every: 5 * 60 * 1000 }] },
+      action: {
+        type: "startWorkflow",
+        workflowType: "workspaceRetentionWorkflow",
+        taskQueue: "review-default",
+        workflowId: "codemaster-workspace-retention-workflow",
+        // No actionInput → args:[] (1:1 with the Python `args=[]`).
+        args: [],
       },
       policies: { overlap: ScheduleOverlapPolicy.SKIP },
     });

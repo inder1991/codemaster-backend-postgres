@@ -18,6 +18,9 @@
  *   - `confluenceIngestWorkflow`       — Wave-4 Confluence corpus sync (6h interval schedule, combined-pod)
  *   - `markStaleChunksWorkflow`        — Wave-4 Confluence staleness sweep (24h interval schedule)
  *   - `triggerPageResyncWorkflow`      — Wave-4 single-page resync (admin-triggered on approval revocation)
+ *   - `runIdRetentionWorkflow`         — Wave-2 retention cron: close stale PRs / retire runs / delete events (3am daily)
+ *   - `partitionMaintenanceWorkflow`   — Wave-2 retention cron: pg_partman maintenance sweep (2am daily)
+ *   - `workspaceRetentionWorkflow`     — Wave-2 retention cron: orphan/reap/purge workspace leases (5-min interval)
  *
  * COMBINED-POD (Wave-4, ADR-0075): the 3 Confluence workflows run on the SAME review worker (queue
  * "review-default"). The Python ported `CONFLUENCE_SYNC_TASK_QUEUE` consts read "confluence-sync", but
@@ -40,3 +43,6 @@ export { reviewRunReaperWorkflow } from "./review_run_reaper.workflow.js";
 export { confluenceIngestWorkflow } from "./confluence_ingest.workflow.js";
 export { markStaleChunksWorkflow } from "./mark_stale_chunks.workflow.js";
 export { triggerPageResyncWorkflow } from "./trigger_page_resync.workflow.js";
+export { runIdRetentionWorkflow } from "./run_id_retention.workflow.js";
+export { partitionMaintenanceWorkflow } from "./partition_maintenance.workflow.js";
+export { workspaceRetentionWorkflow } from "./workspace_retention.workflow.js";

@@ -155,6 +155,18 @@ import { mutexJanitorActivity } from "#backend/activities/mutex_janitor.activity
 import { reviewRunReaperActivity } from "#backend/activities/review_run_reaper.activity.js";
 import { GitHubApiReviewClient } from "#backend/integrations/github/review_client.js";
 
+// ── Wave-2 retention cron activities (combined-pod worker reuse). Registered under their snake_case
+// Temporal NAMES below so the 3 Wave-2 retention workflows (all_workflows.ts bundle) dispatch them. The
+// run_id PR-closer needs a GitHubApiClient (the close-stale-PRs sweep); the other six self-resolve their
+// DSN (+ clock) inside the activity body. ──
+import { RunIdRetentionActivities } from "#backend/activities/run_id_retention.activity.js";
+import { runPgPartmanMaintenanceActivity } from "#backend/activities/partition_maintenance.activity.js";
+import {
+  runWorkspaceOrphanSweepActivity,
+  runWorkspaceReapActivity,
+  runWorkspaceReleasedRetentionActivity,
+} from "#backend/activities/workspace_retention.activity.js";
+
 // ── Wave-4 Confluence ingest activities (combined-pod worker reuse — ADR-0075). Registered under their
 // snake_case Temporal NAMES below so the 3 confluence workflows (all_workflows.ts bundle) dispatch them. ──
 import {
@@ -377,6 +389,45 @@ function makeLazyFixPromptIssueClient(): FixPromptIssueCommentClientShape {
       return new GitHubApiReviewClient({ api, installationId }).createIssueComment(rest);
     },
   };
+}
+
+// ─── lazy GitHubApiClient (the run_id retention PR-closer seam — deferred-Vault, fail-open) ───────
+//
+// The Wave-2 `run_id_close_stale_prs` sweep closes ephemeral smoke PRs via a real {@link GitHubApiClient}
+// (it calls `.get` to list open PRs by branch + `.patch` to close them). `RunIdRetentionActivities`
+// fail-CLOSES if its `githubClient` is undefined (it throws at method entry, BEFORE any DB query) — so the
+// holder MUST be handed a client object. We hand it a LAZY {@link GitHubApiClient} (the same deferred-Vault
+// shape the issue / fix-prompt / manifest clients use): the underlying real client is built on the FIRST
+// `.get`/`.patch` call and memoized, so worker boot stays off `VAULT_ADDR` / GitHub round-trips. In dev the
+// candidate SQL returns ZERO ephemeral runs (none are stale), so the sweep never reaches a `.get`/`.patch`
+// → the lazy client is NEVER built → an absent dev GitHub-App Vault token can't crash the daily 3am sweep.
+// Only `.get` and `.patch` are reachable from the PR-closer, so the lazy structural proxy exposing exactly
+// those two methods is a faithful, fully-real client seam (no stub).
+
+/**
+ * A {@link GitHubApiClient} that builds the real client on first `.get`/`.patch` (the deferred-Vault,
+ * fail-open pattern) and memoizes it. The PR-closer (`runIdCloseStalePrsActivity`) only ever calls `.get`
+ * (list open PRs by head) + `.patch` (close a PR), so exposing exactly those two lazily-resolving methods is
+ * a faithful real seam. Cast to {@link GitHubApiClient} (the ctor field type) — the rest of the class
+ * surface is unreachable from the PR-closer code path.
+ */
+function makeLazyRetentionGithubClient(): GitHubApiClient {
+  let memo: Promise<GitHubApiClient> | undefined;
+  const lazy = (): Promise<GitHubApiClient> => {
+    if (memo === undefined) {
+      // Same deferred-Vault wiring buildFixPromptApi / buildManifestContentsClient use.
+      memo = buildFixPromptApi();
+    }
+    return memo;
+  };
+  return {
+    get: async (path: Parameters<GitHubApiClient["get"]>[0], opts: Parameters<GitHubApiClient["get"]>[1]) =>
+      (await lazy()).get(path, opts),
+    patch: async (
+      path: Parameters<GitHubApiClient["patch"]>[0],
+      opts: Parameters<GitHubApiClient["patch"]>[1],
+    ) => (await lazy()).patch(path, opts),
+  } as unknown as GitHubApiClient;
 }
 
 // ─── real LlmClientCache (ledger-wired client factory — ADR-0068) ────────────────────────────────
@@ -681,6 +732,19 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
   const listActiveConfluenceSpacesActivity = new ListActiveConfluenceSpacesActivity({ dsn });
   const markStaleChunksActivity = new MarkStaleChunksActivity({ dsn });
 
+  // ── Wave-2 retention cron holder (run_id close-stale-PRs / retire-runs / delete-events) ──
+  // The PR-closer needs a GitHubApiClient (the close-stale-PRs sweep lists + closes ephemeral smoke PRs);
+  // it's handed the LAZY deferred-Vault client (built on first GitHub touch — never at boot, and never at
+  // all in dev where the candidate SQL returns zero stale ephemeral runs). The retire-runs / delete-events
+  // sweeps self-resolve the shared pool + clock from env inside the activity body (the holder injects
+  // neither dsn nor clock → each sweep reads CODEMASTER_PG_CORE_DSN + WallClock). The 3 bound methods are
+  // registered under their snake_case Temporal names below (the runIdRetentionWorkflow proxies them by
+  // those exact keys). The other 4 Wave-2 activities (partition + the 3 workspace sweeps) are bare 0-arg
+  // self-resolving functions — registered directly.
+  const runIdRetentionActivities = new RunIdRetentionActivities({
+    githubClient: makeLazyRetentionGithubClient(),
+  });
+
   return {
     // ── 1-arg activities, ready as-is ──
     persistReviewFindings,
@@ -801,5 +865,22 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
       confluenceSyncActivities.reconcileDeletions.bind(confluenceSyncActivities),
     ["mark_stale_chunks_activity"]:
       markStaleChunksActivity.markStaleChunks.bind(markStaleChunksActivity),
+    // ── Wave-2 retention cron activities (combined-pod worker reuse) ──
+    // Registered under their snake_case TEMPORAL NAMES because the 3 Wave-2 retention workflows
+    // (runIdRetentionWorkflow / partitionMaintenanceWorkflow / workspaceRetentionWorkflow, all in
+    // all_workflows.ts) proxy them by those exact names — a camelCase key would dispatch
+    // ActivityNotRegistered. The 3 run_id sweeps are bound methods of the RunIdRetentionActivities holder
+    // (the PR-closer carries the lazy deferred-Vault GitHubApiClient); partition + the 3 workspace sweeps
+    // are bare 0-arg self-resolving functions.
+    ["run_id_close_stale_prs"]:
+      runIdRetentionActivities.runIdCloseStalePrs.bind(runIdRetentionActivities),
+    ["run_id_retire_old_runs"]:
+      runIdRetentionActivities.runIdRetireOldRuns.bind(runIdRetentionActivities),
+    ["run_id_delete_old_events"]:
+      runIdRetentionActivities.runIdDeleteOldEvents.bind(runIdRetentionActivities),
+    ["run_pg_partman_maintenance"]: runPgPartmanMaintenanceActivity,
+    ["run_workspace_orphan_sweep_activity"]: runWorkspaceOrphanSweepActivity,
+    ["run_workspace_reap_activity"]: runWorkspaceReapActivity,
+    ["run_workspace_released_retention_activity"]: runWorkspaceReleasedRetentionActivity,
   } as Record<string, (input: never) => Promise<unknown>>;
 }

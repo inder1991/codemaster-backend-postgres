@@ -25,6 +25,7 @@ import {
 } from "./ensure_schedule.js";
 import { ensureOutboxDispatcherSingleton } from "./outbox_dispatcher_singleton.js";
 import { resolveWorkerTemporalConfig } from "./temporal_config.js";
+import { RUN_ID_RETENTION_DEFAULT_INPUT } from "#backend/workflows/run_id_retention.workflow.js";
 
 // createRequire bound to THIS module's URL so the relative specifiers resolve whether the worker runs from
 // .ts (tsx) or compiled .js. Temporal loads workflowsPath/payloadConverterPath itself (absolute paths).
@@ -96,6 +97,57 @@ const CONFLUENCE_INTERVAL_SCHEDULES: ReadonlyArray<EnsureIntervalScheduleArgs> =
   },
 ];
 
+/**
+ * Wave-2 retention CRON schedules (combined-pod worker reuse). Cadence + schedule/workflow ids are
+ * byte-faithful with the frozen Python (run_id_retention.py / partition_maintenance.py); the workflowType
+ * strings are the registered camelCase TS function names (bundled into THIS pod's `all_workflows.ts`).
+ *   - run_id retention   → runIdRetentionWorkflow,       daily 03:00 UTC ("0 3 * * *"). Carries the default
+ *     TTL input {7,30,90} — the workflow body reads input.prTtlDays/runTtlDays/eventTtlDays with NO internal
+ *     default, so a fired schedule with NO arg would throw `undefined.prTtlDays` and retry forever. 1:1 with
+ *     the Python `args=[7, 30, 90]`.
+ *   - partition maint    → partitionMaintenanceWorkflow, daily 02:00 UTC ("0 2 * * *"). 0-arg workflow → no
+ *     actionInput → `args: []` (the activity self-resolves its DSN at the boundary). 1:1 with the Python.
+ */
+const WAVE2_RETENTION_CRON_SCHEDULES: ReadonlyArray<EnsureCronScheduleArgs> = [
+  {
+    scheduleId: "codemaster-run-id-retention",
+    workflowType: "runIdRetentionWorkflow",
+    workflowId: "codemaster-run-id-retention-workflow",
+    taskQueue: REVIEW_TASK_QUEUE,
+    cronExpression: "0 3 * * *",
+    // The workflow body reads input.prTtlDays/runTtlDays/eventTtlDays with NO internal default → MUST pass
+    // the default TTL input (1:1 with the Python `args=[7, 30, 90]`), else the daily sweep retries forever.
+    actionInput: RUN_ID_RETENTION_DEFAULT_INPUT,
+  },
+  {
+    scheduleId: "codemaster-partition-maintenance",
+    workflowType: "partitionMaintenanceWorkflow",
+    workflowId: "codemaster-partition-maintenance-workflow",
+    taskQueue: REVIEW_TASK_QUEUE,
+    cronExpression: "0 2 * * *",
+    // 0-arg workflow → no actionInput → `args: []` (the activity self-resolves its DSN at the boundary).
+  },
+];
+
+/**
+ * Wave-2 workspace-retention INTERVAL schedule (combined-pod worker reuse). Cadence + schedule/workflow ids
+ * are byte-faithful with the frozen Python `ensure_workspace_retention_schedule`
+ * (`ScheduleIntervalSpec(every=timedelta(minutes=5))`, id "codemaster-workspace-retention", task queue
+ * "review-default"); the workflowType is the registered camelCase TS function name. The workflow is 0-arg —
+ * the Python schedule registers `args=[]`, so NO actionInput is passed (→ `args: []`).
+ *   - workspace retention → workspaceRetentionWorkflow, every 5min (300s). 0-arg → no actionInput.
+ */
+const WAVE2_WORKSPACE_INTERVAL_SCHEDULES: ReadonlyArray<EnsureIntervalScheduleArgs> = [
+  {
+    scheduleId: "codemaster-workspace-retention",
+    workflowType: "workspaceRetentionWorkflow",
+    workflowId: "codemaster-workspace-retention-workflow",
+    taskQueue: REVIEW_TASK_QUEUE,
+    intervalSeconds: 5 * 60,
+    // 0-arg workflow — the Python `ensure_workspace_retention_schedule` registers `args=[]`. No actionInput.
+  },
+];
+
 /** Bring up the outbox-dispatcher worker + singleton and run until shutdown. */
 export async function runOutboxDispatcherWorker(): Promise<void> {
   const temporal = resolveWorkerTemporalConfig(process.env);
@@ -155,6 +207,33 @@ export async function runOutboxDispatcherWorker(): Promise<void> {
   // crash worker startup — the next pod's idempotent ensure retries; `ensureIntervalSchedule` swallows
   // `ScheduleAlreadyRunning` so an already-registered (or operator-paused) schedule is never clobbered.
   for (const schedule of CONFLUENCE_INTERVAL_SCHEDULES) {
+    try {
+      await ensureIntervalSchedule(client, schedule);
+      console.info(`schedule ensured: ${schedule.scheduleId}`);
+    } catch (err) {
+      console.error(`ensureIntervalSchedule(${schedule.scheduleId}) failed; worker continues`, err);
+    }
+  }
+
+  // ── Wave-2 retention CRON Temporal Schedules (combined-pod) ──
+  // Idempotently register the run_id retention (daily 03:00, carries the {7,30,90} TTL input) +
+  // partition-maintenance (daily 02:00, 0-arg) cron schedules. Same FAIL-OPEN posture as the Wave-1/4
+  // blocks: a registration failure (Temporal transient / RBAC) MUST NOT crash worker startup — the next
+  // pod's idempotent ensure retries; `ensureCronSchedule` swallows `ScheduleAlreadyRunning` so an
+  // already-registered (or operator-paused) schedule is never clobbered.
+  for (const schedule of WAVE2_RETENTION_CRON_SCHEDULES) {
+    try {
+      await ensureCronSchedule(client, schedule);
+      console.info(`schedule ensured: ${schedule.scheduleId}`);
+    } catch (err) {
+      console.error(`ensureCronSchedule(${schedule.scheduleId}) failed; worker continues`, err);
+    }
+  }
+
+  // ── Wave-2 workspace-retention INTERVAL Temporal Schedule (combined-pod) ──
+  // Idempotently register the workspace-retention sweep (every 5min, 0-arg). Same FAIL-OPEN posture; the
+  // 0-arg workflow passes no actionInput (→ `args: []`, 1:1 with the Python `args=[]`).
+  for (const schedule of WAVE2_WORKSPACE_INTERVAL_SCHEDULES) {
     try {
       await ensureIntervalSchedule(client, schedule);
       console.info(`schedule ensured: ${schedule.scheduleId}`);
