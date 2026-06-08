@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { resolveWorkerTemporalConfig } from "#backend/worker/temporal_config.js";
+import { resolveReviewTaskQueue, resolveWorkerTemporalConfig } from "#backend/worker/temporal_config.js";
 
 describe("resolveWorkerTemporalConfig", () => {
   it("loopback address + no overrides → the dualrun-isolated defaults (dev / dual-run)", () => {
@@ -54,5 +54,19 @@ describe("resolveWorkerTemporalConfig", () => {
         TEMPORAL_TASK_QUEUE: "review-pull-request",
       }),
     ).toThrow();
+  });
+});
+
+describe("resolveReviewTaskQueue (producer queue — shares TEMPORAL_TASK_QUEUE with the worker)", () => {
+  it("defaults to review-default when TEMPORAL_TASK_QUEUE is unset (Python parity)", () => {
+    expect(resolveReviewTaskQueue({})).toBe("review-default");
+  });
+
+  it("treats an empty-string TEMPORAL_TASK_QUEUE as unset → review-default", () => {
+    expect(resolveReviewTaskQueue({ TEMPORAL_TASK_QUEUE: "" })).toBe("review-default");
+  });
+
+  it("uses TEMPORAL_TASK_QUEUE when set, so producers match the env-polled worker queue (no divergence)", () => {
+    expect(resolveReviewTaskQueue({ TEMPORAL_TASK_QUEUE: "custom-review-q" })).toBe("custom-review-q");
   });
 });

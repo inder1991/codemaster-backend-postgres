@@ -61,3 +61,20 @@ export function resolveWorkerTemporalConfig(env: NodeJS.ProcessEnv): WorkerTempo
     tls,
   };
 }
+
+/** The producer-side default task queue — 1:1 with the frozen Python + the outbox-payload parity. */
+export const REVIEW_TASK_QUEUE = "review-default";
+
+/**
+ * The task queue that workflow PRODUCERS (webhook persistence, push/reconcile/repair emitters, outbox
+ * schedules) start workflows on. It reads the SAME `TEMPORAL_TASK_QUEUE` env the polling worker resolves
+ * ({@link resolveWorkerTemporalConfig}), so once production sets that env a producer can NEVER start a
+ * workflow on a queue the worker isn't polling (review #1 — divergence/stranding). The unset-default is
+ * `review-default` (Python parity + the outbox-payload tests), which intentionally differs from the worker's
+ * dualrun-isolated unset-default (`review-pull-request-dualrun`): production always sets the env so both
+ * agree, and only a bare no-env loopback dev (which the smoke harness sets anyway) sees the dev defaults.
+ */
+export function resolveReviewTaskQueue(env: NodeJS.ProcessEnv = process.env): string {
+  const q = env.TEMPORAL_TASK_QUEUE;
+  return q !== undefined && q !== "" ? q : REVIEW_TASK_QUEUE;
+}

@@ -3,9 +3,9 @@
 // (migration 0062 dropped installation_id), so writes are keyed without installation_id and audit rows carry
 // installation_id=NULL.
 
-import { randomUUID } from "node:crypto";
-
 import { type Kysely, sql } from "kysely";
+
+import { uuid4 } from "#platform/randomness.js";
 
 import { type ConfluenceValidatorPort } from "#backend/integrations/confluence/confluence_validator.js";
 
@@ -167,7 +167,7 @@ export async function insertConfluenceSpace(
   //    so the response body is byte-identical to Python (which returns the in-memory dumps string, NOT a
   //    jsonb round-trip; a jsonb::text round-trip would re-order keys by length). Caveat: Python's default
   //    ensure_ascii=True escapes non-ASCII; space_key is ASCII (regex-constrained) and space_name realistically so.
-  const integrationId = randomUUID();
+  const integrationId = uuid4();
   // Alphabetical key order (no dynamic indexing — avoids the object-injection lint sink).
   const configEntries: Array<[string, string | null]> = [
     ["page_tree_root_id", args.pageTreeRootId],

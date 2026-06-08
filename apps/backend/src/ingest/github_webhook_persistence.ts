@@ -20,6 +20,7 @@ import {
 import { replaceLinks } from "#backend/domain/repos/pr_issue_links_repo.js";
 import { derivePrId } from "#backend/ingest/_pr_id.js";
 import { safePersistPr } from "#backend/ingest/_pr_persistence.js";
+import { resolveReviewTaskQueue } from "#backend/worker/temporal_config.js";
 import { parseIssueLinks } from "#backend/ingest/issue_link_parser.js";
 import {
   buildInstallationPayloadFromWebhook,
@@ -60,7 +61,7 @@ import type { IssueLink } from "#contracts/issue_link.v1.js";
  * Python string would dead-letter ("workflow type not registered"). See the staged-plan R1 resolution.
  */
 const REVIEW_WORKFLOW_TYPE = "reviewPullRequest";
-const REVIEW_TASK_QUEUE = "review-default";
+const REVIEW_TASK_QUEUE = resolveReviewTaskQueue();
 
 /**
  * Reconcile workflow TYPE strings + task queue (the auto-registration emitters). DELIBERATE RENAME +

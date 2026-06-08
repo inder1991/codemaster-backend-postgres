@@ -25,8 +25,13 @@ const ROW_3 = "00000000-0000-4000-8000-000000000003";
 const ROW_4 = "00000000-0000-4000-8000-000000000004";
 
 function makeActs(repoOverrides: Partial<PostgresOutboxRepo>): OutboxDispatchActivities {
+  // dispatchRow now spawns the lease-heartbeat (S14.5.D), which calls repo.extendLease while a handler runs.
+  // Give every fake repo a no-op extendLease default so a dispatchRow test that doesn't stub it doesn't trip
+  // the heartbeat's fail-open WARN path; tests that care override it. (The heartbeat itself is covered in
+  // outbox_dispatch_heartbeat.test.ts.)
+  const repo = { extendLease: async () => {}, ...repoOverrides };
   return new OutboxDispatchActivities({
-    repo: repoOverrides as unknown as PostgresOutboxRepo,
+    repo: repo as unknown as PostgresOutboxRepo,
     db: dummyDb,
     clock,
     maxAttempts: 5,
