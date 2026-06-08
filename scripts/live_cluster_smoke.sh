@@ -4,15 +4,17 @@
 # Codifies (and extends) the previously-manual PR→review cluster smoke into a repeatable, safe,
 # all-workflows / all-activities validation. It verifies the deployed worker actually RUNS every
 # workflow and dispatches every activity on the real cluster — via scheduled-workflow firing +
-# completion (no destructive triggers, no Anthropic spend forced).
+# completion, plus one real end-to-end review driven off a freshly-opened PR each run.
 #
 # SAFETY: it TRIGGERS only idempotent/safe schedules (mutex-janitor, run-reaper, confluence-ingest,
 # mark-stale) + a single-page resync. The DESTRUCTIVE retention crons (run-id / partition / workspace —
 # they DELETE aged rows) are verified by their LAST SCHEDULED RUN status, never force-triggered. The
-# credit-gated reviewPullRequest path is REPORTED, never failed.
+# reviewPullRequest path opens a FRESH PR each run (project-owner directive) and spends Anthropic credits
+# for a real review; gh-absent or webhook-undelivered degrades to SKIP, a FAILED/unposted review is RED.
 #
 # Usage:  CODEMASTER_TEST_LIVE_SMOKE=1 bash scripts/live_cluster_smoke.sh
-# Requires: kubectl (kind context), the deployed `backend` pod, the Temporal pod, psql in pg-0, gh (opt).
+# Requires: kubectl (kind context), the deployed `backend` pod, the Temporal pod, psql in pg-0.
+#           The reviewPullRequest step also needs `gh` (authed) + a live webhook forwarder (smee/port-forward).
 set -uo pipefail
 
 # ── Config (override via env) ─────────────────────────────────────────────────────────────────────
@@ -126,20 +128,87 @@ for entry in "${DESTRUCTIVE_SCHEDULES[@]}"; do
   esac
 done
 
-# ── 5. Outbox dispatcher + reviewPullRequest credit gate ────────────────────────────────────────────
+# ── 5. Outbox dispatcher + reviewPullRequest (FRESH PR each run) ──────────────────────────────────────
 section "5. Outbox dispatcher + review path"
 OUTBOX="$(tctl workflow list --query "WorkflowType='OutboxDispatcherWorkflow'" --limit 1 2>/dev/null | awk 'NR==2{print $1}')"
 [[ "$OUTBOX" == "Running" || "$OUTBOX" == "ContinuedAsNew" ]] && { ok "OutboxDispatcherWorkflow singleton $OUTBOX (loop alive)"; SUMMARY+=("OutboxDispatcherWorkflow: $OUTBOX (singleton)"); } \
   || { skip "OutboxDispatcherWorkflow latest = ${OUTBOX:-none}"; SUMMARY+=("OutboxDispatcherWorkflow: ${OUTBOX:-none}"); }
+
 LLM_PROVIDER="$(psql_q "SELECT provider||'/'||model_id FROM core.llm_provider_settings WHERE enabled LIMIT 1;")"
-LAST_REVIEW="$(psql_q "SELECT lifecycle_state FROM core.review_runs ORDER BY created_at DESC LIMIT 1;")"
-echo "  ℹ️  review LLM provider = ${LLM_PROVIDER:-none}; last review_run = ${LAST_REVIEW:-none}"
-if [[ "$LLM_PROVIDER" == anthropic_direct/* ]]; then
-  skip "reviewPullRequest uses anthropic_direct — a live run needs Anthropic credits (or repoint the LLM at local Ollama, like embeddings). NOT triggered here."
-  SUMMARY+=("reviewPullRequest: SKIPPED (credit-gated)")
+echo "  ℹ️  review LLM provider = ${LLM_PROVIDER:-none}"
+
+# reviewPullRequest — open a FRESH PR every run (project-owner directive: "create a new PR for every
+# smoke") and drive a real end-to-end review. The new branch points at the seeded-issues bait SHA, so the
+# PR diff carries the planted defects. We correlate by the Temporal workflow id ending in /<PR_NUM>: PR
+# numbers are monotonic + globally unique on the repo, so the match never collides with a prior run. gh
+# absent/unauthed OR the webhook not delivered within the wait window degrade to SKIP (environmental); a
+# real workflow FAILED, or COMPLETED-but-no-review-posted, is a hard RED.
+REVIEW_REPO="${CODEMASTER_SMOKE_REVIEW_REPO:-inder1991/inventory-service}"
+REVIEW_BASE="${CODEMASTER_SMOKE_REVIEW_BASE:-main}"
+REVIEW_SEED_BRANCH="${CODEMASTER_SMOKE_REVIEW_SEED_BRANCH:-seeded-issues}"
+REVIEW_WAIT_ROUNDS="${CODEMASTER_SMOKE_REVIEW_WAIT_ROUNDS:-50}"   # ~8 min budget (a real review ≈ 4-6 min)
+# Status of the reviewPullRequest workflow whose id ends in /<PR_NUM> ('' until one appears).
+review_wf_status_for_pr() {
+  tctl workflow list --query "WorkflowType='reviewPullRequest'" --limit 10 2>/dev/null \
+    | awk -v re="/$1$" 'NR>1 && $2 ~ re {print $1; exit}'
+}
+if ! command -v gh >/dev/null 2>&1 || ! gh auth status >/dev/null 2>&1; then
+  skip "reviewPullRequest: gh CLI absent/unauthed — cannot open a fresh PR (set up gh to drive the live review)"
+  SUMMARY+=("reviewPullRequest: SKIPPED (no gh)")
 else
-  skip "reviewPullRequest live trigger not automated here (drive via a real PR webhook); provider=$LLM_PROVIDER"
-  SUMMARY+=("reviewPullRequest: not auto-triggered")
+  TS="$(date +%y%m%d-%H%M%S)"; SMOKE_BRANCH="smoke/review-$TS"
+  SEED_SHA="$(gh api "repos/$REVIEW_REPO/git/ref/heads/$REVIEW_SEED_BRANCH" --jq '.object.sha' 2>/dev/null)"
+  if [[ -z "$SEED_SHA" ]]; then
+    skip "reviewPullRequest: seed branch '$REVIEW_SEED_BRANCH' not found on $REVIEW_REPO"
+    SUMMARY+=("reviewPullRequest: SKIPPED (no seed branch)")
+  elif ! gh api "repos/$REVIEW_REPO/git/refs" -f "ref=refs/heads/$SMOKE_BRANCH" -f "sha=$SEED_SHA" >/dev/null 2>&1; then
+    skip "reviewPullRequest: could not create branch $SMOKE_BRANCH on $REVIEW_REPO"
+    SUMMARY+=("reviewPullRequest: SKIPPED (branch create failed)")
+  else
+    PR_URL="$(gh pr create --repo "$REVIEW_REPO" --base "$REVIEW_BASE" --head "$SMOKE_BRANCH" \
+      --title "codemaster live smoke $TS" \
+      --body "Automated live-smoke PR (seeded-issues bait). Safe to close; run-id retention reaps stale smoke PRs." 2>/dev/null)"
+    PR_NUM="$(echo "$PR_URL" | grep -oE '[0-9]+$')"
+    if [[ -z "$PR_NUM" ]]; then
+      skip "reviewPullRequest: gh pr create failed (head=$SMOKE_BRANCH) — branch left for manual inspect"
+      SUMMARY+=("reviewPullRequest: SKIPPED (pr create failed)")
+    else
+      echo "  ℹ️  opened $REVIEW_REPO PR #$PR_NUM (head=$SMOKE_BRANCH) — waiting up to ~8m for webhook→review…"
+      RSTATUS=""
+      for _ in $(seq 1 "$REVIEW_WAIT_ROUNDS"); do
+        for _ in $(seq 1 12); do kubectl -n "$NS" exec "$BACKEND_POD" -- true >/dev/null 2>&1; done  # ~10s busy-wait (no host sleep)
+        RSTATUS="$(review_wf_status_for_pr "$PR_NUM")"
+        [[ "$RSTATUS" == "Completed" || "$RSTATUS" == "Failed" ]] && break
+      done
+      case "$RSTATUS" in
+        Completed)
+          NREV="$(gh api "repos/$REVIEW_REPO/pulls/$PR_NUM/reviews" --jq 'length' 2>/dev/null || echo 0)"
+          NCMT="$(gh api "repos/$REVIEW_REPO/pulls/$PR_NUM/comments" --jq 'length' 2>/dev/null || echo 0)"
+          if [[ "${NREV:-0}" -ge 1 ]]; then
+            ok "reviewPullRequest PR #$PR_NUM → COMPLETED + posted review ($NREV review, $NCMT inline comments)"
+            SUMMARY+=("reviewPullRequest: COMPLETED + posted (PR #$PR_NUM, $NCMT comments)")
+            SEP_HITS="$( { gh api "repos/$REVIEW_REPO/pulls/$PR_NUM/reviews" --jq '.[].body' 2>/dev/null; \
+                          gh api "repos/$REVIEW_REPO/pulls/$PR_NUM/comments" --jq '.[].body' 2>/dev/null; } \
+                        | grep -ciE "$SMOKE_SPACE_KEY/$SMOKE_PAGE_ID|confluence:$SMOKE_SPACE_KEY" )"
+            [[ "${SEP_HITS:-0}" -ge 1 ]] \
+              && ok "review cites the embedded Confluence corpus ($SMOKE_SPACE_KEY/$SMOKE_PAGE_ID ×$SEP_HITS)" \
+              || skip "review posted but no $SMOKE_SPACE_KEY/$SMOKE_PAGE_ID citation (retrieval/embedder regression?)"
+          else
+            bad "reviewPullRequest PR #$PR_NUM → COMPLETED but NO review posted (publication degraded — invariant 12)"
+            SUMMARY+=("reviewPullRequest: COMPLETED-but-UNPOSTED (PR #$PR_NUM)")
+          fi
+          ;;
+        Failed)
+          bad "reviewPullRequest PR #$PR_NUM → workflow FAILED (temporal workflow show <id>; Anthropic credits?)"
+          SUMMARY+=("reviewPullRequest: FAILED (PR #$PR_NUM)")
+          ;;
+        *)
+          skip "reviewPullRequest PR #$PR_NUM → no terminal review workflow after ~8m (webhook forwarder/smee up? credits?)"
+          SUMMARY+=("reviewPullRequest: ${RSTATUS:-none} (PR #$PR_NUM — webhook not delivered?)")
+          ;;
+      esac
+    fi
+  fi
 fi
 
 # ── 6. Activity-failure scan + summary ──────────────────────────────────────────────────────────────
@@ -151,5 +220,5 @@ section "SUMMARY — every workflow, live status"
 for line in "${SUMMARY[@]}"; do echo "  • $line"; done
 echo
 echo "PASS=$PASS  FAIL=$FAIL  SKIP=$SKIP"
-[[ "$FAIL" -eq 0 ]] && { echo "LIVE SMOKE: GREEN (all hard checks passed; skips are credit/destructive-gated by design)"; exit 0; } \
+[[ "$FAIL" -eq 0 ]] && { echo "LIVE SMOKE: GREEN (all hard checks passed; skips are environmental/destructive-gated by design)"; exit 0; } \
   || { echo "LIVE SMOKE: RED ($FAIL hard failure(s))"; exit 1; }
