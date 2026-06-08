@@ -1,0 +1,171 @@
+// embedDocChunks — 1:1 port of the frozen Python
+// vendor/codemaster-py/codemaster/activities/embed_doc_chunks.py (Sprint 10 / S10.2.3, extended
+// Sprint 26 / B-1 + the R-5/R-12/R-13 multi-lens audit fixes 2026-05-22).
+//
+// Persist in-repo doc chunk embeddings to `core.knowledge_chunks`. Idempotent on `content_sha256` per
+// `(installation_id, repo_id, relative_path, chunk_index)` — chunks whose stored hash matches the
+// discovered hash are kept as-is, sparing both the embed service and the database.
+//
+// ── R-5 ORPHAN-SWEEP EMPTY-CHUNKS GUARD (load-bearing safety check) ──
+// Pass 3 refuses the orphan-sweep when `chunks` is empty. The pre-fix path called
+// `deleteOrphanChunks(keepKeys=∅)`, which the repo treats as "DELETE every row for this
+// (installation_id, repository_id)" — WIPING the entire repo's knowledge index. Common trigger:
+// `discoverKnowledgeDocs` returns 0 docs (clone race, `docs/` removed in this push, bad custom pattern),
+// or every doc read failed. The default-safe behaviour is to KEEP the prior index intact until a refresh
+// with non-empty `chunks` actually runs. Ported EXACTLY — see the empty-fetch integration test.
+//
+// PURE-of-side-effects beyond the injected ports: no clock, no random (the chunk_id is a deterministic
+// UUIDv5 of the natural key — content-addressable, replay-safe).
+
+import { EMBEDDING_DIM, type EmbeddingsPort } from "#backend/adapters/embeddings_port.js";
+import {
+  type ChunkKey,
+  chunkKeyToStr,
+  type KnowledgeChunkRepoPort,
+  type KnowledgeChunkRow,
+} from "#backend/domain/repos/knowledge_chunks_repo.js";
+import { deriveDocKind } from "#backend/policy/doc_kind_heuristic.js";
+import { deriveDocStatus } from "#backend/policy/doc_status_heuristic.js";
+
+import type { MarkdownChunkV1 } from "#contracts/markdown_chunk.v1.js";
+import { EmbedDocChunksResultV1 } from "#contracts/repo_docs.v1.js";
+
+import { uuid5 } from "#platform/randomness.js";
+
+// Embed service batch size. Aligned with EmbedRequest.texts max=128 (Python `_BATCH_SIZE = 128`).
+const BATCH_SIZE = 128;
+const EMBED_PURPOSE = "in_repo_doc";
+
+/**
+ * Stable surrogate id for a chunk slot (1:1 with the Python `_chunk_id_for`). Computed deterministically
+ * from the natural key so re-embedding the same key keeps the same id — review comments cite this as the
+ * locator and the citation must remain stable across re-indexes.
+ *
+ * Python: `uuid.uuid5(repo_id, f"{relative_path}#{chunk_index}")` — note the NAMESPACE is `repo_id`
+ * ITSELF (a UUID), not a fixed RFC-4122 namespace. The TS `uuid5(namespaceHex, name)` takes the namespace
+ * as a hex string; `repoId` is already a UUID string, so it is passed straight through (byte-for-byte
+ * parity with the Python derivation).
+ */
+function chunkIdFor(args: { repoId: string; relativePath: string; chunkIndex: number }): string {
+  return uuid5(args.repoId, `${args.relativePath}#${args.chunkIndex}`);
+}
+
+/**
+ * Index `chunks` into `chunkRepo` using `embeddings`. 1:1 with the frozen Python `embed_doc_chunks`.
+ *
+ * Three passes:
+ *   1. Partition into "needs embedding" vs "skip" via a bulk hash-lookup (R-12).
+ *   2. Embed the survivors in batches of {@link BATCH_SIZE}; bulk-upsert one batch per transaction (R-13).
+ *      A vector whose dimensionality ≠ {@link EMBEDDING_DIM} is logged + skipped (defensive — embed-service
+ *      contract violation; we don't poison the index with a wrong-shape vector).
+ *   3. R-5 orphan-sweep — SKIPPED ENTIRELY when `chunks` is empty (the load-bearing index-wipe guard).
+ *
+ * Propagates whatever the embed port raises (connectivity / rate-limit / validation) — the activity above
+ * catches the degradation classes and returns `retrieval_degraded=True`.
+ */
+export async function embedDocChunks(args: {
+  installationId: string;
+  repoId: string;
+  chunks: ReadonlyArray<MarkdownChunkV1>;
+  /** map from `chunkKeyToStr(relativePath, chunkIndex)` → the file's discovered `content_sha256`. */
+  chunkHashes: ReadonlyMap<string, string>;
+  embeddings: EmbeddingsPort;
+  chunkRepo: KnowledgeChunkRepoPort;
+  modelName: string;
+}): Promise<EmbedDocChunksResultV1> {
+  const { installationId, repoId, chunks, chunkHashes, embeddings, chunkRepo, modelName } = args;
+
+  // ── Pass 1 — partition into "needs embedding" vs "skip" by hash (R-12 bulk lookup) ─────────────────
+  const toEmbed: Array<MarkdownChunkV1> = [];
+  let skippedUnchanged = 0;
+  const lookupKeys: Array<ChunkKey> = chunks.map((c) => [c.relative_path, c.chunk_index] as const);
+  const existingByKey = await chunkRepo.getExistingHashes({ installationId, repoId, keys: lookupKeys });
+  for (const c of chunks) {
+    const keyStr = chunkKeyToStr(c.relative_path, c.chunk_index);
+    const newHash = chunkHashes.get(keyStr);
+    if (newHash === undefined) {
+      // Chunker emitted a chunk for which we have no file hash — programmer error upstream. Be defensive:
+      // embed so we don't silently drop content (1:1 with the Python `if new_hash is None` branch).
+      toEmbed.push(c);
+      continue;
+    }
+    const existing = existingByKey.get(keyStr) ?? null;
+    if (existing === newHash) {
+      skippedUnchanged += 1;
+      continue;
+    }
+    toEmbed.push(c);
+  }
+
+  // ── Pass 2 — embed the survivors in batches; bulk-upsert one batch per transaction (R-13) ──────────
+  let embedded = 0;
+  for (let batchStart = 0; batchStart < toEmbed.length; batchStart += BATCH_SIZE) {
+    const batch = toEmbed.slice(batchStart, batchStart + BATCH_SIZE);
+    if (batch.length === 0) {
+      continue;
+    }
+    const result = await embeddings.embed({
+      texts: batch.map((c) => c.body),
+      model_name: modelName,
+      purpose: EMBED_PURPOSE,
+    });
+    const upsertRows: Array<KnowledgeChunkRow> = [];
+    // zip(batch, result.vectors, strict=True): the port invariant is len(vectors) === len(texts), so `i`
+    // is a bounded numeric index into a same-length array — not an attacker-controlled object key.
+    batch.forEach((c, i) => {
+      // eslint-disable-next-line security/detect-object-injection -- bounded numeric index into a same-length array (port invariant len(vectors)===len(texts))
+      const vec = result.vectors[i];
+      if (vec === undefined || vec.length !== EMBEDDING_DIM) {
+        // Defensive — embed-service contract violation. Log + skip; don't corrupt the index with a
+        // zero-padded / wrong-shape vector (1:1 with the Python dim-mismatch skip).
+        return;
+      }
+      const newHash = chunkHashes.get(chunkKeyToStr(c.relative_path, c.chunk_index));
+      if (newHash === undefined) {
+        // Cannot happen for a survivor that came from the hashed set, but the Python indexes
+        // chunk_hashes[(path, idx)] unconditionally here; mirror the "must have a hash to persist" intent
+        // by skipping rather than writing a NULL content_sha256.
+        return;
+      }
+      upsertRows.push({
+        chunkId: chunkIdFor({ repoId, relativePath: c.relative_path, chunkIndex: c.chunk_index }),
+        installationId,
+        repoId,
+        relativePath: c.relative_path,
+        chunkIndex: c.chunk_index,
+        contentSha256: newHash,
+        headingPath: c.heading_path,
+        body: c.body,
+        vector: [...vec],
+        docKind: deriveDocKind(c.relative_path),
+        docStatus: deriveDocStatus(c.relative_path, c.body),
+      });
+    });
+    if (upsertRows.length > 0) {
+      await chunkRepo.upsertChunks(upsertRows);
+      embedded += upsertRows.length;
+    }
+  }
+
+  // ── Pass 3 — orphan sweep (R-5 EMPTY-CHUNKS GUARD) ─────────────────────────────────────────────────
+  //
+  // Refuse the orphan-sweep when `chunks` is empty. The intentional "customer removed all docs, sweep
+  // stale rows" case is rare and best handled by a separate scheduled cleanup or admin operator command.
+  // The default-safe behaviour here is to keep the prior index intact until a refresh with non-empty
+  // `chunks` actually runs (1:1 with the frozen Python Pass-3 guard).
+  let deletedOrphans: number;
+  if (chunks.length === 0) {
+    // chunks=() — skip orphan-sweep to avoid wiping the entire index; prior rows retained.
+    deletedOrphans = 0;
+  } else {
+    const keepKeys = new Set<string>(chunks.map((c) => chunkKeyToStr(c.relative_path, c.chunk_index)));
+    deletedOrphans = await chunkRepo.deleteOrphanChunks({ installationId, repoId, keepKeys });
+  }
+
+  return EmbedDocChunksResultV1.parse({
+    schema_version: 1,
+    embedded,
+    skipped_unchanged: skippedUnchanged,
+    deleted_orphans: deletedOrphans,
+  });
+}
