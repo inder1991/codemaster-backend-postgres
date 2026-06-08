@@ -1342,3 +1342,133 @@ export {
   QuarantinedChunkV1,
   QuarantinedChunksPageV1,
 } from "./admin/quarantined_chunks.v1.js";
+
+// ─── Status page + review-timeline (Batch 5) ──────────────────────────────────────────────────────
+// Pipeline/pilot status envelopes for GET /api/admin/status/{pipeline,pilot-progress}, plus the
+// per-delivery review-timeline assembly for GET /api/admin/review-timeline?delivery=... . Enum values
+// for OutboxRowV1.state + LlmCallV1.status are pinned to the live DB CHECK constraints (NOT the Python
+// plan guesses): core.outbox CHECK = {pending,dispatched,dead}; telemetry.llm_calls CHECK =
+// {ok,refused_cost_cap,failed,timeout}.
+
+export const HealthStateV1 = z.enum(["healthy", "degraded", "down"]).readonly();
+export type HealthStateV1 = z.infer<typeof HealthStateV1>;
+
+export const PipelineStatusV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    in_flight_review_count: z.number().int().nonnegative(),
+    last_24h_review_count: z.number().int().nonnegative(),
+    last_24h_findings_count: z.number().int().nonnegative(),
+    last_24h_avg_latency_seconds: z.number().nonnegative(),
+    bedrock_health: HealthStateV1,
+    postgres_health: HealthStateV1,
+    temporal_health: HealthStateV1,
+    sampled_at: z.coerce.date(),
+  })
+  .strict()
+  .readonly();
+export type PipelineStatusV1 = z.infer<typeof PipelineStatusV1>;
+
+export const PilotProgressV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    total_orgs_onboarded: z.number().int().nonnegative(),
+    target_orgs: z.number().int().nonnegative(),
+    total_prs_reviewed_this_week: z.number().int().nonnegative(),
+    sprint_day: z.number().int().min(1).max(14),
+    sampled_at: z.coerce.date(),
+  })
+  .strict()
+  .readonly();
+export type PilotProgressV1 = z.infer<typeof PilotProgressV1>;
+
+export const WebhookEventV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    webhook_event_id: z.string().uuid(),
+    installation_id: z.string().uuid().nullable(),
+    event_type: z.string(),
+    received_at: z.coerce.date(),
+  })
+  .strict()
+  .readonly();
+export type WebhookEventV1 = z.infer<typeof WebhookEventV1>;
+
+export const OutboxRowV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    outbox_id: z.string().uuid(),
+    sink: z.string(),
+    state: z.enum(["pending", "dispatched", "dead"]),
+    created_at: z.coerce.date(),
+    leased_until: z.coerce.date().nullable(),
+    workflow_id: z.string().nullable(),
+  })
+  .strict()
+  .readonly();
+export type OutboxRowV1 = z.infer<typeof OutboxRowV1>;
+
+export const WorkflowStatusV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    workflow_id: z.string(),
+    run_id: z.string().nullable(),
+    status: z.enum([
+      "running",
+      "completed",
+      "failed",
+      "canceled",
+      "terminated",
+      "continued_as_new",
+      "timed_out",
+      "unknown",
+    ]),
+    started_at: z.coerce.date().nullable(),
+    closed_at: z.coerce.date().nullable(),
+  })
+  .strict()
+  .readonly();
+export type WorkflowStatusV1 = z.infer<typeof WorkflowStatusV1>;
+
+export const LlmCallV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    llm_call_id: z.string().uuid(),
+    model: z.string(),
+    cost_usd_cents: z.number().int().nonnegative(),
+    latency_ms: z.number().int().nonnegative(),
+    status: z.enum(["ok", "refused_cost_cap", "failed", "timeout"]),
+    created_at: z.coerce.date(),
+  })
+  .strict()
+  .readonly();
+export type LlmCallV1 = z.infer<typeof LlmCallV1>;
+
+export const GitHubPostingV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    kind: z.enum(["check_run", "review_comment", "review"]),
+    posted_at: z.coerce.date(),
+    external_id: z.string().nullable(),
+    status: z.enum(["posted", "failed"]),
+    error_message: z.string().nullable(),
+  })
+  .strict()
+  .readonly();
+export type GitHubPostingV1 = z.infer<typeof GitHubPostingV1>;
+
+export const ReviewTimelineV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    delivery_id: z.string().min(1).max(64),
+    webhook: WebhookEventV1.nullable(),
+    outbox: OutboxRowV1.nullable(),
+    workflow: WorkflowStatusV1.nullable(),
+    bedrock_calls: z.array(LlmCallV1),
+    github_postings: z.array(GitHubPostingV1),
+    warnings: z.array(z.string()),
+    sampled_at: z.coerce.date(),
+  })
+  .strict()
+  .readonly();
+export type ReviewTimelineV1 = z.infer<typeof ReviewTimelineV1>;
