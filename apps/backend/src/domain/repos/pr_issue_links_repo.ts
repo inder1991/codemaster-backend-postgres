@@ -33,8 +33,96 @@
 import { type Kysely, sql } from "kysely";
 
 import { tenantKysely } from "#platform/db/database.js";
+import { type Clock } from "#platform/clock.js";
+import { uuid5 } from "#platform/randomness.js";
 
 import type { IssueLink, LinkageKind, LinkageSource } from "#contracts/issue_link.v1.js";
+
+/**
+ * uuid5 namespace for `derivePrIssueLinkId` — 1:1 with the frozen Python `_PR_ISSUE_LINK_UUID5_NAMESPACE`
+ * (`codemaster/domain/repos/pr_issue_links_repo.py`). MUST NOT change: it is stable across replays so the
+ * same `(pr_id, github_issue_number, linkage_kind, source)` tuple always maps to the same
+ * `pr_issue_link_id`. Paired with the UNIQUE constraint, this makes the DELETE-then-INSERT idempotent on
+ * webhook re-delivery / replay.
+ */
+export const PR_ISSUE_LINK_UUID5_NAMESPACE = "8d8c9d14-0a3e-5e0f-9b7e-fc2c3a8d9704";
+
+/**
+ * Stable per-link UUID5, 1:1 with the Python `derive_pr_issue_link_id`. Used so a PR-edit-after-error does
+ * not drift the row id. The name string is `"{prId}|{githubIssueNumber}|{linkageKind}|{source}"` — exactly
+ * the Python `f"{pr_id}|{github_issue_number}|{linkage_kind}|{source}"`.
+ */
+export function derivePrIssueLinkId(args: {
+  prId: string;
+  githubIssueNumber: number;
+  linkageKind: LinkageKind;
+  source: LinkageSource;
+}): string {
+  const name = `${args.prId}|${args.githubIssueNumber}|${args.linkageKind}|${args.source}`;
+  return uuid5(PR_ISSUE_LINK_UUID5_NAMESPACE, name);
+}
+
+/**
+ * Atomic DELETE-then-INSERT of `core.pr_issue_links` rows for one PR — 1:1 with the frozen Python
+ * `replace_links`. Runs inside the CALLER's transaction (`tx`); on outer rollback both writes vanish, so it
+ * shares fate with the gh_users + pull_requests + pr_state_transitions chain (ADR-0026 §4).
+ *
+ * Semantics (faithful to Python):
+ *   1. `DELETE … WHERE installation_id = :iid AND pr_id = :pid` (tenancy-filtered — REQUIRED so the tenancy
+ *      gate accepts the raw SQL; pr_id is already PR-unique). Capture the deleted rowcount.
+ *   2. If `links` is empty → return `{ deleted, inserted: 0 }` (DELETE-then-INSERT collapses to just-DELETE
+ *      when the author removed every `Closes #N` in an edit).
+ *   3. Otherwise bulk INSERT under `ON CONFLICT (pr_id, github_issue_number, linkage_kind, source)
+ *      DO NOTHING` — the UNIQUE constraint absorbs any caller-side dedup miss + makes a concurrent webhook
+ *      race safe. `created_at = clock.now()` (ONE read for the whole batch); `pr_issue_link_id` is the
+ *      deterministic {@link derivePrIssueLinkId} per row.
+ *
+ * `inserted` mirrors the Python `insert_result.rowcount or len(links)`: when the DB reports 0 affected rows
+ * (all conflicted), it falls back to `links.length` — preserved verbatim for parity.
+ */
+export async function replaceLinks(
+  tx: Kysely<unknown>,
+  args: {
+    prId: string;
+    installationId: string;
+    links: ReadonlyArray<IssueLink>;
+    clock: Clock;
+  },
+): Promise<{ deleted: number; inserted: number }> {
+  const { prId, installationId, links, clock } = args;
+
+  const deleteResult = await sql`
+    DELETE FROM core.pr_issue_links
+     WHERE installation_id = ${installationId} AND pr_id = ${prId}
+  `.execute(tx);
+  const deleted = Number(deleteResult.numAffectedRows ?? 0n);
+
+  if (links.length === 0) {
+    return { deleted, inserted: 0 };
+  }
+
+  const now = clock.now();
+  const valueTuples = links.map((link) => {
+    const linkId = derivePrIssueLinkId({
+      prId,
+      githubIssueNumber: link.github_issue_number,
+      linkageKind: link.linkage_kind,
+      source: link.source,
+    });
+    return sql`(${linkId}, ${installationId}, ${prId}, ${link.github_issue_number}, ${link.linkage_kind}, ${link.source}, ${now})`;
+  });
+
+  const insertResult = await sql`
+    INSERT INTO core.pr_issue_links
+      (pr_issue_link_id, installation_id, pr_id, github_issue_number, linkage_kind, source, created_at)
+    VALUES ${sql.join(valueTuples, sql`, `)}
+    ON CONFLICT (pr_id, github_issue_number, linkage_kind, source) DO NOTHING
+  `.execute(tx);
+  // 1:1 with Python `insert_result.rowcount or len(links)` — fall back to links.length on a falsy count.
+  const inserted = Number(insertResult.numAffectedRows ?? 0n) || links.length;
+
+  return { deleted, inserted };
+}
 
 /** Minimal Kysely table typing for `core.pr_issue_links` (the only table this repo touches). */
 type PrIssueLinksTable = {
