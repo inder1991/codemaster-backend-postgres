@@ -78,11 +78,21 @@ import {
   RoleChangePendingV1,
   RoleChangeRequestV1,
   FindingFeedbackResponseV1,
+  PilotProgressV1,
+  PipelineStatusV1,
+  ReviewTimelineV1,
   SubmitFindingFeedbackRequestV1,
   TaxonomyGapListV1,
   TestPlatformCredentialsResponseV1,
   TaxonomySuggestionAcceptedV1,
   TaxonomySuggestionV1,
+} from "#contracts/admin.v1.js";
+import type {
+  GitHubPostingV1,
+  LlmCallV1,
+  OutboxRowV1,
+  WebhookEventV1,
+  WorkflowStatusV1,
 } from "#contracts/admin.v1.js";
 import {
   ConfluencePageApprovalV1,
@@ -109,6 +119,8 @@ import {
 } from "#backend/api/admin/embedder_read.js";
 import { PostgresEmbeddingGenerationsRepo } from "#backend/domain/repos/embedding_generations_repo.js";
 import { PostgresEmbedderRuntimeStateRepo } from "#backend/domain/repos/embedder_runtime_state_repo.js";
+import { StatusRepo } from "#backend/domain/repos/status_repo.js";
+import { ReviewTimelineRepo } from "#backend/domain/repos/review_timeline_repo.js";
 import {
   CoverageGapPresentError,
   EmbedderGenerationService,
@@ -341,6 +353,12 @@ export type AdminRoutesOptions = {
   /** Optional Temporal dispatch/signal seam for knowledge-proposal + embedder write endpoints.
    *  Undefined → those endpoints return 503. Mirrors opts.audit. */
   temporal?: AdminTemporalPort;
+  /** Status-page reader (pipeline + pilot aggregates). Optional — defaults to `new StatusRepo(opts.db)`
+   *  so endpoint tests that don't inject a stub still exercise the real Postgres aggregates. */
+  statusRepo?: StatusRepo;
+  /** Review-timeline reader (per-delivery webhook/outbox/bedrock chain links). Optional — defaults to
+   *  `new ReviewTimelineRepo(opts.db)`. */
+  reviewTimelineRepo?: ReviewTimelineRepo;
 };
 
 /** The static dashboard summary (1:1 with the shipped Python: _HealthyProbe for the 4 services +
@@ -366,6 +384,8 @@ export async function registerAdminRoutes(
   opts: AdminRoutesOptions,
 ): Promise<void> {
   const requireRole = makeRequireRole({ signingKey: opts.signingKey, clock: opts.clock });
+  const statusRepo = opts.statusRepo ?? new StatusRepo(opts.db);
+  const reviewTimelineRepo = opts.reviewTimelineRepo ?? new ReviewTimelineRepo(opts.db);
 
   await app.register(async (scope) => {
     await scope.register(cookie);
@@ -2630,6 +2650,137 @@ export async function registerAdminRoutes(
       { preHandler: requireRole(["platform_owner", "super_admin"]) },
       async (_request, reply) =>
         reply.code(200).send(DashboardSummaryV1.parse(buildDashboardSummary(opts.clock.now()))),
+    );
+
+    // GET /api/admin/status/pipeline (reader+above). On status-repo schema-drift (missing table/column)
+    // we graceful-degrade to a degraded-health envelope rather than 503, so the dashboard still renders.
+    scope.get(
+      "/api/admin/status/pipeline",
+      {
+        preHandler: requireRole([
+          "reader",
+          "platform_operator",
+          "platform_owner",
+          "super_admin",
+        ]),
+      },
+      async (request, reply) => {
+        try {
+          const status = await statusRepo.getPipelineStatus(opts.clock.now());
+          return reply.code(200).send(PipelineStatusV1.parse(status));
+        } catch (err) {
+          request.log.warn({ err }, "status-repo schema-drift or unavailable");
+          const isSchemaDrift =
+            err instanceof Error &&
+            (err.message.includes("UndefinedTable") ||
+              err.message.includes("UndefinedColumn") ||
+              err.message.includes("does not exist"));
+          if (isSchemaDrift) {
+            return reply.code(200).send(
+              PipelineStatusV1.parse({
+                in_flight_review_count: 0,
+                last_24h_review_count: 0,
+                last_24h_findings_count: 0,
+                last_24h_avg_latency_seconds: 0,
+                bedrock_health: "degraded",
+                postgres_health: "degraded",
+                temporal_health: "degraded",
+                sampled_at: opts.clock.now(),
+              }),
+            );
+          }
+          return reply.code(503).send({ error: "status persistence unreachable" });
+        }
+      },
+    );
+
+    // GET /api/admin/status/pilot-progress (owner/super). Fail-open to zeros on any error (per S16.D.3).
+    scope.get(
+      "/api/admin/status/pilot-progress",
+      { preHandler: requireRole(["platform_owner", "super_admin"]) },
+      async (request, reply) => {
+        try {
+          const progress = await statusRepo.getPilotProgress(opts.clock.now());
+          return reply.code(200).send(PilotProgressV1.parse(progress));
+        } catch (err) {
+          request.log.warn({ err }, "status-repo pilot unavailable");
+          return reply.code(200).send(
+            PilotProgressV1.parse({
+              total_orgs_onboarded: 0,
+              target_orgs: 10,
+              total_prs_reviewed_this_week: 0,
+              sprint_day: 1,
+              sampled_at: opts.clock.now(),
+            }),
+          );
+        }
+      },
+    );
+
+    // GET /api/admin/review-timeline?delivery=<id> (owner/super). Assembles the per-delivery chain from
+    // Postgres sub-sources; each sub-source failure becomes a warning (partial render, not 503). The
+    // external chains (Temporal workflow status, GitHub postings) are Day-1 shims (null + warning).
+    scope.get<{ Querystring: { delivery?: string } }>(
+      "/api/admin/review-timeline",
+      { preHandler: requireRole(["platform_owner", "super_admin"]) },
+      async (request, reply) => {
+        const delivery = request.query.delivery;
+        if (!delivery || delivery.length < 1 || delivery.length > 64) {
+          return reply.code(422).send({ error: "delivery must be 1-64 chars" });
+        }
+
+        const warnings: Array<string> = [];
+        let webhook: WebhookEventV1 | null = null;
+        let outbox: OutboxRowV1 | null = null;
+        let bedrock: Array<LlmCallV1> = [];
+
+        try {
+          webhook = await reviewTimelineRepo.getWebhook(delivery);
+        } catch (err) {
+          request.log.warn({ err, source: "webhook" }, "review-timeline sub-source unavailable");
+          warnings.push(`webhook unavailable: ${(err as Error).name}`);
+        }
+
+        try {
+          outbox = await reviewTimelineRepo.getOutbox(delivery);
+        } catch (err) {
+          request.log.warn({ err, source: "outbox" }, "review-timeline sub-source unavailable");
+          warnings.push(`outbox unavailable: ${(err as Error).name}`);
+        }
+
+        try {
+          bedrock = await reviewTimelineRepo.getBedrock(delivery);
+        } catch (err) {
+          request.log.warn({ err, source: "bedrock" }, "review-timeline sub-source unavailable");
+          warnings.push(`bedrock_calls unavailable: ${(err as Error).name}`);
+        }
+
+        // Day-1 external chains are shims (null + warning, no 503).
+        const workflow: WorkflowStatusV1 | null = null;
+        const github: Array<GitHubPostingV1> = [];
+        warnings.push("workflow status unavailable (Day-1 shim)");
+        warnings.push("github postings unavailable (Day-1 shim)");
+
+        // 404 only when NO chain link was found across every source.
+        if (!webhook && !outbox && !workflow && bedrock.length === 0 && github.length === 0) {
+          return reply
+            .code(404)
+            .send({ error: `no chain links found for delivery_id=${delivery}` });
+        }
+
+        const timeline = ReviewTimelineV1.parse({
+          delivery_id: delivery,
+          webhook,
+          outbox,
+          workflow,
+          bedrock_calls: bedrock,
+          github_postings: github,
+          warnings,
+          sampled_at: opts.clock.now(),
+        });
+
+        return reply.code(200).send(timeline);
+      },
     );
   });
 }
