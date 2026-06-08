@@ -26,6 +26,14 @@ import {
   MarkDispatchedInputV1,
 } from "#contracts/outbox_dispatch.v1.js";
 
+// Sprint 14.5 / S14.5.D — lease-heartbeat tunables (1:1 with vendor/codemaster-py/codemaster/activities/
+// outbox.py: HEARTBEAT_INTERVAL_SECONDS / HEARTBEAT_LEASE_SECONDS). The default claim lease is 10s; the
+// heartbeat fires every 2s so a multi-second sink handler keeps the lease fresh. A db blip on the heartbeat
+// is logged at WARN and NOT propagated — the lease itself is the safety net (it expires; another pod
+// re-claims; the handler's eventual write either commits cleanly or surfaces a CHECK violation).
+const HEARTBEAT_INTERVAL_SECONDS = 2;
+const HEARTBEAT_LEASE_SECONDS = 10;
+
 export type OutboxDispatchActivitiesOptions = {
   repo: PostgresOutboxRepo;
   /** The dispatcher's own connection (its own pool; ADR-0062 cached engine). */
@@ -88,11 +96,14 @@ export class OutboxDispatchActivities {
       runId: v.run_id,
     };
 
-    // SEAM (heartbeat — DEFER §D4): the lease-extend loop is not ported. The only live sink
-    // (temporal_workflow_start) completes sub-second, well within the 10s claim lease. A handler that could
-    // run 10–60s (the dispatchRow start-to-close timeout) would lose its lease and risk double-dispatch
-    // without this. Activate by spawning a `this.#repo.extendLease` loop on `this.#clock.sleep` here.
-    const heartbeat = this.#startLeaseHeartbeat();
+    // Lease-heartbeat (S14.5.D — 1:1 with the Python dispatch_row _heartbeat closure). A background loop
+    // extends `leased_until` by HEARTBEAT_LEASE_SECONDS (10s) every HEARTBEAT_INTERVAL_SECONDS (2s) for the
+    // life of the handler, so a sink that runs close to the 10s claim lease (up to the 60s start-to-close
+    // timeout) does not lose its lease and get double-dispatched by another pod. A heartbeat extendLease
+    // failure is logged at WARN and NOT propagated (fail-open) — the lease itself is the safety net (it
+    // expires; another pod re-claims). The loop is stopped in `finally` so a zombie task can't keep writing
+    // after the handler returns.
+    const heartbeat = this.#startLeaseHeartbeat(v.row_id);
     try {
       // SEAM (trace-restore — DEFER §E): OTel trace-context restore is not ported. `v.trace_context` is
       // carried through the contract but not bound to the OTel context here (fail-open — Python's
@@ -216,11 +227,38 @@ export class OutboxDispatchActivities {
     pending.drain();
   }
 
-  /** SEAM (heartbeat — DEFER §D4): no-op until the lease-extend loop is activated (see dispatchRow). */
-  #startLeaseHeartbeat(): { stop(): void } {
+  /**
+   * Lease-heartbeat loop (1:1 with the Python `_heartbeat` closure in dispatch_row). Spawns a fire-and-forget
+   * background loop that, until {@link stop} is called, sleeps HEARTBEAT_INTERVAL_SECONDS on the injected
+   * Clock then extends the row's lease by HEARTBEAT_LEASE_SECONDS. An extendLease failure is logged at WARN
+   * and swallowed (fail-open: the lease itself is the safety net — Python catches `Exception` and continues).
+   * `stop()` flips a flag so the loop exits after its current sleep (the Python `finally` cancels the task).
+   */
+  #startLeaseHeartbeat(rowId: string): { stop(): void } {
+    let stopped = false;
+    const loop = async (): Promise<void> => {
+      while (!stopped) {
+        await this.#clock.sleep(HEARTBEAT_INTERVAL_SECONDS);
+        if (stopped) {
+          break;
+        }
+        try {
+          await this.#repo.extendLease({ db: this.#db, id: rowId, leaseSeconds: HEARTBEAT_LEASE_SECONDS });
+        } catch (e) {
+          console.warn(
+            JSON.stringify({
+              event: "outbox.lease_heartbeat_failed",
+              row_id: rowId,
+              error: e instanceof Error ? e.message : String(e),
+            }),
+          );
+        }
+      }
+    };
+    void loop();
     return {
       stop(): void {
-        /* no-op until the heartbeat loop is activated */
+        stopped = true;
       },
     };
   }
