@@ -238,4 +238,34 @@ describeDb("admin reviews detail (disposable :5439)", () => {
     }
     await app.close();
   });
+
+  it("reviews_detail_read: buildReviewDetail returns joined findings/activities; tenancy enforced", async () => {
+    const { buildReviewDetail } = await import("#backend/api/admin/reviews_detail_read.js");
+    const detail = await buildReviewDetail(db, {
+      installationId: INST,
+      reviewId: REVIEW_ID,
+    });
+    expect(detail.review_id).toBe(REVIEW_ID);
+    expect(detail.repo).toBe("org/test-repo");
+    expect(detail.pr_title).toBe("Fix: add tests");
+    expect(detail.state).toBe("queued");
+    expect(detail.findings).toHaveLength(1);
+    expect(detail.findings[0]!.file_path).toBe("src/main.ts");
+    expect(detail.activities).toHaveLength(1);
+    expect(detail.activities[0]!.activity_name).toBe("ANALYSIS_STARTED");
+    // current_run_id is NULL in the fixture → temporal_url null (deep-link gated on a live run).
+    expect(detail.temporal_url).toBeNull();
+  });
+
+  it("reviews_detail_read: throws ReviewDetailNotFoundError when in different tenant", async () => {
+    const { buildReviewDetail, ReviewDetailNotFoundError } = await import(
+      "#backend/api/admin/reviews_detail_read.js"
+    );
+    await expect(
+      buildReviewDetail(db, {
+        installationId: INST,
+        reviewId: REVIEW_ID_OTHER, // different tenant
+      }),
+    ).rejects.toThrow(ReviewDetailNotFoundError);
+  });
 });
