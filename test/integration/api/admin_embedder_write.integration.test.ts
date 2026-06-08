@@ -208,6 +208,24 @@ async function seedRetiredWithChunks(modelName: string, n = 1): Promise<number> 
   return genId;
 }
 
+/** Insert a generation in `retired` state with retired_at = now() - `ageDays` days (for the GC retention
+ *  gate). No chunk_embeddings needed — GC operates on retired rows regardless. */
+async function seedRetiredAged(modelName: string, ageDays: number): Promise<number> {
+  const r = await sql<{ generation_id: string | number }>`
+    INSERT INTO core.embedding_generations (
+      state, model_name, embedding_dimension, created_by_email,
+      chunker_version, preprocessing_version, normalization_version,
+      backfill_started_at, backfill_completed_at, retired_at, retire_reason
+    ) VALUES (
+      'retired', ${modelName}, 1024, 'ops@example.com', '1', '1', '1',
+      now() - make_interval(days => ${ageDays + 1}), now() - make_interval(days => ${ageDays + 1}),
+      now() - make_interval(days => ${ageDays}), 'demoted'
+    )
+    RETURNING generation_id
+  `.execute(db);
+  return Number(r.rows[0]!.generation_id);
+}
+
 /** Seed one canonical confluence chunk (no FK to repositories) with NO chunk_embeddings row under the
  *  active generation — i.e. a coverage gap. Returns the chunk_id. Caller cleans up. */
 async function seedConfluenceCoverageGap(): Promise<string> {
@@ -531,6 +549,59 @@ describeDb("embedder write lifecycle (disposable :5439)", () => {
     });
     expect(res2.statusCode).toBe(409);
     expect(res2.json<{ detail: { error: string } }>().detail.error).toBe("invalid_state_transition");
+    await app.close();
+  });
+
+  it("POST /reembed/gc: 200 records gc_started_at + dispatches GC workflow on a retention-aged retired gen", async () => {
+    const { app, inner, audited } = await makeApp();
+    const genId = await seedRetiredAged("gc-aged", 40); // 40d > 30d retention window
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/admin/embedder/reembed/gc",
+      cookies: owner(),
+      payload: { schema_version: 1, generation_id: genId },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json<{ gc_started_at: string | null }>().gc_started_at).not.toBeNull();
+
+    const call = inner.calls.find((c) => c.workflowType === "GarbageCollectGenerationWorkflow");
+    expect(call).toBeDefined();
+    expect(call!.workflowId).toBe(`gc-generation-${genId}`);
+    expect(call!.taskQueue).toBe("embedder-maintenance");
+    expect(call!.idReusePolicy).toBe("ALLOW_DUPLICATE");
+    expect(audited.some((a) => a.action === "embedder.generation.gc_started")).toBe(true);
+    await app.close();
+  });
+
+  it("POST /reembed/gc: 409 gc_retention_not_elapsed (no workflow dispatch)", async () => {
+    const { app, inner } = await makeApp();
+    const genId = await seedRetiredAged("gc-fresh", 1); // 1d < 30d retention window
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/admin/embedder/reembed/gc",
+      cookies: owner(),
+      payload: { schema_version: 1, generation_id: genId },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json<{ detail: { error: string } }>().detail.error).toBe("gc_retention_not_elapsed");
+    // No GC workflow dispatched on the retention failure.
+    expect(inner.calls.some((c) => c.workflowType === "GarbageCollectGenerationWorkflow")).toBe(false);
+    await app.close();
+  });
+
+  it("POST /reembed/gc: 409 invalid_state_transition on a non-retired generation", async () => {
+    const { app } = await makeApp();
+    const genId = await seedReadyWithChunks("gc-ready", 1); // 'ready', not 'retired'
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/admin/embedder/reembed/gc",
+      cookies: owner(),
+      payload: { schema_version: 1, generation_id: genId },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json<{ detail: { error: string } }>().detail.error).toBe("invalid_state_transition");
     await app.close();
   });
 });
