@@ -267,6 +267,9 @@ export type AdminRoutesOptions = {
   userEmailResolver?: UserEmailResolverPort;
   /** Injected DNS resolver for the SSRF URL validator (platform-credentials base_url). Defaults to node:dns. */
   dnsResolver?: DnsResolver;
+  /** Optional Temporal dispatch/signal seam for knowledge-proposal + embedder write endpoints.
+   *  Undefined → those endpoints return 503. Mirrors opts.audit. */
+  temporal?: import("#backend/api/admin/_admin_temporal_port.js").AdminTemporalPort;
 };
 
 /** The static dashboard summary (1:1 with the shipped Python: _HealthyProbe for the 4 services +
