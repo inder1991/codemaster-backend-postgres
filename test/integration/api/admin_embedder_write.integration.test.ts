@@ -342,6 +342,56 @@ describeDb("embedder write lifecycle (disposable :5439)", () => {
     expect(res.json<{ detail: { error: string } }>().detail.error).toBe("generation_not_found");
     await app.close();
   });
+
+  it("POST /reembed/validate: 200 pre-validation snapshot + ALLOW_DUPLICATE dispatch on a 'ready' gen", async () => {
+    const { app, inner, audited } = await makeApp();
+    const genId = await seedReadyWithChunks("validate-test", 1);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/admin/embedder/reembed/validate",
+      cookies: owner(),
+      payload: { schema_version: 1, generation_id: genId, sample_size: 100 },
+    });
+    expect(res.statusCode).toBe(200);
+    // Pre-validation snapshot: validation_completed_at is still null (caller polls /reembed/status).
+    expect(res.json<{ validation_completed_at: string | null }>().validation_completed_at).toBeNull();
+
+    const call = inner.calls.find((c) => c.workflowType === "ValidateGenerationWorkflow");
+    expect(call).toBeDefined();
+    expect(call!.workflowId).toBe(`validate-generation-${genId}`);
+    expect(call!.taskQueue).toBe("embedder-maintenance");
+    expect(call!.idReusePolicy).toBe("ALLOW_DUPLICATE");
+    expect(audited.some((a) => a.action === "embedder.generation.validated")).toBe(true);
+    await app.close();
+  });
+
+  it("POST /reembed/validate: 409 invalid_state_transition on the active generation", async () => {
+    const { app } = await makeApp();
+    // Seed gen 1 is 'active' — validation is only permitted on 'backfilling' or 'ready'.
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/admin/embedder/reembed/validate",
+      cookies: owner(),
+      payload: { schema_version: 1, generation_id: SEED_ACTIVE_GENERATION, sample_size: null },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json<{ detail: { error: string } }>().detail.error).toBe("invalid_state_transition");
+    await app.close();
+  });
+
+  it("POST /reembed/validate: 404 generation_not_found", async () => {
+    const { app } = await makeApp();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/admin/embedder/reembed/validate",
+      cookies: owner(),
+      payload: { schema_version: 1, generation_id: 9_999_999, sample_size: null },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json<{ detail: { error: string } }>().detail.error).toBe("generation_not_found");
+    await app.close();
+  });
 });
 
 export { makeApp, owner, seedBackfilling, seedReadyWithChunks };
