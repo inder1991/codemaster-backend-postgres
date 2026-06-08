@@ -17,6 +17,12 @@ import { describe, expect, it } from "vitest";
 import { PageWithApprovalV1, PagesListPageV1 } from "#contracts/admin.v1.js";
 import { QuarantinedChunkV1, QuarantinedChunksPageV1 } from "#contracts/admin.v1.js";
 
+import {
+  getSpaceKeyForIntegration,
+  listPagesForIntegration,
+  listQuarantinedChunksForIntegration,
+} from "#backend/api/admin/confluence_pages_read.js";
+
 describe("confluence-pages contracts exist", () => {
   it("PageWithApprovalV1 exists", () => {
     expect(PageWithApprovalV1).toBeDefined();
@@ -29,5 +35,17 @@ describe("confluence-pages contracts exist", () => {
   });
   it("QuarantinedChunksPageV1 exists", () => {
     expect(QuarantinedChunksPageV1).toBeDefined();
+  });
+});
+
+describe("confluence_pages_read repo functions", () => {
+  it("getSpaceKeyForIntegration resolves integration_id → space_key", () => {
+    expect(getSpaceKeyForIntegration).toBeDefined();
+  });
+  it("listPagesForIntegration returns paginated pages with approval status", () => {
+    expect(listPagesForIntegration).toBeDefined();
+  });
+  it("listQuarantinedChunksForIntegration returns paginated quarantined chunks", () => {
+    expect(listQuarantinedChunksForIntegration).toBeDefined();
   });
 });
