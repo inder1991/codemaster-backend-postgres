@@ -57,6 +57,9 @@ import {
   PullRequestListResponseV1,
   PutFlagRequestV1,
   PutFlagResponseV1,
+  RejectProposalV1,
+  StaleWriteV1,
+  UpdateLearningBodyV1,
   RetrievalAggregatePRListV1,
   RetrievalAggregateV1,
   RepositoryEnableUpdateV1,
@@ -202,6 +205,17 @@ import {
   searchAuditEvents,
 } from "#backend/api/admin/audit_events_read.js";
 import { makeRequireRole } from "#backend/api/admin/_authz.js";
+import {
+  KnowledgeStaleWriteError,
+  ProposalAlreadyDecidedError,
+  ProposalNotFoundError,
+  RejectReasonInvalidError,
+  SelfApprovalRefusedError,
+  updateLearningBody,
+  validateApproveProposal,
+  validateRejectProposal,
+  workflowIdFor,
+} from "#backend/api/admin/knowledge_write.js";
 
 const TAXONOMY_DEFAULT_LIMIT = 50;
 const TAXONOMY_MAX_LIMIT = 200;
@@ -837,6 +851,158 @@ export async function registerAdminRoutes(
           return reply.code(404).send({ detail: "learning not found" });
         }
         return reply.code(200).send(LearningDetailV1.parse(detail));
+      },
+    );
+
+    // PUT /api/admin/knowledge/{learning_id} — optimistic-concurrency body edit (If-Match on version).
+    // 1:1 with knowledge.py put_route: 428 missing If-Match, 400 unparseable, 422 bad body, 409 stale.
+    scope.put(
+      "/api/admin/knowledge/:learning_id",
+      { preHandler: requireRole(["platform_owner", "super_admin"]) },
+      async (request, reply) => {
+        const learningId = (request.params as { learning_id: string }).learning_id;
+        if (!UUID_RE.test(learningId)) {
+          return reply.code(422).send({ detail: "learning_id must be a UUID" });
+        }
+
+        const ifMatch = request.headers["if-match"];
+        if (ifMatch === undefined) {
+          return reply.code(428).send({ detail: "If-Match header is required" });
+        }
+        const ifMatchVersion = Number.parseInt(
+          (Array.isArray(ifMatch) ? (ifMatch[0] ?? "") : ifMatch).replace(/^"(.*)"$/, "$1"),
+          10,
+        );
+        if (!Number.isInteger(ifMatchVersion)) {
+          return reply.code(400).send({ detail: "If-Match must be an integer version" });
+        }
+
+        const body = UpdateLearningBodyV1.safeParse(request.body);
+        if (!body.success) {
+          return reply.code(422).send(body.error);
+        }
+
+        const installationId = request.authPrincipal!.installationId;
+        try {
+          await updateLearningBody(opts.db, {
+            learningId,
+            installationId,
+            newBodyMarkdown: body.data.body_markdown,
+            ifMatchVersion,
+            editedByUserId: request.authPrincipal!.userId,
+            now: opts.clock.now(),
+          });
+        } catch (err) {
+          if (err instanceof KnowledgeStaleWriteError) {
+            return reply.code(409).send(
+              StaleWriteV1.parse({
+                code: "stale_write",
+                current_body: err.current_body,
+                current_version: err.current_version,
+              }),
+            );
+          }
+          throw err;
+        }
+
+        // Re-read the learning + recent revisions for the detail response (same shape as the GET route).
+        const detail = await getLearningWithRevisions(opts.db, learningId, installationId);
+        if (detail === null) {
+          return reply.code(404).send({ detail: "learning not found" });
+        }
+        return reply.code(200).send(LearningDetailV1.parse(detail));
+      },
+    );
+
+    // POST /api/admin/knowledge/proposals/{proposal_id}/approve — signal KnowledgeApprovalWorkflow.
+    // 503 when the Temporal seam is unwired; 403 self-approval; 404 unknown; 409 already-decided.
+    scope.post(
+      "/api/admin/knowledge/proposals/:proposal_id/approve",
+      { preHandler: requireRole(["platform_owner", "super_admin"]) },
+      async (request, reply) => {
+        const proposalId = (request.params as { proposal_id: string }).proposal_id;
+        if (!UUID_RE.test(proposalId)) {
+          return reply.code(422).send({ detail: "proposal_id must be a UUID" });
+        }
+        if (opts.temporal === undefined) {
+          return reply.code(503).send({ detail: "approval signal seam unwired" });
+        }
+
+        const approverUserId = request.authPrincipal!.userId;
+        try {
+          await validateApproveProposal(opts.db, {
+            proposalId,
+            installationId: request.authPrincipal!.installationId,
+            approverUserId,
+          });
+        } catch (err) {
+          if (err instanceof ProposalNotFoundError) {
+            return reply.code(404).send({ detail: "proposal not found" });
+          }
+          if (err instanceof SelfApprovalRefusedError) {
+            return reply.code(403).send({ detail: err.message });
+          }
+          if (err instanceof ProposalAlreadyDecidedError) {
+            return reply.code(409).send({ code: "already_decided", current_state: err.current_state });
+          }
+          throw err;
+        }
+
+        await opts.temporal.signalWorkflow({
+          workflowId: workflowIdFor(proposalId),
+          signalName: "approve",
+          input: { approver_user_id: approverUserId },
+        });
+        return reply.code(204).send();
+      },
+    );
+
+    // POST /api/admin/knowledge/proposals/{proposal_id}/reject — signal with a bounded reason.
+    // 503 when the Temporal seam is unwired; 422 bad reason; 404 unknown; 409 already-decided.
+    scope.post(
+      "/api/admin/knowledge/proposals/:proposal_id/reject",
+      { preHandler: requireRole(["platform_owner", "super_admin"]) },
+      async (request, reply) => {
+        const proposalId = (request.params as { proposal_id: string }).proposal_id;
+        if (!UUID_RE.test(proposalId)) {
+          return reply.code(422).send({ detail: "proposal_id must be a UUID" });
+        }
+        if (opts.temporal === undefined) {
+          return reply.code(503).send({ detail: "approval signal seam unwired" });
+        }
+
+        const body = RejectProposalV1.safeParse(request.body);
+        if (!body.success) {
+          return reply.code(422).send(body.error);
+        }
+
+        const approverUserId = request.authPrincipal!.userId;
+        const reason = body.data.reason.trim();
+        try {
+          await validateRejectProposal(opts.db, {
+            proposalId,
+            installationId: request.authPrincipal!.installationId,
+            reason,
+          });
+        } catch (err) {
+          if (err instanceof ProposalNotFoundError) {
+            return reply.code(404).send({ detail: "proposal not found" });
+          }
+          if (err instanceof RejectReasonInvalidError) {
+            return reply.code(422).send({ detail: "reason must be 10–2048 characters" });
+          }
+          if (err instanceof ProposalAlreadyDecidedError) {
+            return reply.code(409).send({ code: "already_decided", current_state: err.current_state });
+          }
+          throw err;
+        }
+
+        await opts.temporal.signalWorkflow({
+          workflowId: workflowIdFor(proposalId),
+          signalName: "reject",
+          input: { approver_user_id: approverUserId, reason },
+        });
+        return reply.code(204).send();
       },
     );
 
