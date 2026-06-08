@@ -1616,6 +1616,17 @@ export async function registerAdminRoutes(
               },
             });
           }
+          // 1:1 with the Python create_approval cross-check (page_approvals.py ~L224): the URL page_id is
+          // authoritative, so a body.page_id naming a DIFFERENT page is rejected (pre-fix the body won).
+          const urlPageId = (request.params as { page_id: string }).page_id;
+          if (body.page_id !== urlPageId) {
+            return reply.code(400).send({
+              detail: {
+                code: "url_body_mismatch",
+                detail: `body page_id '${body.page_id}' != URL '${urlPageId}'`,
+              },
+            });
+          }
           const approvalId = await createPageApproval(opts.db, body, {
             actorUserId: principal.userId,
             emailResolver,

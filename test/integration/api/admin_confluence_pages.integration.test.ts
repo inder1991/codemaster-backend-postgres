@@ -258,6 +258,25 @@ describeDb("confluence pages admin endpoints (disposable PG)", () => {
     }
   });
 
+  it("POST /approval — 400 when body.page_id mismatches the URL path page_id", async () => {
+    // 1:1 with the Python create_approval cross-check (page_approvals.py ~L224): the URL page_id is
+    // authoritative, so a body.page_id naming a DIFFERENT page is rejected with code=url_body_mismatch.
+    const app = await makeApp();
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: `${PAGES_BASE}/${PAGE_A}/approval`,
+        cookies: { [SESSION_COOKIE_NAME]: mintCookie("platform_owner") },
+        payload: { ...approvalBody(), page_id: PAGE_Q },
+      });
+      expect(res.statusCode).toBe(400);
+      const detail = res.json<{ detail: { code: string } }>().detail;
+      expect(detail.code).toBe("url_body_mismatch");
+    } finally {
+      await app.close();
+    }
+  });
+
   it("DELETE /approval — 204 revokes the active approval; second DELETE → 404", async () => {
     const app = await makeApp();
     try {
