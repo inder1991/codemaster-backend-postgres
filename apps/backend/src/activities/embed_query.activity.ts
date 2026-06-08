@@ -23,6 +23,7 @@ import {
   EMBEDDING_DIM,
 } from "#backend/adapters/embeddings_port.js";
 
+import { CURRENT_SCHEMA_VERSION } from "#contracts/embed_query.v1.js";
 import type { EmbedQueryInputV1, EmbedQueryResultV1 } from "#contracts/embed_query.v1.js";
 
 // Aligned with AnnRetriever's per-chunk fallback purpose so the embed service routes both calls
@@ -72,6 +73,9 @@ export class EmbedQueryActivity {
         `embed_query: vector dim mismatch (got=${vector.length} expected=${EMBEDDING_DIM})`,
       );
     }
-    return { schema_version: input.schema_version, vector };
+    // The result carries the RESULT contract's CURRENT_SCHEMA_VERSION, NOT the echoed input version —
+    // input + result are distinct, independently versioned contracts (1:1 with the Python
+    // `EmbedQueryResultV1(vector=vector)`, which leaves schema_version at its field default).
+    return { schema_version: CURRENT_SCHEMA_VERSION, vector };
   }
 }

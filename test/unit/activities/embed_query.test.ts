@@ -46,6 +46,22 @@ describe("EmbedQueryActivity", () => {
     expect(result.vector.every((x) => typeof x === "number")).toBe(true);
   });
 
+  it("returns the RESULT contract's schema_version (CURRENT), not the echoed input version", async () => {
+    // Python returns EmbedQueryResultV1(vector=vector): schema_version defaults to the RESULT contract's
+    // CURRENT_SCHEMA_VERSION, independent of the input. The input + result are distinct, independently
+    // versioned contracts, so a forward-compat caller sending input.schema_version=2 must NOT make the
+    // result echo 2.
+    const activity = new EmbedQueryActivity({
+      embeddings: new RecordingEmbeddingsClient(),
+      modelName: "m",
+    });
+    const input = EmbedQueryInputV1.parse({ query: "x", schema_version: 2 });
+
+    const result = await activity.embedQuery(input);
+
+    expect(result.schema_version).toBe(1);
+  });
+
   it("routes through the in_repo_doc purpose bucket", async () => {
     const recording = new RecordingEmbeddingsClient();
     const activity = new EmbedQueryActivity({ embeddings: recording, modelName: "m" });
