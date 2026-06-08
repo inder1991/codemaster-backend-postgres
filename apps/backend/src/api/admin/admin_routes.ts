@@ -62,6 +62,7 @@ import {
   RepositoryEnableUpdateV1,
   RepositoryV1,
   RetrievalTraceListPageV1,
+  ReviewDetailV1,
   ReviewsListPageV1,
   RoleChangePendingV1,
   RoleChangeRequestV1,
@@ -92,6 +93,11 @@ import {
   getGeneration,
 } from "#backend/api/admin/embedder_read.js";
 import { buildMembersPage } from "#backend/api/admin/members_read.js";
+import type { AdminTemporalPort } from "#backend/api/admin/_admin_temporal_port.js";
+import {
+  ReviewDetailNotFoundError,
+  buildReviewDetail,
+} from "#backend/api/admin/reviews_detail_read.js";
 import {
   NotificationRuleNotFoundError,
   type NotificationRulePatch,
@@ -269,7 +275,7 @@ export type AdminRoutesOptions = {
   dnsResolver?: DnsResolver;
   /** Optional Temporal dispatch/signal seam for knowledge-proposal + embedder write endpoints.
    *  Undefined → those endpoints return 503. Mirrors opts.audit. */
-  temporal?: import("#backend/api/admin/_admin_temporal_port.js").AdminTemporalPort;
+  temporal?: AdminTemporalPort;
 };
 
 /** The static dashboard summary (1:1 with the shipped Python: _HealthyProbe for the 4 services +
@@ -1748,6 +1754,29 @@ export async function registerAdminRoutes(
           size,
         });
         return reply.code(200).send(ReviewsListPageV1.parse({ items, total, page, size }));
+      },
+    );
+
+    scope.get(
+      "/api/admin/reviews/:review_id",
+      { preHandler: requireRole(["platform_operator", "platform_owner", "super_admin"]) },
+      async (request, reply) => {
+        const reviewId = (request.params as { review_id: string }).review_id;
+        if (!UUID_RE.test(reviewId)) {
+          return reply.code(422).send({ detail: "review_id must be a UUID" });
+        }
+        try {
+          const detail = await buildReviewDetail(opts.db, {
+            installationId: request.authPrincipal!.installationId,
+            reviewId,
+          });
+          return reply.code(200).send(ReviewDetailV1.parse(detail));
+        } catch (e) {
+          if (e instanceof ReviewDetailNotFoundError) {
+            return reply.code(404).send({ detail: e.message });
+          }
+          throw e;
+        }
       },
     );
 

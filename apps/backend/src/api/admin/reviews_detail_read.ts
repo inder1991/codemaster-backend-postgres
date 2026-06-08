@@ -30,7 +30,7 @@ function iso(d: Date): string {
   return new Date(d).toISOString();
 }
 
-interface HeadRow {
+type HeadRow = {
   review_id: string;
   repo: string;
   repository_id: string;
@@ -40,9 +40,9 @@ interface HeadRow {
   pr_id: string | null;
   current_run_id: string | null;
   posted_at: Date | null;
-}
+};
 
-interface FindingRow {
+type FindingRow = {
   review_finding_id: string;
   file_path: string;
   start_line: number;
@@ -52,25 +52,26 @@ interface FindingRow {
   body: string;
   suggestion: string | null;
   source_tool: string | null;
-}
+};
 
-interface ActivityRow {
+type ActivityRow = {
   sequence_no: number;
   event_type: string;
   received_at: Date;
-}
+};
 
 /** Map audit.workflow_events.event_type to the activity state enum; default 'started' for unmapped types. */
+const EVENT_TYPE_TO_STATE = new Map<string, ActivityEventV1["state"]>([
+  ["SCHEDULED", "scheduled"],
+  ["ANALYSIS_STARTED", "started"],
+  ["RETRY_STARTED", "retrying"],
+  ["ANALYZED", "completed"],
+  ["COMMENT_POSTED", "completed"],
+  ["FINDINGS_PERSISTED", "completed"],
+]);
+
 function mapEventTypeToState(eventType: string): ActivityEventV1["state"] {
-  const stateMap: Record<string, ActivityEventV1["state"]> = {
-    SCHEDULED: "scheduled",
-    ANALYSIS_STARTED: "started",
-    RETRY_STARTED: "retrying",
-    ANALYZED: "completed",
-    COMMENT_POSTED: "completed",
-    FINDINGS_PERSISTED: "completed",
-  };
-  return stateMap[eventType] ?? "started";
+  return EVENT_TYPE_TO_STATE.get(eventType) ?? "started";
 }
 
 export async function buildReviewDetail(
@@ -162,7 +163,7 @@ export async function buildReviewDetail(
     LIMIT ${ACTIVITIES_LIMIT}
   `.execute(db);
 
-  const findings: ReviewFindingItemV1[] = findingsResult.rows.map((r) => ({
+  const findings: Array<ReviewFindingItemV1> = findingsResult.rows.map((r) => ({
     schema_version: 1,
     finding_id: r.review_finding_id,
     file_path: r.file_path,
@@ -175,7 +176,7 @@ export async function buildReviewDetail(
     tool_source: r.source_tool,
   }));
 
-  const activities: ActivityEventV1[] = activitiesResult.rows.map((r) => ({
+  const activities: Array<ActivityEventV1> = activitiesResult.rows.map((r) => ({
     seq: r.sequence_no,
     activity_name: r.event_type,
     state: mapEventTypeToState(r.event_type),

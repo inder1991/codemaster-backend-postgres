@@ -33,7 +33,7 @@ import { registerAdminRoutes } from "#backend/api/admin/admin_routes.js";
 import { SESSION_COOKIE_NAME } from "#backend/api/auth/auth_routes.js";
 import type { Role } from "#backend/api/auth/roles.js";
 import { issueCookie } from "#backend/api/auth/session.js";
-import type { ReviewDetailV1, YourReviewsPageV1 } from "#contracts/admin.v1.js";
+import type { ReviewDetailV1 } from "#contracts/admin.v1.js";
 
 import { describeDb, INTEGRATION_DSN } from "../_db.js";
 
@@ -132,8 +132,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (INTEGRATION_DSN) await cleanup();
-  await db?.destroy();
-  await pool?.end();
+  await db?.destroy(); // also ends the underlying pg pool (do NOT call pool.end() again)
 });
 
 function mintCookie(role: Role): string {
