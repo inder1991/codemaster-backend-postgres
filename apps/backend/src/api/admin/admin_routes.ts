@@ -51,9 +51,11 @@ import {
   NotificationRuleUpdateRequestV1,
   NotificationRuleV1,
   OrgsListV1,
+  PagesListPageV1,
   PatchPlatformCredentialsRequestV1,
   PlatformCredentialsMetaV1,
   ProposalListPageV1,
+  QuarantinedChunksPageV1,
   PullRequestListResponseV1,
   PutFlagRequestV1,
   PutFlagResponseV1,
@@ -77,6 +79,10 @@ import {
   TaxonomySuggestionAcceptedV1,
   TaxonomySuggestionV1,
 } from "#contracts/admin.v1.js";
+import {
+  ConfluencePageApprovalV1,
+  CreatePageApprovalRequestV1,
+} from "#contracts/page_approval.v1.js";
 
 import { CursorInvalidError } from "#backend/api/admin/_keyset_cursor.js";
 import { CostCapSettingsMissingError, buildCostCapsPage } from "#backend/api/admin/cost_caps_read.js";
@@ -153,6 +159,17 @@ import {
   IntegrationNotFoundError,
   IntegrationValidationError,
 } from "#backend/api/admin/integrations_write.js";
+import {
+  getSpaceKeyForIntegration,
+  listPagesForIntegration,
+  listQuarantinedChunksForIntegration,
+  IntegrationNotFoundError as ConfluenceIntegrationNotFoundError,
+} from "#backend/api/admin/confluence_pages_read.js";
+import {
+  createPageApproval,
+  revokePageApproval,
+  type PageResyncDispatcherPort,
+} from "#backend/api/admin/confluence_pages_write.js";
 import { type GetConfluenceValidator } from "#backend/integrations/confluence/confluence_validator.js";
 import { PostgresPlatformCredentialsMetaRepo } from "#backend/api/admin/platform_credentials_repo.js";
 import {
@@ -285,8 +302,12 @@ export type AdminRoutesOptions = {
   /** Injected platform-credential probe factory. Undefined → the platform-credentials PATCH/test routes 503.
    *  Real Confluence/Qwen probe adapters deferred; tests inject a stub. */
   getPlatformCredentialProbe?: GetPlatformCredentialProbe;
-  /** Resolves an actor user_id → email for the credential-rotation audit. Defaults to the shim resolver. */
+  /** Resolves an actor user_id → email for the credential-rotation + page-approval audit (P0-1). Defaults to
+   *  the shim resolver. */
   userEmailResolver?: UserEmailResolverPort;
+  /** Optional Temporal dispatch seam for TriggerPageResyncWorkflow on page-approval revoke. Undefined → the
+   *  resync is skipped (the retrieval LEFT JOIN excludes the page's chunks immediately regardless). */
+  pageResyncDispatcher?: PageResyncDispatcherPort;
   /** Injected DNS resolver for the SSRF URL validator (platform-credentials base_url). Defaults to node:dns. */
   dnsResolver?: DnsResolver;
   /** Optional Temporal dispatch/signal seam for knowledge-proposal + embedder write endpoints.
@@ -1095,6 +1116,156 @@ export async function registerAdminRoutes(
             }
             // auth_error | not_found | validation_failed → 422 with the nested {code, detail} body.
             return reply.code(422).send({ detail: { code: err.code, detail: err.validationDetail } });
+          }
+          throw err;
+        }
+      },
+    );
+
+    // ─── Confluence pages (per-space page list + approval lifecycle + quarantined chunks) ────────────
+    // 1:1 with codemaster/api/admin/page_approvals.py + quarantined_chunks.py. platform_owner / super_admin.
+    // The page-approval POST/DELETE and the quarantined-chunks GET emit NO audit action (the Python routers
+    // are audit-exempt — mirrored here). // audit-test-exempt
+
+    // GET /pages — list pages with approval status. Paginated (offset cursor + page_size). 404 on unknown
+    // integration_id.
+    scope.get(
+      "/api/admin/integrations/confluence-spaces/:integration_id/pages",
+      { preHandler: requireRole(["platform_owner", "super_admin"]) },
+      async (request, reply) => {
+        const integrationId = (request.params as { integration_id: string }).integration_id;
+        const q = request.query as AdminQuery;
+        const cursor = optStr(q.cursor);
+        const pageSize = clampLimit(q.page_size, 50, 200);
+        try {
+          const page = await listPagesForIntegration(opts.db, integrationId, { cursor, pageSize });
+          return reply.code(200).send(PagesListPageV1.parse(page));
+        } catch (err) {
+          if (err instanceof ConfluenceIntegrationNotFoundError) {
+            return reply.code(404).send({
+              detail: { code: "integration_not_found", integration_id: integrationId },
+            });
+          }
+          throw err;
+        }
+      },
+    );
+
+    // POST /pages/{page_id}/approval — create/upsert approval. Derives actor email from session (audit P0-1).
+    // F-72: cross-checks body.space_key against the URL integration's space_key. 201 on success.
+    scope.post(
+      "/api/admin/integrations/confluence-spaces/:integration_id/pages/:page_id/approval",
+      { preHandler: requireRole(["platform_owner", "super_admin"]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const integrationId = (request.params as { integration_id: string }).integration_id;
+        const parsed = CreatePageApprovalRequestV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        const body = parsed.data;
+        const emailResolver = opts.userEmailResolver ?? shimUserEmailResolver;
+        try {
+          // F-72 (P2): the URL integration's space_key is the source of truth — a body whose space_key
+          // names a DIFFERENT integration is rejected (pre-fix the body silently won).
+          const urlSpaceKey = await getSpaceKeyForIntegration(opts.db, integrationId);
+          if (body.space_key !== urlSpaceKey) {
+            return reply.code(400).send({
+              detail: {
+                code: "url_body_mismatch",
+                detail: `body.space_key '${body.space_key}' != URL integration space_key '${urlSpaceKey}'`,
+              },
+            });
+          }
+          const approvalId = await createPageApproval(opts.db, body, {
+            actorUserId: principal.userId,
+            emailResolver,
+          });
+          // Reconstruct the response from the request + the freshly-minted id + the resolved actor email.
+          const actorEmail = await emailResolver.resolveEmail(principal.userId);
+          const response = ConfluencePageApprovalV1.parse({
+            approval_id: approvalId,
+            space_key: body.space_key,
+            page_id: body.page_id,
+            approver_email: actorEmail,
+            approved_at_utc: body.approved_at_utc,
+            approval_artifact_url: body.approval_artifact_url,
+            scope_justification: body.scope_justification,
+            default_scope: body.default_scope,
+            revoked_at: null,
+            revoked_by: null,
+            created_at: body.approved_at_utc,
+            updated_at: body.approved_at_utc,
+          });
+          return reply.code(201).send(response);
+        } catch (err) {
+          if (err instanceof ConfluenceIntegrationNotFoundError) {
+            return reply.code(404).send({
+              detail: { code: "integration_not_found", integration_id: integrationId },
+            });
+          }
+          throw err;
+        }
+      },
+    );
+
+    // DELETE /pages/{page_id}/approval — revoke approval. Derives revoked_by email from session (audit P0-1).
+    // 204 on success; 404 when no active approval exists. F-26: space_key derived from the URL integration.
+    scope.delete(
+      "/api/admin/integrations/confluence-spaces/:integration_id/pages/:page_id/approval",
+      { preHandler: requireRole(["platform_owner", "super_admin"]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const integrationId = (request.params as { integration_id: string }).integration_id;
+        const pageId = (request.params as { page_id: string }).page_id;
+        try {
+          const spaceKey = await getSpaceKeyForIntegration(opts.db, integrationId);
+          const ok = await revokePageApproval(opts.db, {
+            spaceKey,
+            pageId,
+            actorUserId: principal.userId,
+            emailResolver: opts.userEmailResolver ?? shimUserEmailResolver,
+            ...(opts.pageResyncDispatcher ? { resyncDispatcher: opts.pageResyncDispatcher } : {}),
+            onWarn: (e) => request.log.warn(e, "trigger_page_resync_enqueue_failed"),
+          });
+          if (!ok) {
+            return reply.code(404).send({
+              detail: { code: "approval_not_found", space_key: spaceKey, page_id: pageId },
+            });
+          }
+          return reply.code(204).send();
+        } catch (err) {
+          if (err instanceof ConfluenceIntegrationNotFoundError) {
+            return reply.code(404).send({
+              detail: { code: "integration_not_found", integration_id: integrationId },
+            });
+          }
+          throw err;
+        }
+      },
+    );
+
+    // GET /quarantined-chunks — list quarantined chunks. Paginated (offset cursor + page_size). 404 on
+    // unknown integration_id.
+    scope.get(
+      "/api/admin/integrations/confluence-spaces/:integration_id/quarantined-chunks",
+      { preHandler: requireRole(["platform_owner", "super_admin"]) },
+      async (request, reply) => {
+        const integrationId = (request.params as { integration_id: string }).integration_id;
+        const q = request.query as AdminQuery;
+        const cursor = optStr(q.cursor);
+        const pageSize = clampLimit(q.page_size, 50, 200);
+        try {
+          const page = await listQuarantinedChunksForIntegration(opts.db, integrationId, {
+            cursor,
+            pageSize,
+          });
+          return reply.code(200).send(QuarantinedChunksPageV1.parse(page));
+        } catch (err) {
+          if (err instanceof ConfluenceIntegrationNotFoundError) {
+            return reply.code(404).send({
+              detail: { code: "integration_not_found", integration_id: integrationId },
+            });
           }
           throw err;
         }
