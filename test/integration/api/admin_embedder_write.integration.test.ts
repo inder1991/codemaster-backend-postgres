@@ -162,6 +162,24 @@ async function seedReadyWithChunks(modelName: string, n = 1): Promise<number> {
   return genId;
 }
 
+/** Seed one canonical confluence chunk (no FK to repositories) with NO chunk_embeddings row under the
+ *  active generation — i.e. a coverage gap. Returns the chunk_id. Caller cleans up. */
+async function seedConfluenceCoverageGap(): Promise<string> {
+  const r = await sql<{ chunk_id: string }>`
+    INSERT INTO core.confluence_chunks (
+      chunk_id, space_key, page_id, page_title, version, chunk_index, chunk_text,
+      redaction_applied, ingested_at, token_count, labels, quarantined, quarantine_reasons,
+      page_status, last_modified_at, content_sha256
+    ) VALUES (
+      gen_random_uuid(), 'BATCH4', 'page-1', 'Batch 4 gap page', 1, 0, 'gap body',
+      false, now(), 3, ARRAY[]::text[], false, ARRAY[]::text[],
+      'active', now(), 'sha-conf-gap'
+    )
+    RETURNING chunk_id
+  `.execute(db);
+  return String(r.rows[0]!.chunk_id);
+}
+
 describeDb("embedder write lifecycle (disposable :5439)", () => {
   it("POST /reembed/start: inserts backfilling generation, sets pending, returns EmbeddingGenerationV1", async () => {
     const { app, inner, audited } = await makeApp();
@@ -226,6 +244,49 @@ describeDb("embedder write lifecycle (disposable :5439)", () => {
     });
     expect(res.statusCode).toBe(403);
     await app.close();
+  });
+
+  it("POST /embedder/retrieval-mode: 200 fallback (no gate) + audit, 200 generation_only with zero gap", async () => {
+    const { app, audited } = await makeApp();
+
+    const res1 = await app.inject({
+      method: "POST",
+      url: "/api/admin/embedder/retrieval-mode",
+      cookies: owner(),
+      payload: { schema_version: 1, mode: "fallback" },
+    });
+    expect(res1.statusCode).toBe(200);
+    expect(res1.json<{ retrieval_mode: string }>().retrieval_mode).toBe("fallback");
+    expect(audited.some((a) => a.action === "embedder.retrieval_mode.set")).toBe(true);
+
+    // No canonical chunks seeded → total_missing=0 → the generation_only gate passes.
+    const res2 = await app.inject({
+      method: "POST",
+      url: "/api/admin/embedder/retrieval-mode",
+      cookies: owner(),
+      payload: { schema_version: 1, mode: "generation_only" },
+    });
+    expect(res2.statusCode).toBe(200);
+    expect(res2.json<{ retrieval_mode: string }>().retrieval_mode).toBe("generation_only");
+    await app.close();
+  });
+
+  it("POST /embedder/retrieval-mode: 422 coverage_gap_present when a canonical chunk lacks an embedding", async () => {
+    const { app } = await makeApp();
+    const chunkId = await seedConfluenceCoverageGap();
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/admin/embedder/retrieval-mode",
+        cookies: owner(),
+        payload: { schema_version: 1, mode: "generation_only" },
+      });
+      expect(res.statusCode).toBe(422);
+      expect(res.json<{ detail: { error: string } }>().detail.error).toBe("coverage_gap_present");
+    } finally {
+      await sql`DELETE FROM core.confluence_chunks WHERE chunk_id = ${chunkId}`.execute(db);
+      await app.close();
+    }
   });
 });
 
