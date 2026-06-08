@@ -1,0 +1,75 @@
+{{- /*
+Non-secret application configuration. Secrets (PG DSN, GitHub App key,
+field-encryption keys, auth secrets, embedder/Langfuse keys) are NEVER here —
+they come from Vault (see _helpers.tpl + the deployment).
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "codemaster-backend.fullname" . }}-config
+  labels:
+    {{- include "codemaster-backend.labels" . | nindent 4 }}
+  {{- with (include "codemaster-backend.commonAnnotations" .) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+data:
+  NODE_ENV: {{ .Values.config.nodeEnv | quote }}
+  {{- if gt (int .Values.config.nodeMaxOldSpaceSizeMb) 0 }}
+  # Cap V8 old-space below the container memory limit so it GCs before the kernel OOM-kills.
+  NODE_OPTIONS: {{ printf "--max-old-space-size=%d" (int .Values.config.nodeMaxOldSpaceSizeMb) | quote }}
+  {{- end }}
+  CODEMASTER_API_HOST: {{ .Values.config.api.host | quote }}
+  CODEMASTER_API_PORT: {{ .Values.config.api.port | quote }}
+  CODEMASTER_AUTH_ROUTES_ENABLED: {{ .Values.config.api.authRoutesEnabled | ternary "true" "false" | quote }}
+  CODEMASTER_SECURE_COOKIES: {{ .Values.config.api.secureCookies | ternary "true" "false" | quote }}
+  TEMPORAL_ADDRESS: {{ .Values.config.temporal.address | quote }}
+  TEMPORAL_NAMESPACE: {{ .Values.config.temporal.namespace | quote }}
+  TEMPORAL_TASK_QUEUE: {{ .Values.config.temporal.taskQueue | quote }}
+  CODEMASTER_OUTBOX_TASK_QUEUE: {{ .Values.config.temporal.outboxTaskQueue | quote }}
+  TEMPORAL_TLS: {{ .Values.config.temporal.tls | ternary "1" "0" | quote }}
+  CODEMASTER_EMBEDDINGS_PROVIDER: {{ .Values.config.embeddings.provider | quote }}
+  {{- if .Values.config.embeddings.qwenDsn }}
+  CODEMASTER_QWEN_DSN: {{ .Values.config.embeddings.qwenDsn | quote }}
+  {{- end }}
+  {{- if eq .Values.config.embeddings.provider "openai_compat" }}
+  CODEMASTER_EMBEDDER_BASE_URL: {{ .Values.config.embeddings.openaiCompat.baseUrl | quote }}
+  CODEMASTER_EMBEDDER_MODEL_NAME: {{ .Values.config.embeddings.openaiCompat.modelName | quote }}
+  {{- /* api key here ONLY for non-secret keys (e.g. Ollama's "ollama"). For a real key leave this
+         empty and inject CODEMASTER_EMBEDDER_API_KEY via vault.agent.envSecrets (never the ConfigMap). */ -}}
+  {{- with .Values.config.embeddings.openaiCompat.apiKey }}
+  CODEMASTER_EMBEDDER_API_KEY: {{ . | quote }}
+  {{- end }}
+  {{- end }}
+  CODEMASTER_WORKSPACE_ROOT: {{ .Values.config.workspaceRoot | quote }}
+  CODEMASTER_CLONE_CACHE_ROOT: {{ .Values.config.cloneCacheRoot | quote }}
+  CODEMASTER_OUTBOX_MAX_ATTEMPTS: {{ .Values.config.outbox.maxAttempts | quote }}
+  CODEMASTER_REVIEW_PLACEHOLDER_ENABLED: {{ .Values.config.review.placeholderEnabled | ternary "1" "0" | quote }}
+  CODEMASTER_PR_REVIEW_MUTEX_LEASE_TTL_SECONDS: {{ .Values.config.review.mutexLeaseTtlSeconds | quote }}
+  CODEMASTER_REVIEW_RUN_REAPER_STALE_AFTER_SECONDS: {{ .Values.config.review.runReaperStaleAfterSeconds | quote }}
+  CODEMASTER_REPAIR_COOLDOWN_SECONDS: {{ .Values.config.repairCooldownSeconds | quote }}
+  CODEMASTER_LIFECYCLE_WRITES_ENABLED: {{ .Values.config.features.lifecycleWritesEnabled | ternary "true" "false" | quote }}
+  CODEMASTER_CARRY_FORWARD_ENABLED: {{ .Values.config.features.carryForwardEnabled | ternary "true" "false" | quote }}
+  CODEMASTER_LLM_RERANK_ENABLED: {{ .Values.config.features.llmRerankEnabled | ternary "true" "false" | quote }}
+  LANGFUSE_EXPORT_ENABLED: {{ .Values.config.langfuse.exportEnabled | ternary "true" "false" | quote }}
+  {{- if .Values.config.langfuse.host }}
+  LANGFUSE_HOST: {{ .Values.config.langfuse.host | quote }}
+  {{- end }}
+  {{- if .Values.config.buildSha }}
+  BUILD_SHA: {{ .Values.config.buildSha | quote }}
+  {{- end }}
+  # ---- Vault wiring (non-secret selectors/paths) ----
+  CODEMASTER_VAULT_SECRET_SOURCE: {{ include "codemaster-backend.vaultSecretSource" . | quote }}
+  CODEMASTER_VAULT_SECRETS_DIR: {{ .Values.vault.secretsDir | quote }}
+  {{- if eq .Values.vault.mode "agent" }}
+  # Agent renders its own token to {secretsDir}/token (agent-inject-token); the app needs it +
+  # VAULT_ADDR for the field-encryption keyset HTTP read (it can't be agent-file-flattened).
+  VAULT_AGENT_TOKEN_PATH: {{ printf "%s/token" .Values.vault.secretsDir | quote }}
+  {{- else }}
+  VAULT_AGENT_TOKEN_PATH: {{ .Values.vault.tokenPath | quote }}
+  {{- end }}
+  # Rendered unconditionally: REQUIRED in agent mode too (empty => app fails loud at boot; NOTES warns).
+  VAULT_ADDR: {{ .Values.vault.addr | quote }}
+  {{- range $k, $v := .Values.config.extra }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}

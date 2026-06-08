@@ -1,0 +1,23 @@
+{{- /*
+PDB protects against voluntary disruption (drain, node-pool upgrade, autoscaler
+eviction). Rendered only when replicas > 1 (a single-replica deploy can't honor
+a PDB). minAvailable is an absolute floor — not proportional to replicas — so a
+future replica-count change can't silently weaken the safety floor.
+*/ -}}
+{{- $replicas := .Values.replicaCount -}}
+{{- if .Values.autoscaling.enabled -}}
+{{- $replicas = .Values.autoscaling.minReplicas -}}
+{{- end -}}
+{{- if and .Values.podDisruptionBudget.enabled (gt (int $replicas) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "codemaster-backend.fullname" . }}
+  labels:
+    {{- include "codemaster-backend.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "codemaster-backend.selectorLabels" . | nindent 6 }}
+{{- end }}

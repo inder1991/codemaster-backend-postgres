@@ -1,0 +1,99 @@
+# =============================================================================
+# DEV overlay for a local kind cluster. Relaxes the production-hardened
+# defaults to work with the CURRENT root dev image + the in-namespace kind
+# infra (pg-postgresql, dev Vault root token, in-cluster Temporal dev server).
+#
+#   helm upgrade --install codemaster-backend deploy/helm/codemaster-backend \
+#     -n codemaster-backend -f deploy/helm/codemaster-backend/values-kind.yaml
+#
+# NEVER use this overlay outside kind/local. It enables a cleartext dev Secret.
+# =============================================================================
+
+image:
+  repository: codemaster-backend
+  tag: dev
+  pullPolicy: Never        # kind-loaded image; never pull from a registry
+  digest: ""
+
+replicaCount: 1
+
+# Current dev image runs as ROOT (no USER directive) and the git cloner needs a
+# real $HOME/passwd entry, so do NOT force a non-root uid here. readOnlyRootFS is
+# also relaxed for the dev image (prod defaults keep both hardened).
+podSecurityContext:
+  runAsNonRoot: false
+  runAsUser: 0
+  runAsGroup: 0
+  fsGroup: 0
+  seccompProfile:
+    type: RuntimeDefault
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop: ["ALL"]
+
+# kind nodes are memory-tight; low requests, generous limits (overcommit).
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: "2"
+    memory: 1536Mi
+
+# Slower, more forgiving boot budget on a shared kind node.
+probes:
+  startup:
+    enabled: true
+    path: /healthz
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 40
+  liveness:
+    enabled: true
+    path: /healthz
+    periodSeconds: 15
+    timeoutSeconds: 3
+    failureThreshold: 6
+
+config:
+  nodeEnv: production        # the image sets NODE_ENV=production; keep the guard honest
+  nodeMaxOldSpaceSizeMb: 1024  # ~75% of the 1536Mi kind limit
+  api:
+    authRoutesEnabled: true
+    secureCookies: false     # kind has no TLS at the edge
+  temporal:
+    address: temporal-frontend:7233
+    namespace: default
+    taskQueue: review-default
+    outboxTaskQueue: outbox-dispatcher
+    tls: false
+  embeddings:
+    provider: openai_compat
+    openaiCompat:
+      baseUrl: http://host.docker.internal:11434
+      modelName: mxbai-embed-large
+      apiKey: ollama         # Ollama ignores it, but the resolver is fail-loud on empty
+  workspaceRoot: /var/lib/codemaster/workspaces
+  cloneCacheRoot: /clone-cache
+
+# DEV secrets via the chart-managed Secret (vault-api mode reads the other KV
+# secrets over HTTP using this token against the in-cluster dev Vault).
+vault:
+  mode: token
+  addr: http://vault:8200
+  token:
+    create: true
+    vaultToken: devroot
+    pgCoreDsn: postgresql://postgres:devpass@pg-postgresql:5432/postgres
+
+migrate:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi

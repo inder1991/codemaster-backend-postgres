@@ -68,6 +68,19 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist/ ./
 # Raw SQL migrations for the node-pg-migrate job (tsc does not process .sql).
 COPY migrations ./migrations
+# ── Non-root runtime user (uid/gid 1001) ──────────────────────────────────────
+# The process writes ONLY to CODEMASTER_WORKSPACE_ROOT, CODEMASTER_CLONE_CACHE_ROOT
+# and (transiently) /tmp — never to /app, $HOME or the tool dirs. So the image can
+# run as a non-root user with a read-only root filesystem; the Helm chart mounts
+# those three paths as writable emptyDir volumes. We pre-create the default
+# workspace + clone-cache paths and a $HOME (git reads $HOME/.gitconfig; nothing
+# writes there at runtime). Done AFTER all COPYs so the chown covers the dist tree.
+RUN groupadd --gid 1001 codemaster \
+  && useradd --uid 1001 --gid 1001 --home-dir /home/codemaster --create-home --shell /usr/sbin/nologin codemaster \
+  && mkdir -p /var/lib/codemaster/workspaces /clone-cache \
+  && chown -R 1001:1001 /app /home/codemaster /var/lib/codemaster /clone-cache
+ENV HOME=/home/codemaster
+USER 1001
 EXPOSE 8080
 # Default = the combined entrypoint (HTTP API + review worker + outbox-dispatcher worker, fail-loud, one
 # process). The migrate Job overrides `command` with `npm run migrate:up`.
