@@ -254,7 +254,7 @@ export class EmbedderGenerationService {
   public async gc(args: {
     generationId: number;
     triggeredByEmail: string;
-    now?: Date;
+    now: Date;
   }): Promise<EmbeddingGenerationRowV1> {
     const gen = await this.gensRepo.get(args.generationId);
     if (gen === null) {
@@ -268,8 +268,7 @@ export class EmbedderGenerationService {
     if (gen.retired_at === null) {
       throw new InvalidStateTransitionError(`gc: gen ${args.generationId} retired_at is NULL`);
     }
-    const now = args.now ?? new Date();
-    const ageMs = now.getTime() - gen.retired_at.getTime();
+    const ageMs = args.now.getTime() - gen.retired_at.getTime();
     if (ageMs < this.gcRetentionMs) {
       throw new GCRetentionNotElapsedError(
         `gen ${args.generationId} retired_at=${gen.retired_at.toISOString()} ` +
