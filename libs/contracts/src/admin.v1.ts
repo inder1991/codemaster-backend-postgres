@@ -698,6 +698,70 @@ export const ReviewsListPageV1 = z
   .strict();
 export type ReviewsListPageV1 = z.infer<typeof ReviewsListPageV1>;
 
+// ─── Review detail (S12.2.3) ──────────────────────────────────────────────────────────────────
+
+/** One activity event in the review-detail timeline (Pydantic __contract_internal__; no schema_version). */
+export const ActivityEventV1 = z
+  .object({
+    seq: z.number().int().min(1),
+    activity_name: z.string(),
+    state: z.enum(["scheduled", "started", "completed", "failed", "retrying"]),
+    started_at: z.string().datetime({ offset: true }),
+    completed_at: z.string().datetime({ offset: true }).nullable().default(null),
+    detail: z.string().max(500).default(""),
+  })
+  .strict();
+export type ActivityEventV1 = z.infer<typeof ActivityEventV1>;
+
+/** One finding rendered on the review-detail page (Pydantic __contract_internal__). */
+export const ReviewFindingItemV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    finding_id: z.string().uuid(),
+    file_path: z.string().min(1),
+    start_line: z.number().int().min(0),
+    end_line: z.number().int().min(0),
+    severity: z.enum(["blocker", "issue", "suggestion", "nit", "none"]),
+    title: z.string().min(1).max(500),
+    body: z.string(),
+    suggestion: z.string().nullable().default(null),
+    tool_source: z.string().nullable().default(null),
+  })
+  .strict();
+export type ReviewFindingItemV1 = z.infer<typeof ReviewFindingItemV1>;
+
+/** GET /api/admin/reviews/{review_id} — full review detail with findings and activities. */
+export const ReviewDetailV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    review_id: z.string().uuid(),
+    repo: z.string().min(1),
+    pr_number: z.number().int().min(1),
+    pr_title: z.string(),
+    state: z.enum(["queued", "in_progress", "complete", "failed"]),
+    findings: z.array(ReviewFindingItemV1),
+    activities: z.array(ActivityEventV1),
+    langfuse_url: z.string().nullable().default(null),
+    temporal_url: z.string().nullable().default(null),
+    posted_at: z.string().datetime({ offset: true }).nullable().default(null),
+  })
+  .strict();
+export type ReviewDetailV1 = z.infer<typeof ReviewDetailV1>;
+
+// ─── Your-reviews (S14.B) ────────────────────────────────────────────────────────────────────────
+
+/** GET /api/admin/your-reviews — per-engineer scoped reviews (authored + assigned). Pattern A: returns
+ *  empty tuples until the engineer-identity link lands. */
+export const YourReviewsPageV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    authored: z.array(ReviewListItemV1),
+    assigned: z.array(ReviewListItemV1),
+    user_id: z.string().min(1).max(512),
+  })
+  .strict();
+export type YourReviewsPageV1 = z.infer<typeof YourReviewsPageV1>;
+
 /** One row from GET /api/admin/pull-requests (a core.pull_requests row + resolved author_login). */
 export const PullRequestRowV1 = z
   .object({
