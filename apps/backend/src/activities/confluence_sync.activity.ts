@@ -44,10 +44,15 @@
  *  - **`get_default_corpus_limits()` is synchronous** in the TS port (the Python was `async` because it
  *    read platform_config; the ported `hard_limits.ts` inlines the spec-pinned fallbacks per ADR-0075).
  *
- *  - **EmbedderCache dual-write is NOT wired (ADR-0075).** Per the task constraint, `embedderCache=null`:
- *    `upsertChunks` is called WITHOUT `activeGeneration` / `activeModelName`, so the repo writes ONLY the
- *    legacy `core.confluence_chunks.embedding` column. The dual-write to `core.chunk_embeddings` stays
- *    dormant until the embedder-cache worker composition lands (FOLLOW-UP-embedder-cache-worker-composition).
+ *  - **EmbedderCache dual-write is NOW wired (SCOPE-A).** When an `embedderCache` collaborator is injected,
+ *    `upsertChunks` resolves the active generation + model from it (awaiting one lazy-TTL `refresh()` so a
+ *    config_version bump propagates) and passes `{ activeGeneration, activeModelName }` to the repo, which
+ *    dual-writes each vector to `core.chunk_embeddings` under the active generation IN ADDITION to the
+ *    legacy `core.confluence_chunks.embedding` column. When `embedderCache` is undefined (test holders
+ *    that don't wire it), the legacy-only write is preserved (the repo skips the dual-write). This is
+ *    SAFE-DEFAULT: the dual-write only POPULATES `chunk_embeddings`; it does not change what retrieval
+ *    reads until an operator flips `retrieval_mode` to 'generation_only'. The cache is the SAME
+ *    DSN-memoized singleton the confluence retrieval adapter shares.
  *
  *  - **No `activity.heartbeat` / `activity.info().heartbeat_details`.** The Python `fetch_space_pages`
  *    emitted a heartbeat per cursor round-trip (F-41) and resumed from heartbeat details on retry. The
@@ -163,6 +168,18 @@ export type ExistingChunkRowsReader = {
   listChunkRowsForLimits(): Promise<ReadonlyArray<ConfluenceChunkRow>>;
 };
 
+/**
+ * The dual-write slice the {@link PostgresEmbedderCache} façade satisfies: resolve the active embedding
+ * generation + model so the upsert can dual-write to `core.chunk_embeddings`. `refresh()` drives one
+ * lazy-TTL refresh so a config_version bump (operator activating a new generation) propagates before the
+ * sync reads. OPTIONAL — when undefined, the upsert writes ONLY the legacy embedding column (SAFE-DEFAULT).
+ */
+export type EmbedderCacheForDualWrite = {
+  getActiveGeneration(): number;
+  getActiveModelName(): string;
+  refresh(): Promise<void>;
+};
+
 export type ConfluenceSyncActivitiesOptions = {
   client: ConfluenceChunkClient;
   embeddings: EmbeddingsPort;
@@ -171,6 +188,8 @@ export type ConfluenceSyncActivitiesOptions = {
   chunksWriter: ConfluenceChunksWriter;
   approvalsReader: PageApprovalsReader;
   existingChunkRowsReader: ExistingChunkRowsReader;
+  /** SCOPE-A dual-write: when wired, upsert dual-writes to `core.chunk_embeddings` (else legacy-only). */
+  embedderCache?: EmbedderCacheForDualWrite;
 };
 
 /** One embed candidate: the chunk index, the wrapped body, and its content hash. */
@@ -185,6 +204,7 @@ export class ConfluenceSyncActivities {
   private readonly writer: ConfluenceChunksWriter;
   private readonly approvals: PageApprovalsReader;
   private readonly existingRows: ExistingChunkRowsReader;
+  private readonly embedderCache: EmbedderCacheForDualWrite | undefined;
 
   public constructor(opts: ConfluenceSyncActivitiesOptions) {
     this.client = opts.client;
@@ -194,6 +214,7 @@ export class ConfluenceSyncActivities {
     this.writer = opts.chunksWriter;
     this.approvals = opts.approvalsReader;
     this.existingRows = opts.existingChunkRowsReader;
+    this.embedderCache = opts.embedderCache;
   }
 
   // ── Activity 1: list all pages in a space (cursor pagination) ──────────────────────────────────
@@ -499,8 +520,9 @@ export class ConfluenceSyncActivities {
       });
     }
 
-    // Build repo rows and upsert. embedderCache=null (ADR-0075) → no dual-write; the repo writes only
-    // the legacy embedding column.
+    // Build repo rows and upsert. When the EmbedderCache is wired (SCOPE-A) we resolve the active
+    // generation + model and dual-write to core.chunk_embeddings IN ADDITION to the legacy embedding
+    // column; when it's absent the repo writes ONLY the legacy column (SAFE-DEFAULT).
     const rows: Array<UpsertChunkRow> = parsed.chunks.map((chunk) => ({
       chunkId: chunk.chunk_id,
       spaceKey: parsed.space_key,
@@ -521,7 +543,19 @@ export class ConfluenceSyncActivities {
       redactionApplied: true, // the redactor ran in chunk_and_embed_activity
     }));
 
-    const upserted = await this.writer.upsertChunks(rows);
+    // SCOPE-A dual-write: resolve the active generation + model from the EmbedderCache (awaiting one
+    // lazy-TTL refresh so a config_version bump propagates). When the cache is absent, leave both
+    // undefined → the repo writes ONLY the legacy embedding column (SAFE-DEFAULT, byte-identical to before).
+    let dualWriteOpts: { activeGeneration?: number; activeModelName?: string } = {};
+    if (this.embedderCache !== undefined) {
+      await this.embedderCache.refresh();
+      dualWriteOpts = {
+        activeGeneration: this.embedderCache.getActiveGeneration(),
+        activeModelName: this.embedderCache.getActiveModelName(),
+      };
+    }
+
+    const upserted = await this.writer.upsertChunks(rows, dualWriteOpts);
 
     return {
       schema_version: 1,

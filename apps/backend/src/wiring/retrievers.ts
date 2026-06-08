@@ -14,9 +14,15 @@
 //   - FOLLOW-UP-retrieve-knowledge-llm-rerank / FOLLOW-UP-production-reranker — the production
 //     Bedrock-backed reranker is OWNER-PROVIDED; until it lands the IdentityRerankPort no-op is wired
 //     (matching the frozen Python, which ships only the identity no-op).
-//   - FOLLOW-UP-embedder-cache — PostgresConfluenceRetrieval accepts an EmbedderCache for the
-//     Phase-A/Phase-C generation dispatch; that cache is unported, so the adapter runs the legacy direct
-//     query (`embedderCache=null`). Same posture as the AnnRetriever embedder-cache deferral below.
+//   - EMBEDDER-CACHE (SCOPE-A, now WIRED) — PostgresConfluenceRetrieval accepts an EmbedderCache for the
+//     Phase-A/Phase-C generation dispatch. The real {@link PostgresEmbedderCache} is now wired via a LAZY
+//     façade ({@link makeLazyEmbedderCache}): construction is deferred to the first confluence query (the
+//     adapter awaits `refresh()` before its sync reads), keeping worker boot off the DB. This is
+//     SAFE-DEFAULT: at the seeded `retrieval_mode='fallback'` the adapter runs Phase A (LEFT JOIN
+//     chunk_embeddings + COALESCE), which with empty chunk_embeddings is byte-identical to the legacy
+//     direct query (proven in embedder_cache_wiring.integration.test.ts). It only changes behaviour once
+//     an operator flips retrieval_mode to 'generation_only'. The AnnRetriever embedder-cache wiring stays
+//     deferred (its Phase-A/Phase-C SELECT branch is unported — FOLLOW-UP-ann-embedder-cache).
 //
 // ── DSN gate (DIVERGES from the Python; documented for the verifier) ─────────────────────────────
 // The Python `build_bm25_port` / `build_ann_port` fall back to EMPTY InMemory*Port test doubles when
@@ -33,6 +39,7 @@
 
 import { RetrieveKnowledgeActivity } from "#backend/activities/retrieve_knowledge.activity.js";
 import { PostgresConfluenceRetrieval } from "#backend/adapters/postgres_confluence_retrieval.js";
+import { makeLazyEmbedderCache } from "#backend/adapters/embedder_cache.js";
 import { type EmbeddingsPort } from "#backend/adapters/embeddings_port.js";
 import { AnnRetriever } from "#backend/retrieval/ann_retriever.js";
 import { type AnnPort, PostgresAnnPort } from "#backend/retrieval/ann_port.js";
@@ -44,9 +51,10 @@ import { IdentityRerankPort, LlmRerank } from "#backend/retrieval/llm_rerank.js"
 import type { RerankLlmCacheLike } from "#backend/retrieval/llm_backed_rerank.js";
 
 import { tenantKysely } from "#platform/db/database.js";
+import { WallClock } from "#platform/clock.js";
 
-/** Resolve the shared ADR-0062 Kysely from `CODEMASTER_PG_CORE_DSN` (fail-loud on unset; see header). */
-function resolveCoreDb(): ReturnType<typeof tenantKysely<unknown>> {
+/** Resolve the raw `CODEMASTER_PG_CORE_DSN` (fail-loud on unset; see header). */
+function resolveCoreDsn(): string {
   const dsn = process.env.CODEMASTER_PG_CORE_DSN;
   if (dsn === undefined || dsn === "") {
     throw new Error(
@@ -54,7 +62,12 @@ function resolveCoreDb(): ReturnType<typeof tenantKysely<unknown>> {
         "Set it to the core Postgres DSN. (The in-memory ports are test-only and are never wired here.)",
     );
   }
-  return tenantKysely<unknown>(dsn);
+  return dsn;
+}
+
+/** Resolve the shared ADR-0062 Kysely from `CODEMASTER_PG_CORE_DSN` (fail-loud on unset; see header). */
+function resolveCoreDb(): ReturnType<typeof tenantKysely<unknown>> {
+  return tenantKysely<unknown>(resolveCoreDsn());
 }
 
 /**
@@ -86,13 +99,18 @@ export function buildAnnPort(): AnnPort {
  * NO `installation_id` filter; the by-design cross-tenant access posture lives on the adapter's
  * `// tenant:exempt` raw-SQL markers (the frozen Python's `@privileged_path` + `cross_tenant_audit`).
  *
- * FOLLOW-UP-embedder-cache: the Python threads an optional EmbedderCache into the adapter for the
- * Phase-A/Phase-C generation dispatch; that cache is `None` in the current composition AND unported, so
- * no `embedderCache` is passed here (the adapter runs the legacy direct query) — same posture as
- * {@link buildAnnPort}.
+ * SCOPE-A: the real {@link PostgresEmbedderCache} is now wired via a LAZY façade ({@link
+ * makeLazyEmbedderCache}) for the Phase-A/Phase-C generation dispatch. The build is deferred to the first
+ * confluence query (the adapter awaits `refresh()` before its sync reads), so worker boot stays off the
+ * DB. SAFE-DEFAULT: at `retrieval_mode='fallback'` Phase A is byte-identical to the legacy query (empty
+ * chunk_embeddings → COALESCE falls back to `cc.embedding`); behaviour only changes when an operator flips
+ * the mode to 'generation_only'. The lazy cache is DSN-memoized, so it is the SAME singleton the confluence
+ * dual-write shares.
  */
 export function buildConfluencePort(): ConfluenceRetrievalPort {
-  return new PostgresConfluenceRetrieval({ db: resolveCoreDb() });
+  const dsn = resolveCoreDsn();
+  const embedderCache = makeLazyEmbedderCache(dsn, { clock: new WallClock() });
+  return new PostgresConfluenceRetrieval({ db: tenantKysely<unknown>(dsn), embedderCache });
 }
 
 export type BuildRetrieveKnowledgeActivityOptions = {

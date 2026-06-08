@@ -52,6 +52,13 @@ export type EmbedderCache = {
   getRetrievalMode(): "fallback" | "generation_only";
   /** Active embedding-generation id (bound as `:active_generation`). */
   getActiveGeneration(): number | bigint;
+  /**
+   * OPTIONAL lazy-TTL refresh boundary. When the wired cache exposes it (the production
+   * {@link PostgresEmbedderCache} does), `search()` awaits it ONCE per query so the sync `get*()` reads
+   * below serve a snapshot no older than the cache's TTL (config_version bumps propagate within ≤30s per
+   * spec v4 §11.5). Absent on the test fakes — those serve a fixed snapshot and skip the refresh.
+   */
+  refresh?(): Promise<void>;
 };
 
 /** The row shape every SELECT below materializes (snake_case = the DB column / alias names). */
@@ -154,6 +161,11 @@ export class PostgresConfluenceRetrieval {
     if (this.embedderCache === null) {
       rows = await this.runLegacy({ qvec, labelsBind, topK: args.topK });
     } else {
+      // Lazy-TTL refresh boundary (when the wired cache exposes it): drive a per-query refresh so the
+      // sync reads below serve a snapshot within the cache's ≤30s staleness bound. Test fakes omit it.
+      if (this.embedderCache.refresh !== undefined) {
+        await this.embedderCache.refresh();
+      }
       const mode = this.embedderCache.getRetrievalMode();
       const activeGeneration = this.embedderCache.getActiveGeneration();
       rows =

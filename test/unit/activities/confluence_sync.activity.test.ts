@@ -19,6 +19,7 @@ import {
   type ChunkEmbeddingLookup,
   type ConfluenceChunkClient,
   type ConfluenceChunksWriter,
+  type EmbedderCacheForDualWrite,
   type ExistingChunkRowsReader,
   type PageApprovalsReader,
 } from "#backend/activities/confluence_sync.activity.js";
@@ -433,6 +434,77 @@ describe("ConfluenceSyncActivities.upsertChunks", () => {
     );
     expect(out.upserted).toBe(1); // no approval required (no 'default' in effective labels)
     expect(writer.upsertCalls).toHaveLength(1);
+  });
+
+  // ── SCOPE-A dual-write wiring ──────────────────────────────────────────────────────────────────
+
+  /** An opts-capturing writer (the shared StubWriter discards the 2nd arg; here we capture it). */
+  class OptsCapturingWriter implements ConfluenceChunksWriter {
+    public lastOpts: { activeGeneration?: number | null; activeModelName?: string | null } | undefined;
+    public async upsertChunks(
+      rows: ReadonlyArray<unknown>,
+      opts?: { activeGeneration?: number | null; activeModelName?: string | null },
+    ): Promise<number> {
+      this.lastOpts = opts;
+      return rows.length;
+    }
+    public async reconcileDeletions(): Promise<number> {
+      return 0;
+    }
+  }
+
+  /** A fake EmbedderCache pinned to a gen + model; counts refresh() calls. */
+  class FakeDualWriteCache implements EmbedderCacheForDualWrite {
+    public refreshes = 0;
+    public constructor(
+      private readonly gen: number,
+      private readonly model: string,
+    ) {}
+    public getActiveGeneration(): number {
+      return this.gen;
+    }
+    public getActiveModelName(): string {
+      return this.model;
+    }
+    public async refresh(): Promise<void> {
+      this.refreshes += 1;
+    }
+  }
+
+  it("WITH an EmbedderCache wired: upsert receives {activeGeneration, activeModelName} (refresh awaited)", async () => {
+    const writer = new OptsCapturingWriter();
+    const cache = new FakeDualWriteCache(42, "mxbai-embed-large-v1");
+    const acts = new ConfluenceSyncActivities({
+      client: new StubClient([{ items: [], next_cursor: null }]),
+      embeddings: new StubEmbeddings(),
+      modelName: MODEL,
+      chunkEmbeddingLookup: new StubLookups(),
+      chunksWriter: writer,
+      approvalsReader: new StubApprovals(),
+      existingChunkRowsReader: new StubExistingRows([]),
+      embedderCache: cache,
+    });
+    const out = await acts.upsertChunks(baseInput() as never);
+    expect(out.upserted).toBe(1);
+    expect(cache.refreshes).toBe(1); // lazy-TTL refresh awaited once per batch
+    expect(writer.lastOpts).toEqual({ activeGeneration: 42, activeModelName: "mxbai-embed-large-v1" });
+  });
+
+  it("WITHOUT an EmbedderCache (default): upsert receives EMPTY opts (legacy-only, SAFE-DEFAULT)", async () => {
+    const writer = new OptsCapturingWriter();
+    const acts = new ConfluenceSyncActivities({
+      client: new StubClient([{ items: [], next_cursor: null }]),
+      embeddings: new StubEmbeddings(),
+      modelName: MODEL,
+      chunkEmbeddingLookup: new StubLookups(),
+      chunksWriter: writer,
+      approvalsReader: new StubApprovals(),
+      existingChunkRowsReader: new StubExistingRows([]),
+      // embedderCache omitted → no dual-write.
+    });
+    const out = await acts.upsertChunks(baseInput() as never);
+    expect(out.upserted).toBe(1);
+    expect(writer.lastOpts).toEqual({}); // no activeGeneration / activeModelName → repo writes legacy only
   });
 });
 

@@ -178,6 +178,7 @@ import { ListActiveConfluenceSpacesActivity } from "#backend/activities/list_act
 import { MarkStaleChunksActivity } from "#backend/activities/mark_stale_chunks.activity.js";
 import { PostgresConfluenceChunksRepo } from "#backend/domain/repos/confluence_chunks_repo.js";
 import { PostgresConfluencePageApprovalsRepo } from "#backend/domain/repos/confluence_page_approvals_repo.js";
+import { makeLazyEmbedderCache } from "#backend/adapters/embedder_cache.js";
 import { ConfluenceClient } from "#backend/integrations/confluence/client.js";
 import { ConfluenceTokenProvider } from "#backend/integrations/confluence/token_provider.js";
 import { tenantKysely } from "#platform/db/database.js";
@@ -801,7 +802,14 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
   // ADR-0062 pool (satisfies BOTH the idempotency-lookup `findExistingChunkEmbedding` AND the
   // upsert/reconcile writer slices); the PostgresConfluencePageApprovalsRepo (the `getActiveApproval`
   // reader); and the PoolExistingChunkRowsReader (the hard-limit candidate-row fetcher). embedderCache is
-  // NOT wired (ADR-0075): upsert writes ONLY the legacy embedding column (the dual-write stays dormant).
+  // NOW wired (SCOPE-A) via the LAZY DSN-memoized façade: upsert dual-writes each vector to
+  // core.chunk_embeddings under the active generation IN ADDITION to the legacy embedding column. The build
+  // is deferred to the first upsert (the façade's refresh() builds + starts the real cache), keeping worker
+  // boot off the DB. It is the SAME DSN-memoized singleton buildConfluencePort wires into the confluence
+  // retrieval adapter (makeLazyEmbedderCache over the same dsn → buildEmbedderCacheForDsn(dsn) memo), so
+  // retrieval + dual-write read ONE snapshot. SAFE-DEFAULT: the dual-write only POPULATES chunk_embeddings;
+  // retrieval stays at retrieval_mode='fallback' (Phase A === legacy) until an operator flips to
+  // 'generation_only'.
   const confluenceChunksRepo = new PostgresConfluenceChunksRepo({ db: tenantKysely(dsn), clock });
   const confluencePageApprovalsRepo = new PostgresConfluencePageApprovalsRepo({
     db: tenantKysely(dsn),
@@ -814,6 +822,7 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     chunksWriter: confluenceChunksRepo,
     approvalsReader: confluencePageApprovalsRepo,
     existingChunkRowsReader: new PoolExistingChunkRowsReader({ dsn }),
+    embedderCache: makeLazyEmbedderCache(dsn, { clock }),
   });
   // The entry-point + staleness holders self-resolve the shared pool from the injected dsn (lazy pool —
   // no connection at construction). In dev, listActiveSpaces returns ZERO rows (no configured spaces), so
