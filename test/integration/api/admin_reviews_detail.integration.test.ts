@@ -33,7 +33,7 @@ import { registerAdminRoutes } from "#backend/api/admin/admin_routes.js";
 import { SESSION_COOKIE_NAME } from "#backend/api/auth/auth_routes.js";
 import type { Role } from "#backend/api/auth/roles.js";
 import { issueCookie } from "#backend/api/auth/session.js";
-import type { ReviewDetailV1 } from "#contracts/admin.v1.js";
+import type { ReviewDetailV1, YourReviewsPageV1 } from "#contracts/admin.v1.js";
 
 import { describeDb, INTEGRATION_DSN } from "../_db.js";
 
@@ -266,5 +266,62 @@ describeDb("admin reviews detail (disposable :5439)", () => {
         reviewId: REVIEW_ID_OTHER, // different tenant
       }),
     ).rejects.toThrow(ReviewDetailNotFoundError);
+  });
+});
+
+describeDb("admin your-reviews (disposable :5439)", () => {
+  it("GET /api/admin/your-reviews — 200 happy path returns YourReviewsPageV1 with empty tuples", async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/admin/your-reviews",
+      cookies: { [SESSION_COOKIE_NAME]: mintCookie("reader") },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json<YourReviewsPageV1>();
+    expect(body.schema_version).toBe(1);
+    expect(body.user_id).toBe(USER_ID);
+    expect(body.authored).toEqual([]);
+    expect(body.assigned).toEqual([]);
+    await app.close();
+  });
+
+  it("authz: reader/operator/owner/super/security_auditor 200, org_owner 403", async () => {
+    const app = await makeApp();
+    const allowed = [
+      "reader",
+      "platform_operator",
+      "platform_owner",
+      "super_admin",
+      "security_auditor",
+    ] as const;
+    const denied = ["org_owner"] as const;
+    for (const role of allowed) {
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/admin/your-reviews",
+        cookies: { [SESSION_COOKIE_NAME]: mintCookie(role) },
+      });
+      expect(res.statusCode, `${role} should be 200`).toBe(200);
+    }
+    for (const role of denied) {
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/admin/your-reviews",
+        cookies: { [SESSION_COOKIE_NAME]: mintCookie(role) },
+      });
+      expect(res.statusCode, `${role} should be 403`).toBe(403);
+    }
+    await app.close();
+  });
+
+  it("401 no cookie", async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/admin/your-reviews",
+    });
+    expect(res.statusCode).toBe(401);
+    await app.close();
   });
 });

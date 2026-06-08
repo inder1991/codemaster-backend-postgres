@@ -64,6 +64,7 @@ import {
   RetrievalTraceListPageV1,
   ReviewDetailV1,
   ReviewsListPageV1,
+  YourReviewsPageV1,
   RoleChangePendingV1,
   RoleChangeRequestV1,
   FindingFeedbackResponseV1,
@@ -98,6 +99,7 @@ import {
   ReviewDetailNotFoundError,
   buildReviewDetail,
 } from "#backend/api/admin/reviews_detail_read.js";
+import { buildYourReviews } from "#backend/api/admin/reviews_your_read.js";
 import {
   NotificationRuleNotFoundError,
   type NotificationRulePatch,
@@ -1777,6 +1779,29 @@ export async function registerAdminRoutes(
           }
           throw e;
         }
+      },
+    );
+
+    scope.get(
+      "/api/admin/your-reviews",
+      {
+        preHandler: requireRole([
+          "reader",
+          "platform_operator",
+          "platform_owner",
+          "super_admin",
+          "security_auditor",
+        ]),
+      },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const { authored, assigned } = await buildYourReviews(opts.db, {
+          installationId: principal.installationId,
+          userId: principal.userId,
+        });
+        return reply
+          .code(200)
+          .send(YourReviewsPageV1.parse({ authored, assigned, user_id: principal.userId }));
       },
     );
 
