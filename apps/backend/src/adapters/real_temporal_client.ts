@@ -23,6 +23,16 @@ export class RealTemporalClient implements TemporalClientPort {
   }
 
   public async startWorkflow(call: StartWorkflowCall): Promise<string> {
+    // Fail LOUD rather than silently dropping: this adapter does NOT forward the raw `searchAttributes`
+    // form (deprecated in this SDK; wire typedSearchAttributes below if/when a producer needs them). The
+    // outbox payload default is {} so this never fires today, but a future producer that set them would
+    // otherwise lose them with no signal.
+    if (Object.keys(call.searchAttributes).length > 0) {
+      throw new Error(
+        `startWorkflow: searchAttributes are not forwarded (would be silently dropped) — ` +
+          `keys=[${Object.keys(call.searchAttributes).join(", ")}]; wire typedSearchAttributes if needed`,
+      );
+    }
     try {
       const handle = await this.#client.workflow.start(call.workflowType, {
         taskQueue: call.taskQueue,

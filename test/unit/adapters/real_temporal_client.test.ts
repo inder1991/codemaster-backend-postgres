@@ -67,4 +67,15 @@ describe("RealTemporalClient.startWorkflow", () => {
     const port = new RealTemporalClient(clientWithStart(start));
     await expect(port.startWorkflow(CALL)).rejects.toBeInstanceOf(TemporalConnectivityError);
   });
+
+  it("fails LOUD on non-empty searchAttributes instead of silently dropping them", async () => {
+    // The raw searchAttributes form isn't forwarded by this adapter; a producer that sets them would lose
+    // them silently. Guard fires BEFORE the SDK call, so a non-empty set is a loud error, not data loss.
+    const start = vi.fn(async () => ({ firstExecutionRunId: "run-xyz" }));
+    const port = new RealTemporalClient(clientWithStart(start));
+    const callWithSA: StartWorkflowCall = { ...CALL, searchAttributes: { foo: "bar" } };
+
+    await expect(port.startWorkflow(callWithSA)).rejects.toThrow(/searchAttributes/);
+    expect(start).not.toHaveBeenCalled();
+  });
 });
