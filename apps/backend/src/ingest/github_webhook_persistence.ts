@@ -17,8 +17,10 @@ import {
   RECONCILE_PAYLOAD_SCHEMA_VERSION,
   PostgresOutboxRepo,
 } from "#backend/domain/repos/outbox_repo.js";
+import { replaceLinks } from "#backend/domain/repos/pr_issue_links_repo.js";
 import { derivePrId } from "#backend/ingest/_pr_id.js";
 import { safePersistPr } from "#backend/ingest/_pr_persistence.js";
+import { parseIssueLinks } from "#backend/ingest/issue_link_parser.js";
 import {
   buildInstallationPayloadFromWebhook,
   buildRepositoriesPayloadFromWebhook,
@@ -46,6 +48,8 @@ import { recordReconcilePayloadMissingRequiredFields } from "#backend/observabil
 
 import { type Clock } from "#platform/clock.js";
 import { uuid4 } from "#platform/randomness.js";
+
+import type { IssueLink } from "#contracts/issue_link.v1.js";
 
 // ─── constants (1:1 with the Python module, except the R1 workflow-type rename) ──────────────────────
 
@@ -107,6 +111,166 @@ export type WebhookPersistResultV1 = {
   installationId: string | null;
   deliveryId: string;
 };
+
+// ─── pr_issue_links producer (S3 / DM-WIRE T3) ────────────────────────────────────────────────────────
+
+/** The producer collaborator `maybePersistPrIssueLinks` invokes — 1:1 with the repo `replaceLinks`. The
+ *  production call site passes the real `replaceLinks`; tests inject a stub so the wiring is DB-free. */
+type ReplaceLinksFn = (
+  tx: Kysely<unknown>,
+  args: { prId: string; installationId: string; links: ReadonlyArray<IssueLink>; clock: Clock },
+) => Promise<{ deleted: number; inserted: number }>;
+
+/** Runs `body` inside a `sp_pr_issue_links` SAVEPOINT: RELEASE on success, ROLLBACK TO + RELEASE on throw
+ *  (re-throwing so the caller's fail-open catch logs it). This is the DB-touching seam, so it is injectable
+ *  — tests pass a pass-through that just runs `body` (mirrors the `sp_pr_repair` savepoint in persistWebhook
+ *  on the real path). */
+type RunInSavepointFn = (tx: Kysely<unknown>, body: () => Promise<void>) => Promise<void>;
+
+/** Default {@link RunInSavepointFn} — the real Postgres SAVEPOINT orchestration (production path). */
+async function runInPrIssueLinksSavepoint(tx: Kysely<unknown>, body: () => Promise<void>): Promise<void> {
+  await sql`SAVEPOINT sp_pr_issue_links`.execute(tx);
+  try {
+    await body();
+    await sql`RELEASE SAVEPOINT sp_pr_issue_links`.execute(tx);
+  } catch (err) {
+    await sql`ROLLBACK TO SAVEPOINT sp_pr_issue_links`.execute(tx);
+    await sql`RELEASE SAVEPOINT sp_pr_issue_links`.execute(tx);
+    throw err;
+  }
+}
+
+/**
+ * Port of `_maybe_persist_pr_issue_links` (github_webhook_persistence.py:1699-1880). Parses the PR's
+ * description / title / branch_name for issue links and DELETE-then-INSERTs them into `core.pr_issue_links`
+ * via {@link replaceLinks}, so `fetchLinkedIssues` (the consumer) has rows to read and the walkthrough's
+ * "Linked issues" section is populated.
+ *
+ * Sources parsed (v0, faithful to Python): `pr_description` (description), `pr_title` (title), `head_ref`
+ * (branch_name). NOT `commit_message` — the `pull_request` webhook payload lacks the commits[] array, so
+ * that fourth source is a documented deferral (`LinkageSource` Literal in issue_link_parser).
+ *
+ * Fail-CLOSED guard (1:1 with the Python + with `maybePersistPr`): a missing / non-positive
+ * `githubPullRequestId` skips the write path entirely — without a real PR id the derived `prId` would not
+ * match what the review workflow body sees later.
+ *
+ * Fail-OPEN persistence (ADR-0026 §2): `replaceLinks` runs inside a SAVEPOINT (`sp_pr_issue_links`). On
+ * error the savepoint rolls back ONLY the link writes — the outer webhook transaction (audit + idempotency +
+ * the gh_users/pull_requests/transitions trio that `safePersistPr` already wrote + the outbox row) stays
+ * clean and commits. Postgres aborts the WHOLE transaction on any error inside it, so a plain try/catch
+ * around `replaceLinks` would leave the outer tx in an aborted state; the savepoint is what makes the
+ * fail-open actually fail OPEN (mirrors the `sp_pr_repair` pattern in `persistWebhook`).
+ *
+ * @param replaceLinksImpl injected producer (defaults to the real {@link replaceLinks}); tests pass a stub.
+ * @param runInSavepoint injected savepoint runner (defaults to the real Postgres SAVEPOINT); tests pass a
+ *        pass-through so the wiring is exercised without a DB.
+ */
+export async function maybePersistPrIssueLinks(
+  tx: Kysely<unknown>,
+  args: {
+    prMeta: PrMetadata;
+    internalIid: string;
+    internalRepoId: string;
+    deliveryId: string;
+    clock: Clock;
+    replaceLinksImpl?: ReplaceLinksFn;
+    runInSavepoint?: RunInSavepointFn;
+  },
+): Promise<void> {
+  const { prMeta, internalIid, internalRepoId, deliveryId, clock } = args;
+  const replaceLinksImpl = args.replaceLinksImpl ?? replaceLinks;
+  const runInSavepoint = args.runInSavepoint ?? runInPrIssueLinksSavepoint;
+
+  // Same fail-closed guard as maybePersistPr: without a real PR id the derived pr_id won't match what the
+  // workflow body sees later.
+  if (prMeta.githubPullRequestId === null || prMeta.githubPullRequestId <= 0) {
+    return;
+  }
+
+  // Parse all three sources. Results are concatenated — replaceLinks's natural key
+  // (pr_id, issue_number, kind, source) keeps the same (issue_number, kind) from different sources as
+  // distinct rows (audit-preserving by design, 1:1 with Python).
+  const links: Array<IssueLink> = [
+    ...parseIssueLinks({ text: prMeta.prDescription || "", source: "description" }),
+    ...parseIssueLinks({ text: prMeta.prTitle || "", source: "title" }),
+    ...parseIssueLinks({ text: prMeta.headRef || "", source: "branch_name" }),
+  ];
+
+  const prId = derivePrId({
+    installationId: internalIid,
+    repositoryId: internalRepoId,
+    prNumber: prMeta.prNumber,
+  });
+
+  // SAVEPOINT-wrapped fail-open (mirrors the sp_pr_repair pattern). On error the savepoint rolls back ONLY
+  // the link writes; we log + swallow so the outer transaction's more-important writes commit.
+  try {
+    await runInSavepoint(tx, async () => {
+      const { deleted, inserted } = await replaceLinksImpl(tx, {
+        prId,
+        installationId: internalIid,
+        links,
+        clock,
+      });
+      console.debug(
+        JSON.stringify({
+          event: "pr_issue_links.replaced",
+          delivery_id: deliveryId,
+          deleted,
+          inserted,
+        }),
+      );
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(
+      JSON.stringify({
+        event: "pr_issue_links.replace_failed",
+        delivery_id: deliveryId,
+        error_class: err instanceof Error ? err.constructor.name : "unknown",
+        error_msg: message.slice(0, 2048),
+        installation_id: internalIid,
+        pr_id: prId,
+        pr_number: prMeta.prNumber,
+        action: prMeta.action,
+        n_links_attempted: links.length,
+      }),
+    );
+    // Intentionally do NOT re-throw — the savepoint already rolled back the failed link writes; the outer
+    // transaction stays clean so the gh_users/pull_requests/transitions + outbox writes can commit.
+  }
+}
+
+/**
+ * Port of `_safe_persist_pr_issue_links` (github_webhook_persistence.py:1065-1083). Outer fail-open wrapper
+ * around {@link maybePersistPrIssueLinks}: catches + logs `webhook.pr_issue_links_persistence_failed` and
+ * swallows so the webhook continues (mirrors the `safePersistPr` fail-open logging shape). Belt-and-braces
+ * alongside the inner savepoint — if the savepoint SQL itself were ever to throw, this still keeps the 204.
+ */
+export async function safePersistPrIssueLinks(
+  tx: Kysely<unknown>,
+  args: {
+    prMeta: PrMetadata;
+    internalIid: string;
+    internalRepoId: string;
+    deliveryId: string;
+    clock: Clock;
+  },
+): Promise<void> {
+  try {
+    await maybePersistPrIssueLinks(tx, args);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(
+      JSON.stringify({
+        event: "webhook.pr_issue_links_persistence_failed",
+        delivery_id: args.deliveryId,
+        error_class: err instanceof Error ? err.constructor.name : "unknown",
+        error_msg: message.slice(0, 2048),
+      }),
+    );
+  }
+}
 
 // ─── the v2 review payload + the outer temporal-start payload ─────────────────────────────────────────
 
@@ -415,6 +579,17 @@ export async function persistWebhook(args: {
             // fk_pr_files_pr_id_pull_requests). Fail-open SAVEPOINT: a persistence fault rolls back ONLY these
             // writes — it never poisons the outer webhook transaction, fails the 204, or blocks the dispatch.
             await safePersistPr(tx, {
+              prMeta,
+              internalIid,
+              internalRepoId,
+              deliveryId,
+              clock: args.clock,
+            });
+            // DM-WIRE T3 — parse the PR description / title / branch_name for issue links + DELETE-then-INSERT
+            // rows into core.pr_issue_links so fetchLinkedIssues has rows to read (the producer the TS port
+            // had previously omitted). Fail-OPEN: safePersistPrIssueLinks wraps the savepoint-isolated
+            // replaceLinks so a link-persistence fault never poisons the outer webhook tx / fails the 204.
+            await safePersistPrIssueLinks(tx, {
               prMeta,
               internalIid,
               internalRepoId,

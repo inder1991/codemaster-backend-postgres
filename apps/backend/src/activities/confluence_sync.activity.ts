@@ -384,7 +384,14 @@ export class ConfluenceSyncActivities {
     try {
       const req: EmbedRequest = { texts, model_name: this.modelName, purpose: EMBED_PURPOSE };
       const result = await this.embeddings.embed(req);
-      // `i` is a bounded numeric map index into the port-invariant `vectors`
+      // Mirror the Python `zip(batch, result.vectors, strict=True)`: the embedder MUST return exactly one
+      // vector per text. No contract validates `vectors.length === texts.length`, so this is the SOLE guard
+      // against a drifting embedder silently mis-mapping vectors to chunks (over-count) or producing a vague
+      // `[...undefined]` TypeError (under-count).
+      if (result.vectors.length !== batch.length) {
+        throw new Error(`embed returned ${result.vectors.length} vectors for ${batch.length} texts`);
+      }
+      // `i` is a bounded numeric map index into the now-length-checked `vectors`
       // (vectors.length === texts.length === batch.length) — not an attacker-controlled object key.
       // eslint-disable-next-line security/detect-object-injection -- bounded numeric index into a same-length array
       return batch.map((item, i) => ({ item, vector: [...result.vectors[i]!] }));

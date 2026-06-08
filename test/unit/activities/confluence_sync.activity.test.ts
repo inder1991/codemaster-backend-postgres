@@ -47,14 +47,20 @@ function vec1024(seed: number): Array<number> {
 class StubEmbeddings implements EmbeddingsPort {
   public readonly calls: Array<EmbedRequest> = [];
   public failValidationOnce = false;
+  /** When >0, return this many MORE vectors than texts requested — trips the strict length check. */
+  public extraVectors = 0;
   public async embed(req: EmbedRequest): Promise<EmbedResult> {
     this.calls.push(req);
     if (this.failValidationOnce) {
       this.failValidationOnce = false;
       throw new EmbeddingsValidationError("simulated context-window overflow");
     }
+    const vectors = req.texts.map((_, i) => vec1024(i + 1));
+    for (let k = 0; k < this.extraVectors; k += 1) {
+      vectors.push(vec1024(900 + k));
+    }
     return {
-      vectors: req.texts.map((_, i) => vec1024(i + 1)),
+      vectors,
       model_name: req.model_name,
       model_version: "test-v1",
       cache_hits: 0,
@@ -286,6 +292,20 @@ describe("ConfluenceSyncActivities.chunkAndEmbed", () => {
     const out = await acts.chunkAndEmbed(sanitizedInput(""));
     expect(out.chunks).toEqual([]);
     expect(embeddings.calls.length).toBe(0);
+  });
+
+  it("throws when the embedder returns a vector count != text count (Python zip(strict=True))", async () => {
+    // The Python _embed_batch_resilient success path is `zip(batch, result.vectors, strict=True)`, which
+    // raises on a length mismatch. It is the SOLE guard that the embedder honored the request shape — no
+    // contract validates vectors.length === texts.length — so the TS must enforce it explicitly rather
+    // than silently drop surplus vectors (over-count) or throw a vague TypeError (under-count).
+    const embeddings = new StubEmbeddings();
+    embeddings.extraVectors = 1; // embedder returns one MORE vector than texts requested
+    const { acts } = buildActivities({ embeddings });
+
+    await expect(
+      acts.chunkAndEmbed(sanitizedInput("Hello world. This is a doc.")),
+    ).rejects.toThrow(/embed returned \d+ vectors for \d+ texts/);
   });
 });
 
