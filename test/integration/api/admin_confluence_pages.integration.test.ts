@@ -22,6 +22,10 @@ import {
   listPagesForIntegration,
   listQuarantinedChunksForIntegration,
 } from "#backend/api/admin/confluence_pages_read.js";
+import {
+  createPageApproval,
+  revokePageApproval,
+} from "#backend/api/admin/confluence_pages_write.js";
 
 describe("confluence-pages contracts exist", () => {
   it("PageWithApprovalV1 exists", () => {
@@ -47,5 +51,14 @@ describe("confluence_pages_read repo functions", () => {
   });
   it("listQuarantinedChunksForIntegration returns paginated quarantined chunks", () => {
     expect(listQuarantinedChunksForIntegration).toBeDefined();
+  });
+});
+
+describe("confluence_pages_write approval functions", () => {
+  it("createPageApproval wraps the repo upsert with email resolution", () => {
+    expect(createPageApproval).toBeDefined();
+  });
+  it("revokePageApproval wraps the repo revoke + resync dispatch", () => {
+    expect(revokePageApproval).toBeDefined();
   });
 });
