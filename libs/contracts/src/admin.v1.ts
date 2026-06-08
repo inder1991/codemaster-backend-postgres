@@ -1283,3 +1283,18 @@ export const FindingFeedbackResponseV1 = z
   })
   .strict();
 export type FindingFeedbackResponseV1 = z.infer<typeof FindingFeedbackResponseV1>;
+
+// ─── Confluence pages (page-approval read envelope + quarantined-chunks list) ─────────────────────────
+// 1:1 with contracts/admin/page_approvals/v1.py + contracts/admin/quarantined_chunks/v1.py. The
+// write-side page-approval row (CreatePageApprovalRequestV1 / ConfluencePageApprovalV1) lives in
+// #contracts/page_approval.v1; these are the read envelopes for the per-space pages + quarantine lists.
+
+export {
+  PageApprovalStatusV1,
+  PageWithApprovalV1,
+  PagesListPageV1,
+} from "./admin/page_approvals.v1.js";
+export {
+  QuarantinedChunkV1,
+  QuarantinedChunksPageV1,
+} from "./admin/quarantined_chunks.v1.js";
