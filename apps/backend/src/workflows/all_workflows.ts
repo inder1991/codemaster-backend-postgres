@@ -21,6 +21,8 @@
  *   - `runIdRetentionWorkflow`         — Wave-2 retention cron: close stale PRs / retire runs / delete events (3am daily)
  *   - `partitionMaintenanceWorkflow`   — Wave-2 retention cron: pg_partman maintenance sweep (2am daily)
  *   - `workspaceRetentionWorkflow`     — Wave-2 retention cron: orphan/reap/purge workspace leases (5-min interval)
+ *   - `syncCodeOwners`                 — Wave-3 spine: CODEOWNERS sync on default-branch push (event-driven)
+ *   - `refreshSemanticDocs`            — Wave-3 spine: clone → discover/chunk/embed repo knowledge docs (event-driven)
  *
  * COMBINED-POD (Wave-4, ADR-0075): the 3 Confluence workflows run on the SAME review worker (queue
  * "review-default"). The Python ported `CONFLUENCE_SYNC_TASK_QUEUE` consts read "confluence-sync", but
@@ -46,3 +48,5 @@ export { triggerPageResyncWorkflow } from "./trigger_page_resync.workflow.js";
 export { runIdRetentionWorkflow } from "./run_id_retention.workflow.js";
 export { partitionMaintenanceWorkflow } from "./partition_maintenance.workflow.js";
 export { workspaceRetentionWorkflow } from "./workspace_retention.workflow.js";
+export { syncCodeOwners } from "./sync_code_owners.workflow.js";
+export { refreshSemanticDocs } from "./refresh_semantic_docs.workflow.js";

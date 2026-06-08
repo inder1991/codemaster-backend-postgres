@@ -78,7 +78,7 @@ describe("reconcile.workflow.ts — three thin pass-through workflows", () => {
 });
 
 describe("all_workflows.ts — combined-pod bundle barrel", () => {
-  it("re-exports ALL TWELVE workflow functions for the single workflowsPath bundle", () => {
+  it("re-exports ALL FOURTEEN workflow functions for the single workflowsPath bundle", () => {
     expect(ALL_WORKFLOWS_SRC).toContain("reviewPullRequest");
     expect(ALL_WORKFLOWS_SRC).toContain("reconcileInstallation");
     expect(ALL_WORKFLOWS_SRC).toContain("reconcileRepositories");
@@ -94,9 +94,13 @@ describe("all_workflows.ts — combined-pod bundle barrel", () => {
     expect(ALL_WORKFLOWS_SRC).toContain("runIdRetentionWorkflow");
     expect(ALL_WORKFLOWS_SRC).toContain("partitionMaintenanceWorkflow");
     expect(ALL_WORKFLOWS_SRC).toContain("workspaceRetentionWorkflow");
-    // Ten re-export statements: the review spine + the three reconcile/repair (one statement) + the two
+    // Wave-3 spine workflows (CODEOWNERS sync + clone-backed semantic-docs refresh).
+    expect(ALL_WORKFLOWS_SRC).toContain("syncCodeOwners");
+    expect(ALL_WORKFLOWS_SRC).toContain("refreshSemanticDocs");
+    // Twelve re-export statements: the review spine + the three reconcile/repair (one statement) + the two
     // Wave-1 backstops (one each) + the three Wave-4 confluence workflows (one each) + the three Wave-2
-    // retention workflows (one each) — 1 + 1 + 2 + 3 + 3 = 10 (12 workflow functions total).
-    expect(ALL_WORKFLOWS_SRC.split("export {").length - 1).toBe(10);
+    // retention workflows (one each) + the two Wave-3 spine workflows (one each) —
+    // 1 + 1 + 2 + 3 + 3 + 2 = 12 (14 workflow functions total).
+    expect(ALL_WORKFLOWS_SRC.split("export {").length - 1).toBe(12);
   });
 });

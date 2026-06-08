@@ -34,14 +34,15 @@
  *   `activity.heartbeat()`, so a heartbeat timeout would spuriously fail it. Embed-service degradation is
  *   NOT retryable at the workflow layer — the activity returns `retrieval_degraded=True` and we surface it.
  *
- * ── DIVERGENCE: clone activity shape (surfaced for the integrator) ──
- * The frozen Python `clone_repository_activity` takes 3 string positionals `(installation_id,
- * repository_id, head_sha)` and returns a workspace-path STRING. The TS review-pipeline clone primitive
- * is `clone_repo_into_workspace` (typed `CloneRepoIntoWorkspaceInput` → `ClonedRepoV1.workspace_path`).
- * `clone_repository_activity` is NOT yet registered on the TS side — its registration + the adapter that
- * maps these inputs to the cloned workspace path is the INTEGRATOR's wiring. This body proxies it by the
- * Python registered name + the Python args/return shape so it stays a byte-faithful pass-through; the
- * integrator binds the name to whichever clone primitive yields the workspace path.
+ * ── DIVERGENCE: clone activity shape (INVARIANT-11 single typed input) ──
+ * The frozen Python refresh workflow dispatches `clone_repository_activity` as 3 string positionals
+ * (`args=[str(installation_id), str(repository_id), head_sha]`) and gets back a workspace-path STRING.
+ * CLAUDE.md invariant 11 (LOCKED) forbids multi-positional activity dispatch in the TS port — every
+ * activity takes ONE typed input. So this body proxies the activity by the SAME registered name
+ * (`clone_repository_activity`) but with a SINGLE typed {@link CloneRepositoryInputV1} arg, built below
+ * from the workflow's typed input. The TS `clone_repository_activity` port (clone_repository.activity.ts)
+ * is the bound impl — the INTEGRATOR wires its registration (token provider + repo resolver + cloner deps)
+ * in build_activities; the registered NAME is the binding seam, the typed input is the wire contract.
  *
  * ── SANDBOX SAFETY (ADR-0065 / ADR-0066) ──
  * This module is bundled into the Temporal V8-isolate workflow sandbox. It imports ONLY
@@ -52,6 +53,7 @@
 
 import { proxyActivities } from "@temporalio/workflow";
 
+import type { CloneRepositoryInputV1 } from "#contracts/clone_repository.v1.js";
 import type {
   RefreshSemanticDocsInputV1,
   RefreshSemanticDocsResultV1,
@@ -61,13 +63,16 @@ import type {
  * Proxy for `clone_repository_activity` (Step 1). Retry curve 1:1 with the Python clone step. The METHOD
  * KEY is the REGISTERED Temporal activity name the INTEGRATOR binds (see the divergence note in the module
  * header). Returns the cloned-workspace path STRING.
+ *
+ * INVARIANT-11 (CLAUDE.md #11, LOCKED): the Python refresh workflow dispatches this step as THREE string
+ * positionals (`args=[str(installation_id), str(repository_id), head_sha]`). That multi-positional shape is
+ * forbidden in the TS port — every activity takes ONE typed input. So the proxy is a SINGLE typed
+ * {@link CloneRepositoryInputV1} (the TS `clone_repository_activity` port's contract), and the body below
+ * builds that one input from the workflow's typed `RefreshSemanticDocsInputV1`. This is the surfaced
+ * faithful-port divergence (see the module header's clone-activity-shape note + the contract header).
  */
 const { clone_repository_activity } = proxyActivities<{
-  clone_repository_activity(
-    installationId: string,
-    repositoryId: string,
-    headSha: string,
-  ): Promise<string>;
+  clone_repository_activity(input: CloneRepositoryInputV1): Promise<string>;
 }>({
   startToCloseTimeout: "60 seconds",
   heartbeatTimeout: "30 seconds",
@@ -113,12 +118,14 @@ const { refresh_semantic_docs_activity } = proxyActivities<{
 export async function refreshSemanticDocs(
   input: RefreshSemanticDocsInputV1,
 ): Promise<RefreshSemanticDocsResultV1> {
-  // Step 1: clone the repository → workspace path.
-  const workspacePath = await clone_repository_activity(
-    input.installation_id,
-    input.repository_id,
-    input.head_sha,
-  );
+  // Step 1: clone the repository → workspace path. Single typed input (invariant 11) built from the
+  // workflow's typed input — replaces the Python 3-positional `args=[...]` dispatch.
+  const workspacePath = await clone_repository_activity({
+    schema_version: 1,
+    installation_id: input.installation_id,
+    repository_id: input.repository_id,
+    head_sha: input.head_sha,
+  });
 
   // Step 2: discover + chunk + embed + upsert.
   return refresh_semantic_docs_activity({

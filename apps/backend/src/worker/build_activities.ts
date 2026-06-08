@@ -188,6 +188,20 @@ import { PostgresGithubIssuesCacheRepo } from "#backend/domain/repos/github_issu
 import { PostgresPrFilesRepo } from "#backend/domain/repos/pr_files_repo.js";
 import { PostgresCodeOwnersRepo } from "#backend/domain/repos/code_owners_repo.js";
 
+// ── Wave-3 spine activities (clone primitive + CODEOWNERS sync + semantic-docs refresh) ──
+// The refresh_semantic_docs workflow (all_workflows.ts bundle) proxies clone_repository_activity (Step 1) +
+// refresh_semantic_docs_activity (Step 2); the sync_code_owners workflow proxies sync_code_owners_activity.
+// All three resolve their real collaborators here (the lazy deferred-Vault token provider / GitHub contents
+// client + the shared embedder + the Postgres repos over the ADR-0062 pool).
+import { cloneRepositoryActivity } from "#backend/activities/clone_repository.activity.js";
+import {
+  SyncCodeOwnersActivity,
+  type CodeOwnersFilePort,
+} from "#backend/activities/sync_code_owners.activity.js";
+import { RefreshSemanticDocsActivity } from "#backend/activities/refresh_semantic_docs.activity.js";
+import { PostgresKnowledgeChunkRepo } from "#backend/domain/repos/knowledge_chunks_repo.js";
+import { type TokenProvider } from "#backend/integrations/github/api_client.js";
+
 import { resolveEmbeddingsConsumer } from "#backend/adapters/resolve_embeddings.js";
 import { VaultHttpPort } from "#backend/adapters/vault_http.js";
 
@@ -539,6 +553,81 @@ function makeLazyManifestContentsClient(): GithubContentsPort {
   };
 }
 
+// ─── lazy GitHubAppTokenProvider (the clone_repository_activity getToken seam — deferred-Vault) ────
+//
+// `clone_repository_activity` REQUIRES a `getToken: TokenProvider` (numeric installation id → install
+// token) — there is no production default in the activity module (no Vault-backed provider lives there),
+// so the integrator wires it here. It is the SAME token-provider construction the review cloner +
+// issue/fix-prompt/manifest clients use (one shared GitHub HTTP transport + a Vault adapter from env + a
+// {@link GitHubAppTokenProvider}). Deferred to the first clone dispatch (async `fromEnv`-build) + memoized,
+// so worker boot stays off `VAULT_ADDR` / GitHub round-trips — mirroring the deferred-Vault pattern the
+// other GitHub seams use.
+
+/**
+ * A {@link TokenProvider} that builds the real {@link GitHubAppTokenProvider} on first call (the
+ * deferred-Vault pattern) and memoizes it, then mints the installation token for the per-call NUMERIC
+ * installation id. `clone_repository_activity` calls this with `githubInstallationId` resolved at the
+ * activity boundary. A faithful, fully-real token seam — no stub, just construction deferred + memoized.
+ */
+function makeLazyTokenProvider(): TokenProvider {
+  let memo: Promise<GitHubAppTokenProvider> | undefined;
+  const lazy = (): Promise<GitHubAppTokenProvider> => {
+    if (memo === undefined) {
+      memo = (async (): Promise<GitHubAppTokenProvider> => {
+        const clock = new WallClock();
+        const githubHttp = new FetchGitHubHttpClient({});
+        const vault = VaultHttpPort.fromEnv();
+        return GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
+      })();
+    }
+    return memo;
+  };
+  return async (installationId: number): Promise<string> => (await lazy()).getToken(installationId);
+}
+
+// ─── CODEOWNERS file port (the sync_code_owners_activity GitHub seam — deferred-Vault, 3-path lookup) ──
+//
+// 1:1 with the Python `_SpineCodeOwnersAdapter` (worker/main.py:2565-2589): wrap a lazy deferred-Vault
+// GitHubApiClient.getContents behind the activity's narrow {@link CodeOwnersFilePort}. Tries the three
+// CODEOWNERS lookup paths in order (`.github/CODEOWNERS`, `CODEOWNERS`, `docs/CODEOWNERS`) per GitHub's
+// documented resolution; returns the first one that exists (base64-ASCII bytes + blob SHA), or null when
+// none of the conventional paths host a CODEOWNERS file (the activity treats null as a no-op → returns 0).
+
+/** The three conventional CODEOWNERS paths, tried in order (1:1 with the Python `_CODEOWNERS_LOOKUP_PATHS`). */
+const CODEOWNERS_LOOKUP_PATHS = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"] as const;
+
+/**
+ * A {@link CodeOwnersFilePort} that wraps the lazy deferred-Vault {@link GithubContentsPort} (the SAME
+ * `getContents` seam the manifest fetch uses) with the 3-path CODEOWNERS lookup. 1:1 with the Python
+ * `_SpineCodeOwnersAdapter.fetch_codeowners`. `getContents` additionally takes a telemetry-only
+ * `installationUuid` (NOT consumed by `_request`); the port only carries the numeric id, so the stringified
+ * numeric id is supplied for that unused parameter.
+ */
+function makeCodeOwnersFilePort(): CodeOwnersFilePort {
+  const contents = makeLazyManifestContentsClient();
+  return {
+    fetchCodeowners: async (args): Promise<readonly [Uint8Array, string] | null> => {
+      for (const path of CODEOWNERS_LOOKUP_PATHS) {
+        const result = await contents.getContents({
+          installationId: args.installationId,
+          // Telemetry-only param the GitHub `_request` does not consume; the port carries only the numeric
+          // id, so the stringified numeric id stands in for the unused UUID telemetry slot.
+          installationUuid: String(args.installationId),
+          owner: args.owner,
+          repo: args.repo,
+          path,
+          ref: args.ref,
+        });
+        if (result !== null) {
+          return result;
+        }
+      }
+      // None of the conventional paths host a CODEOWNERS file — no-op (the activity returns 0).
+      return null;
+    },
+  };
+}
+
 // ─── lazy ConfluenceClient (the confluence-sync read seam — deferred-Vault, fail-open) ────────────
 //
 // The Confluence Vault token is ABSENT in dev (ADR-0075): there is no `codemaster/confluence/token` KV
@@ -745,6 +834,29 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     githubClient: makeLazyRetentionGithubClient(),
   });
 
+  // ── Wave-3 spine holders (clone primitive + CODEOWNERS sync + semantic-docs refresh) ──
+  // clone_repository_activity REQUIRES `getToken` (no production default in the module) — wired to the lazy
+  // deferred-Vault token provider (the SAME GitHubAppTokenProvider mint the review cloner uses; called with
+  // the per-PR NUMERIC installation id resolved at the activity boundary); `cloner`/`resolveRepo` fall to
+  // their real production defaults. sync_code_owners_activity is wired with: the 3-path CODEOWNERS file port
+  // (lazy deferred-Vault getContents — 1:1 with the Python `_SpineCodeOwnersAdapter`); PostgresCodeOwnersRepo
+  // over the shared ADR-0062 pool; and `isEnabled` DEFAULT-OFF (the `code_owners_v1` flag reader is unported
+  // — FOLLOW-UP-code-owners-v1-flag-reader, same default-off precedent as fetch_suggested_reviewers). The
+  // refresh_semantic_docs holder shares the SAME real embedder + model name ("qwen3-embed-0.6b") the
+  // confluence chunk_and_embed / embed_query path uses, over a PostgresKnowledgeChunkRepo on the shared pool.
+  const cloneRepositoryGetToken = makeLazyTokenProvider();
+  const syncCodeOwnersActivity = new SyncCodeOwnersActivity({
+    github: makeCodeOwnersFilePort(),
+    repo: PostgresCodeOwnersRepo.fromDsn(dsn),
+    isEnabled: async (): Promise<boolean> => false,
+    clock,
+  });
+  const refreshSemanticDocsActivity = new RefreshSemanticDocsActivity({
+    embeddings: embedder,
+    chunkRepo: PostgresKnowledgeChunkRepo.fromDsn(dsn),
+    modelName: "qwen3-embed-0.6b",
+  });
+
   return {
     // ── 1-arg activities, ready as-is ──
     persistReviewFindings,
@@ -882,5 +994,18 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     ["run_workspace_orphan_sweep_activity"]: runWorkspaceOrphanSweepActivity,
     ["run_workspace_reap_activity"]: runWorkspaceReapActivity,
     ["run_workspace_released_retention_activity"]: runWorkspaceReleasedRetentionActivity,
+    // ── Wave-3 spine activities (clone primitive + CODEOWNERS sync + semantic-docs refresh) ──
+    // Registered under their snake_case TEMPORAL NAMES because the 2 Wave-3 workflows (sync_code_owners +
+    // refresh_semantic_docs, both in all_workflows.ts) proxy them by those exact names — a camelCase key
+    // would dispatch ActivityNotRegistered (the refresh workflow proxies BOTH clone_repository_activity as
+    // Step 1 AND refresh_semantic_docs_activity as Step 2). clone_repository_activity(input, deps) is
+    // CURRIED with the lazy deferred-Vault token provider so the registered value is genuinely 1-arg; the
+    // sync + refresh holders are bound (`.bind(holder)`) so `this` stays wired when destructured.
+    ["clone_repository_activity"]: (input: Parameters<typeof cloneRepositoryActivity>[0]) =>
+      cloneRepositoryActivity(input, { getToken: cloneRepositoryGetToken }),
+    ["sync_code_owners_activity"]:
+      syncCodeOwnersActivity.syncCodeOwners.bind(syncCodeOwnersActivity),
+    ["refresh_semantic_docs_activity"]:
+      refreshSemanticDocsActivity.refreshSemanticDocs.bind(refreshSemanticDocsActivity),
   } as Record<string, (input: never) => Promise<unknown>>;
 }

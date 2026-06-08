@@ -23,6 +23,10 @@ import {
   buildInstallationPayloadFromWebhook,
   buildRepositoriesPayloadFromWebhook,
 } from "#backend/ingest/_reconcile_payload_builder.js";
+import {
+  maybeEmitRefreshSemanticDocs,
+  maybeEmitSyncCodeOwners,
+} from "#backend/ingest/_push_emitters.js";
 import { maybeEnqueueRepair } from "#backend/ingest/_repair_dispatcher.js";
 import { allocateRun, type AllocationOutcome } from "#backend/ingest/_review_run_allocator.js";
 import { upsertReview } from "#backend/ingest/_reviews_repository.js";
@@ -503,13 +507,36 @@ export async function persistWebhook(args: {
       // Auto-registration emit (1:1 with the Python unconditional `_maybe_emit_installation_reconcile` call
       // after the pull_request path): installation events → reconcileInstallation; installation_repositories
       // events → reconcileRepositories; a pull_request for an unknown installation → reconcileInstallation
-      // back-fill. Skips on deduped / missing github_iid internally. The sync_code_owners /
-      // refresh_semantic_docs emitters remain deferred (their workflows are not ported).
+      // back-fill. Skips on deduped / missing github_iid internally.
       await maybeEmitInstallationReconcile({
         tx,
         eventType,
         body: args.body,
         githubIid,
+        internalIid,
+        deliveryId,
+        deduped,
+      });
+
+      // DM-WIRE T0 + Sprint 26 / B-3 (1:1 with the Python unconditional `_maybe_emit_sync_code_owners` +
+      // `_maybe_emit_refresh_semantic_docs` calls): a `push` to the repository's DEFAULT branch enqueues
+      // SyncCodeOwners + RefreshSemanticDocs temporal_workflow_start outbox rows. Both skip internally on
+      // non-push events / non-default-branch pushes / deduped / unresolved installation+repo. Emitted
+      // unconditionally here — the FF gates live inside the workflows/activities, so the operator flips the
+      // flag without redeploying ingest.
+      await maybeEmitSyncCodeOwners({
+        tx,
+        eventType,
+        body: args.body,
+        githubIid,
+        internalIid,
+        deliveryId,
+        deduped,
+      });
+      await maybeEmitRefreshSemanticDocs({
+        tx,
+        eventType,
+        body: args.body,
         internalIid,
         deliveryId,
         deduped,

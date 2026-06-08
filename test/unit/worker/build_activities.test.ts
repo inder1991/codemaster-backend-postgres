@@ -84,6 +84,18 @@ const PARTITION_MAINTENANCE_WORKFLOW_PATH = fileURLToPath(
 const WORKSPACE_RETENTION_WORKFLOW_PATH = fileURLToPath(
   new URL("../../../apps/backend/src/workflows/workspace_retention.workflow.ts", import.meta.url),
 );
+// Wave-3 spine workflows (clone-backed semantic-docs refresh + CODEOWNERS sync). The refresh workflow
+// proxies TWO snake_case activities (clone_repository_activity Step 1 + refresh_semantic_docs_activity
+// Step 2); the sync workflow proxies one (sync_code_owners_activity). Each is bundled into the SAME pod's
+// `all_workflows.ts` and dispatches its activities by their REGISTERED names — registering by-name must hold
+// or an event-driven start dies with ActivityNotRegistered at dispatch. Parsed here so the source-derived
+// coverage assertion PINS all three (clone_repository_activity is ONLY proxied by the refresh workflow).
+const SYNC_CODE_OWNERS_WORKFLOW_PATH = fileURLToPath(
+  new URL("../../../apps/backend/src/workflows/sync_code_owners.workflow.ts", import.meta.url),
+);
+const REFRESH_SEMANTIC_DOCS_WORKFLOW_PATH = fileURLToPath(
+  new URL("../../../apps/backend/src/workflows/refresh_semantic_docs.workflow.ts", import.meta.url),
+);
 
 /**
  * Parse the REGISTERED activity names from every `proxyActivities<{ <name>(...)` block in a workflow-side
@@ -116,6 +128,8 @@ const PROXIED_ACTIVITY_NAMES: ReadonlyArray<string> = [
     ...parseProxiedActivityNames(RUN_ID_RETENTION_WORKFLOW_PATH),
     ...parseProxiedActivityNames(PARTITION_MAINTENANCE_WORKFLOW_PATH),
     ...parseProxiedActivityNames(WORKSPACE_RETENTION_WORKFLOW_PATH),
+    ...parseProxiedActivityNames(SYNC_CODE_OWNERS_WORKFLOW_PATH),
+    ...parseProxiedActivityNames(REFRESH_SEMANTIC_DOCS_WORKFLOW_PATH),
   ]),
 ];
 
@@ -209,6 +223,13 @@ const EXPECTED_ACTIVITY_NAMES = [
   "run_workspace_orphan_sweep_activity",
   "run_workspace_reap_activity",
   "run_workspace_released_retention_activity",
+  // Wave-3 spine activities (clone primitive + CODEOWNERS sync + semantic-docs refresh), registered under
+  // their snake_case Temporal names (the 2 Wave-3 workflows proxy them by these exact keys; the refresh
+  // workflow proxies BOTH clone_repository_activity as Step 1 AND refresh_semantic_docs_activity as Step 2,
+  // the sync workflow proxies sync_code_owners_activity).
+  "clone_repository_activity",
+  "sync_code_owners_activity",
+  "refresh_semantic_docs_activity",
 ] as const;
 
 describe("buildActivities() composition root", () => {
