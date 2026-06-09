@@ -13,7 +13,21 @@ import {
   recordStaleTokenWrite,
 } from "./runner_metrics.js";
 export type JobHandler = (job: ReviewJobV1, signal: AbortSignal) => Promise<void>;
-export type RunOutcome = "idle" | "done" | "failed" | "lease_lost";
+export type RunOutcome = "idle" | "done" | "failed" | "lease_lost" | "cancelled";
+
+/**
+ * Terminal supersede/abort signal the shell throws so {@link runOneJob} settles the job `cancelled`
+ * (via `markCancelled`) instead of `markFailed`'s retry/dead-letter path (E3). The shell raises this for
+ * the supersede/lost-claim family — `PrMutexLostClaim` / `StaleWriteError` / `StateDrift` /
+ * `CurrentRunMismatch` / an aborted `signal` — so a loser exits clean and is NEVER re-enqueued.
+ * `reason` is the bounded human-readable cause persisted to `core.review_jobs.cancel_reason`.
+ */
+export class TerminalCancelError extends Error {
+  constructor(public readonly reason: string, cause?: unknown) {
+    super(reason, cause === undefined ? undefined : { cause });
+    this.name = "TerminalCancelError";
+  }
+}
 /** Sentinel the hard-runtime race resolves to when the handler overran `maxRuntimeS`. */
 const HARD_TIMEOUT = Symbol("hard-timeout");
 export async function runOneJob(o: { repo: ReviewJobsRepo; clock: Clock; owner: string; leaseS: number;
@@ -63,11 +77,19 @@ export async function runOneJob(o: { repo: ReviewJobsRepo; clock: Clock; owner: 
       outcome = done.applied ? "done" : "lease_lost";
     }
   } catch (e) {
-    const r = await o.repo.markFailed({ jobId: job.job_id, owner: o.owner, token,
-      error: e instanceof Error ? e.message : String(e), baseBackoffMs: 1000 });
-    if (!r.applied) recordStaleTokenWrite({ op: "markFailed" });
-    else if (!r.terminal) recordRetryAttempt();
-    outcome = r.applied ? "failed" : "lease_lost";
+    if (e instanceof TerminalCancelError) {
+      // Supersede/abort loser (E3): settle 'cancelled' — terminal, NEVER re-enqueued (markFailed would
+      // bounce it back to 'ready' while attempts remain). Fenced like markDone: a stolen lease ⇒ 0 rows.
+      const c = await o.repo.markCancelled({ jobId: job.job_id, owner: o.owner, token, reason: e.reason });
+      if (!c.applied) recordStaleTokenWrite({ op: "markFailed" });   // lease was stolen → loser; bounded op label
+      outcome = c.applied ? "cancelled" : "lease_lost";
+    } else {
+      const r = await o.repo.markFailed({ jobId: job.job_id, owner: o.owner, token,
+        error: e instanceof Error ? e.message : String(e), baseBackoffMs: 1000 });
+      if (!r.applied) recordStaleTokenWrite({ op: "markFailed" });
+      else if (!r.terminal) recordRetryAttempt();
+      outcome = r.applied ? "failed" : "lease_lost";
+    }
   } finally { stop.abort(); await hb; await hardTimeout; }   // immediate stop (cancellableSleep wakes); helpers never mask `outcome`
   recordHandlerDurationMs((o.clock.monotonic() - handlerStart) * 1000);
   recordJobOutcome({ outcome });

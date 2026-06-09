@@ -17,14 +17,14 @@
  *                                                — counter: a fenced terminal write affected 0 rows (the
  *                                                  lease was stolen) — op ∈ {markDone, markFailed}.
  *   * codemaster_runner_jobs_total{outcome}     — counter: one per settled runOneJob, outcome ∈
- *                                                  {idle, done, failed, lease_lost}.
+ *                                                  {idle, done, failed, lease_lost, cancelled}.
  *   * codemaster_runner_handler_duration_ms     — histogram: wall time the handler ran (claim → settle).
  *   * codemaster_runner_retry_attempts_total    — counter: a job re-enqueued for another attempt (markFailed
  *                                                  non-terminal).
  *   * codemaster_runner_crash_loop_reaped_total — counter: rows dead-lettered by `reapCrashLooped()`.
  *
  * ## Cardinality discipline
- * Bounded-enum labels ONLY: `op` ∈ {markDone, markFailed}; `outcome` ∈ {idle, done, failed, lease_lost}.
+ * Bounded-enum labels ONLY: `op` ∈ {markDone, markFailed}; `outcome` ∈ {idle, done, failed, lease_lost, cancelled}.
  * NEVER per-tenant / per-installation / per-PR / per-job labels — same discipline the sibling modules enforce.
  *
  * Fail-safe: every emit swallows meter errors so telemetry never perturbs the runner loop.
@@ -72,8 +72,8 @@ const STALE_TOKEN_WRITES_COUNTER: Counter = METER.createCounter(STALE_TOKEN_WRIT
 });
 const JOBS_TOTAL_COUNTER: Counter = METER.createCounter(JOBS_TOTAL_NAME, {
   description:
-    "Count of settled runOneJob invocations, labeled by outcome ∈ {idle, done, failed, lease_lost}. The " +
-    "canonical runner-throughput + error-rate surface.",
+    "Count of settled runOneJob invocations, labeled by outcome ∈ {idle, done, failed, lease_lost, cancelled}. " +
+    "The canonical runner-throughput + error-rate surface.",
 });
 const RETRY_ATTEMPTS_COUNTER: Counter = METER.createCounter(RETRY_ATTEMPTS_NAME, {
   description:
@@ -111,8 +111,8 @@ export function recordStaleTokenWrite(args: { op: "markDone" | "markFailed" }): 
   try { STALE_TOKEN_WRITES_COUNTER.add(1, { op: args.op }); } catch { /* telemetry never perturbs the runner */ }
 }
 
-/** Record one settled runOneJob outcome ∈ {idle, done, failed, lease_lost}. Fail-safe. */
-export function recordJobOutcome(args: { outcome: "idle" | "done" | "failed" | "lease_lost" }): void {
+/** Record one settled runOneJob outcome ∈ {idle, done, failed, lease_lost, cancelled}. Fail-safe. */
+export function recordJobOutcome(args: { outcome: "idle" | "done" | "failed" | "lease_lost" | "cancelled" }): void {
   try { JOBS_TOTAL_COUNTER.add(1, { outcome: args.outcome }); } catch { /* telemetry never perturbs the runner */ }
 }
 

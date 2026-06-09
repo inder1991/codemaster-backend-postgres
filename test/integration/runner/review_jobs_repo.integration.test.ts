@@ -132,6 +132,30 @@ describeDb("ReviewJobsRepo.markDone", () => {
   });
 });
 
+// ─── W0.3: markCancelled (E3) — superseded loser settles 'cancelled', terminal, fenced like markDone ───
+describeDb("ReviewJobsRepo.markCancelled", () => {
+  it("settles 'cancelled' for the owning token (cancel_reason + finished_at + lease cleared); a stale token is applied:false", async () => {
+    const repo = new ReviewJobsRepo(db); const s = await seedRun(db); await repo.enqueue({ ...s, payload: minimalReviewPayload(s) });
+    const c = await repo.claim({ owner: "w1", leaseMs: 1000, maxRuntimeMs: 60_000 });
+    // Stale token → fenced out (0 rows), state unchanged.
+    expect((await repo.markCancelled({ jobId: c!.job_id, owner: "w1", token: crypto.randomUUID(), reason: "superseded" })).applied).toBe(false);
+    expect((await repo.getById(c!.job_id))!.state).toBe("leased");
+    // Owning token → settles cancelled (terminal — NOT ready, NOT dead) with cancel_reason + finished_at.
+    expect((await repo.markCancelled({ jobId: c!.job_id, owner: "w1", token: c!.attempt_token!, reason: "superseded" })).applied).toBe(true);
+    const cancelled = await repo.getById(c!.job_id);
+    expect(cancelled!.state).toBe("cancelled");
+    expect((cancelled as Record<string, unknown>).cancel_reason).toBe("superseded");
+    expect((cancelled as Record<string, unknown>).finished_at).toBeTruthy();
+    expect((cancelled as Record<string, unknown>).attempt_token).toBeNull();        // ALL lease metadata cleared (v3 #9)
+    expect((cancelled as Record<string, unknown>).lease_owner).toBeNull();
+    expect((cancelled as Record<string, unknown>).leased_until).toBeNull();
+    expect((cancelled as Record<string, unknown>).timeout_at).toBeNull();
+    expect((cancelled as Record<string, unknown>).heartbeat_at).toBeNull();
+    // Terminal: a cancelled job is NOT re-driven by claim() (state is neither 'ready' nor a reclaimable 'leased').
+    expect(await repo.claim({ owner: "w2", leaseMs: 1000, maxRuntimeMs: 60_000 })).toBeNull();
+  });
+});
+
 describeDb("ReviewJobsRepo.markFailed", () => {
   it("re-enqueues with backoff then dead-letters; clears lease; a stale token is applied:false", async () => {
     const repo = new ReviewJobsRepo(db); const s = await seedRun(db); await repo.enqueue({ ...s, maxAttempts: 2, payload: minimalReviewPayload(s) });

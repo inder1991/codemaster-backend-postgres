@@ -137,6 +137,22 @@ export class ReviewJobsRepo {
     return { applied: Number(r.numAffectedRows ?? 0n) === 1 };
   }
 
+  /**
+   * Terminally settle a job as `cancelled` (E3) — the superseded loser exits clean and is NEVER re-enqueued.
+   * Fenced exactly like {@link markDone} (owning `lease_owner`+`attempt_token` required; a stale token affects
+   * 0 rows → `applied:false`). Records `cancel_reason`+`finished_at` and clears ALL lease metadata, so a
+   * `cancelled` job is neither `claim`-reclaimable (not `ready`, not a live `leased`) nor a `markFailed` retry.
+   */
+  async markCancelled(a: { jobId: string; owner: string; token: string; reason: string }): Promise<FencedResult> {
+    // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
+    const r = await sql`UPDATE core.review_jobs
+        SET state = 'cancelled', cancel_reason = left(${a.reason}, 2000), finished_at = now(),
+            leased_until = NULL, lease_owner = NULL, attempt_token = NULL, timeout_at = NULL, heartbeat_at = NULL
+      WHERE job_id = ${a.jobId} AND state = 'leased' AND lease_owner = ${a.owner} AND attempt_token = ${a.token}`
+      .execute(this.db);
+    return { applied: Number(r.numAffectedRows ?? 0n) === 1 };
+  }
+
   async markFailed(a: { jobId: string; owner: string; token: string; error: string; baseBackoffMs: number }):
     Promise<{ applied: boolean; terminal: boolean }> {
     // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode

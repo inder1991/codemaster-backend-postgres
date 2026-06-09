@@ -3,7 +3,7 @@ import { Kysely, PostgresDialect, sql } from "kysely";
 import { Pool } from "pg";
 import { describeDb, INTEGRATION_DSN } from "../_db.js";
 import { ReviewJobsRepo } from "#backend/runner/review_jobs_repo.js";
-import { runOneJob } from "#backend/runner/review_job_runner.js";
+import { runOneJob, TerminalCancelError } from "#backend/runner/review_job_runner.js";
 import { WallClock } from "#platform/clock.js";
 import { minimalReviewPayload, seedRun } from "./_fixtures.js";
 
@@ -41,6 +41,21 @@ describeDb("runOneJob", () => {
     expect(res.outcome).toBe("failed");
     expect(Date.now() - t).toBeLessThan(2000);             // returned ~maxRuntimeS, not hung
     expect((await repo.getById(id))!.state).toBe("dead");
+  });
+});
+
+// ─── W0.3: TerminalCancelError → 'cancelled' outcome (E3) — supersede losers settle cancelled, NEVER re-enqueue ───
+describeDb("runOneJob — terminal cancel", () => {
+  it("a handler that throws TerminalCancelError settles 'cancelled' (NOT ready, NOT dead); attempts are NOT re-driven", async () => {
+    const repo = new ReviewJobsRepo(db); const s = await seedRun(db); const id = await repo.enqueue({ ...s, maxAttempts: 3, payload: minimalReviewPayload(s) });
+    const res = await runOneJob({ repo, clock, owner: "w1", leaseS: 1, heartbeatS: 0.2, maxRuntimeS: 60,
+      handler: async () => { throw new TerminalCancelError("superseded", new Error("flipCurrentRun")); } });
+    expect(res.outcome).toBe("cancelled");
+    const job = await repo.getById(id);
+    expect(job!.state).toBe("cancelled");                  // NOT 'ready' (re-enqueue) and NOT 'dead' (failure exhaustion)
+    expect((job as Record<string, unknown>).cancel_reason).toBe("superseded");
+    // Terminal: even with attempts remaining (maxAttempts=3, attempts=1), claim() does NOT re-drive a cancelled job.
+    expect(await repo.claim({ owner: "w2", leaseMs: 1000, maxRuntimeMs: 60_000 })).toBeNull();
   });
 });
 
