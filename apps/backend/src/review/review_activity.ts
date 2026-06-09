@@ -150,6 +150,8 @@ export async function doReview(
         reviewId: context.pr_id,
         chunkId: context.chunk.chunk_id,
         toolSchemaVersion: REVIEW_TOOL_SCHEMA_VERSION,
+        // F9: the bulk-spend per-chunk site labels its ledger hit/miss/paid telemetry too (else purpose="unknown").
+        ledgerPurpose: "bedrock_review_chunk",
       },
     });
   } catch (e) {
