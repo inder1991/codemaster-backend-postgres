@@ -90,3 +90,21 @@ describeDb("ReviewJobsRepo.markFailed", () => {
     expect((await repo.markFailed({ jobId: c2!.job_id, owner: "w1", token: crypto.randomUUID(), error: "x", baseBackoffMs: 1 })).applied).toBe(false);
   });
 });
+
+describeDb("ReviewJobsRepo.reapCrashLooped", () => {
+  it("dead-letters an expired lease with attempts exhausted; leaves a live lease alone", async () => {
+    const repo = new ReviewJobsRepo(db);
+    // (A) crash-looped job: maxAttempts=1, claimed (attempts→1), lease expires, never markFailed'd
+    const a = await seedRun(db); await repo.enqueue({ ...a, maxAttempts: 1 });
+    const ca = await repo.claim({ owner: "w1", leaseMs: 1, maxRuntimeMs: 60_000 });
+    await new Promise((r) => setTimeout(r, 50));
+    // (B) live job: freshly claimed with a long lease — must NOT be reaped
+    const b = await seedRun(db); await repo.enqueue(b);
+    const cb = await repo.claim({ owner: "w2", leaseMs: 60_000, maxRuntimeMs: 60_000 });
+    expect(await repo.reapCrashLooped()).toBe(1);
+    const dead = await repo.getById(ca!.job_id);
+    expect(dead!.state).toBe("dead"); expect((dead as any).dead_reason).toContain("crash loop");
+    expect((dead as any).attempt_token).toBeNull();          // lease metadata cleared (v3 #9)
+    expect((await repo.getById(cb!.job_id))!.state).toBe("leased"); // live lease untouched
+  });
+});

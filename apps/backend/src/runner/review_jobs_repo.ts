@@ -75,4 +75,14 @@ export class ReviewJobsRepo {
       RETURNING (state = 'dead') AS terminal`.execute(this.db);
     return { applied: r.rows.length === 1, terminal: r.rows[0]?.terminal ?? false };
   }
+
+  async reapCrashLooped(): Promise<number> {
+    // tenant:exempt reason=watchdog-sweep-across-tenants follow_up=FOLLOW-UP-gf3-error-mode
+    const r = await sql`UPDATE core.review_jobs
+        SET state = 'dead', dead_reason = COALESCE(dead_reason, 'lease expired with attempts exhausted (crash loop)'),
+            finished_at = now(),
+            leased_until = NULL, lease_owner = NULL, attempt_token = NULL, timeout_at = NULL, heartbeat_at = NULL
+      WHERE state = 'leased' AND leased_until < now() AND attempts >= max_attempts`.execute(this.db);
+    return Number(r.numAffectedRows ?? 0n);
+  }
 }
