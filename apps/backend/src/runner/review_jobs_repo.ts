@@ -59,4 +59,20 @@ export class ReviewJobsRepo {
       .execute(this.db);
     return { applied: Number(r.numAffectedRows ?? 0n) === 1 };
   }
+
+  async markFailed(a: { jobId: string; owner: string; token: string; error: string; baseBackoffMs: number }):
+    Promise<{ applied: boolean; terminal: boolean }> {
+    // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
+    const r = await sql<{ terminal: boolean }>`UPDATE core.review_jobs SET
+        last_error  = left(${a.error}, 2000),
+        state       = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'ready' END,
+        dead_reason = CASE WHEN attempts >= max_attempts THEN left(${a.error}, 2000) ELSE dead_reason END,
+        finished_at = CASE WHEN attempts >= max_attempts THEN now() ELSE finished_at END,
+        -- exponential backoff with ±25% jitter (avoid a herd re-claiming after an LLM/GitHub incident):
+        run_after   = now() + ((${a.baseBackoffMs}::double precision * power(2, attempts - 1)) * (0.75 + random() * 0.5) / 1000) * interval '1 second',
+        lease_owner = NULL, attempt_token = NULL, leased_until = NULL, timeout_at = NULL, heartbeat_at = NULL
+      WHERE job_id = ${a.jobId} AND state = 'leased' AND lease_owner = ${a.owner} AND attempt_token = ${a.token}
+      RETURNING (state = 'dead') AS terminal`.execute(this.db);
+    return { applied: r.rows.length === 1, terminal: r.rows[0]?.terminal ?? false };
+  }
 }
