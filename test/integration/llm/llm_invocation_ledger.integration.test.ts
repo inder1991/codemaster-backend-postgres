@@ -681,3 +681,51 @@ describeDb("W2.2 — fix-prompt paid call ledgered by purpose (disposable PG)", 
     }
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// W2.3 (D2) — ledger retention pruner. `pruneOlderThan(days)` is a cross-tenant maintenance sweep that
+// DELETEs rows whose `created_at` is older than `days` days (default 7 via
+// CODEMASTER_LLM_LEDGER_RETENTION_DAYS). An OLD row (created 8 days ago) is pruned; a FRESH row (created
+// now) survives. The DELETE is the cross-tenant sweep the W6.4 schedule wires (mechanism only here).
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** Insert a ledger row with an EXPLICIT created_at so the pruner's age cutoff can be exercised. */
+async function insertLedgerRowAt(
+  installationId: string,
+  key: string,
+  createdAt: Date,
+): Promise<void> {
+  await sql`
+    INSERT INTO core.llm_invocation_ledger
+        (idempotency_key, installation_id, provider_response, created_at)
+    VALUES
+        (${key}, ${installationId}::uuid, CAST(${"{}"} AS jsonb), ${createdAt.toISOString()}::timestamptz)
+  `.execute(db);
+}
+
+describeDb("W2.3 — ledger retention pruner (disposable PG)", () => {
+  it("pruneOlderThan(7) deletes a row older than 7 days and keeps a fresh row", async () => {
+    const installationId = randomUUID();
+    const oldKey = `old-${randomUUID()}`;
+    const freshKey = `fresh-${randomUUID()}`;
+    const now = Date.now();
+    const eightDaysAgo = new Date(now - 8 * 24 * 60 * 60 * 1000);
+    const oneHourAgo = new Date(now - 60 * 60 * 1000);
+    const ledger = new LlmInvocationLedger({ db });
+    try {
+      await insertLedgerRowAt(installationId, oldKey, eightDaysAgo);
+      await insertLedgerRowAt(installationId, freshKey, oneHourAgo);
+      expect((await ledgerRows(installationId)).length).toBe(2);
+
+      const deleted = await ledger.pruneOlderThan(7);
+      // The sweep is cross-tenant; assert the returned count >= 1 (our old row at minimum) and that OUR
+      // fresh row survived while OUR old row is gone.
+      expect(deleted).toBeGreaterThanOrEqual(1);
+
+      const survivors = await ledgerRows(installationId);
+      expect(survivors.map((r) => r.idempotency_key)).toEqual([freshKey]);
+    } finally {
+      await cleanup(installationId);
+    }
+  });
+});

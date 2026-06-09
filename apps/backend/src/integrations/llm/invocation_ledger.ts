@@ -183,7 +183,41 @@ export class LlmInvocationLedger {
       ON CONFLICT (idempotency_key) DO NOTHING
     `.execute(this.#db);
   }
+
+  /**
+   * Retention sweep (D2): DELETE every ledger row whose `created_at` is older than `days` days, and
+   * return how many rows were deleted. This is a CROSS-TENANT maintenance operation (the retention
+   * policy is platform-wide, not per-installation) — so it deliberately does NOT filter on
+   * installation_id, and the raw-SQL tenancy gate is satisfied by an explicit `tenant:exempt` marker
+   * (the retention sweep is the gate's intended escape-hatch case, tracked under the GF-3 follow-up).
+   *
+   * The cutoff is computed server-side via `now() - make_interval(days => ${days})` so no wall-clock is
+   * read in process (clock_random gate — the DB's `now()` is the time source, consistent with the
+   * `created_at` default). The W6.4 schedule wires this against {@link DEFAULT_LEDGER_RETENTION_DAYS};
+   * here it is the mechanism only.
+   */
+  public async pruneOlderThan(days: number): Promise<number> {
+    // tenant:exempt reason=retention-sweep follow_up=FOLLOW-UP-gf3-error-mode
+    const r = await sql`
+      DELETE FROM core.llm_invocation_ledger
+       WHERE created_at < now() - make_interval(days => ${days})
+    `.execute(this.#db);
+    return Number(r.numAffectedRows ?? 0n);
+  }
 }
+
+/**
+ * Default ledger retention window in days, read once from `CODEMASTER_LLM_LEDGER_RETENTION_DAYS`
+ * (fallback 7). The W6.4 retention schedule passes this into {@link LlmInvocationLedger.pruneOlderThan};
+ * a non-positive or non-numeric env value falls back to 7 so a misconfiguration can never widen the
+ * sweep to delete fresh rows.
+ */
+export const DEFAULT_LEDGER_RETENTION_DAYS: number = (() => {
+  const raw = process.env["CODEMASTER_LLM_LEDGER_RETENTION_DAYS"];
+  if (raw === undefined) return 7;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 7;
+})();
 
 /**
  * SHA-256 hex of the serialized request messages — the prompt hash component of the idempotency key.
