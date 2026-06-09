@@ -29,7 +29,9 @@ import { createHash } from "node:crypto";
 
 import { type Kysely, sql } from "kysely";
 
+import { type Counter, getMeter } from "#platform/observability/metrics.js";
 import { tenantKysely } from "#platform/db/database.js";
+import { uuid5 } from "#platform/randomness.js";
 
 /** The deterministic activity inputs the idempotency key is derived from (owner decision verbatim). */
 export type LlmInvocationKeyInputs = {
@@ -192,4 +194,96 @@ export class LlmInvocationLedger {
 export function hashMessagesForLedger(messages: ReadonlyArray<{ role: string; content: string }>): string {
   const canonical = JSON.stringify(messages.map((m) => ({ role: m.role, content: m.content })));
   return createHash("sha256").update(Buffer.from(canonical, "utf-8")).digest("hex");
+}
+
+// ─── PR-level ledger purpose-key surrogate (E8 / D2) ──────────────────────────────────────────────
+//
+// The per-chunk paid call (bedrock_review_chunk) keys the ledger by the content-addressed chunk_id
+// UUID. The four PR-LEVEL paid calls (walkthrough / Tier-1 curator / rerank / fix-prompt) have NO
+// per-chunk UUID, so they need a STABLE, DETERMINISTIC chunkId surrogate to satisfy `computeKey` —
+// otherwise two distinct PR-level purposes for the same review_id would collide (D2 verbatim: "key by
+// purpose + stable input, not just review_id — otherwise walkthrough and fix_prompt could collide or
+// replay the wrong LLM response"). The surrogate is `uuid5(LEDGER_PURPOSE_NS, purpose)`: deterministic
+// (same purpose → same id across replays + across the TS/Python impls, no oracle leak — the LLM never
+// sees the mint inputs) and distinct per purpose. Combined with promptSha256 + the per-site
+// toolSchemaVersion, the full key stays unique across sites. `uuid5` is the sanctioned deterministic
+// minter (#platform/randomness.js; clock_random gate — hashing only, no entropy).
+
+/** The set of PR-level paid-call purposes the ledger surrogate keys. Bounds the metric `purpose` label. */
+export type LedgerPurpose = "walkthrough" | "curator" | "rerank" | "fix_prompt";
+
+/**
+ * The frozen uuid5 namespace for PR-level ledger chunk-key surrogates (a uuid4 literal minted ONCE at
+ * authoring time). MUST NOT change — it would re-key every PR-level ledger row and force a re-pay on the
+ * next retry of every walkthrough / curator / rerank / fix-prompt call.
+ */
+export const LEDGER_PURPOSE_NS = "b7e3a1c4-2f6d-4a8b-9c0e-5d1f7a2b6c8e";
+
+/**
+ * The deterministic `chunkId` surrogate for a PR-level paid LLM call (E8). Same `purpose` always maps to
+ * the same UUID; distinct purposes never collide. Used both as the ledger idempotency `chunkId` AND
+ * (F9) tied to the SAME `purpose` token the metric label carries, so cost observability and replay
+ * keying never diverge.
+ */
+export function purposeChunkId(purpose: LedgerPurpose): string {
+  return uuid5(LEDGER_PURPOSE_NS, purpose);
+}
+
+// ─── ledger telemetry (D2) — four bounded-cardinality counters, label `purpose` only ──────────────
+//
+// `hit` vs `miss` is the replay-effectiveness signal; `paid_call` vs `miss` over time exposes duplicate
+// spend (D2's upgrade trigger for the full in-flight reservation protocol); `store_failed` makes the
+// silent-swallow of a ledger write failure (client.ts storeInvocation guard) VISIBLE. Mirrors the OTel
+// idiom of runner_metrics.ts: a module-scoped meter + instruments cached once at import, every emit
+// fail-safe so telemetry never perturbs the paid path. Cardinality discipline: the ONLY label is
+// `purpose` (bounded to {bedrock_review_chunk} for the per-chunk call + {walkthrough|curator|rerank|
+// fix_prompt} for the PR-level calls) — NEVER per-tenant / per-PR / per-review labels.
+
+/** Grafana-query-stable counter names (renaming requires ADR). */
+export const LEDGER_HIT_TOTAL_NAME = "codemaster_llm_ledger_hit_total";
+export const LEDGER_MISS_TOTAL_NAME = "codemaster_llm_ledger_miss_total";
+export const LEDGER_STORE_FAILED_TOTAL_NAME = "codemaster_llm_ledger_store_failed_total";
+export const LEDGER_PAID_CALL_TOTAL_NAME = "codemaster_llm_ledger_paid_call_total";
+
+const LEDGER_METER = getMeter("codemaster.integrations.llm.invocation_ledger");
+
+const LEDGER_HIT_COUNTER: Counter = LEDGER_METER.createCounter(LEDGER_HIT_TOTAL_NAME, {
+  description:
+    "Count of ledger lookups that REPLAYED a stored provider response (a HIT — the paid SDK call was " +
+    "skipped). Bounded label `purpose`. hit/miss is the replay-effectiveness signal.",
+});
+const LEDGER_MISS_COUNTER: Counter = LEDGER_METER.createCounter(LEDGER_MISS_TOTAL_NAME, {
+  description:
+    "Count of ledger lookups with no stored row (a MISS — the paid SDK call is about to run). Bounded " +
+    "label `purpose`. paid_call/miss over time exposes duplicate spend (D2 upgrade trigger).",
+});
+const LEDGER_STORE_FAILED_COUNTER: Counter = LEDGER_METER.createCounter(LEDGER_STORE_FAILED_TOTAL_NAME, {
+  description:
+    "Count of ledger store() writes that FAILED after a paid SDK call (the write is guarded so it never " +
+    "masks a successful invocation — but a subsequent retry would re-pay). Bounded label `purpose`.",
+});
+const LEDGER_PAID_CALL_COUNTER: Counter = LEDGER_METER.createCounter(LEDGER_PAID_CALL_TOTAL_NAME, {
+  description:
+    "Count of paid provider (SDK) calls made after a ledger MISS — the actual billed completions. " +
+    "Bounded label `purpose`. Diverging from miss signals racing duplicate spend.",
+});
+
+/** Record one ledger HIT (a replay). `purpose` is the bounded label. Fail-safe. */
+export function recordLedgerHit(purpose: string): void {
+  try { LEDGER_HIT_COUNTER.add(1, { purpose }); } catch { /* telemetry never perturbs the paid path */ }
+}
+
+/** Record one ledger MISS (no stored row; the SDK is about to run). Fail-safe. */
+export function recordLedgerMiss(purpose: string): void {
+  try { LEDGER_MISS_COUNTER.add(1, { purpose }); } catch { /* telemetry never perturbs the paid path */ }
+}
+
+/** Record one ledger store() failure (a guarded write that did not persist). Fail-safe. */
+export function recordLedgerStoreFailed(purpose: string): void {
+  try { LEDGER_STORE_FAILED_COUNTER.add(1, { purpose }); } catch { /* telemetry never perturbs the paid path */ }
+}
+
+/** Record one paid provider (SDK) call made after a MISS. Fail-safe. */
+export function recordLedgerPaidCall(purpose: string): void {
+  try { LEDGER_PAID_CALL_COUNTER.add(1, { purpose }); } catch { /* telemetry never perturbs the paid path */ }
 }

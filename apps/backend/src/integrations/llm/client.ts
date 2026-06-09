@@ -72,12 +72,40 @@ import { redactPii } from "#backend/redact/pii_redactor.js";
 import { OutputSafetyValidator } from "#backend/security/output_safety.js";
 
 import { LlmInvocationError, LlmOutputUnsafeError } from "./errors.js";
-import { hashMessagesForLedger, type LlmInvocationLedgerPort } from "./invocation_ledger.js";
+import {
+  hashMessagesForLedger,
+  recordLedgerHit,
+  recordLedgerMiss,
+  recordLedgerPaidCall,
+  recordLedgerStoreFailed,
+  type LlmInvocationLedgerPort,
+} from "./invocation_ledger.js";
 
 import type { BlobRef } from "#contracts/blob_ref.v1.js";
 import { LlmInvokeResultV1 } from "#contracts/llm_invoke_result.v1.js";
 import { BedrockTraceV1 } from "#contracts/llm_trace.v1.js";
 import type { LlmMessage } from "#contracts/llm_message.v1.js";
+
+// ─── strict-ledger mode (F4) ───────────────────────────────────────────────────────────────────────
+
+/**
+ * TS hardening divergence (ADR-0068 / de-Temporal Phase 2, F4) — raised when a client constructed in
+ * STRICT-LEDGER mode reaches a paid invocation (a ledger MISS about to call the SDK) with NO
+ * `idempotency` context. The de-Temporal review-job shell constructs its review {@link LlmClient} with
+ * `strictLedger: true`, so EVERY paid Bedrock call in the shell path is provably ledgered — an
+ * un-ledgered paid call is a wiring bug, not a silent un-deduplicated spend. The Temporal-legacy path
+ * keeps the default (`strictLedger: false`) and pays un-ledgered exactly as the frozen Python does.
+ */
+export class LedgerRequiredError extends Error {
+  public constructor(message?: string) {
+    super(
+      message ??
+        "strict-ledger mode: a paid LlmClient.invokeModel call requires an idempotency context " +
+          "(no un-ledgered paid Bedrock call is permitted in the de-Temporal shell path)",
+    );
+    this.name = "LedgerRequiredError";
+  }
+}
 
 // ─── documented model set (BEDROCK_MODELS) ─────────────────────────────────────────────────────────
 
@@ -299,6 +327,13 @@ export class LlmClient {
   // the paid SDK call; a MISS stores the raw response BEFORE returning. Platform jobs / unit tests leave
   // it undefined.
   private readonly ledger: LlmInvocationLedgerPort | undefined;
+  // de-Temporal Phase 2 (F4) — STRICT-LEDGER mode. Default false = current Temporal-legacy behavior (a
+  // paid call with no idempotency context invokes the SDK un-ledgered, exactly as the frozen Python).
+  // When true (the shell wires it on), a paid invokeModel that lacks an `idempotency` context throws
+  // LedgerRequiredError BEFORE any SDK call / cost-cap reservation — so every paid Bedrock call in the
+  // shell path is provably ledgered (gate ②). A replay HIT is unaffected (it never reaches the paid
+  // edge); a ledger MISS WITH an idempotency context pays + stores normally.
+  private readonly strictLedger: boolean;
 
   public constructor(args: {
     sdk: LlmSdk;
@@ -317,6 +352,9 @@ export class LlmClient {
     // TS hardening divergence (ADR-0068) — OPTIONAL idempotency ledger. Absent → exactly-as-Python (no
     // replay). Production review wiring injects the REAL Postgres-backed ledger; platform jobs omit it.
     ledger?: LlmInvocationLedgerPort;
+    // de-Temporal Phase 2 (F4) — STRICT-LEDGER mode. Default false (Temporal-legacy: pay un-ledgered when
+    // no idempotency context). The shell sets true so an un-ledgered paid call throws LedgerRequiredError.
+    strictLedger?: boolean;
   }) {
     this.clock = args.clock ?? new WallClock();
     this.sdk = args.sdk;
@@ -328,6 +366,7 @@ export class LlmClient {
     this.langfuse = args.langfuse ?? DISABLED_LANGFUSE_EXPORTER;
     this.random = new SystemRandom();
     this.ledger = args.ledger;
+    this.strictLedger = args.strictLedger ?? false;
   }
 
   /**
@@ -366,6 +405,12 @@ export class LlmClient {
       reviewId: string;
       chunkId: string;
       toolSchemaVersion: string;
+      // de-Temporal Phase 2 (F9) — the BOUNDED ledger-telemetry `purpose` label for this call. It MUST be
+      // the SAME token the call site uses to derive the idempotency `chunkId` surrogate (E8: a PR-level
+      // call passes `purposeChunkId(<purpose>)` as `chunkId` and `<purpose>` here), so cost observability
+      // and replay keying never diverge. The per-chunk call passes `"bedrock_review_chunk"`. Absent →
+      // the metric label falls back to `"unknown"` (a wiring smell, not a normal path).
+      ledgerPurpose?: string;
     };
   }): Promise<LlmInvokeResultV1> {
     const maxTokens = args.maxTokens ?? 1024;
@@ -420,6 +465,11 @@ export class LlmClient {
           })
         : null;
 
+    // de-Temporal Phase 2 (D2 / F9) — the BOUNDED ledger-telemetry `purpose` label. F9: it is the SAME
+    // token the call site uses to derive the idempotency `chunkId` surrogate (E8), so the metric and the
+    // replay key never diverge. Absent context → "unknown" (a wiring smell; never a normal shell path).
+    const ledgerPurpose = args.idempotency?.ledgerPurpose ?? "unknown";
+
     const started = this.clock.monotonic();
     const replayed =
       this.ledger !== undefined && idempotencyKey !== null
@@ -432,9 +482,23 @@ export class LlmClient {
       // HIT — replay the stored provider response; the paid SDK call, the cost-cap reservation, and the
       // request archive are all SKIPPED (already done on the first invoke). No store (the row exists). The
       // transform + telemetry/Langfuse below run against this replayed response.
+      recordLedgerHit(ledgerPurpose);
       response = replayed;
     } else {
-      // MISS — the paid path. Cost-cap pre-call check (FAIL-CLOSED). Retry ONCE on lock-timeout (S14.D
+      // MISS — the paid path. A ledger lookup that found nothing (when ledgering is on) — and the
+      // no-ledger path (platform jobs / unit tests) also reach here. Emit the MISS counter when ledgering
+      // is engaged so paid_call/miss exposes duplicate spend (D2 upgrade trigger).
+      if (this.ledger !== undefined && idempotencyKey !== null) {
+        recordLedgerMiss(ledgerPurpose);
+      }
+      // F4 (strict-ledger mode) — in the shell path a paid call MUST carry an idempotency context. A MISS
+      // with NO context here means an un-ledgered paid Bedrock call is about to happen: forbid it BEFORE
+      // the cost-cap reservation and the SDK call (gate ②). A replay HIT never reaches this branch, and a
+      // MISS WITH a context (idempotencyKey !== null) pays + stores normally.
+      if (this.strictLedger && args.idempotency === undefined) {
+        throw new LedgerRequiredError();
+      }
+      // Cost-cap pre-call check (FAIL-CLOSED). Retry ONCE on lock-timeout (S14.D
       // edge case 5: the telemetry.cost_daily row lock is contended under `SET LOCAL lock_timeout='2s'` →
       // CostCapLockTimeoutError); a second timeout fails closed via BedrockBudgetExceededError so no LLM
       // invocation proceeds without an atomic cost record. 1:1 with the frozen Python invoke_model.
@@ -528,11 +592,18 @@ export class LlmClient {
         });
         throw new LlmInvocationError(`bedrock invocation failed: ${formatErr(e)}`);
       }
+      // D2 — the SDK call succeeded: this is the ACTUAL billed completion. Emit paid_call (only when
+      // ledgering is engaged) so paid_call/miss over time exposes racing duplicate spend (the D2 upgrade
+      // trigger for the in-flight reservation protocol).
+      if (this.ledger !== undefined && idempotencyKey !== null) {
+        recordLedgerPaidCall(ledgerPurpose);
+      }
       // MISS — the paid SDK call succeeded: persist the RAW provider response BEFORE returning, so a
       // future retry replays it instead of buying a second completion. ON CONFLICT DO NOTHING in the
       // ledger makes a racing retry a safe no-op (the key is content-addressable). Guarded so a ledger
       // write failure never masks a successful invocation — but then a retry WOULD re-pay, which is the
-      // pre-ADR-0068 (Python) behavior, strictly no worse than before.
+      // pre-ADR-0068 (Python) behavior, strictly no worse than before. A store FAILURE emits store_failed
+      // (D2) so the guarded swallow is VISIBLE.
       if (this.ledger !== undefined && idempotencyKey !== null && args.idempotency !== undefined) {
         await this.storeInvocation({
           key: idempotencyKey,
@@ -544,6 +615,7 @@ export class LlmClient {
           promptSha256: hashMessages(args.messages),
           toolSchemaVersion: args.idempotency.toolSchemaVersion,
           providerResponse: response,
+          ledgerPurpose,
         });
       }
     }
@@ -755,6 +827,7 @@ export class LlmClient {
     promptSha256: string;
     toolSchemaVersion: string;
     providerResponse: Record<string, unknown>;
+    ledgerPurpose: string;
   }): Promise<void> {
     if (this.ledger === undefined) {
       return;
@@ -775,7 +848,9 @@ export class LlmClient {
       });
     } catch {
       // Defense in depth — a ledger write failure must not mask a successful invocation. A subsequent
-      // retry would then re-pay (the pre-ADR-0068 Python behavior), which is strictly no worse.
+      // retry would then re-pay (the pre-ADR-0068 Python behavior), which is strictly no worse. Emit
+      // store_failed (D2) so the guarded swallow is VISIBLE in observability (not silent).
+      recordLedgerStoreFailed(args.ledgerPurpose);
     }
   }
 
