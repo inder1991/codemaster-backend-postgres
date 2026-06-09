@@ -85,12 +85,24 @@ export function buildRerankOverride(args: {
   enabled: boolean;
   cache: RerankLlmCacheLike | undefined;
   installationId: string;
+  /**
+   * de-Temporal Phase 2 (D2 / W2.2) — additive optional review/PR identity for the rerank LLM-invocation
+   * ledger. RetrieveKnowledgeInputV1 carries no review_id today, so this stays absent in the current wiring
+   * → no idempotency context on the paid rerank call → back-compat (invoke, no replay). When a review_id is
+   * plumbed through, the {@link LlmBackedRerankPort} ledgers the call keyed by purposeChunkId("rerank").
+   */
+  reviewId?: string;
 }): LlmRerank | undefined {
   if (!args.enabled || args.cache === undefined) {
     return undefined;
   }
   return new LlmRerank({
-    port: new LlmBackedRerankPort({ cache: args.cache, installationId: args.installationId }),
+    port: new LlmBackedRerankPort({
+      cache: args.cache,
+      installationId: args.installationId,
+      // exactOptionalPropertyTypes: only set `reviewId` when it is actually present (absent → no ledgering).
+      ...(args.reviewId !== undefined ? { reviewId: args.reviewId } : {}),
+    }),
   });
 }
 

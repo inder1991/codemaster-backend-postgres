@@ -21,10 +21,13 @@
 // role; until the owner seeds that role + flips the wiring, identity rerank runs (1:1 with Python). The
 // port carries installation_id at construction because LlmRerankerPort.rerank() does not receive it.
 
+import { createHash } from "node:crypto";
+
 import { transportAbortSignal } from "#platform/transport_timeout.js";
 
 import { BedrockBudgetExceededError } from "#backend/cost/enforcer.js";
 import type { LlmClient } from "#backend/integrations/llm/client.js";
+import { purposeChunkId } from "#backend/integrations/llm/invocation_ledger.js";
 import { modelForPurpose } from "#backend/llm/model_router.js";
 import { LlmRerankUnavailableError, type LlmRerankerPort } from "#backend/retrieval/llm_rerank.js";
 
@@ -69,6 +72,19 @@ export const RERANK_TOOL_SCHEMA = {
     required: ["scores"],
   },
 } as const;
+
+/**
+ * de-Temporal Phase 2 (D2 / W2.2) — the tool-schema-version component of the rerank's LLM-invocation
+ * idempotency key. A content-addressable digest of RERANK_TOOL_SCHEMA: a tool-schema change (which changes
+ * the SHAPE of the structured output, and therefore the parse) changes the key, so a stale stored response
+ * is NOT replayed. Per-site (distinct from the other PR-level purposes' digests). `createHash` is the
+ * gate-sanctioned hashing primitive (clock_random gate bans random fns, NOT createHash; mirrors
+ * review_activity.ts:55).
+ */
+export const RERANK_TOOL_SCHEMA_VERSION = `rrts-${createHash("sha256")
+  .update(Buffer.from(JSON.stringify(RERANK_TOOL_SCHEMA), "utf-8"))
+  .digest("hex")
+  .slice(0, 16)}`;
 
 /** Typed soft-timeout marker (internal; mapped to LlmRerankUnavailableError below). */
 class RerankTimeoutError extends Error {
@@ -153,17 +169,28 @@ export class LlmBackedRerankPort implements LlmRerankerPort {
   private readonly installationId: string;
   private readonly timeoutMs: number;
   private readonly modelOverride: string | undefined;
+  // de-Temporal Phase 2 (D2 / W2.2) — OPTIONAL review/PR identity for the LLM-invocation ledger. The
+  // LlmRerankerPort.rerank() signature is fixed ({query, candidates}) and RetrieveKnowledgeInputV1 carries
+  // no review_id, so review_id is threaded as an ADDITIVE OPTIONAL constructor field. When PRESENT, the
+  // paid rerank call passes an idempotency context (keyed by purposeChunkId("rerank")), so a retry replays
+  // the stored scores instead of buying a second Haiku completion. When ABSENT (the current wiring until a
+  // review_id is plumbed through), the call carries no idempotency context → no ledgering → back-compat
+  // with the Temporal-legacy path (invoke, no replay), exactly the frozen-Python behavior.
+  private readonly reviewId: string | undefined;
 
   public constructor(args: {
     cache: RerankLlmCacheLike;
     installationId: string;
     timeoutMs?: number;
     modelOverride?: string;
+    /** de-Temporal Phase 2 (D2) — additive optional; absent → no ledgering (back-compat). */
+    reviewId?: string;
   }) {
     this.cache = args.cache;
     this.installationId = args.installationId;
     this.timeoutMs = args.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.modelOverride = args.modelOverride;
+    this.reviewId = args.reviewId;
   }
 
   public async rerank(args: {
@@ -201,6 +228,24 @@ export class LlmBackedRerankPort implements LlmRerankerPort {
           maxTokens: RERANK_MAX_TOKENS,
           purpose: RERANK_PURPOSE,
           installationId: this.installationId,
+          // de-Temporal Phase 2 (D2 / W2.2 / F9) — ledger this PR-level paid call by PURPOSE, but ONLY when a
+          // review_id was threaded in (additive optional). The stable key is review_id + the purpose chunk-key
+          // surrogate (purposeChunkId("rerank"), E8) + role + model + prompt hash + RERANK_TOOL_SCHEMA_VERSION.
+          // run_id is deliberately NOT in the key (D2: output need not change per run). On a retry the stored
+          // scores replay instead of buying a second Haiku completion. F9: the SAME "rerank" token drives BOTH
+          // the chunk-key surrogate AND the metric purpose label. ABSENT review_id → no idempotency context →
+          // no ledgering (back-compat with the Temporal-legacy path). The client also no-ops when it has no
+          // ledger (unit tests / platform jobs).
+          ...(this.reviewId !== undefined
+            ? {
+                idempotency: {
+                  reviewId: this.reviewId,
+                  chunkId: purposeChunkId("rerank"),
+                  toolSchemaVersion: RERANK_TOOL_SCHEMA_VERSION,
+                  ledgerPurpose: "rerank",
+                },
+              }
+            : {}),
         }),
         this.timeoutMs,
       );
