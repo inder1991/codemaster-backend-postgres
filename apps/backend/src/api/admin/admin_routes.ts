@@ -2739,7 +2739,10 @@ export async function registerAdminRoutes(
       },
     );
 
-    // GET /api/admin/status/pilot-progress (owner/super). Fail-open to zeros on any error (per S16.D.3).
+    // GET /api/admin/status/pilot-progress (owner/super). 1:1 with the Python status.py _safe_call +
+    // _pilot_fallback: schema-drift (missing table/column) graceful-degrades to the zero envelope with
+    // target_orgs=0; any real I/O / persistence error surfaces 503 (it does NOT silently zero the
+    // dashboard). Mirrors the /status/pipeline schema-drift detection above.
     scope.get(
       "/api/admin/status/pilot-progress",
       { preHandler: requireRole(["platform_owner", "super_admin"]) },
@@ -2749,15 +2752,23 @@ export async function registerAdminRoutes(
           return reply.code(200).send(PilotProgressV1.parse(progress));
         } catch (err) {
           request.log.warn({ err }, "status-repo pilot unavailable");
-          return reply.code(200).send(
-            PilotProgressV1.parse({
-              total_orgs_onboarded: 0,
-              target_orgs: 10,
-              total_prs_reviewed_this_week: 0,
-              sprint_day: 1,
-              sampled_at: opts.clock.now(),
-            }),
-          );
+          const isSchemaDrift =
+            err instanceof Error &&
+            (err.message.includes("UndefinedTable") ||
+              err.message.includes("UndefinedColumn") ||
+              err.message.includes("does not exist"));
+          if (isSchemaDrift) {
+            return reply.code(200).send(
+              PilotProgressV1.parse({
+                total_orgs_onboarded: 0,
+                target_orgs: 0,
+                total_prs_reviewed_this_week: 0,
+                sprint_day: 1,
+                sampled_at: opts.clock.now(),
+              }),
+            );
+          }
+          return reply.code(503).send({ error: "status persistence unreachable" });
         }
       },
     );

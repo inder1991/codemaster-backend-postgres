@@ -25,6 +25,7 @@ import { registerAdminRoutes } from "#backend/api/admin/admin_routes.js";
 import { SESSION_COOKIE_NAME } from "#backend/api/auth/auth_routes.js";
 import type { Role } from "#backend/api/auth/roles.js";
 import { issueCookie } from "#backend/api/auth/session.js";
+import { StatusRepo } from "#backend/domain/repos/status_repo.js";
 
 import { describeDb, INTEGRATION_DSN } from "../_db.js";
 
@@ -64,6 +65,23 @@ async function makeApp() {
     db,
     signingKey: SIGNING_KEY,
     clock: new FakeClock({ now: NOW }),
+  });
+  await app.ready();
+  return app;
+}
+
+/** Build the app with a StatusRepo whose getPilotProgress throws the given error (fail-open branches). */
+async function makeAppWithPilotError(err: Error) {
+  const app = buildApp({});
+  const statusRepo = new StatusRepo(db);
+  statusRepo.getPilotProgress = async (): Promise<never> => {
+    throw err;
+  };
+  await registerAdminRoutes(app, {
+    db,
+    signingKey: SIGNING_KEY,
+    clock: new FakeClock({ now: NOW }),
+    statusRepo,
   });
   await app.ready();
   return app;
@@ -118,6 +136,36 @@ describeDb("admin status + review-timeline", () => {
       cookies: { [SESSION_COOKIE_NAME]: mintCookie("reader") },
     });
     expect(forbidden.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it("GET /api/admin/status/pilot-progress — schema-drift fail-open returns zeros with target_orgs=0 (Python _pilot_fallback parity)", async () => {
+    // 1:1 with the Python status.py _pilot_fallback: on schema-drift the fallback envelope uses
+    // target_orgs=0 (NOT 10). The TS schema-drift detection mirrors the pipeline route (UndefinedTable /
+    // UndefinedColumn / "does not exist").
+    const app = await makeAppWithPilotError(new Error('relation "core.installations" does not exist'));
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/admin/status/pilot-progress",
+      cookies: { [SESSION_COOKIE_NAME]: mintCookie("platform_owner") },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{ total_orgs_onboarded: number; target_orgs: number }>();
+    expect(body.total_orgs_onboarded).toBe(0);
+    expect(body.target_orgs).toBe(0);
+    await app.close();
+  });
+
+  it("GET /api/admin/status/pilot-progress — non-schema-drift I/O error returns 503 (Python _safe_call parity)", async () => {
+    // 1:1 with the Python _safe_call: a real I/O / persistence error (NOT schema-drift) surfaces 503
+    // rather than silently zeroing the dashboard.
+    const app = await makeAppWithPilotError(new Error("connection refused"));
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/admin/status/pilot-progress",
+      cookies: { [SESSION_COOKIE_NAME]: mintCookie("platform_owner") },
+    });
+    expect(res.statusCode).toBe(503);
     await app.close();
   });
 
