@@ -780,9 +780,18 @@ export async function registerAdminRoutes(
 
         // Dispatch AFTER the state-check. Default sample_size from the workflow contract when omitted.
         if (opts.temporal) {
+          // 1:1 with the Python temporal_embedder_dispatcher: the validate workflow_id carries a UTC
+          // timestamp suffix (strftime "%Y%m%dT%H%M%SZ") so each re-validate under ALLOW_DUPLICATE lands
+          // as a DISTINCT execution rather than colliding with a prior run. Derive the suffix from the
+          // injected clock (never `new Date()` — the no-wall-clock gate is ERROR-mode in src).
+          const ts = opts.clock
+            .now()
+            .toISOString()
+            .replace(/[-:]/g, "")
+            .replace(/\.\d{3}Z$/, "Z");
           await opts.temporal.dispatchWorkflow({
             workflowType: "ValidateGenerationWorkflow",
-            workflowId: `validate-generation-${body.generation_id}`,
+            workflowId: `validate-generation-${body.generation_id}-${ts}`,
             taskQueue: "embedder-maintenance",
             input:
               body.sample_size === null

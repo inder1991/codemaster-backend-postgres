@@ -423,7 +423,10 @@ describeDb("embedder write lifecycle (disposable :5439)", () => {
 
     const call = inner.calls.find((c) => c.workflowType === "ValidateGenerationWorkflow");
     expect(call).toBeDefined();
-    expect(call!.workflowId).toBe(`validate-generation-${genId}`);
+    // 1:1 with the Python temporal_embedder_dispatcher: the validate workflow_id carries a UTC-timestamp
+    // suffix (strftime "%Y%m%dT%H%M%SZ") so each re-validate lands as a distinct execution under
+    // ALLOW_DUPLICATE. The suffix is clock-derived (FakeClock NOW=2026-06-08T12:00:00Z) → deterministic.
+    expect(call!.workflowId).toBe(`validate-generation-${genId}-20260608T120000Z`);
     expect(call!.taskQueue).toBe("embedder-maintenance");
     expect(call!.idReusePolicy).toBe("ALLOW_DUPLICATE");
     expect(audited.some((a) => a.action === "embedder.generation.validated")).toBe(true);
