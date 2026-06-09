@@ -1,6 +1,6 @@
 // test/integration/runner/_fixtures.ts
 import { randomUUID } from "node:crypto"; // test/ is OUT of the clock/random gate's scope
-import { Kysely, sql } from "kysely";
+import { type Kysely, sql } from "kysely";
 
 /**
  * Seed a real review chain (pull_request_reviews → review_runs) so review_jobs.run_id FK holds.

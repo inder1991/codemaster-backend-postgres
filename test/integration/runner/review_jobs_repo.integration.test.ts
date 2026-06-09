@@ -30,7 +30,7 @@ describeDb("ReviewJobsRepo.claim", () => {
     const repo = new ReviewJobsRepo(db); const s = await seedRun(db); await repo.enqueue(s);
     const c = await repo.claim({ owner: "w1", leaseMs: 1000, maxRuntimeMs: 60_000 });
     expect(c?.attempt_token).toBeTruthy(); expect(c?.attempts).toBe(1);
-    expect((c as any).timeout_at).toBeTruthy();
+    expect((c as Record<string, unknown>).timeout_at).toBeTruthy();
     expect(await repo.claim({ owner: "w2", leaseMs: 1000, maxRuntimeMs: 60_000 })).toBeNull();
   });
   it("reclaims an expired lease with a NEW token while attempts remain", async () => {
@@ -68,8 +68,8 @@ describeDb("ReviewJobsRepo.markDone", () => {
     expect((await repo.markDone({ jobId: c!.job_id, owner: "w1", token: c!.attempt_token! })).applied).toBe(true);
     const done = await repo.getById(c!.job_id);
     expect(done!.state).toBe("done");
-    expect((done as any).attempt_token).toBeNull();          // lease metadata cleared (v3 #9)
-    expect((done as any).lease_owner).toBeNull();
+    expect((done as Record<string, unknown>).attempt_token).toBeNull();          // lease metadata cleared (v3 #9)
+    expect((done as Record<string, unknown>).lease_owner).toBeNull();
   });
 });
 
@@ -81,12 +81,12 @@ describeDb("ReviewJobsRepo.markFailed", () => {
     expect(r1).toEqual({ applied: true, terminal: false });
     const requeued = await repo.getById(c1!.job_id);
     expect(requeued!.state).toBe("ready");
-    expect((requeued as any).attempt_token).toBeNull();      // lease metadata cleared on requeue (v3 #9)
+    expect((requeued as Record<string, unknown>).attempt_token).toBeNull();      // lease metadata cleared on requeue (v3 #9)
     await new Promise((r) => setTimeout(r, 30));
     const c2 = await repo.claim({ owner: "w1", leaseMs: 1000, maxRuntimeMs: 60_000 });
     const r2 = await repo.markFailed({ jobId: c2!.job_id, owner: "w1", token: c2!.attempt_token!, error: "boom2", baseBackoffMs: 1 });
     expect(r2).toEqual({ applied: true, terminal: true });
-    const dead = await repo.getById(c2!.job_id); expect(dead!.state).toBe("dead"); expect((dead as any).dead_reason).toContain("boom2");
+    const dead = await repo.getById(c2!.job_id); expect(dead!.state).toBe("dead"); expect((dead as Record<string, unknown>).dead_reason).toContain("boom2");
     expect((await repo.markFailed({ jobId: c2!.job_id, owner: "w1", token: crypto.randomUUID(), error: "x", baseBackoffMs: 1 })).applied).toBe(false);
   });
 });
@@ -103,8 +103,8 @@ describeDb("ReviewJobsRepo.reapCrashLooped", () => {
     const cb = await repo.claim({ owner: "w2", leaseMs: 60_000, maxRuntimeMs: 60_000 });
     expect(await repo.reapCrashLooped()).toBe(1);
     const dead = await repo.getById(ca!.job_id);
-    expect(dead!.state).toBe("dead"); expect((dead as any).dead_reason).toContain("crash loop");
-    expect((dead as any).attempt_token).toBeNull();          // lease metadata cleared (v3 #9)
+    expect(dead!.state).toBe("dead"); expect((dead as Record<string, unknown>).dead_reason).toContain("crash loop");
+    expect((dead as Record<string, unknown>).attempt_token).toBeNull();          // lease metadata cleared (v3 #9)
     expect((await repo.getById(cb!.job_id))!.state).toBe("leased"); // live lease untouched
   });
 });

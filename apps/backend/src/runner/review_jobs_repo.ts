@@ -1,4 +1,4 @@
-import { Kysely, sql } from "kysely";
+import { type Kysely, sql } from "kysely";
 import { uuid4 } from "#platform/randomness.js";
 import { ReviewJobV1 } from "#contracts/review_jobs.v1.js";
 
