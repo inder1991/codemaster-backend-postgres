@@ -179,6 +179,39 @@ export const LearningDetailV1 = z
   .strict();
 export type LearningDetailV1 = z.infer<typeof LearningDetailV1>;
 
+// ─── Knowledge write (PUT body, stale-write 409 envelope, proposal reject body) ──────────────────
+// 1:1 with codemaster/api/admin/knowledge.py (_UpdateLearningBody / _StaleWrite / _RejectProposal).
+
+/** PUT /api/admin/knowledge/{learning_id} request body — new body markdown. */
+export const UpdateLearningBodyV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    body_markdown: z.string().min(1).max(8192),
+  })
+  .strict();
+export type UpdateLearningBodyV1 = z.infer<typeof UpdateLearningBodyV1>;
+
+/** 409 Conflict — optimistic-concurrency mismatch (If-Match version stale). Carries current state
+ *  so the frontend renders a collision-diff modal. */
+export const StaleWriteV1 = z
+  .object({
+    code: z.literal("stale_write"),
+    current_body: z.string(),
+    current_version: z.number().int(),
+  })
+  .strict();
+export type StaleWriteV1 = z.infer<typeof StaleWriteV1>;
+
+/** POST /api/admin/knowledge/proposals/{proposal_id}/reject request body — rejection reason,
+ *  bounded 10–2048 chars (trimmed). */
+export const RejectProposalV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    reason: z.string().min(10).max(2048),
+  })
+  .strict();
+export type RejectProposalV1 = z.infer<typeof RejectProposalV1>;
+
 // ─── Integrations (platform-scope; in-memory keyset pagination) ──────────────────────────────────
 
 /** One integration in GET /api/admin/integrations (config_json kept as an opaque raw JSON string). */
@@ -698,6 +731,70 @@ export const ReviewsListPageV1 = z
   .strict();
 export type ReviewsListPageV1 = z.infer<typeof ReviewsListPageV1>;
 
+// ─── Review detail (S12.2.3) ──────────────────────────────────────────────────────────────────
+
+/** One activity event in the review-detail timeline (Pydantic __contract_internal__; no schema_version). */
+export const ActivityEventV1 = z
+  .object({
+    seq: z.number().int().min(1),
+    activity_name: z.string(),
+    state: z.enum(["scheduled", "started", "completed", "failed", "retrying"]),
+    started_at: z.string().datetime({ offset: true }),
+    completed_at: z.string().datetime({ offset: true }).nullable().default(null),
+    detail: z.string().max(500).default(""),
+  })
+  .strict();
+export type ActivityEventV1 = z.infer<typeof ActivityEventV1>;
+
+/** One finding rendered on the review-detail page (Pydantic __contract_internal__). */
+export const ReviewFindingItemV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    finding_id: z.string().uuid(),
+    file_path: z.string().min(1),
+    start_line: z.number().int().min(0),
+    end_line: z.number().int().min(0),
+    severity: z.enum(["blocker", "issue", "suggestion", "nit", "none"]),
+    title: z.string().min(1).max(500),
+    body: z.string(),
+    suggestion: z.string().nullable().default(null),
+    tool_source: z.string().nullable().default(null),
+  })
+  .strict();
+export type ReviewFindingItemV1 = z.infer<typeof ReviewFindingItemV1>;
+
+/** GET /api/admin/reviews/{review_id} — full review detail with findings and activities. */
+export const ReviewDetailV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    review_id: z.string().uuid(),
+    repo: z.string().min(1),
+    pr_number: z.number().int().min(1),
+    pr_title: z.string(),
+    state: z.enum(["queued", "in_progress", "complete", "failed"]),
+    findings: z.array(ReviewFindingItemV1),
+    activities: z.array(ActivityEventV1),
+    langfuse_url: z.string().nullable().default(null),
+    temporal_url: z.string().nullable().default(null),
+    posted_at: z.string().datetime({ offset: true }).nullable().default(null),
+  })
+  .strict();
+export type ReviewDetailV1 = z.infer<typeof ReviewDetailV1>;
+
+// ─── Your-reviews (S14.B) ────────────────────────────────────────────────────────────────────────
+
+/** GET /api/admin/your-reviews — per-engineer scoped reviews (authored + assigned). Pattern A: returns
+ *  empty tuples until the engineer-identity link lands. */
+export const YourReviewsPageV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    authored: z.array(ReviewListItemV1),
+    assigned: z.array(ReviewListItemV1),
+    user_id: z.string().min(1).max(512),
+  })
+  .strict();
+export type YourReviewsPageV1 = z.infer<typeof YourReviewsPageV1>;
+
 /** One row from GET /api/admin/pull-requests (a core.pull_requests row + resolved author_login). */
 export const PullRequestRowV1 = z
   .object({
@@ -963,6 +1060,50 @@ export const EmbedderCoverageV1 = z
   .strict();
 export type EmbedderCoverageV1 = z.infer<typeof EmbedderCoverageV1>;
 
+// ─── Embedder WRITE request bodies (Batch 4 — POST /retrieval-mode + /reembed/{start,activate,rollback}) ──
+// 1:1 with contracts/admin/embedder/v1.py (StartReembedRequestV1 / ActivateGenerationRequestV1 /
+// RollbackGenerationRequestV1 / RetrievalModeRequestV1). cancel / validate / manual-retire / gc bodies are
+// declared inline at the route (mirroring the Python _GenerationIdRequest / _ValidateRequest).
+
+/** POST /api/admin/embedder/reembed/start body. */
+export const StartReembedRequestV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    target_model_name: z.string().min(1).max(256),
+    generation_label: z.string().nullable().default(null),
+    generation_reason: z.string().nullable().default(null),
+    created_from_generation: z.number().int().nullable().default(null),
+  })
+  .strict();
+export type StartReembedRequestV1 = z.infer<typeof StartReembedRequestV1>;
+
+/** POST /api/admin/embedder/reembed/activate body. */
+export const ActivateGenerationRequestV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    generation_id: z.number().int().min(1),
+  })
+  .strict();
+export type ActivateGenerationRequestV1 = z.infer<typeof ActivateGenerationRequestV1>;
+
+/** POST /api/admin/embedder/reembed/rollback body. */
+export const RollbackGenerationRequestV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    target_generation_id: z.number().int().min(1),
+  })
+  .strict();
+export type RollbackGenerationRequestV1 = z.infer<typeof RollbackGenerationRequestV1>;
+
+/** POST /api/admin/embedder/retrieval-mode body. */
+export const RetrievalModeRequestV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    mode: z.enum(["fallback", "generation_only"]),
+  })
+  .strict();
+export type RetrievalModeRequestV1 = z.infer<typeof RetrievalModeRequestV1>;
+
 // ─── Retrieval-trace inspector list (GET /api/admin/retrieval-traces) ────────────────────────────────
 // 1:1 with contracts/admin/retrieval_traces/v1.py. One flattened row of the v_retrieval_traces_recent
 // materialized view (all columns derived from the trace JSONB). The detail endpoint reuses the full
@@ -1186,3 +1327,148 @@ export const FindingFeedbackResponseV1 = z
   })
   .strict();
 export type FindingFeedbackResponseV1 = z.infer<typeof FindingFeedbackResponseV1>;
+
+// ─── Confluence pages (page-approval read envelope + quarantined-chunks list) ─────────────────────────
+// 1:1 with contracts/admin/page_approvals/v1.py + contracts/admin/quarantined_chunks/v1.py. The
+// write-side page-approval row (CreatePageApprovalRequestV1 / ConfluencePageApprovalV1) lives in
+// #contracts/page_approval.v1; these are the read envelopes for the per-space pages + quarantine lists.
+
+export {
+  PageApprovalStatusV1,
+  PageWithApprovalV1,
+  PagesListPageV1,
+} from "./admin/page_approvals.v1.js";
+export {
+  QuarantinedChunkV1,
+  QuarantinedChunksPageV1,
+} from "./admin/quarantined_chunks.v1.js";
+
+// ─── Status page + review-timeline (Batch 5) ──────────────────────────────────────────────────────
+// Pipeline/pilot status envelopes for GET /api/admin/status/{pipeline,pilot-progress}, plus the
+// per-delivery review-timeline assembly for GET /api/admin/review-timeline?delivery=... . Enum values
+// for OutboxRowV1.state + LlmCallV1.status are pinned to the live DB CHECK constraints (NOT the Python
+// plan guesses): core.outbox CHECK = {pending,dispatched,dead}; telemetry.llm_calls CHECK =
+// {ok,refused_cost_cap,failed,timeout}.
+
+export const HealthStateV1 = z.enum(["healthy", "degraded", "down"]).readonly();
+export type HealthStateV1 = z.infer<typeof HealthStateV1>;
+
+export const PipelineStatusV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    in_flight_review_count: z.number().int().nonnegative(),
+    last_24h_review_count: z.number().int().nonnegative(),
+    last_24h_findings_count: z.number().int().nonnegative(),
+    last_24h_avg_latency_seconds: z.number().nonnegative(),
+    bedrock_health: HealthStateV1,
+    postgres_health: HealthStateV1,
+    temporal_health: HealthStateV1,
+    sampled_at: z.coerce.date(),
+  })
+  .strict()
+  .readonly();
+export type PipelineStatusV1 = z.infer<typeof PipelineStatusV1>;
+
+export const PilotProgressV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    total_orgs_onboarded: z.number().int().nonnegative(),
+    target_orgs: z.number().int().nonnegative(),
+    total_prs_reviewed_this_week: z.number().int().nonnegative(),
+    sprint_day: z.number().int().min(1).max(14),
+    sampled_at: z.coerce.date(),
+  })
+  .strict()
+  .readonly();
+export type PilotProgressV1 = z.infer<typeof PilotProgressV1>;
+
+export const WebhookEventV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    webhook_event_id: z.string().uuid(),
+    installation_id: z.string().uuid().nullable(),
+    event_type: z.string(),
+    received_at: z.coerce.date(),
+  })
+  .strict()
+  .readonly();
+export type WebhookEventV1 = z.infer<typeof WebhookEventV1>;
+
+export const OutboxRowV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    outbox_id: z.string().uuid(),
+    sink: z.string(),
+    state: z.enum(["pending", "dispatched", "dead"]),
+    created_at: z.coerce.date(),
+    leased_until: z.coerce.date().nullable(),
+    workflow_id: z.string().nullable(),
+  })
+  .strict()
+  .readonly();
+export type OutboxRowV1 = z.infer<typeof OutboxRowV1>;
+
+export const WorkflowStatusV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    workflow_id: z.string(),
+    run_id: z.string().nullable(),
+    status: z.enum([
+      "running",
+      "completed",
+      "failed",
+      "canceled",
+      "terminated",
+      "continued_as_new",
+      "timed_out",
+      "unknown",
+    ]),
+    started_at: z.coerce.date().nullable(),
+    closed_at: z.coerce.date().nullable(),
+  })
+  .strict()
+  .readonly();
+export type WorkflowStatusV1 = z.infer<typeof WorkflowStatusV1>;
+
+export const LlmCallV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    llm_call_id: z.string().uuid(),
+    model: z.string(),
+    cost_usd_cents: z.number().int().nonnegative(),
+    latency_ms: z.number().int().nonnegative(),
+    status: z.enum(["ok", "refused_cost_cap", "failed", "timeout"]),
+    created_at: z.coerce.date(),
+  })
+  .strict()
+  .readonly();
+export type LlmCallV1 = z.infer<typeof LlmCallV1>;
+
+export const GitHubPostingV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    kind: z.enum(["check_run", "review_comment", "review"]),
+    posted_at: z.coerce.date(),
+    external_id: z.string().nullable(),
+    status: z.enum(["posted", "failed"]),
+    error_message: z.string().nullable(),
+  })
+  .strict()
+  .readonly();
+export type GitHubPostingV1 = z.infer<typeof GitHubPostingV1>;
+
+export const ReviewTimelineV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    delivery_id: z.string().min(1).max(64),
+    webhook: WebhookEventV1.nullable(),
+    outbox: OutboxRowV1.nullable(),
+    workflow: WorkflowStatusV1.nullable(),
+    bedrock_calls: z.array(LlmCallV1),
+    github_postings: z.array(GitHubPostingV1),
+    warnings: z.array(z.string()),
+    sampled_at: z.coerce.date(),
+  })
+  .strict()
+  .readonly();
+export type ReviewTimelineV1 = z.infer<typeof ReviewTimelineV1>;
