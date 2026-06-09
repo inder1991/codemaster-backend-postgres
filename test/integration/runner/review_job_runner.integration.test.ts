@@ -43,3 +43,18 @@ describeDb("runOneJob", () => {
     expect((await repo.getById(id))!.state).toBe("dead");
   });
 });
+
+describeDb("runOneJob — chaos", () => {
+  it("a stolen lease completes once; the loser reports lease_lost, not success", async () => {
+    const repo = new ReviewJobsRepo(db); const s = await seedRun(db); const id = await repo.enqueue(s);
+    // w1: attempt 1 hangs past its 100ms lease, no heartbeat (heartbeatS huge) → its later markDone is fenced out
+    const w1 = runOneJob({ repo, clock, owner: "w1", leaseS: 0.1, heartbeatS: 999, maxRuntimeS: 60,
+      handler: async () => { await new Promise((r) => setTimeout(r, 700)); } });
+    await new Promise((r) => setTimeout(r, 200));    // w1's lease expires
+    const w2 = await runOneJob({ repo, clock, owner: "w2", leaseS: 2, heartbeatS: 0.2, maxRuntimeS: 60, handler: async () => {} });
+    const r1 = await w1;
+    expect(w2.outcome).toBe("done");
+    expect(r1.outcome).toBe("lease_lost");           // fenced: w1's markDone affected 0 rows
+    expect((await repo.getById(id))!.state).toBe("done");
+  });
+});
