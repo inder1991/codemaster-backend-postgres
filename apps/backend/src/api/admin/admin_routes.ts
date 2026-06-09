@@ -618,8 +618,13 @@ export async function registerAdminRoutes(
           return reply.code(422).send({ detail: "request body failed schema validation" });
         }
         const body = parsed.data;
+        // 1:1 with the Python embedder.py handlers: resolve the actor's email and pass THAT as the
+        // service's triggered_by_email (the bare UUID would persist a non-email to *_by_email columns).
+        const actorEmail = await (opts.userEmailResolver ?? shimUserEmailResolver).resolveEmail(
+          principal.userId,
+        );
         try {
-          await setRetrievalMode(embedderService, body, principal.userId);
+          await setRetrievalMode(embedderService, body, actorEmail);
           await opts.audit?.({
             actorUserId: principal.userId,
             installationId: principal.installationId,
@@ -650,8 +655,13 @@ export async function registerAdminRoutes(
           return reply.code(422).send({ detail: "request body failed schema validation" });
         }
         const body = parsed.data;
+        // Resolve the actor email once; pass it as triggered_by_email to both the service write and the
+        // dispatched workflow input (1:1 with the Python embedder.py start handler).
+        const actorEmail = await (opts.userEmailResolver ?? shimUserEmailResolver).resolveEmail(
+          principal.userId,
+        );
         try {
-          const gen = await startReembedGeneration(embedderService, body, principal.userId);
+          const gen = await startReembedGeneration(embedderService, body, actorEmail);
           // Mirror the service fallback (source = active when caller omits) so the workflow input carries the
           // same value the service persisted; defensive '1' for the unreachable NULL branch.
           const sourceForWorkflow = gen.created_from_generation ?? 1;
@@ -665,7 +675,7 @@ export async function registerAdminRoutes(
                 generation_id: gen.generation_id,
                 target_model_name: body.target_model_name,
                 source_generation_id: sourceForWorkflow,
-                triggered_by_email: principal.userId,
+                triggered_by_email: actorEmail,
               },
               idReusePolicy: "REJECT_DUPLICATE",
             });
@@ -709,8 +719,11 @@ export async function registerAdminRoutes(
           return reply.code(422).send({ detail: "request body failed schema validation" });
         }
         const body = parsed.data;
+        const actorEmail = await (opts.userEmailResolver ?? shimUserEmailResolver).resolveEmail(
+          principal.userId,
+        );
         try {
-          const updated = await cancelReembedGeneration(embedderService, body.generation_id, principal.userId);
+          const updated = await cancelReembedGeneration(embedderService, body.generation_id, actorEmail);
           // Best-effort cancel signal AFTER persistence — swallow not-found / already-completed.
           if (opts.temporal) {
             try {
@@ -825,8 +838,11 @@ export async function registerAdminRoutes(
           return reply.code(422).send({ detail: "request body failed schema validation" });
         }
         const body = parsed.data;
+        const actorEmail = await (opts.userEmailResolver ?? shimUserEmailResolver).resolveEmail(
+          principal.userId,
+        );
         try {
-          await activateReembedGeneration(embedderService, body.generation_id, principal.userId);
+          await activateReembedGeneration(embedderService, body.generation_id, actorEmail);
           await opts.audit?.({
             actorUserId: principal.userId,
             installationId: principal.installationId,
@@ -866,8 +882,11 @@ export async function registerAdminRoutes(
           return reply.code(422).send({ detail: "request body failed schema validation" });
         }
         const body = parsed.data;
+        const actorEmail = await (opts.userEmailResolver ?? shimUserEmailResolver).resolveEmail(
+          principal.userId,
+        );
         try {
-          await rollbackReembedGeneration(embedderService, body.target_generation_id, principal.userId);
+          await rollbackReembedGeneration(embedderService, body.target_generation_id, actorEmail);
           await opts.audit?.({
             actorUserId: principal.userId,
             installationId: principal.installationId,
@@ -907,11 +926,14 @@ export async function registerAdminRoutes(
           return reply.code(422).send({ detail: "request body failed schema validation" });
         }
         const body = parsed.data;
+        const actorEmail = await (opts.userEmailResolver ?? shimUserEmailResolver).resolveEmail(
+          principal.userId,
+        );
         try {
           const updated = await manualRetireReembedGeneration(
             embedderService,
             body.generation_id,
-            principal.userId,
+            actorEmail,
           );
           await opts.audit?.({
             actorUserId: principal.userId,
@@ -946,11 +968,14 @@ export async function registerAdminRoutes(
           return reply.code(422).send({ detail: "request body failed schema validation" });
         }
         const body = parsed.data;
+        const actorEmail = await (opts.userEmailResolver ?? shimUserEmailResolver).resolveEmail(
+          principal.userId,
+        );
         try {
           const updated = await gcReembedGeneration(
             embedderService,
             body.generation_id,
-            principal.userId,
+            actorEmail,
             opts.clock.now(),
           );
           // Dispatch the GC workflow ONLY after a successful service.gc() (which set gc_started_at).

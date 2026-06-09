@@ -33,6 +33,10 @@ const NOW = new Date("2026-06-08T12:00:00.000Z");
 const SIGNING_KEY = Buffer.from("test-signing-key-0123456789abcdef");
 const INSTALL_ID = "00000000-0000-0000-0000-000000000001";
 const ACTOR_USER = "00000000-0000-0000-0000-0000000000aa";
+// Resolved actor email — 1:1 with the Python embedder.py handlers, which resolve
+// actor_email = await _resolve_actor_email(actor_user_id) and pass it as triggered_by_email to the
+// service (NOT the bare UUID). The injected resolver maps ACTOR_USER → this email deterministically.
+const ACTOR_EMAIL = "owner@codemaster.test";
 
 // The migration-seed singleton points at gen 1 (active). Restore it after every test so a left-over
 // pending pointer or a flipped retrieval_mode never leaks into the next test.
@@ -128,6 +132,14 @@ async function makeApp(): Promise<{
     signingKey: SIGNING_KEY,
     clock: new FakeClock({ now: NOW }),
     temporal: makeAdminTemporalPort(inner),
+    // Mirror the Python: the handler always resolves the actor email (the bootstrap shim never returns the
+    // bare UUID). Map ACTOR_USER → ACTOR_EMAIL so the persisted created_by_email / dispatched
+    // triggered_by_email are deterministic.
+    userEmailResolver: {
+      async resolveEmail(userId: string): Promise<string> {
+        return userId === ACTOR_USER ? ACTOR_EMAIL : `unknown-${userId}@codemaster.test`;
+      },
+    },
     audit: async (e) => {
       audited.push(e);
     },
@@ -260,10 +272,13 @@ describeDb("embedder write lifecycle (disposable :5439)", () => {
       },
     });
     expect(res.statusCode).toBe(200);
-    const body = res.json<{ generation_id: number; state: string; model_name: string }>();
+    const body = res.json<{ generation_id: number; state: string; model_name: string; created_by_email: string | null }>();
     expect(body.generation_id).toBeGreaterThan(0);
     expect(body.state).toBe("backfilling");
     expect(body.model_name).toBe("test-model");
+    // 1:1 with the Python: the service persists triggered_by_email (the RESOLVED actor email) to
+    // created_by_email — NOT the bare UUID (which would coerce to null because it lacks an '@').
+    expect(body.created_by_email).toBe(ACTOR_EMAIL);
 
     // Workflow dispatched with REJECT_DUPLICATE + the right workflow id/type/queue.
     const call = inner.calls.find((c: StartWorkflowCall) => c.workflowType === "ReembedGenerationWorkflow");
@@ -271,6 +286,8 @@ describeDb("embedder write lifecycle (disposable :5439)", () => {
     expect(call!.workflowId).toBe(`reembed-generation-${body.generation_id}`);
     expect(call!.taskQueue).toBe("embedder-maintenance");
     expect(call!.idReusePolicy).toBe("REJECT_DUPLICATE");
+    // The dispatched workflow input (args[0]) carries the resolved actor email, not the UUID.
+    expect((call!.args[0] as { triggered_by_email: string }).triggered_by_email).toBe(ACTOR_EMAIL);
 
     // Audit emitted.
     expect(audited.some((a) => a.action === "embedder.generation.created")).toBe(true);
