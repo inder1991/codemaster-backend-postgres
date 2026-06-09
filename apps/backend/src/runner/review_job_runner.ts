@@ -4,6 +4,7 @@ import type { ReviewJobV1 } from "#contracts/review_jobs.v1.js";
 import { cancellableSleep } from "./clock_async.js";
 import {
   recordClaimLatencyMs,
+  recordCrashLoopReaped,
   recordHandlerDurationMs,
   recordHeartbeatFailure,
   recordJobOutcome,
@@ -71,4 +72,21 @@ export async function runOneJob(o: { repo: ReviewJobsRepo; clock: Clock; owner: 
   recordHandlerDurationMs((o.clock.monotonic() - handlerStart) * 1000);
   recordJobOutcome({ outcome });
   return { outcome, jobId: job.job_id };
+}
+
+export class RunnerLoop {
+  #stopped = false;
+  readonly #stop = new AbortController();                  // wakes the idle sleep immediately on stop()
+  constructor(private o: { repo: ReviewJobsRepo; clock: Clock; owner: string; leaseS: number; heartbeatS: number;
+    maxRuntimeS: number; idleS: number; handler: JobHandler }) {}
+  stop() { this.#stopped = true; this.#stop.abort(); }     // wire to process.on('SIGTERM', () => loop.stop())
+  async run(): Promise<void> {
+    while (!this.#stopped) {
+      const { outcome } = await runOneJob(this.o);          // an in-flight job ALWAYS runs to completion (drain)
+      if (outcome === "idle" && !this.#stopped) {
+        recordCrashLoopReaped(await this.o.repo.reapCrashLooped()); // bounded cleanup of maxed-out crashed leases (v3 #2)
+        await cancellableSleep(this.o.clock, this.o.idleS, this.#stop.signal); // stop() interrupts this wait (v3 #6)
+      }
+    }
+  }
 }
