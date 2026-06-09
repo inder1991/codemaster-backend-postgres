@@ -27,9 +27,12 @@
  * / walkthrough_activity decision. The id is threaded in from `GenerateFixPromptInputV1.installation_id`.
  */
 
+import { createHash } from "node:crypto";
+
 import { type Clock, WallClock } from "#platform/clock.js";
 
 import type { LlmClient } from "#backend/integrations/llm/client.js";
+import { purposeChunkId } from "#backend/integrations/llm/invocation_ledger.js";
 import { modelForPurpose } from "#backend/llm/model_router.js";
 
 import {
@@ -72,6 +75,19 @@ export const FIX_PROMPT_THEME_SCHEMA: Readonly<Record<string, unknown>> = {
     required: ["themes"],
   },
 };
+
+/**
+ * de-Temporal Phase 2 (D2 / W2.2) — the tool-schema-version component of the fix-prompt's LLM-invocation
+ * idempotency key. A content-addressable digest of FIX_PROMPT_THEME_SCHEMA: a tool-schema change (which
+ * changes the SHAPE of the structured output, and therefore the parse) changes the key, so a stale stored
+ * response is NOT replayed. Per-site (distinct from the other PR-level purposes' digests). `createHash` is
+ * the gate-sanctioned hashing primitive (clock_random gate bans random fns, NOT createHash; mirrors
+ * review_activity.ts:55).
+ */
+export const FIX_PROMPT_THEME_TOOL_SCHEMA_VERSION = `fpts-${createHash("sha256")
+  .update(Buffer.from(JSON.stringify(FIX_PROMPT_THEME_SCHEMA), "utf-8"))
+  .digest("hex")
+  .slice(0, 16)}`;
 
 /** The Python `_THEME_SYSTEM_PROMPT`. */
 const THEME_SYSTEM_PROMPT =
@@ -173,6 +189,19 @@ export async function buildFixPrompt(args: {
       // TS hardening divergence (ADR-0068) — the REAL installation_id flows to the cost-cap (per-org
       // isolation), blob put, telemetry/Langfuse rows. Python platform-scopes this call (omits it).
       installationId: args.installationId,
+      // de-Temporal Phase 2 (D2 / W2.2 / F9) — ledger this PR-level paid call by PURPOSE. The stable key is
+      // review_id (args.reviewId, already in scope) + the purpose chunk-key surrogate
+      // (purposeChunkId("fix_prompt"), E8) + role + model + prompt hash + FIX_PROMPT_THEME_TOOL_SCHEMA_VERSION.
+      // run_id is deliberately NOT in the key (D2: output need not change per run). On a retry the stored
+      // provider response replays instead of buying a second paid Sonnet completion. F9: the SAME "fix_prompt"
+      // token drives BOTH the chunk-key surrogate AND the metric purpose label. No-op when the client has no
+      // ledger (unit tests / platform jobs).
+      idempotency: {
+        reviewId: args.reviewId,
+        chunkId: purposeChunkId("fix_prompt"),
+        toolSchemaVersion: FIX_PROMPT_THEME_TOOL_SCHEMA_VERSION,
+        ledgerPurpose: "fix_prompt",
+      },
     });
     const themes = extractThemes(result.raw_content_blocks);
     if (themes !== null) {
