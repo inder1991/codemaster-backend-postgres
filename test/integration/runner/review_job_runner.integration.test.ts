@@ -5,7 +5,7 @@ import { describeDb, INTEGRATION_DSN } from "../_db.js";
 import { ReviewJobsRepo } from "#backend/runner/review_jobs_repo.js";
 import { runOneJob } from "#backend/runner/review_job_runner.js";
 import { WallClock } from "#platform/clock.js";
-import { seedRun } from "./_fixtures.js";
+import { minimalReviewPayload, seedRun } from "./_fixtures.js";
 
 const clock = new WallClock();
 
@@ -23,17 +23,17 @@ beforeEach(async () => { if (INTEGRATION_DSN) await sql`DELETE FROM core.review_
 
 describeDb("runOneJob", () => {
   it("runs the handler and reports done", async () => {
-    const repo = new ReviewJobsRepo(db); const s = await seedRun(db); await repo.enqueue(s);
+    const repo = new ReviewJobsRepo(db); const s = await seedRun(db); await repo.enqueue({ ...s, payload: minimalReviewPayload(s) });
     const res = await runOneJob({ repo, clock, owner: "w1", leaseS: 1, heartbeatS: 0.2, maxRuntimeS: 60, handler: async () => {} });
     expect(res.outcome).toBe("done");
   });
   it("reports failed→dead when the handler throws on its last attempt", async () => {
-    const repo = new ReviewJobsRepo(db); const s = await seedRun(db); const id = await repo.enqueue({ ...s, maxAttempts: 1 });
+    const repo = new ReviewJobsRepo(db); const s = await seedRun(db); const id = await repo.enqueue({ ...s, maxAttempts: 1, payload: minimalReviewPayload(s) });
     const res = await runOneJob({ repo, clock, owner: "w1", leaseS: 1, heartbeatS: 0.2, maxRuntimeS: 60, handler: async () => { throw new Error("boom"); } });
     expect(res.outcome).toBe("failed"); expect((await repo.getById(id))!.state).toBe("dead");
   });
   it("HARD-stops a handler that ignores the signal and hangs (slot returns)", async () => {
-    const repo = new ReviewJobsRepo(db); const s = await seedRun(db); const id = await repo.enqueue({ ...s, maxAttempts: 1 });
+    const repo = new ReviewJobsRepo(db); const s = await seedRun(db); const id = await repo.enqueue({ ...s, maxAttempts: 1, payload: minimalReviewPayload(s) });
     const t = Date.now();
     // heartbeatS huge → the heartbeat NEVER refuses within the test, so the hard race is the SOLE guarantee:
     const res = await runOneJob({ repo, clock, owner: "w1", leaseS: 2, heartbeatS: 999, maxRuntimeS: 0.2,
@@ -46,7 +46,7 @@ describeDb("runOneJob", () => {
 
 describeDb("runOneJob — chaos", () => {
   it("a stolen lease completes once; the loser reports lease_lost, not success", async () => {
-    const repo = new ReviewJobsRepo(db); const s = await seedRun(db); const id = await repo.enqueue(s);
+    const repo = new ReviewJobsRepo(db); const s = await seedRun(db); const id = await repo.enqueue({ ...s, payload: minimalReviewPayload(s) });
     // w1: attempt 1 hangs past its 100ms lease, no heartbeat (heartbeatS huge) → its later markDone is fenced out
     const w1 = runOneJob({ repo, clock, owner: "w1", leaseS: 0.1, heartbeatS: 999, maxRuntimeS: 60,
       handler: async () => { await new Promise((r) => setTimeout(r, 700)); } });

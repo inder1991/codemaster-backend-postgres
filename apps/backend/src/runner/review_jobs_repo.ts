@@ -1,22 +1,99 @@
+import { createHash } from "node:crypto"; // sanctioned hashing primitive (clock_random gate bans random.*, NOT createHash)
 import { type Kysely, sql } from "kysely";
 import { uuid4 } from "#platform/randomness.js";
 import { ReviewJobV1 } from "#contracts/review_jobs.v1.js";
+import { ReviewPullRequestPayloadV1 } from "#contracts/review_pull_request.v1.js";
+
+// D1 (migration 0037): core.review_jobs is the durable workflow-argument store. enqueue REQUIRES a valid
+// ReviewPullRequestPayloadV1 (inner schema_version=2); it is canonicalized + sha256'd at write, and
+// verifyPayload re-parses + re-hashes it in the shell before running, so a corrupted/drifted row is caught.
+export const JOB_PAYLOAD_SCHEMA_VERSION = 1; // F1: storage-envelope version (NOT the payload's inner schema_version=2)
 
 export type EnqueueArgs = { runId: string; reviewId: string; installationId: string;
+  payload: unknown; // validated inside enqueue via ReviewPullRequestPayloadV1.parse (D1)
   deliveryId?: string | null; priority?: number; maxAttempts?: number };
 export type FencedResult = { applied: boolean };
+
+/** Thrown by {@link ReviewJobsRepo.verifyPayload} when the stored payload's hash does not match the stored sha256. */
+export class PayloadIntegrityError extends Error {
+  constructor(public readonly jobId: string, message: string) {
+    super(message);
+    this.name = "PayloadIntegrityError";
+  }
+}
+
+/**
+ * Stable, key-ordered JSON encoding (recursively sorts object keys; arrays keep order; primitives pass
+ * through) so the same payload always hashes identically across processes/re-runs. Mirrors the codebase's
+ * `stableJson`/`sortKeysDeep` idiom (ingest/_workflow_events_repository.ts) — NOT a clock/random surface.
+ */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(sortKeysDeep(value));
+}
+function sortKeysDeep(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(sortKeysDeep);
+  }
+  if (value !== null && typeof value === "object") {
+    const src = value as Record<string, unknown>;
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(src).sort()) {
+      // `key` is a bounded own-enumerable string key of a plain object (Object.keys) — not an
+      // attacker-controlled object-key sink; the prototype-pollution threat model does not apply.
+      // eslint-disable-next-line security/detect-object-injection
+      sorted[key] = sortKeysDeep(src[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
+/** sha256 hex over a string preimage. `createHash` is the gate-sanctioned hashing primitive. */
+function sha256hex(s: string): string {
+  return createHash("sha256").update(Buffer.from(s, "utf-8")).digest("hex");
+}
 
 export class ReviewJobsRepo {
   constructor(private db: Kysely<unknown>) {}
 
   async enqueue(a: EnqueueArgs): Promise<string> {
+    // D1: the job becomes the durable workflow-argument store. (1) validate the inner contract
+    // (schema_version MUST be 2 — review_pull_request.v1.ts); an invalid payload throws here, BEFORE any
+    // INSERT, so nothing is written. (2) canonicalize + (3) hash; (4) store payload + envelope version + sha.
+    const payload = ReviewPullRequestPayloadV1.parse(a.payload);
+    const canonical = canonicalJson(payload);
+    const payloadSha256 = sha256hex(canonical);
     const jobId = uuid4();
     // The INSERT lists installation_id ⇒ raw-SQL tenancy gate escape hatch (a) is satisfied (no marker needed).
     await sql`INSERT INTO core.review_jobs
-        (job_id, run_id, review_id, installation_id, delivery_id, priority, max_attempts)
+        (job_id, run_id, review_id, installation_id, delivery_id, priority, max_attempts,
+         job_payload_schema_version, payload, payload_sha256)
       VALUES (${jobId}, ${a.runId}, ${a.reviewId}, ${a.installationId},
-        ${a.deliveryId ?? null}, ${a.priority ?? 0}, ${a.maxAttempts ?? 3})`.execute(this.db);
+        ${a.deliveryId ?? null}, ${a.priority ?? 0}, ${a.maxAttempts ?? 3},
+        ${JOB_PAYLOAD_SCHEMA_VERSION}, CAST(${canonical} AS jsonb), ${payloadSha256})`.execute(this.db);
     return jobId;
+  }
+
+  /**
+   * Re-derive the typed workflow argument from a job row: parse the stored `payload` through
+   * {@link ReviewPullRequestPayloadV1}, recompute its canonical hash, and assert it equals the stored
+   * `payload_sha256`. The shell calls this BEFORE running — a hash mismatch (corruption / out-of-band edit)
+   * raises {@link PayloadIntegrityError} so a drifted argument never silently drives a review.
+   *
+   * The driver hands JSONB back as a JS object; canonicalJson re-orders keys identically to enqueue, so the
+   * recomputed hash is stable regardless of the column's internal byte order.
+   */
+  verifyPayload(job: ReviewJobV1): ReviewPullRequestPayloadV1 {
+    const raw = (job as Record<string, unknown>)["payload"];
+    const payload = ReviewPullRequestPayloadV1.parse(raw);
+    const recomputed = sha256hex(canonicalJson(payload));
+    const stored = (job as Record<string, unknown>)["payload_sha256"];
+    if (recomputed !== stored) {
+      throw new PayloadIntegrityError(
+        job.job_id,
+        `payload hash mismatch for job ${job.job_id}: stored=${String(stored)} recomputed=${recomputed}`,
+      );
+    }
+    return payload;
   }
 
   async getById(jobId: string): Promise<ReviewJobV1 | null> {

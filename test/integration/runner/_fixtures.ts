@@ -1,6 +1,10 @@
 // test/integration/runner/_fixtures.ts
 import { randomUUID } from "node:crypto"; // test/ is OUT of the clock/random gate's scope
 import { type Kysely, sql } from "kysely";
+import {
+  ReviewPullRequestPayloadV1,
+  type ReviewPullRequestPayloadV1 as ReviewPullRequestPayloadV1Type,
+} from "#contracts/review_pull_request.v1.js";
 
 /**
  * Seed a real review chain (pull_request_reviews → review_runs) so review_jobs.run_id FK holds.
@@ -28,4 +32,35 @@ export async function seedRun(db: Kysely<unknown>): Promise<{ runId: string; rev
       (run_id, review_id, trigger_type, attempt_number, lifecycle_state, is_ephemeral, started_at, created_at)
     VALUES (${runId}, ${reviewId}, 'pr_opened', 1, 'PENDING', false, now(), now())`.execute(db);
   return { runId, reviewId, installationId };
+}
+
+/**
+ * A minimal VALID ReviewPullRequestPayloadV1 (inner `schema_version` = 2) tied to a seeded run's ids, so
+ * `enqueue` (Task W0.2) accepts it and the durable-argument store round-trips. Phase-1 enqueue tests call
+ * `enqueue` with no payload; after W0.2 `enqueue` REQUIRES one — every existing call site threads this.
+ *
+ * The `s` overload (minimalReviewPayloadForSeed) reuses the run/review/installation ids from `seedRun` so the
+ * payload is self-consistent with the FK chain; `repository_id`/`pr_id` are fresh UUIDs (the payload carries
+ * GitHub-side identity that need not exist as DB FKs for the enqueue path). The result is parsed through the
+ * contract so the fixture itself can never drift from the schema.
+ */
+export function minimalReviewPayload(
+  ids: { runId: string; reviewId: string; installationId: string },
+): ReviewPullRequestPayloadV1Type {
+  return ReviewPullRequestPayloadV1.parse({
+    schema_version: 2,
+    installation_id: ids.installationId,
+    repository_id: randomUUID(),
+    pr_id: randomUUID(),
+    pr_number: 1,
+    head_sha: "0".repeat(40),
+    gh_owner: "acme",
+    gh_repo_name: "widgets",
+    pr_title: "Add widget",
+    pr_description: "",
+    delivery_id: `dlv-${ids.reviewId}`,
+    policy_revision: 0,
+    run_id: ids.runId,
+    review_id: ids.reviewId,
+  });
 }

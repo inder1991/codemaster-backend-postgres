@@ -5,7 +5,7 @@ import { describeDb, INTEGRATION_DSN } from "../_db.js";
 import { ReviewJobsRepo } from "#backend/runner/review_jobs_repo.js";
 import { RunnerLoop } from "#backend/runner/review_job_runner.js";
 import { WallClock } from "#platform/clock.js";
-import { seedRun } from "./_fixtures.js";
+import { minimalReviewPayload, seedRun } from "./_fixtures.js";
 
 const clock = new WallClock();
 
@@ -24,8 +24,8 @@ beforeEach(async () => { if (INTEGRATION_DSN) await sql`DELETE FROM core.review_
 describeDb("RunnerLoop", () => {
   it("drains the in-flight job and stops claiming new ones on stop()", async () => {
     const repo = new ReviewJobsRepo(db);
-    const s1 = await seedRun(db); const id1 = await repo.enqueue(s1);
-    const s2 = await seedRun(db); const id2 = await repo.enqueue(s2);
+    const s1 = await seedRun(db); const id1 = await repo.enqueue({ ...s1, payload: minimalReviewPayload(s1) });
+    const s2 = await seedRun(db); const id2 = await repo.enqueue({ ...s2, payload: minimalReviewPayload(s2) });
     let started = 0;
     const loop = new RunnerLoop({ repo, clock, owner: "w1", leaseS: 2, heartbeatS: 0.2, maxRuntimeS: 60, idleS: 0.05,
       handler: async () => { started++; await new Promise((r) => setTimeout(r, 300)); } });
