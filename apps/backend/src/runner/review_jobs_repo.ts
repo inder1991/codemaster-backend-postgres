@@ -24,4 +24,20 @@ export class ReviewJobsRepo {
     const r = await sql<ReviewJobV1>`SELECT * FROM core.review_jobs WHERE job_id = ${jobId}`.execute(this.db);
     return r.rows[0] ? ReviewJobV1.parse(r.rows[0]) : null;
   }
+
+  async claim(a: { owner: string; leaseMs: number; maxRuntimeMs: number }): Promise<ReviewJobV1 | null> {
+    // tenant:exempt reason=worker-pool-claim-across-tenants follow_up=FOLLOW-UP-gf3-error-mode
+    const r = await sql<ReviewJobV1>`
+      UPDATE core.review_jobs SET state = 'leased', lease_owner = ${a.owner}, attempt_token = gen_random_uuid(),
+             leased_until = now() + (${a.leaseMs}::double precision / 1000) * interval '1 second',
+             timeout_at   = now() + (${a.maxRuntimeMs}::double precision / 1000) * interval '1 second',
+             heartbeat_at = now(), started_at = COALESCE(started_at, now()), attempts = attempts + 1
+        WHERE job_id = (
+          SELECT job_id FROM core.review_jobs
+            WHERE (state = 'ready'  AND run_after <= now())
+               OR (state = 'leased' AND leased_until < now() AND attempts < max_attempts)  -- maxed crashes are NOT reclaimed
+            ORDER BY priority DESC, run_after FOR UPDATE SKIP LOCKED LIMIT 1)
+      RETURNING *`.execute(this.db);
+    return r.rows[0] ? ReviewJobV1.parse(r.rows[0]) : null;
+  }
 }

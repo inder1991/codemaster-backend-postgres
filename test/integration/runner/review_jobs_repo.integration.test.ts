@@ -24,3 +24,26 @@ describeDb("ReviewJobsRepo.enqueue", () => {
     expect((await repo.getById(id))?.state).toBe("ready");
   });
 });
+
+describeDb("ReviewJobsRepo.claim", () => {
+  it("claims, mints a token, sets timeout_at; a 2nd claimer gets nothing", async () => {
+    const repo = new ReviewJobsRepo(db); const s = await seedRun(db); await repo.enqueue(s);
+    const c = await repo.claim({ owner: "w1", leaseMs: 1000, maxRuntimeMs: 60_000 });
+    expect(c?.attempt_token).toBeTruthy(); expect(c?.attempts).toBe(1);
+    expect((c as any).timeout_at).toBeTruthy();
+    expect(await repo.claim({ owner: "w2", leaseMs: 1000, maxRuntimeMs: 60_000 })).toBeNull();
+  });
+  it("reclaims an expired lease with a NEW token while attempts remain", async () => {
+    const repo = new ReviewJobsRepo(db); const s = await seedRun(db); await repo.enqueue({ ...s, maxAttempts: 3 });
+    const c1 = await repo.claim({ owner: "w1", leaseMs: 1, maxRuntimeMs: 60_000 });
+    await new Promise((r) => setTimeout(r, 50));
+    const c2 = await repo.claim({ owner: "w2", leaseMs: 1000, maxRuntimeMs: 60_000 });
+    expect(c2?.job_id).toBe(c1!.job_id); expect(c2!.attempt_token).not.toBe(c1!.attempt_token); expect(c2!.attempts).toBe(2);
+  });
+  it("does NOT reclaim an expired lease whose attempts are exhausted (v3 #2)", async () => {
+    const repo = new ReviewJobsRepo(db); const s = await seedRun(db); await repo.enqueue({ ...s, maxAttempts: 1 });
+    await repo.claim({ owner: "w1", leaseMs: 1, maxRuntimeMs: 60_000 }); // attempts → 1 (== max)
+    await new Promise((r) => setTimeout(r, 50));                          // lease expires; worker "crashed"
+    expect(await repo.claim({ owner: "w2", leaseMs: 1000, maxRuntimeMs: 60_000 })).toBeNull(); // not re-run
+  });
+});
