@@ -61,6 +61,7 @@ type DoPost = (
     dsn: string;
     clock?: FakeClock;
     inFlightWindowSeconds?: number;
+    sameRunTakeover?: boolean;
   },
 ) => Promise<PostedReviewV1>;
 type MarkerFor = (prId: string) => string;
@@ -204,6 +205,16 @@ async function readPostedRow(prId: string): Promise<
   return res.rows[0];
 }
 
+/** Pre-seed the Phase-1 claim-row shape: an OWNED posted_reviews row with github_review_id NULL +
+ *  publication_outcome='degraded_unposted' (the exact state after a crash between claim and Phase-2). A
+ *  re-run loses the ON CONFLICT claim → enters the lost-claim NULL-row branch → the W3.2 takeover. */
+async function seedNullClaimRow(prId: string): Promise<void> {
+  await pool.query(
+    `INSERT INTO core.posted_reviews (pr_id, marker, posted_at) VALUES ($1, $2, now())`,
+    [prId, `<!-- codemaster:review-marker:${prId} -->`],
+  );
+}
+
 // ─── fixtures ────────────────────────────────────────────────────────────────────────────────────
 
 const FILE_IN_DIFF = "src/app.ts";
@@ -287,20 +298,41 @@ function makeInput(args: {
 // ─── scripted stub GhReviewClient ────────────────────────────────────────────────────────────────
 
 type StubScript = {
-  createReview?: Array<CreatedReviewV1>;
+  createReview?: Array<CreatedReviewV1 | (() => CreatedReviewV1)>;
+  /** Scripted return for findExistingReviewByMarker (W3.2 takeover). Default: null (no remote review). */
+  findExistingReviewByMarker?: number | null;
+  /** Scripted comment ids for listReviewComments (W3.2 takeover recovery). Default: []. */
+  reviewComments?: Array<number>;
+  /** W3.2 racer hook: invoked AFTER the marker search, BEFORE the takeover CAS, so the test can simulate
+   *  another writer winning the row (sets github_review_id between the lost-claim SELECT and the CAS). */
+  beforeCas?: () => Promise<void>;
 };
 
 type StubCalls = {
   createReview: Array<{ comments: ReadonlyArray<ReviewComment> }>;
   updateReview: Array<{ reviewId: number; body: string }>;
+  findExistingReviewByMarker: Array<{ marker: string }>;
+  listReviewComments: Array<{ reviewId: number }>;
 };
 
 function makeStub(script: StubScript): { client: GhReviewClient; calls: StubCalls } {
   const createSeq = [...(script.createReview ?? [])];
-  const calls: StubCalls = { createReview: [], updateReview: [] };
+  const calls: StubCalls = {
+    createReview: [],
+    updateReview: [],
+    findExistingReviewByMarker: [],
+    listReviewComments: [],
+  };
   const client: GhReviewClient = {
-    async findExistingReviewByMarker() {
-      return null;
+    async findExistingReviewByMarker({ marker }) {
+      calls.findExistingReviewByMarker.push({ marker });
+      // The racer hook fires right after the marker search (the takeover reads the marker, then the racer
+      // wins the row, then the takeover CAS finds 0 rows). Modelled here because doPost calls the marker
+      // search immediately before the CAS.
+      if (script.beforeCas) {
+        await script.beforeCas();
+      }
+      return script.findExistingReviewByMarker ?? null;
     },
     async createReview({ comments }) {
       calls.createReview.push({ comments });
@@ -308,10 +340,14 @@ function makeStub(script: StubScript): { client: GhReviewClient; calls: StubCall
       if (next === undefined) {
         throw new Error("stub createReview called more times than scripted");
       }
-      return next;
+      return typeof next === "function" ? next() : next;
     },
     async updateReview({ reviewId, body }) {
       calls.updateReview.push({ reviewId, body });
+    },
+    async listReviewComments({ reviewId }) {
+      calls.listReviewComments.push({ reviewId });
+      return [...(script.reviewComments ?? [])];
     },
     async createIssueComment() {
       throw new Error("not used in this test");
@@ -440,5 +476,164 @@ describeDb("post_review_results doPost — durable comment_ids re-run recovery (
 
     await provider.forceFlush();
     expect(sumFor(REPAIR_NEEDED_NAME)).toBe(0);
+  });
+});
+
+// ─── W3.2 (E7 + v3-F1): same-run takeover WITH remote-recovery on the NULL-row path ─────────────────
+//
+// A NULL github_review_id row means EITHER (i) createReview never ran (claim taken, crash before create)
+// OR (ii) createReview SUCCEEDED but the DB UPDATE crashed before storing the id. Blindly re-creating
+// handles (i) but DOUBLE-POSTS a second GitHub review in (ii). So sameRunTakeover FIRST recovers from
+// GitHub by marker, and creates ONLY when no matching remote review exists. The takeover also bypasses
+// the 300s IN_FLIGHT_WINDOW (a freshly-seeded NULL row is < window age) because in the runner world the
+// re-run IS the retry of the crashed self.
+describeDb("post_review_results doPost — same-run takeover w/ remote-recovery (W3.2 / E7 / v3-F1)", () => {
+  let seed: Seed;
+
+  beforeEach(async () => {
+    seed = await seedTenant();
+  });
+
+  afterEach(async () => {
+    await cleanupTenant(seed);
+  });
+
+  it("(a) create-never-ran: marker finds nothing → re-creates, exactly ONE createReview total", async () => {
+    // Phase-1 claim row exists (NULL github_review_id), createReview never ran. Re-run loses the claim →
+    // lost-claim NULL branch → takeover: marker search finds nothing → re-create lands the review.
+    await seedNullClaimRow(seed.prId);
+
+    const created: CreatedReviewV1 = { reviewId: 4242, commentIds: [7001, 7002] };
+    const { client, calls } = makeStub({
+      createReview: [created],
+      findExistingReviewByMarker: null, // no remote review exists yet
+    });
+    const input = makeInput({
+      seed,
+      findings: [finding({ start_line: 10, end_line: 10 }), finding({ start_line: 20, end_line: 20 })],
+    });
+
+    const result = await doPost(input, {
+      ghClient: client,
+      dsn: INTEGRATION_DSN!,
+      clock: FIXED_CLOCK,
+      sameRunTakeover: true,
+    });
+
+    // Marker searched, found nothing → re-created exactly once. ZERO listReviewComments (no remote review).
+    expect(calls.findExistingReviewByMarker.length).toBe(1);
+    expect(calls.createReview.length).toBe(1);
+    expect(calls.listReviewComments.length).toBe(0);
+    expect(result.review_id).toBe(4242);
+    expect(result.comment_ids).toEqual([7001, 7002]);
+    expect(result.publication_outcome).toBe("inline_posted");
+
+    // The row was CAS-flipped from the NULL claim to the created review.
+    const row = await readPostedRow(seed.prId);
+    expect(Number(row!.github_review_id)).toBe(4242);
+    expect(row!.comment_ids).toEqual([7001, 7002]);
+    expect(row!.publication_outcome).toBe("inline_posted");
+  });
+
+  it("(b) v3-F1 create-succeeded-DB-crashed: marker finds 999 → recovers id + comment_ids, ZERO new createReview", async () => {
+    // createReview SUCCEEDED on the crashed run (remote review 999 + 3 comment ids) but the row UPDATE was
+    // skipped, so github_review_id is still NULL. Re-run with takeover → marker finds 999 → re-fetch its
+    // comment_ids → CAS-store. NO second createReview (the duplicate-review window is closed).
+    await seedNullClaimRow(seed.prId);
+
+    const { client, calls } = makeStub({
+      // createReview MUST NOT be called — script empty so a stray call throws.
+      findExistingReviewByMarker: 999, // the orphaned remote review the crashed run created
+      reviewComments: [8001, 8002, 8003], // its 3 inline comment ids, recovered via GET /reviews/999/comments
+    });
+    const input = makeInput({
+      seed,
+      findings: [
+        finding({ start_line: 10, end_line: 10 }),
+        finding({ start_line: 20, end_line: 20 }),
+        finding({ start_line: 30, end_line: 30 }),
+      ],
+    });
+
+    const result = await doPost(input, {
+      ghClient: client,
+      dsn: INTEGRATION_DSN!,
+      clock: FIXED_CLOCK,
+      sameRunTakeover: true,
+    });
+
+    expect(calls.findExistingReviewByMarker.length).toBe(1);
+    expect(calls.listReviewComments.length).toBe(1); // GET /reviews/999/comments
+    expect(calls.listReviewComments[0]!.reviewId).toBe(999);
+    expect(calls.createReview.length).toBe(0); // ZERO new createReview — no duplicate review
+    expect(calls.updateReview.length).toBe(0); // recovered directly via CAS, not the lost-claim update path
+    expect(result.review_id).toBe(999);
+    expect(result.comment_ids).toEqual([8001, 8002, 8003]);
+
+    // The row carries the recovered 999 + its comment ids (CAS-stored).
+    const row = await readPostedRow(seed.prId);
+    expect(Number(row!.github_review_id)).toBe(999);
+    expect(row!.comment_ids).toEqual([8001, 8002, 8003]);
+    expect(row!.publication_outcome).toBe("inline_posted");
+  });
+
+  it("(c) racer: another writer sets github_review_id between read and CAS → 0-row CAS → lost-claim update", async () => {
+    // The takeover reads the NULL row, marker finds remote review 999, but a RACER wins the row first (sets
+    // github_review_id=777 + inline_posted). The CAS (WHERE github_review_id IS NULL) matches 0 rows → fall
+    // through to the lost-claim update path: updateReview on the racer's 777, return the racer's comment_ids.
+    await seedNullClaimRow(seed.prId);
+
+    const { client, calls } = makeStub({
+      findExistingReviewByMarker: 999,
+      reviewComments: [8001], // would be recovered IF the CAS won — but the racer pre-empts it
+      beforeCas: async () => {
+        // Simulate the racer winning the row before our CAS lands.
+        await pool.query(
+          `UPDATE core.posted_reviews
+              SET github_review_id = 777, publication_outcome = 'inline_posted',
+                  comment_ids = '[5001, 5002]'::jsonb, updated_at = now()
+            WHERE pr_id = $1`,
+          [seed.prId],
+        );
+      },
+    });
+    const input = makeInput({ seed, findings: [finding({ start_line: 10, end_line: 10 })] });
+
+    const result = await doPost(input, {
+      ghClient: client,
+      dsn: INTEGRATION_DSN!,
+      clock: FIXED_CLOCK,
+      sameRunTakeover: true,
+    });
+
+    // Marker found 999 + the CAS was attempted (0 rows) → fell through to the lost-claim update path.
+    expect(calls.createReview.length).toBe(0); // NEVER blindly re-create
+    expect(calls.updateReview.length).toBe(1); // lost-claim update path on the racer's review
+    expect(calls.updateReview[0]!.reviewId).toBe(777);
+    expect(result.was_update).toBe(true);
+    expect(result.review_id).toBe(777);
+    expect(result.comment_ids).toEqual([5001, 5002]); // the racer's stored ids, recovered by the lost-claim read
+
+    // The racer's row is intact (the loser's CAS never touched it).
+    const row = await readPostedRow(seed.prId);
+    expect(Number(row!.github_review_id)).toBe(777);
+    expect(row!.comment_ids).toEqual([5001, 5002]);
+  });
+
+  it("default (no sameRunTakeover): NULL-row within window still RAISES (Temporal path byte-identical)", async () => {
+    // Without the flag, a fresh NULL claim row (< 300s) is treated as a legitimate in-flight winner → the
+    // lost-claim path raises PostReviewTransientError. This pins that the takeover is OPT-IN only.
+    await seedNullClaimRow(seed.prId);
+
+    const { client, calls } = makeStub({ findExistingReviewByMarker: 999 });
+    const input = makeInput({ seed, findings: [finding({ start_line: 10, end_line: 10 })] });
+
+    await expect(
+      doPost(input, { ghClient: client, dsn: INTEGRATION_DSN!, clock: FIXED_CLOCK }),
+    ).rejects.toThrow(/still NULL/);
+
+    // The marker was NEVER searched on the default path (no takeover).
+    expect(calls.findExistingReviewByMarker.length).toBe(0);
+    expect(calls.createReview.length).toBe(0);
   });
 });

@@ -278,6 +278,10 @@ function makeStub(script: StubScript): { client: GhReviewClient; calls: StubCall
       calls.findExistingReviewByMarker += 1;
       return null;
     },
+    async listReviewComments() {
+      // W3.2 takeover recovery — never exercised on the default (no sameRunTakeover) Temporal path.
+      throw new Error("listReviewComments not used in this test");
+    },
     async createReview({ comments }) {
       calls.createReview.push({ comments });
       const next = createSeq.shift();

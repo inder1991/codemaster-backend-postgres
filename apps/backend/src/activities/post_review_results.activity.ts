@@ -56,7 +56,7 @@
  * it with a disposable PG + a stub client.
  */
 
-import { sql, type Transaction } from "kysely";
+import { type Kysely, sql, type Transaction } from "kysely";
 
 import { ApplicationFailure } from "@temporalio/common";
 
@@ -719,6 +719,128 @@ export async function attemptCreateWithBodyOnlyFallback(args: {
   }
 }
 
+// ─── W3.2 / E7 / v3-F1: same-run takeover on the lost-claim NULL-row path ────────────────────────
+
+/** Result of {@link attemptSameRunTakeover}:
+ *  - `recovered`: a remote review was recovered-by-marker OR re-created, and the CAS landed (1 row) →
+ *    the caller returns an update-style envelope with the recovered review id + comment ids.
+ *  - `degraded`: the re-create double-422'd → the caller returns DEGRADED_UNPOSTED.
+ *  - `raced`: a racer set `github_review_id` between the lost-claim read and the CAS (0-row CAS) → the
+ *    caller re-reads the row and falls through to the normal lost-claim UPDATE path. */
+type SameRunTakeover =
+  | {
+      kind: "recovered";
+      reviewId: number;
+      commentIds: ReadonlyArray<number>;
+      outcome: PublicationOutcome;
+      degradationNotes: ReadonlyArray<string>;
+    }
+  | { kind: "degraded"; degradationNotes: ReadonlyArray<string> }
+  | { kind: "raced" };
+
+/**
+ * The same-run takeover ladder. IN ORDER (W3.2 / v3-F1): (1) scan GitHub by marker (paginated) to recover
+ * an orphaned review a crashed self may have created; (2) on a hit re-fetch its comment ids and CAS-store;
+ * (3) ONLY when no remote review exists re-attempt createReview, then the same CAS. The CAS
+ * (`WHERE pr_id = … AND github_review_id IS NULL`) fences a racer — a 0-row result means the racer won, so
+ * we never overwrite a published row. NEVER blindly re-creates: the marker scan closes the duplicate-review
+ * window (createReview succeeded but the DB UPDATE crashed) that blind re-creation would re-open.
+ */
+async function attemptSameRunTakeover(args: {
+  db: Kysely<unknown>;
+  ghClient: GhReviewClient;
+  owner: string;
+  repoName: string;
+  prNumber: number;
+  body: string;
+  headSha: string;
+  inlinePayload: ReadonlyArray<ReviewComment>;
+  keptFindings: ReadonlyArray<ReviewFindingV1>;
+  marker: string;
+  prMeta: PrMetaV1;
+}): Promise<SameRunTakeover> {
+  const { db, ghClient, owner, repoName, prNumber, body, headSha, inlinePayload, marker, prMeta } =
+    args;
+
+  // (1) Recover an orphaned remote review by marker (paginated — our marker must not hide behind >30
+  //     other reviews, else we'd re-create a duplicate).
+  const remoteReviewId = await ghClient.findExistingReviewByMarker({
+    owner,
+    repo: repoName,
+    prNumber,
+    marker,
+  });
+
+  let reviewId: number;
+  let commentIds: ReadonlyArray<number>;
+  let outcome: PublicationOutcome;
+  let degradationNotes: ReadonlyArray<string> = [];
+
+  if (remoteReviewId !== null) {
+    // (2) The crashed self DID create the review. Recover its comment ids — NO second createReview.
+    commentIds = await ghClient.listReviewComments({
+      owner,
+      repo: repoName,
+      prNumber,
+      reviewId: remoteReviewId,
+    });
+    reviewId = remoteReviewId;
+    // A recovered review with inline comments is inline_posted; a body-only one is body_only_posted. We
+    // do NOT re-assert commentIds.length === keptFindings.length here: this is RECOVERY of a prior post,
+    // not a fresh post — the diff window may have shifted between the crashed run and this re-run.
+    outcome =
+      commentIds.length > 0
+        ? PublicationOutcome.enum.inline_posted
+        : PublicationOutcome.enum.body_only_posted;
+  } else {
+    // (3) No remote review exists → the crashed self never created it → re-attempt the create (with the
+    //     same inline→body-only 422 ladder the won-claim path uses). A double-422 → DEGRADED.
+    const attempt = await attemptCreateWithBodyOnlyFallback({
+      ghClient,
+      owner,
+      repoName,
+      prNumber,
+      body,
+      headSha,
+      inlinePayload,
+      prMeta,
+    });
+    if (attempt.created === null) {
+      return { kind: "degraded", degradationNotes: [...attempt.degradationNotes] };
+    }
+    reviewId = attempt.created.reviewId;
+    commentIds = attempt.created.commentIds;
+    outcome = attempt.inlineSucceeded
+      ? PublicationOutcome.enum.inline_posted
+      : PublicationOutcome.enum.body_only_posted;
+    degradationNotes = [...attempt.degradationNotes];
+  }
+
+  // CAS-fence the racer: store the recovered/created review id + comment ids + outcome ONLY if the row is
+  // still NULL. A racer that won between our lost-claim read and here makes this match 0 rows.
+  const commentIdsJson = JSON.stringify([...commentIds]);
+  // tenant:exempt reason=posted-reviews-keyed-by-pr-id-pk follow_up=FOLLOW-UP-gf3-error-mode
+  const cas = await sql<{ pr_id: string }>`
+    UPDATE core.posted_reviews
+       SET github_review_id = ${reviewId},
+           publication_outcome = ${outcome},
+           comment_ids = CAST(${commentIdsJson} AS jsonb),
+           updated_at = now()
+     WHERE pr_id = ${prMeta.pr_id}
+       AND github_review_id IS NULL
+    RETURNING pr_id
+  `.execute(db);
+
+  if (cas.rows[0] === undefined) {
+    // 0-row CAS — a racer published first. We must NOT have re-created (we only reach the create branch
+    // when the marker found nothing AND the row was NULL at read time; a racer that creates a second
+    // review would itself have lost the same CAS — see the test's racer scenario which forces the
+    // marker-found branch so no duplicate create happens). Fall through to the lost-claim update path.
+    return { kind: "raced" };
+  }
+  return { kind: "recovered", reviewId, commentIds, outcome, degradationNotes };
+}
+
 // ─── best-effort OTel counters (publication outcome + drop reasons) ──────────────────────────────
 // 1:1 with `record_post_review_publication_total` / `record_findings_dropped_outside_diff`. Best-effort:
 // failures are swallowed; the activity NEVER blocks on observability. Counters are emitted INLINE (NOT
@@ -876,6 +998,16 @@ export type DoPostDeps = {
   clock?: Clock;
   /** Override the IN_FLIGHT_WINDOW (seconds). Defaults to {@link IN_FLIGHT_WINDOW_SECONDS_DEFAULT}. */
   inFlightWindowSeconds?: number;
+  /**
+   * W3.2 / E7 / v3-F1 — same-run takeover. Default `false` keeps the Temporal path BYTE-IDENTICAL (the
+   * window heuristic assumes the prior NULL-row owner is a DIFFERENT execution). When `true` (the runner
+   * shell passes this), a lost-claim + NULL-`github_review_id` row is treated as OUR OWN crashed self:
+   * the takeover bypasses the IN_FLIGHT_WINDOW and, IN ORDER, (1) scans GitHub by marker (paginated) to
+   * recover an orphaned review the crashed self may have created, (2) on a hit re-fetches its comment ids
+   * and CAS-stores them, (3) ONLY when no remote review exists re-attempts createReview then the same
+   * CAS. A 0-row CAS (a racer won) falls through to the lost-claim update path. NEVER blindly re-creates.
+   */
+  sameRunTakeover?: boolean;
 };
 
 /**
@@ -1182,15 +1314,90 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
     );
   }
 
-  // github_review_id is bigint → pg may surface it as a string; normalize to number | null.
-  const githubReviewId: number | null =
+  // github_review_id is bigint → pg may surface it as a string; normalize to number | null. `let`
+  // because the W3.2 takeover may refresh these from the row after a racer wins the CAS (fall-through).
+  let githubReviewId: number | null =
     row.github_review_id === null ? null : Number(row.github_review_id);
   const ageSeconds: number = Number(row.age_seconds ?? 0);
-  const persistedOutcomeStr: string | null = row.publication_outcome;
+  let persistedOutcomeStr: string | null = row.publication_outcome;
   // D4 (W3.1): the winner's durable comment_ids. The JSONB-read idiom returns `comment_ids::text`; parse
   // it to the int[] the lost-claim caller returns for inline lifecycle finalization (NEVER re-fetch from
   // GitHub as the primary truth). Defensive fallback to [] on a NULL/malformed value.
-  const storedCommentIds: Array<number> = parseStoredCommentIds(row.comment_ids);
+  let storedCommentIds: Array<number> = parseStoredCommentIds(row.comment_ids);
+
+  // ── W3.2 / E7 / v3-F1: same-run takeover on the NULL-row path. ──
+  // A NULL github_review_id means EITHER (i) createReview never ran OR (ii) it SUCCEEDED but the row
+  // UPDATE crashed before storing the id. Blindly re-creating handles (i) but DOUBLE-POSTS in (ii). So
+  // the takeover FIRST recovers an orphaned remote review by marker (paginated), and creates ONLY when
+  // none exists — then CAS-fences a racer. It is OPT-IN (runner shell only); the default Temporal path
+  // skips it entirely (byte-identical). assertCurrentRun already passed for OUR run_id in the Phase-1
+  // claim transaction above (it runs unconditionally before the ON CONFLICT — a mismatch would have
+  // thrown before reaching either the won or lost branch), so reaching here = the takeover is for us.
+  if (githubReviewId === null && deps.sameRunTakeover === true) {
+    const takeover = await attemptSameRunTakeover({
+      db,
+      ghClient,
+      owner,
+      repoName,
+      prNumber,
+      body,
+      headSha,
+      inlinePayload,
+      keptFindings,
+      marker,
+      prMeta,
+    });
+    if (takeover.kind === "recovered") {
+      // The CAS landed (1 row): the row now carries the recovered/created review id + comment ids. Return
+      // an UPDATE-style envelope (was_update=true — the inline comments already exist remotely; the body
+      // refresh is implicit) so the lifecycle finalizer pairs rfids with the recovered comment ids.
+      recordPublicationOutcome(prMeta, takeover.outcome);
+      return PostedReviewV1.parse({
+        review_id: takeover.reviewId,
+        marker_comment_id: null,
+        was_update: true,
+        inline_comment_count: takeover.commentIds.length,
+        comment_ids: takeover.commentIds,
+        kept_finding_indices: keptIndices,
+        publication_outcome: takeover.outcome,
+        degradation_notes: takeover.degradationNotes,
+        dropped_classifications: droppedClassifications,
+      });
+    }
+    if (takeover.kind === "degraded") {
+      // Double-422 on the re-create → DEGRADED_UNPOSTED, mirroring the won-path double-422 return. The
+      // row stays NULL (the degraded marker); ownership preserved.
+      recordPublicationOutcome(prMeta, PublicationOutcome.enum.degraded_unposted);
+      return PostedReviewV1.parse({
+        review_id: null,
+        marker_comment_id: null,
+        was_update: false,
+        inline_comment_count: 0,
+        kept_finding_indices: keptIndices,
+        publication_outcome: PublicationOutcome.enum.degraded_unposted,
+        degradation_notes: takeover.degradationNotes,
+        dropped_classifications: droppedClassifications,
+      });
+    }
+    // kind === "raced": a racer set github_review_id between our read and the CAS (0-row CAS). Re-read the
+    // now-published row and fall through to the lost-claim UPDATE path with the racer's id + comment ids.
+    // tenant:exempt reason=posted-reviews-keyed-by-pr-id-pk follow_up=FOLLOW-UP-gf3-error-mode
+    const refreshed = await sql<{
+      github_review_id: string | number | null;
+      publication_outcome: string | null;
+      comment_ids: string | null;
+    }>`
+      SELECT github_review_id, publication_outcome, comment_ids::text AS comment_ids
+        FROM core.posted_reviews
+       WHERE pr_id = ${prMeta.pr_id}
+    `.execute(db);
+    const r = refreshed.rows[0];
+    if (r !== undefined) {
+      githubReviewId = r.github_review_id === null ? null : Number(r.github_review_id);
+      persistedOutcomeStr = r.publication_outcome;
+      storedCommentIds = parseStoredCommentIds(r.comment_ids);
+    }
+  }
 
   if (githubReviewId === null) {
     // v7-A3: disambiguate in-flight from terminal-degraded by row age. Within window → legitimate winner

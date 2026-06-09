@@ -17,14 +17,16 @@
  * ## Idempotency complement
  *
  * `findExistingReviewByMarker` is the GitHub-side dedupe path; it complements (rather than replaces)
- * Sprint-14.D's `core.posted_reviews` atomic claim in `_do_post` (the actual TOCTOU fix). v1
- * single-page lookup is sufficient because the DB-side claim prevents duplicates regardless of how
- * thoroughly we scan GitHub.
+ * Sprint-14.D's `core.posted_reviews` atomic claim in `_do_post` (the actual TOCTOU fix). The W3.2
+ * same-run takeover (v3-F1) promotes it to the RECOVERY oracle for the "createReview succeeded but the
+ * DB UPDATE crashed" window, so it now PAGINATES (follows `Link: rel="next"`) — our marker must not be
+ * missed behind >30 other reviews, otherwise the takeover would double-post a second review.
  *
  * ## Exact REST endpoints (byte-ported from the Python concrete impl)
  *
  *   - findExistingReviewByMarker → GET  /repos/{owner}/{repo}/pulls/{prNumber}/reviews
- *       First page only (GitHub's default per_page=30). Returns the id of the FIRST review whose `body`
+ *       PAGINATED (W3.2): the first request is the bare path (byte-identical to v1); subsequent pages
+ *       follow `Link: rel="next"` up to a page cap. Returns the id of the FIRST review whose `body`
  *       CONTAINS `marker`; reviews with `body: null` are skipped. Else null.
  *   - createReview → POST /repos/{owner}/{repo}/pulls/{prNumber}/reviews
  *       Body: { commit_id, body, event: "COMMENT", comments }. Parses `review_id` from the response id.
@@ -49,10 +51,22 @@
  * {@link GitHubApiClient} + a fixed `installationId`.
  */
 
-import { type GitHubApiClient, type GitHubHttpResponse } from "#backend/integrations/github/api_client.js";
+import {
+  extractNextLink,
+  type GitHubApiClient,
+  type GitHubHttpResponse,
+} from "#backend/integrations/github/api_client.js";
 
 // CLAUDE.md invariant 9 — locked here so the type stays event-free.
 export const REVIEW_EVENT = "COMMENT";
+
+/**
+ * Hard cap on the number of `/pulls/{n}/reviews` pages the marker scan will walk before giving up. A PR
+ * with >100×{@link MARKER_SCAN_MAX_PAGES} reviews is pathological; the cap bounds the worst case so a
+ * runaway Link chain (or a server that never drops `rel="next"`) cannot spin forever. The first page is
+ * always fetched at the bare path (no query string) so the single-page wire stays byte-identical.
+ */
+const MARKER_SCAN_MAX_PAGES = 20;
 
 /**
  * Return envelope for {@link GhReviewClient.createReview} — the 1:1 analogue of the Python
@@ -90,8 +104,12 @@ export type ReviewComment = Record<string, unknown>;
  */
 export type GhReviewClient = {
   /**
-   * Returns the id of the first review (on page 1) whose body CONTAINS `marker`, or null when none
-   * match. Reviews with a null body are skipped. v1 inspects the FIRST page only (default per_page=30).
+   * Returns the id of the first review whose body CONTAINS `marker`, or null when none match. Reviews
+   * with a null/empty body are skipped. PAGINATED (W3.2): follows GitHub's `Link: rel="next"` across up
+   * to {@link MARKER_SCAN_MAX_PAGES} pages so our marker isn't missed behind >30 other reviews — the
+   * same-run takeover (W3.2/E7/v3-F1) relies on this to recover an orphaned remote review created by a
+   * crashed self before it would otherwise blindly re-create (double-post). The FIRST page is fetched at
+   * the bare path so the single-page wire stays byte-identical to v1.
    */
   findExistingReviewByMarker(args: {
     owner: string;
@@ -99,6 +117,20 @@ export type GhReviewClient = {
     prNumber: number;
     marker: string;
   }): Promise<number | null>;
+
+  /**
+   * GET the inline comment ids of an EXISTING review, in submission (id-ascending) order — the recovery
+   * oracle for the W3.2 takeover's "createReview succeeded but the DB UPDATE crashed" window: the marker
+   * scan recovers the review id, then this re-fetches its comment ids so they can be CAS-stored on
+   * `core.posted_reviews.comment_ids` WITHOUT a second createReview. Mirrors the follow-up GET that
+   * {@link createReview} already issues after a fresh POST.
+   */
+  listReviewComments(args: {
+    owner: string;
+    repo: string;
+    prNumber: number;
+    reviewId: number;
+  }): Promise<ReadonlyArray<number>>;
 
   /**
    * POST a new review (event ALWAYS "COMMENT"); returns {@link CreatedReviewV1}. When `comments` is
@@ -147,6 +179,17 @@ function jsonOf(resp: GitHubHttpResponse): unknown {
   return JSON.parse(resp.body_text ?? "{}");
 }
 
+/** Case-insensitive header lookup (GitHub may lowercase header names) — local twin of the api_client's
+ *  non-exported `header`, used by the paginated marker scan to read the `Link` header. Iterates entries
+ *  (no bracket-index sink) since `name` is a fixed literal at every call site. */
+function headerOf(headers: Record<string, string>, name: string): string | undefined {
+  const lower = name.toLowerCase();
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === lower) return v;
+  }
+  return undefined;
+}
+
 /**
  * Production {@link GhReviewClient}: implements the 6 methods over an injected {@link GitHubApiClient}.
  * 1:1 with the Python `GhReviewHttpClient`.
@@ -174,20 +217,49 @@ export class GitHubApiReviewClient implements GhReviewClient {
     prNumber: number;
     marker: string;
   }): Promise<number | null> {
-    const resp = await this.api.get(`/repos/${owner}/${repo}/pulls/${prNumber}/reviews`, {
-      installationId: this.installationId,
-    });
-    const body = jsonOf(resp) as Array<Record<string, unknown>>;
-    for (const review of body) {
-      const reviewBody = review["body"];
-      // Mirror Python's `if review_body and marker in review_body`: a falsy (empty-string or null)
-      // body is skipped. The `!== ""` guard makes the truthiness byte-exact (only observable when the
-      // marker is "" — never in production, where the marker is a non-empty literal — but kept faithful).
-      if (typeof reviewBody === "string" && reviewBody !== "" && reviewBody.includes(marker)) {
-        return Number(review["id"]);
+    // W3.2: paginate via GitHub's `Link: rel="next"` header. The FIRST request stays at the bare path
+    // (no query string) so the single-page wire is byte-identical to v1; subsequent pages follow the
+    // server-provided next link verbatim (extractNextLink returns a relative path the api client
+    // re-prepends the base url to). Bounded by MARKER_SCAN_MAX_PAGES so a never-ending chain can't spin.
+    let path: string | null = `/repos/${owner}/${repo}/pulls/${prNumber}/reviews`;
+    for (let page = 0; path !== null && page < MARKER_SCAN_MAX_PAGES; page += 1) {
+      const resp: GitHubHttpResponse = await this.api.get(path, {
+        installationId: this.installationId,
+      });
+      const body = jsonOf(resp) as Array<Record<string, unknown>>;
+      for (const review of body) {
+        const reviewBody = review["body"];
+        // Mirror Python's `if review_body and marker in review_body`: a falsy (empty-string or null)
+        // body is skipped. The `!== ""` guard makes the truthiness byte-exact (only observable when the
+        // marker is "" — never in production, where the marker is a non-empty literal — but kept faithful).
+        if (typeof reviewBody === "string" && reviewBody !== "" && reviewBody.includes(marker)) {
+          return Number(review["id"]);
+        }
       }
+      path = extractNextLink(headerOf(resp.headers, "Link"));
     }
     return null;
+  }
+
+  public async listReviewComments({
+    owner,
+    repo,
+    prNumber,
+    reviewId,
+  }: {
+    owner: string;
+    repo: string;
+    prNumber: number;
+    reviewId: number;
+  }): Promise<ReadonlyArray<number>> {
+    // Same follow-up GET createReview issues after a fresh POST — GitHub returns the inline comments
+    // id-ascending == submission order, so the ids align with the original payload order.
+    const resp = await this.api.get(
+      `/repos/${owner}/${repo}/pulls/${prNumber}/reviews/${reviewId}/comments`,
+      { installationId: this.installationId },
+    );
+    const commentsJson = jsonOf(resp) as Array<Record<string, unknown>>;
+    return commentsJson.map((c) => Number(c["id"]));
   }
 
   public async createReview({

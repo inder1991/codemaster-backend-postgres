@@ -57,6 +57,48 @@ function okJson(body: unknown): GitHubHttpResponse {
   return { status: 200, headers: {}, body_text: JSON.stringify(body) };
 }
 
+/** A 200 carrying a `Link: rel="next"` header (W3.2 pagination) pointing at `nextPath` (a relative path,
+ *  the shape GitHub emits after the api client's host-strip). */
+function okJsonWithNext(body: unknown, nextPath: string): GitHubHttpResponse {
+  return {
+    status: 200,
+    headers: { Link: `<https://api.github.com${nextPath}>; rel="next"` },
+    body_text: JSON.stringify(body),
+  };
+}
+
+/** A recording transport that returns DISTINCT responses per call (no overflow-clamp), so a paginated
+ *  scan walks page 1 → page 2 → … in order and a stray extra request surfaces as an error. */
+function strictRecordingTransport(responses: ReadonlyArray<GitHubHttpResponse>): {
+  http: GitHubHttpClient;
+  requests: Array<GitHubHttpRequestArgs>;
+} {
+  const requests: Array<GitHubHttpRequestArgs> = [];
+  let i = 0;
+  const http: GitHubHttpClient = {
+    request(args: GitHubHttpRequestArgs): Promise<GitHubHttpResponse> {
+      requests.push(args);
+      const resp = responses[i];
+      if (resp === undefined) {
+        return Promise.reject(new Error(`unexpected request #${i + 1}: ${args.method} ${args.url}`));
+      }
+      i += 1;
+      return Promise.resolve(resp);
+    },
+  };
+  return { http, requests };
+}
+
+function strictClient(responses: ReadonlyArray<GitHubHttpResponse>): {
+  client: GitHubApiReviewClient;
+  requests: Array<GitHubHttpRequestArgs>;
+} {
+  const { http, requests } = strictRecordingTransport(responses);
+  const api = new GitHubApiClient({ tokenProvider, http, clock: new FakeClock() });
+  const client = new GitHubApiReviewClient({ api, installationId: INSTALLATION_ID });
+  return { client, requests };
+}
+
 const tokenProvider: TokenProvider = () => Promise.resolve("tok");
 const INSTALLATION_ID = 555;
 
@@ -119,6 +161,92 @@ describe("GitHubApiReviewClient — findExistingReviewByMarker (exact REST wire)
       marker: "<!-- codemaster:marker -->",
     });
     expect(id).toBeNull();
+  });
+
+  it("W3.2 — PAGINATES: page-1 has no match, follows Link rel=next to page 2 where the marker IS found", async () => {
+    const { client, requests } = strictClient([
+      okJsonWithNext(
+        [
+          { id: 1, body: "unrelated" },
+          { id: 2, body: null },
+        ],
+        "/repositories/9/pulls/42/reviews?page=2",
+      ),
+      okJson([{ id: 314, body: "header\n<!-- codemaster:marker -->\nfooter" }]),
+    ]);
+    const id = await client.findExistingReviewByMarker({
+      owner: "octo",
+      repo: "hello-world",
+      prNumber: 42,
+      marker: "<!-- codemaster:marker -->",
+    });
+    expect(id).toBe(314);
+    // TWO requests: the bare first page, then the server-provided next link verbatim.
+    expect(requests).toHaveLength(2);
+    expect(requests[0]!.url).toBe("https://api.github.com/repos/octo/hello-world/pulls/42/reviews");
+    expect(requests[1]!.url).toBe("https://api.github.com/repositories/9/pulls/42/reviews?page=2");
+  });
+
+  it("W3.2 — first page MATCH short-circuits: never fetches page 2 even when Link rel=next is present", async () => {
+    const { client, requests } = strictClient([
+      okJsonWithNext(
+        [{ id: 77, body: "<!-- codemaster:marker -->" }],
+        "/repositories/9/pulls/42/reviews?page=2",
+      ),
+      // page 2 response present but MUST NOT be requested (the strict transport would still serve it; the
+      // assertion is on requests.length).
+      okJson([{ id: 999, body: "<!-- codemaster:marker -->" }]),
+    ]);
+    const id = await client.findExistingReviewByMarker({
+      owner: "octo",
+      repo: "hello-world",
+      prNumber: 42,
+      marker: "<!-- codemaster:marker -->",
+    });
+    expect(id).toBe(77); // FIRST match wins (page 1), page 2 never fetched
+    expect(requests).toHaveLength(1);
+  });
+
+  it("W3.2 — no Link header → ONE request, byte-identical to the v1 single-page wire", async () => {
+    const { client, requests } = strictClient([okJson([{ id: 1, body: "no marker" }])]);
+    const id = await client.findExistingReviewByMarker({
+      owner: "octo",
+      repo: "hello-world",
+      prNumber: 42,
+      marker: "<!-- codemaster:marker -->",
+    });
+    expect(id).toBeNull();
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.url).toBe("https://api.github.com/repos/octo/hello-world/pulls/42/reviews");
+  });
+});
+
+describe("GitHubApiReviewClient — listReviewComments (W3.2 takeover recovery)", () => {
+  it("GET pulls/{n}/reviews/{id}/comments → comment ids in submission (id-ascending) order", async () => {
+    const { client, requests } = strictClient([okJson([{ id: 11 }, { id: 22 }, { id: 33 }])]);
+    const ids = await client.listReviewComments({
+      owner: "octo",
+      repo: "hello-world",
+      prNumber: 42,
+      reviewId: 999,
+    });
+    expect(ids).toEqual([11, 22, 33]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("GET");
+    expect(requests[0]!.url).toBe(
+      "https://api.github.com/repos/octo/hello-world/pulls/42/reviews/999/comments",
+    );
+  });
+
+  it("empty review (no inline comments) → []", async () => {
+    const { client } = strictClient([okJson([])]);
+    const ids = await client.listReviewComments({
+      owner: "octo",
+      repo: "hello-world",
+      prNumber: 42,
+      reviewId: 999,
+    });
+    expect(ids).toEqual([]);
   });
 });
 
