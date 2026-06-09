@@ -666,6 +666,10 @@ export async function registerAdminRoutes(
           // same value the service persisted; defensive '1' for the unreachable NULL branch.
           const sourceForWorkflow = gen.created_from_generation ?? 1;
           if (opts.temporal) {
+            // FOLLOW-UP-embedder-maintenance-worker: this PascalCase type string diverges from the Python
+            // wire name (snake_case "reembed_generation_workflow"). No TS consumer exists yet; when the
+            // embedder-maintenance worker lands it MUST register the workflow under the EXACT type string
+            // dispatched here — reconcile the casing to the Python snake_case at that point.
             await opts.temporal.dispatchWorkflow({
               workflowType: "ReembedGenerationWorkflow",
               workflowId: `reembed-generation-${gen.generation_id}`,
@@ -802,6 +806,9 @@ export async function registerAdminRoutes(
             .toISOString()
             .replace(/[-:]/g, "")
             .replace(/\.\d{3}Z$/, "Z");
+          // FOLLOW-UP-embedder-maintenance-worker: PascalCase here vs the Python snake_case wire name
+          // ("validate_generation_workflow"); no TS consumer yet — the future embedder-maintenance worker
+          // MUST register under the exact type string dispatched here (reconcile casing to snake_case then).
           await opts.temporal.dispatchWorkflow({
             workflowType: "ValidateGenerationWorkflow",
             workflowId: `validate-generation-${body.generation_id}-${ts}`,
@@ -980,6 +987,9 @@ export async function registerAdminRoutes(
           );
           // Dispatch the GC workflow ONLY after a successful service.gc() (which set gc_started_at).
           if (opts.temporal) {
+            // FOLLOW-UP-embedder-maintenance-worker: PascalCase here vs the Python snake_case wire name
+            // ("garbage_collect_generation_workflow"); no TS consumer yet — the future embedder-maintenance
+            // worker MUST register under the exact type string dispatched here (reconcile casing then).
             await opts.temporal.dispatchWorkflow({
               workflowType: "GarbageCollectGenerationWorkflow",
               workflowId: `gc-generation-${body.generation_id}`,
