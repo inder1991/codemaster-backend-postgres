@@ -1607,6 +1607,11 @@ export async function registerAdminRoutes(
       { preHandler: requireRole(["platform_owner", "super_admin"]) },
       async (request, reply) => {
         const integrationId = (request.params as { integration_id: string }).integration_id;
+        // 1:1 with the Python list_pages_route(integration_id: uuid.UUID): a malformed UUID is 422 BEFORE
+        // the repo call (FastAPI path-param coercion). Without this the bad string would 404/500 from the DB.
+        if (!UUID_RE.test(integrationId)) {
+          return reply.code(422).send({ detail: "integration_id must be a uuid" });
+        }
         const q = request.query as AdminQuery;
         const cursor = optStr(q.cursor);
         const pageSize = clampLimit(q.page_size, 50, 200);
@@ -1736,6 +1741,11 @@ export async function registerAdminRoutes(
       { preHandler: requireRole(["platform_owner", "super_admin"]) },
       async (request, reply) => {
         const integrationId = (request.params as { integration_id: string }).integration_id;
+        // 1:1 with the Python list_quarantined_chunks_route(integration_id: uuid.UUID): 422 on a malformed
+        // UUID BEFORE the repo call.
+        if (!UUID_RE.test(integrationId)) {
+          return reply.code(422).send({ detail: "integration_id must be a uuid" });
+        }
         const q = request.query as AdminQuery;
         const cursor = optStr(q.cursor);
         const pageSize = clampLimit(q.page_size, 50, 200);

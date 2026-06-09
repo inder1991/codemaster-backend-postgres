@@ -216,6 +216,36 @@ describeDb("confluence pages admin endpoints (disposable PG)", () => {
     }
   });
 
+  it("GET /pages — 422 for a malformed integration_id (Python uuid.UUID path-param parity)", async () => {
+    // 1:1 with the Python list_pages_route(integration_id: uuid.UUID): FastAPI rejects a malformed UUID
+    // with 422 BEFORE the repo call. Pre-fix the TS passed the bad string straight to the repo → 404.
+    const app = await makeApp();
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/admin/integrations/confluence-spaces/not-a-uuid/pages",
+        cookies: { [SESSION_COOKIE_NAME]: mintCookie("platform_owner") },
+      });
+      expect(res.statusCode).toBe(422);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("GET /quarantined-chunks — 422 for a malformed integration_id (Python uuid.UUID path-param parity)", async () => {
+    const app = await makeApp();
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/admin/integrations/confluence-spaces/not-a-uuid/quarantined-chunks",
+        cookies: { [SESSION_COOKIE_NAME]: mintCookie("platform_owner") },
+      });
+      expect(res.statusCode).toBe(422);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("POST /approval — 201 creates approval; then GET /pages shows approval_status='approved'", async () => {
     const app = await makeApp();
     try {
