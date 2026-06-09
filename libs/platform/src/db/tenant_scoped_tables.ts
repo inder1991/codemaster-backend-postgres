@@ -79,6 +79,7 @@ export const TENANT_SCOPED_TABLES: ReadonlySet<string> = new Set<string>([
   "core.repo_symbols",
   "core.repositories",
   "core.review_findings",
+  "core.review_jobs",
   "core.review_runs",
   "core.review_tool_runs",
   "core.role_grant_pending",
