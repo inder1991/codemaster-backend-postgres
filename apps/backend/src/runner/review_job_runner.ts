@@ -2,6 +2,15 @@ import type { Clock } from "#platform/clock.js";
 import type { ReviewJobsRepo } from "./review_jobs_repo.js";
 import type { ReviewJobV1 } from "#contracts/review_jobs.v1.js";
 import { cancellableSleep } from "./clock_async.js";
+import {
+  recordClaimLatencyMs,
+  recordHandlerDurationMs,
+  recordHeartbeatFailure,
+  recordJobOutcome,
+  recordLeaseSteal,
+  recordRetryAttempt,
+  recordStaleTokenWrite,
+} from "./runner_metrics.js";
 export type JobHandler = (job: ReviewJobV1, signal: AbortSignal) => Promise<void>;
 export type RunOutcome = "idle" | "done" | "failed" | "lease_lost";
 /** Sentinel the hard-runtime race resolves to when the handler overran `maxRuntimeS`. */
@@ -9,9 +18,13 @@ const HARD_TIMEOUT = Symbol("hard-timeout");
 export async function runOneJob(o: { repo: ReviewJobsRepo; clock: Clock; owner: string; leaseS: number;
   heartbeatS: number; maxRuntimeS: number; handler: JobHandler }): Promise<{ outcome: RunOutcome; jobId?: string }> {
   const leaseMs = o.leaseS * 1000;
+  const claimStart = o.clock.monotonic();
   const job = await o.repo.claim({ owner: o.owner, leaseMs, maxRuntimeMs: o.maxRuntimeS * 1000 });
-  if (!job) return { outcome: "idle" };
+  recordClaimLatencyMs((o.clock.monotonic() - claimStart) * 1000);
+  if (!job) { recordJobOutcome({ outcome: "idle" }); return { outcome: "idle" }; }
   const token = job.attempt_token!;
+  if (job.attempts > 1) recordLeaseSteal();   // a reclaim minted attempts > 1 → a prior owner crashed
+  const handlerStart = o.clock.monotonic();
   const work = new AbortController();   // cooperative stop of the handler (lease-loss OR runtime ceiling)
   const stop = new AbortController();    // stops the heartbeat + hard-timeout helpers once the job settles
   const hb = (async () => {
@@ -20,7 +33,7 @@ export async function runOneJob(o: { repo: ReviewJobsRepo; clock: Clock; owner: 
         await cancellableSleep(o.clock, o.heartbeatS, stop.signal);
         if (stop.signal.aborted) break;
         const held = await o.repo.heartbeat({ jobId: job.job_id, owner: o.owner, token, leaseMs }); // false past timeout_at too
-        if (!held) { work.abort(new Error("lease lost or timed out")); break; }
+        if (!held) { recordHeartbeatFailure(); work.abort(new Error("lease lost or timed out")); break; }
       }
     } catch { work.abort(new Error("heartbeat error")); }   // never let the hb loop throw out
   })();
@@ -40,14 +53,22 @@ export async function runOneJob(o: { repo: ReviewJobsRepo; clock: Clock; owner: 
       // contract). Settle as failed; the fence guards against any late completion write.
       const r = await o.repo.markFailed({ jobId: job.job_id, owner: o.owner, token,
         error: `max runtime ${o.maxRuntimeS}s exceeded`, baseBackoffMs: 1000 });
+      if (!r.applied) recordStaleTokenWrite({ op: "markFailed" });
+      else if (!r.terminal) recordRetryAttempt();
       outcome = r.applied ? "failed" : "lease_lost";
     } else {
-      outcome = (await o.repo.markDone({ jobId: job.job_id, owner: o.owner, token })).applied ? "done" : "lease_lost";
+      const done = await o.repo.markDone({ jobId: job.job_id, owner: o.owner, token });
+      if (!done.applied) recordStaleTokenWrite({ op: "markDone" });
+      outcome = done.applied ? "done" : "lease_lost";
     }
   } catch (e) {
     const r = await o.repo.markFailed({ jobId: job.job_id, owner: o.owner, token,
       error: e instanceof Error ? e.message : String(e), baseBackoffMs: 1000 });
+    if (!r.applied) recordStaleTokenWrite({ op: "markFailed" });
+    else if (!r.terminal) recordRetryAttempt();
     outcome = r.applied ? "failed" : "lease_lost";
   } finally { stop.abort(); await hb; await hardTimeout; }   // immediate stop (cancellableSleep wakes); helpers never mask `outcome`
+  recordHandlerDurationMs((o.clock.monotonic() - handlerStart) * 1000);
+  recordJobOutcome({ outcome });
   return { outcome, jobId: job.job_id };
 }
