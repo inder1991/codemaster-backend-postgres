@@ -40,4 +40,13 @@ export class ReviewJobsRepo {
       RETURNING *`.execute(this.db);
     return r.rows[0] ? ReviewJobV1.parse(r.rows[0]) : null;
   }
+
+  async heartbeat(a: { jobId: string; owner: string; token: string; leaseMs: number }): Promise<boolean> {
+    // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
+    const r = await sql`UPDATE core.review_jobs
+        SET leased_until = now() + (${a.leaseMs}::double precision / 1000) * interval '1 second', heartbeat_at = now()
+      WHERE job_id = ${a.jobId} AND state = 'leased' AND lease_owner = ${a.owner} AND attempt_token = ${a.token}
+        AND (timeout_at IS NULL OR now() < timeout_at)`.execute(this.db);
+    return Number(r.numAffectedRows ?? 0n) === 1;
+  }
 }

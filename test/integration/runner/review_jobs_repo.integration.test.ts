@@ -47,3 +47,14 @@ describeDb("ReviewJobsRepo.claim", () => {
     expect(await repo.claim({ owner: "w2", leaseMs: 1000, maxRuntimeMs: 60_000 })).toBeNull(); // not re-run
   });
 });
+
+describeDb("ReviewJobsRepo.heartbeat", () => {
+  it("extends for the owning token; refuses a stale token; refuses past timeout_at", async () => {
+    const repo = new ReviewJobsRepo(db); const s = await seedRun(db); await repo.enqueue(s);
+    const c = await repo.claim({ owner: "w1", leaseMs: 1000, maxRuntimeMs: 30 }); // 30ms runtime ceiling
+    expect(await repo.heartbeat({ jobId: c!.job_id, owner: "w1", token: c!.attempt_token!, leaseMs: 1000 })).toBe(true);
+    expect(await repo.heartbeat({ jobId: c!.job_id, owner: "w1", token: crypto.randomUUID(), leaseMs: 1000 })).toBe(false);
+    await new Promise((r) => setTimeout(r, 60)); // exceed timeout_at
+    expect(await repo.heartbeat({ jobId: c!.job_id, owner: "w1", token: c!.attempt_token!, leaseMs: 1000 })).toBe(false);
+  });
+});
