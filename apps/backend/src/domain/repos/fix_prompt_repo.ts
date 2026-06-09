@@ -47,6 +47,15 @@ type FixPromptsTable = {
   // Read as a canonical `…Z` microsecond string via the to_char projection below; the column type is
   // timestamptz, but the typed select projects a string alias, so we never touch the raw Date mapping.
   generated_at: string;
+  // de-Temporal Phase 2 (W3.3 / D4 / F3) — RECOVERABLE GitHub-comment post claim. The success columns
+  // (`github_comment_id`/`comment_posted_at`) are set ONLY after a confirmed GitHub post (biconditional
+  // CHECK `ck_fix_prompts_posted_iff_comment_id`); the in-flight claim is a reclaimable LEASE
+  // (`comment_claim_owner`/`comment_claim_expires_at`) a re-run takes over once it expires. Nullable until
+  // a post is claimed/recorded; the read path here does not project them.
+  github_comment_id: number | null;
+  comment_posted_at: string | null;
+  comment_claim_owner: string | null;
+  comment_claim_expires_at: string | null;
 };
 
 /** Minimal DB schema the repo's Kysely instance is typed against. */
@@ -139,5 +148,79 @@ export class FixPromptRepo {
       truncated: row.truncated,
       generated_at: row.generated_at,
     });
+  }
+
+  // ─── de-Temporal Phase 2 (W3.3 / F2 / F3 / F5) — recoverable GitHub-comment post claim ─────────────
+  //
+  // The naive "set comment_posted_at, then post" conflates in-flight with done: a crash AFTER the claim
+  // but BEFORE the GitHub post would make every re-run skip → the comment is permanently lost (F3). So the
+  // success columns (`github_comment_id`/`comment_posted_at`) are set ONLY on a confirmed post
+  // (biconditional CHECK `ck_fix_prompts_posted_iff_comment_id`); the in-flight claim is a reclaimable
+  // LEASE (`comment_claim_owner`/`comment_claim_expires_at`). All three methods are TENANT-SCOPED (F5):
+  // they take `scope: { installationId }` and carry `AND installation_id = …` so the GF-3 raw-SQL tenancy
+  // gate's escape-hatch (a) (the `installation_id` token in the SQL) is satisfied — matching `persist`.
+
+  /**
+   * Try to acquire the in-flight post claim for `reviewId`, scoped to its tenant. Wins iff the row exists,
+   * is not yet posted (`comment_posted_at IS NULL`), and has no LIVE claim (no claim, or an expired one).
+   * Sets `comment_claim_owner`/`comment_claim_expires_at = now() + ttlS`. Returns `true` iff EXACTLY this
+   * caller took the lease (`numAffectedRows === 1`). Claim ≠ success — a crash after this and before the
+   * post leaves the lease to expire so a re-run can reclaim it (the comment is never permanently lost).
+   */
+  async claimCommentPost(
+    reviewId: string,
+    owner: string,
+    ttlS: number,
+    scope: TenantScope,
+  ): Promise<boolean> {
+    const result = await sql`
+      UPDATE core.fix_prompts
+         SET comment_claim_owner      = ${owner},
+             comment_claim_expires_at = now() + make_interval(secs => ${ttlS})
+       WHERE review_id = ${reviewId}
+         AND installation_id = ${scope.installationId}
+         AND comment_posted_at IS NULL
+         AND (comment_claim_expires_at IS NULL OR comment_claim_expires_at < now())
+    `.execute(this.db);
+    // Kysely returns numAffectedRows as a bigint on UPDATE; exactly-one-row → this caller won the lease.
+    return Number(result.numAffectedRows ?? 0n) === 1;
+  }
+
+  /**
+   * Record a CONFIRMED GitHub post: set `comment_posted_at = now()` + `github_comment_id`, and clear the
+   * in-flight claim. Fenced on `comment_claim_owner = ${owner}` so only the lease holder can record (a
+   * stale/lost holder no-ops). Satisfies the biconditional CHECK (posted ⇔ comment id). Tenant-scoped.
+   */
+  async recordCommentPosted(
+    reviewId: string,
+    owner: string,
+    commentId: number,
+    scope: TenantScope,
+  ): Promise<void> {
+    await sql`
+      UPDATE core.fix_prompts
+         SET comment_posted_at        = now(),
+             github_comment_id        = ${commentId},
+             comment_claim_owner      = NULL,
+             comment_claim_expires_at = NULL
+       WHERE review_id = ${reviewId}
+         AND installation_id = ${scope.installationId}
+         AND comment_claim_owner = ${owner}
+    `.execute(this.db);
+  }
+
+  /**
+   * True iff the review's fix-prompt comment is already posted (`comment_posted_at IS NOT NULL`), scoped
+   * to its tenant. The activity's idempotency short-circuit — a second run on a posted review skips the
+   * claim + post entirely. Absent / wrong-tenant / not-yet-posted → false.
+   */
+  async isCommentPosted(reviewId: string, scope: TenantScope): Promise<boolean> {
+    const row = await this.db
+      .selectFrom("core.fix_prompts")
+      .select([sql<boolean>`comment_posted_at IS NOT NULL`.as("posted")])
+      .where("review_id", "=", reviewId)
+      .where("installation_id", "=", scope.installationId)
+      .executeTakeFirst();
+    return row?.posted === true;
   }
 }

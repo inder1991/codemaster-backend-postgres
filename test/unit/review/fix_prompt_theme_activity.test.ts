@@ -8,6 +8,7 @@ import { LlmInvocationError, LlmRoleNotConfiguredError } from "#backend/integrat
 import {
   FixPromptActivities,
   type FixPromptIssueCommentClient,
+  fixPromptMarkerFor,
 } from "#backend/activities/generate_fix_prompt.activity.js";
 import {
   FIX_PROMPT_THEME_TOOL_NAME,
@@ -273,21 +274,65 @@ describe("buildFixPrompt — additive LLM theme synthesis", () => {
 
 // ─── FixPromptActivities.generateFixPrompt (persist + post + result) ─────────────────────────────
 
-/** A fake FixPromptRepo capturing the persisted record + tenancy scope. */
+/** A fake FixPromptRepo capturing the persisted record + tenancy scope, plus an in-memory model of the
+ *  W3.3 recoverable post claim (claim ≠ success): `claimCommentPost` wins iff not-yet-posted + no live
+ *  claim; `recordCommentPosted` records the id on a successful post (fenced on owner); `isCommentPosted`
+ *  reflects the recorded state. The single fake review row keys off REVIEW_ID. */
 class FakeRepo {
   public persisted: Array<{ record: FixPromptV1; installationId: string }> = [];
+  private posted = false;
+  private commentId: number | null = null;
+  private claimOwner: string | null = null;
+
   async persist(record: FixPromptV1, scope: { installationId: string }): Promise<void> {
     this.persisted.push({ record, installationId: scope.installationId });
+  }
+
+  async claimCommentPost(
+    _reviewId: string,
+    owner: string,
+    _ttlS: number,
+    _scope: { installationId: string },
+  ): Promise<boolean> {
+    // Wins iff not yet posted AND no live claim (in these unit tests a claim, once taken, stays live).
+    if (this.posted || this.claimOwner !== null) return false;
+    this.claimOwner = owner;
+    return true;
+  }
+
+  async recordCommentPosted(
+    _reviewId: string,
+    owner: string,
+    commentId: number,
+    _scope: { installationId: string },
+  ): Promise<void> {
+    // Fenced on the lease owner (a stale holder no-ops).
+    if (this.claimOwner !== owner) return;
+    this.posted = true;
+    this.commentId = commentId;
+    this.claimOwner = null;
+  }
+
+  async isCommentPosted(_reviewId: string, _scope: { installationId: string }): Promise<boolean> {
+    return this.posted;
+  }
+
+  // Test introspection (not part of the repo surface).
+  get recordedCommentId(): number | null {
+    return this.commentId;
   }
 }
 
 /** The per-review numeric GitHub installation id threaded through the input (per-review routing). */
 const GH_INSTALLATION_ID = 4815162342;
 
-/** A fake issue-comment client recording every posted comment (incl. the per-call installation id). */
+/** A fake issue-comment client recording every posted comment (incl. the per-call installation id).
+ *  `listIssueComments` is the W3.3 marker-recovery oracle; by default it returns no prior comments (the
+ *  no-recovery case — the activity creates a fresh comment). */
 class FakeGh implements FixPromptIssueCommentClient {
   public posted: Array<{ installationId: number; owner: string; repo: string; prNumber: number; body: string }> = [];
   public throwOnPost = false;
+  public listed: Array<{ id: number; body: string }> = [];
   async createIssueComment(args: {
     installationId: number;
     owner: string;
@@ -300,6 +345,14 @@ class FakeGh implements FixPromptIssueCommentClient {
     }
     this.posted.push(args);
     return 999;
+  }
+  async listIssueComments(_args: {
+    installationId: number;
+    owner: string;
+    repo: string;
+    prNumber: number;
+  }): Promise<Array<Record<string, unknown>>> {
+    return this.listed.map((c) => ({ id: c.id, body: c.body }) as Record<string, unknown>);
   }
 }
 
@@ -357,15 +410,25 @@ describe("FixPromptActivities.generateFixPrompt", () => {
     expect(repo.persisted[0]!.record.review_id).toBe(REVIEW_ID);
     expect(repo.persisted[0]!.record.generation_mode).toBe("llm");
 
-    // Posted exactly once to the right PR, with the rendered <details> comment wrapping the prompt.
+    // Posted exactly once to the right PR, with the rendered <details> comment wrapping the prompt PLUS the
+    // operational marker appended (W3.3 — the recovery oracle a re-run scans for).
     expect(gh.posted).toHaveLength(1);
     expect(gh.posted[0]!.owner).toBe("acme");
     expect(gh.posted[0]!.repo).toBe("widget");
     expect(gh.posted[0]!.prNumber).toBe(77);
-    expect(gh.posted[0]!.body).toBe(renderFixPromptComment(repo.persisted[0]!.record.prompt));
+    expect(gh.posted[0]!.body).toBe(
+      `${renderFixPromptComment(repo.persisted[0]!.record.prompt)}\n\n${fixPromptMarkerFor(REVIEW_ID)}`,
+    );
+    // The successful post is recorded (the lease cleared, the id stored).
+    expect(repo.recordedCommentId).toBe(999);
   });
 
-  it("comment_posted=false (NOT thrown) when the PR comment POST fails — but the record still persisted", async () => {
+  it("PROPAGATES the PR-comment POST failure (recoverable lease left to expire) — record still persisted", async () => {
+    // W3.3 contract change: the activity NO LONGER swallows a post failure. It propagates so the de-Temporal
+    // runner re-drives the job (the recoverable lease + marker recovery then make the re-run safe). The
+    // Temporal-path fail-open posture is preserved AT THE CALL SITE: posting.ts wraps generateFixPrompt in
+    // stageOutcome(...) with raiseAfterLog=false, which swallows + records outcome=error, so the
+    // already-posted review is never failed. On failure the lease is LEFT (not recorded) so a re-run reclaims.
     const repo = new FakeRepo();
     const gh = new FakeGh();
     gh.throwOnPost = true;
@@ -375,13 +438,16 @@ describe("FixPromptActivities.generateFixPrompt", () => {
       gh,
       clock: FIXED_CLOCK,
     });
-    const result = await acts.generateFixPrompt(input([finding({ title: "y" })]));
 
-    expect(result.generated).toBe(true);
-    expect(result.generation_mode).toBe("deterministic_fallback");
-    expect(result.comment_posted).toBe(false);
-    // The advisory post failed, but the durable record is still there (serves the API/UI).
+    await expect(acts.generateFixPrompt(input([finding({ title: "y" })]))).rejects.toThrow(
+      /422 from GitHub/,
+    );
+
+    // The durable record is still there (persist ran before the post; serves the API/UI).
     expect(repo.persisted).toHaveLength(1);
+    // The post failed → the lease is left UNRECORDED (a re-run reclaims it after expiry; never lost).
+    expect(repo.recordedCommentId).toBeNull();
+    expect(await repo.isCommentPosted(REVIEW_ID, { installationId: INSTALLATION_ID })).toBe(false);
   });
 
   it("still generates (deterministic_fallback) + persists + posts when the LLM enrichment fails", async () => {

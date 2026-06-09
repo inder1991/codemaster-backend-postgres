@@ -355,7 +355,8 @@ function makeLazyIssueClient(): GithubIssuePortShape {
 
 // ─── lazy GitHubApiReviewClient (the fix-prompt advisory-comment seam — deferred-Vault) ───────────
 
-/** The `createIssueComment` slice the FixPromptActivities consumes (1:1 with its FixPromptIssueCommentClient).
+/** The issue-comment slice the FixPromptActivities consumes (1:1 with its FixPromptIssueCommentClient):
+ *  `createIssueComment` (post) + `listIssueComments` (the W3.3 operational-marker recovery oracle).
  *  `installationId` is PER-CALL (per-review routing) — the seam is no longer bound to one installation. */
 type FixPromptIssueCommentClientShape = {
   createIssueComment(args: {
@@ -365,6 +366,12 @@ type FixPromptIssueCommentClientShape = {
     prNumber: number;
     body: string;
   }): Promise<number>;
+  listIssueComments(args: {
+    installationId: number;
+    owner: string;
+    repo: string;
+    prNumber: number;
+  }): Promise<Array<Record<string, unknown>>>;
 };
 
 /**
@@ -395,13 +402,22 @@ async function buildFixPromptApi(): Promise<GitHubApiClient> {
  */
 function makeLazyFixPromptIssueClient(): FixPromptIssueCommentClientShape {
   let memo: Promise<GitHubApiClient> | undefined;
+  const apiFor = async (): Promise<GitHubApiClient> => {
+    if (memo === undefined) {
+      memo = buildFixPromptApi();
+    }
+    return memo;
+  };
   return {
     createIssueComment: async ({ installationId, ...rest }) => {
-      if (memo === undefined) {
-        memo = buildFixPromptApi();
-      }
-      const api = await memo;
+      const api = await apiFor();
       return new GitHubApiReviewClient({ api, installationId }).createIssueComment(rest);
+    },
+    // W3.3 marker-recovery oracle — list the PR's issue comments so the activity can recover a comment that
+    // was posted right before a crash (the marker scan happens activity-side). Per-call installation routing.
+    listIssueComments: async ({ installationId, ...rest }) => {
+      const api = await apiFor();
+      return new GitHubApiReviewClient({ api, installationId }).listIssueComments(rest);
     },
   };
 }
