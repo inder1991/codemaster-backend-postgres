@@ -744,6 +744,19 @@ const FINDINGS_DROPPED_OUTSIDE_DIFF_COUNTER: Counter = getMeter(
     "Labels: installation_id, repo, drop_reason.",
 });
 
+// D4 (W3.1) repair signal: a lost-claim re-run observed a published row (github_review_id set) whose
+// stored comment_ids is EMPTY while the input still carries kept findings — so inline lifecycle
+// finalization can't recover the rfid→comment_id pairing from the durable column. Bounded-cardinality:
+// NO labels (a count-only signal that a posted_reviews row needs a comment_ids backfill).
+const COMMENT_IDS_REPAIR_NEEDED_COUNTER: Counter = getMeter(
+  "codemaster.activities.post_review_results",
+).createCounter("codemaster_posted_reviews_comment_ids_repair_needed_total", {
+  description:
+    "Lost-claim re-run found a published posted_reviews row with EMPTY stored comment_ids but the input " +
+    "still has kept findings — the durable comment_ids could not be recovered for inline finalization. " +
+    "No labels (bounded cardinality).",
+});
+
 /** Best-effort emit of the publication-outcome counter. 1:1 with `_record_publication_outcome`. */
 function recordPublicationOutcome(prMeta: PrMetaV1, outcome: PublicationOutcome): void {
   try {
@@ -791,6 +804,37 @@ function emitDropMetrics(args: {
       console.debug("post_review_results: per-reason metric emit failed", metricErr);
     }
   }
+}
+
+/**
+ * Parse the durable `core.posted_reviews.comment_ids` JSONB read via the project's `::text` JSONB-read
+ * idiom (D4 / W3.1). Returns the int[] the lost-claim caller threads into {@link PostedReviewV1} for
+ * inline lifecycle finalization. Defensive: a NULL column, a non-array, or any non-integer element
+ * collapses to `[]` (the lost-claim path must never raise on a malformed durable value — it falls back
+ * to the empty-with-findings repair signal instead).
+ */
+function parseStoredCommentIds(raw: string | null): Array<number> {
+  if (raw === null) {
+    return [];
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+  const out: Array<number> = [];
+  for (const v of parsed) {
+    if (typeof v === "number" && Number.isInteger(v)) {
+      out.push(v);
+    } else {
+      return []; // any non-integer element → treat the whole column as unrecoverable
+    }
+  }
+  return out;
 }
 
 // ─── doPost — the 2-phase atomic-claim state machine ─────────────────────────────────────────────
@@ -1077,8 +1121,11 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
       responseCommentIds = [];
     }
 
-    // ── Phase 2: persist github_review_id + publication_outcome so subsequent callers dispatch the
-    //    update path AND emit the inherited outcome. The UPDATE is idempotent (single-PK row). ──
+    // ── Phase 2: persist github_review_id + publication_outcome + comment_ids so subsequent callers
+    //    dispatch the update path AND emit the inherited outcome AND recover the durable comment_ids on
+    //    a re-run (D4). The UPDATE is idempotent (single-PK row). The comment_ids are the rfid→comment_id
+    //    pairing a crashed-then-re-run loser reads from the column instead of re-fetching from GitHub. ──
+    const commentIdsJson = JSON.stringify([...responseCommentIds]);
     await db.transaction().execute(async (txTyped) => {
       const tx = txTyped as unknown as Transaction<unknown>;
       // tenant:exempt reason=posted-reviews-keyed-by-pr-id-pk follow_up=FOLLOW-UP-gf3-error-mode
@@ -1086,6 +1133,7 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
         UPDATE core.posted_reviews
            SET github_review_id = ${created.reviewId},
                publication_outcome = ${outcome},
+               comment_ids = CAST(${commentIdsJson} AS jsonb),
                updated_at = now()
          WHERE pr_id = ${prMeta.pr_id}
       `.execute(tx);
@@ -1112,10 +1160,14 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
     github_review_id: string | number | null;
     age_seconds: string | number | null;
     publication_outcome: string | null;
+    // D4 (W3.1): the durable comment_ids the winner persisted. asyncpg/pg deserializes JSONB to a JS
+    // value, but the project JSONB-read idiom is `::text` + JSON.parse to keep a stable wire shape.
+    comment_ids: string | null;
   }>`
     SELECT github_review_id,
            EXTRACT(EPOCH FROM (now() - posted_at)) AS age_seconds,
-           publication_outcome
+           publication_outcome,
+           comment_ids::text AS comment_ids
       FROM core.posted_reviews
      WHERE pr_id = ${prMeta.pr_id}
   `.execute(db);
@@ -1135,6 +1187,10 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
     row.github_review_id === null ? null : Number(row.github_review_id);
   const ageSeconds: number = Number(row.age_seconds ?? 0);
   const persistedOutcomeStr: string | null = row.publication_outcome;
+  // D4 (W3.1): the winner's durable comment_ids. The JSONB-read idiom returns `comment_ids::text`; parse
+  // it to the int[] the lost-claim caller returns for inline lifecycle finalization (NEVER re-fetch from
+  // GitHub as the primary truth). Defensive fallback to [] on a NULL/malformed value.
+  const storedCommentIds: Array<number> = parseStoredCommentIds(row.comment_ids);
 
   if (githubReviewId === null) {
     // v7-A3: disambiguate in-flight from terminal-degraded by row age. Within window → legitimate winner
@@ -1205,11 +1261,25 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
       ? PublicationOutcome.parse(persistedOutcomeStr)
       : PublicationOutcome.enum.inline_posted;
   recordPublicationOutcome(prMeta, inheritedOutcome);
+  // D4 (W3.1): repair signal — the winner published (github_review_id set) but stored NO comment_ids
+  // while the re-run input STILL carries kept findings → the rfid→comment_id pairing the lost-claim
+  // caller needs for inline finalization is unrecoverable from the durable column. Surface it so a
+  // backfill can be scheduled; the lost-claim path still returns [] (no GitHub re-fetch as primary truth).
+  if (storedCommentIds.length === 0 && keptFindings.length > 0) {
+    try {
+      COMMENT_IDS_REPAIR_NEEDED_COUNTER.add(1);
+    } catch (metricErr) {
+      console.debug("post_review_results: comment_ids repair-needed metric emit failed", metricErr);
+    }
+  }
   return PostedReviewV1.parse({
     review_id: githubReviewId,
     marker_comment_id: null,
     was_update: true,
     inline_comment_count: inlinePayload.length,
+    // D4 (W3.1): return the STORED comment_ids so a crashed-then-re-run loser recovers the inline
+    // rfid→comment_id pairing inline (instead of the empty [] the lost-claim path returned pre-W3.1).
+    comment_ids: storedCommentIds,
     // C-3: emit kept_finding_indices so the workflow body's degraded sweep has rfids to flip when the
     // inherited outcome is body_only_posted.
     kept_finding_indices: keptIndices,
