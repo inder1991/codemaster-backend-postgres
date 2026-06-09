@@ -29,7 +29,10 @@ import { describe, it, expect } from "vitest";
 import { FakeClock } from "#platform/clock.js";
 import { CassetteHttpClient } from "#backend/infra/cassettes.js";
 import { GitHubApiClient, type TokenProvider } from "#backend/integrations/github/api_client.js";
-import { GitHubApiPrDescriptionClient } from "#backend/integrations/github/pr_description_client.js";
+import {
+  GitHubApiPrDescriptionClient,
+  type GhPrDescriptionClient,
+} from "#backend/integrations/github/pr_description_client.js";
 import {
   SUMMARY_END,
   SUMMARY_START,
@@ -219,6 +222,104 @@ describe("doUpdatePrDescriptionSummary — GET then PATCH round-trip (cassette)"
     expect(expectedBody).toContain("## 🤖 Summary by codemaster");
     expect(expectedBody).toContain("**Bug**: 1");
     expect(expectedBody.endsWith("\n")).toBe(true);
+  });
+});
+
+// ── 2-run re-run audit (W3.4): the GET-modify-PATCH choreography is marker-replace, NOT blind-append ─
+
+/**
+ * In-memory {@link GhPrDescriptionClient} that PERSISTS the PR body across calls: each
+ * `patchPullRequestBody` overwrites the stored body, and the next `getPullRequestBody` returns it. This
+ * is what a real GitHub PR description does between two `update_pr_description_summary` runs — the second
+ * run reads back the body the FIRST run wrote. A blind-append implementation would accumulate a second
+ * summary block here; the marker-replace implementation strips the prior block first, so exactly one
+ * block survives. The cassette test (above) can only assert a fixed two-interaction sequence; this
+ * stateful fake is what makes the RE-RUN (idempotency at the choreography level, not just the pure
+ * helper) assertable.
+ */
+class StatefulPrDescriptionClient implements GhPrDescriptionClient {
+  public body: string;
+  public readonly patchedBodies: Array<string> = [];
+
+  public constructor(initialBody: string) {
+    this.body = initialBody;
+  }
+
+  public async getPullRequestBody(): Promise<string> {
+    await Promise.resolve();
+    return this.body;
+  }
+
+  public async patchPullRequestBody(args: { body: string }): Promise<void> {
+    await Promise.resolve();
+    this.body = args.body;
+    this.patchedBodies.push(args.body);
+  }
+}
+
+/** Count non-overlapping occurrences of a literal needle in a string. */
+function occurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
+}
+
+describe("doUpdatePrDescriptionSummary — re-run audit (marker-replace, not blind-append)", () => {
+  it("running twice leaves exactly ONE summary block (the 2nd run strips the 1st run's block)", async () => {
+    const original = "This PR adds a feature flag.\n\nFixes #100.";
+    const client = new StatefulPrDescriptionClient(original);
+
+    const runArgs = {
+      owner: "acme",
+      repo: "widget",
+      prNumber: 123,
+      aggregated: aggregated([finding({ category: "bug" }), finding({ category: "style" })]),
+      ghClient: client,
+      installationId: INSTALLATION_ID,
+    };
+
+    // Run #1 — appends a fresh summary onto the developer's body.
+    await doUpdatePrDescriptionSummary(runArgs);
+    expect(occurrences(client.body, SUMMARY_START)).toBe(1);
+    expect(occurrences(client.body, SUMMARY_END)).toBe(1);
+
+    // Run #2 — reads back the body run #1 wrote, strips the prior block, re-emits a single fresh one.
+    await doUpdatePrDescriptionSummary(runArgs);
+    expect(occurrences(client.body, SUMMARY_START)).toBe(1);
+    expect(occurrences(client.body, SUMMARY_END)).toBe(1);
+
+    // The developer's text is preserved verbatim above the (single) marker block across BOTH runs.
+    expect(client.body).toContain("This PR adds a feature flag.");
+    expect(client.body).toContain("Fixes #100.");
+    expect(client.body.split(SUMMARY_START)[0]).toContain("This PR adds a feature flag.");
+
+    // The re-emitted summary is the fresh render (the latest findings), not a stale duplicate.
+    expect(client.body).toContain("**Bug**: 1");
+    expect(client.body).toContain("**Style**: 1");
+
+    // Two PATCH writes happened; the second is IDEMPOTENT with the first given identical inputs (the
+    // strip+recompose is deterministic), so re-running converges to a fixed point — no accumulation.
+    expect(client.patchedBodies).toHaveLength(2);
+    expect(client.patchedBodies[1]).toBe(client.patchedBodies[0]);
+  });
+
+  it("a THIRD run with the same inputs is a no-op fixed point (no drift on repeated retries)", async () => {
+    const client = new StatefulPrDescriptionClient("Developer text.\n");
+    const runArgs = {
+      owner: "acme",
+      repo: "widget",
+      prNumber: 7,
+      aggregated: aggregated([finding({ category: "bug" })]),
+      ghClient: client,
+      installationId: INSTALLATION_ID,
+    };
+
+    await doUpdatePrDescriptionSummary(runArgs);
+    const afterFirst = client.body;
+    await doUpdatePrDescriptionSummary(runArgs);
+    await doUpdatePrDescriptionSummary(runArgs);
+
+    // Converged: runs 2 and 3 reproduce run 1's body byte-for-byte (marker-replace is a fixed point).
+    expect(client.body).toBe(afterFirst);
+    expect(occurrences(client.body, SUMMARY_START)).toBe(1);
   });
 });
 
