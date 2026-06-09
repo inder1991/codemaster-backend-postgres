@@ -37,7 +37,10 @@
 // workflow V8-isolate sandbox), so the LLM client / crypto / clock all live in the activity, exactly
 // like bedrockReviewChunk + generateWalkthrough.
 
+import { createHash } from "node:crypto";
+
 import { BedrockBudgetExceededError } from "#backend/cost/enforcer.js";
+import { purposeChunkId } from "#backend/integrations/llm/invocation_ledger.js";
 import { buildSystemPrompt } from "#backend/llm/review_prompt.js";
 import { modelForPurpose } from "#backend/llm/model_router.js";
 import { wrapUntrusted } from "#backend/security/trust_tier_wrapping.js";
@@ -65,6 +68,19 @@ import type { PrMetaV1 } from "#contracts/walkthrough.v1.js";
 export type LlmClientCacheLike = {
   forRole(role: string): Promise<LlmClient>;
 };
+
+/**
+ * de-Temporal Phase 2 (D2 / W2.2) — the tool-schema-version component of the curator's LLM-invocation
+ * idempotency key. A content-addressable digest of CURATE_TOOL_SCHEMA: a tool-schema change (which changes
+ * the SHAPE of the structured output, and therefore the parse) changes the key, so a stale stored response
+ * is NOT replayed. Per-site (distinct from the other PR-level purposes' digests). `createHash` is the
+ * gate-sanctioned hashing primitive (clock_random gate bans random fns, NOT createHash; mirrors
+ * review_activity.ts:55).
+ */
+export const CURATE_TOOL_SCHEMA_VERSION = `cts-${createHash("sha256")
+  .update(Buffer.from(JSON.stringify(CURATE_TOOL_SCHEMA), "utf-8"))
+  .digest("hex")
+  .slice(0, 16)}`;
 
 /**
  * Tools whose findings ALWAYS bypass the curator + go straight to ReviewFindingV1 at severity=blocker,
@@ -263,6 +279,18 @@ export class AnalysisCurator {
       // telemetry/Langfuse rows — mirrors the walkthrough port. Python platform-scopes the call; the
       // curation is per-PR, so the PR's installation owns it.
       installationId: args.prMeta.installation_id,
+      // de-Temporal Phase 2 (D2 / W2.2 / F9) — ledger this PR-level paid call by PURPOSE. The stable key is
+      // review_id (prMeta.pr_id) + the purpose chunk-key surrogate (purposeChunkId("curator"), E8) + role +
+      // model + prompt hash + CURATE_TOOL_SCHEMA_VERSION. run_id is deliberately NOT in the key (D2: output
+      // need not change per run). On a retry the stored provider response replays instead of buying a second
+      // paid Haiku completion. F9: the SAME "curator" token drives BOTH the chunk-key surrogate AND the
+      // metric purpose label. No-op when the client has no ledger (unit tests / platform jobs).
+      idempotency: {
+        reviewId: args.prMeta.pr_id,
+        chunkId: purposeChunkId("curator"),
+        toolSchemaVersion: CURATE_TOOL_SCHEMA_VERSION,
+        ledgerPurpose: "curator",
+      },
     });
 
     return parseWithSkipMalformed([...result.raw_content_blocks]);
