@@ -149,27 +149,41 @@ export function buildConfluenceSyncActivities(o: {
  * bodies thread `bodyOut.page.version`). Failures propagate to the CALLER, which owns the policy:
  * the ingest loop catches per-page (F-40 fail-open); the resync handler lets the throw fail the job
  * attempt (platform retry/backoff).
+ *
+ * ## Cancellation (W4b.3 — review blocker #4)
+ * `signal` is the runner's cooperative-cancellation seam (aborted on lease loss AND at the hard
+ * runtime ceiling). `signal.throwIfAborted()` fires BEFORE each of the 4 activities, so an aborted
+ * job stops at the next step boundary instead of orphan-driving external work (the Confluence
+ * fetch, the chunk EMBED — the network/cost steps) after the runner already settled the attempt:
+ * a settled-then-orphaned handler would duplicate those calls when the retry redrives. The throw is
+ * `signal.reason` (the runner's abort Error), which propagates to the CALLER — see each caller's
+ * abort-is-not-fail-open re-throw posture.
  */
 export async function syncOneConfluencePage(
   acts: ConfluenceSyncActivities,
-  args: { spaceKey: string; pageId: string; cycleStartedAt: string },
+  args: { spaceKey: string; pageId: string; cycleStartedAt: string; signal: AbortSignal },
 ): Promise<UpsertChunksOutputV1> {
+  args.signal.throwIfAborted();
   const bodyOut = await acts.fetchPageBody({
     schema_version: 1,
     page_id: args.pageId,
     space_key: args.spaceKey,
   });
 
+  args.signal.throwIfAborted();
   const sanitizedOut = await acts.sanitizePage({
     schema_version: 1,
     page: bodyOut.page,
     last_modified_at: args.cycleStartedAt,
   });
 
+  args.signal.throwIfAborted();
   const chunkedOut = await acts.chunkAndEmbed({
     schema_version: 1,
     sanitized: sanitizedOut.sanitized,
   });
+
+  args.signal.throwIfAborted();
 
   return await acts.upsertChunks({
     schema_version: 1,

@@ -73,11 +73,22 @@ import {
 // equally consumed by nobody but observability).
 //
 // ## Cancellation (`signal`) posture
-// All the sweeps are idempotent (FOR UPDATE SKIP LOCKED / CTE UPDATE WHERE-guarded / pg_partman's
-// own re-runnable maintenance / per-batch transactions guarded by `retired_at IS NULL`), so the
+// The SWEEP crons are idempotent (FOR UPDATE SKIP LOCKED / CTE UPDATE WHERE-guarded / pg_partman's
+// own re-runnable maintenance / per-batch transactions guarded by `retired_at IS NULL`), so those
 // adapters deliberately do not thread `signal`. A lease-lost duplicate dispatch re-sweeping is
 // harmless by construction; the run_id_retention chain's bounded batches keep each step's loss
 // window small (the Temporal side ran the same sweeps under at-least-once retries).
+//
+// confluence_ingest is the EXCEPTION (W4b.3 — review blocker #4): its per-space × per-page fan-out
+// is long-running with EXTERNAL/COST calls (Confluence fetches, chunk embeds), so it HONORS the
+// runner's abort cooperatively — `signal.throwIfAborted()` at the top of each SPACE iteration, each
+// PAGE iteration, and before every per-page activity (_confluence_page_sync.ts). Without the
+// checkpoints the runner can settle the attempt (lease loss / hard runtime ceiling) while the
+// orphaned handler keeps fetching + embedding — duplicating the external calls the retry redrives.
+// An abort is NOT a fail-open case: BOTH catches (per-space, per-page F-40) re-throw when
+// `signal.aborted` so the cancellation propagates out instead of being swallowed as one more
+// transient failure (the orchestrate/withAbortGate posture — no NEW external call starts after
+// abort). The throw is `signal.reason`; the runner settles it failed (markFailed/lease_lost).
 
 /** mutex_janitor scheduled input — zero-config, 1:1 with the Temporal zero-arg dispatch. */
 const MutexJanitorCronInputV1 = z.object({}).strict();
@@ -185,6 +196,7 @@ async function syncOneConfluenceSpace(
   acts: ConfluenceSyncActivities,
   spaceKey: string,
   cycleStartedAt: string,
+  signal: AbortSignal,
 ): Promise<ConfluenceSpaceStats> {
   // Fetch all page references in the space.
   const pagesOut = await acts.fetchSpacePages({ schema_version: 1, space_key: spaceKey });
@@ -201,6 +213,10 @@ async function syncOneConfluenceSpace(
   const livePageIds: Array<string> = [];
 
   for (const pageRef of pagesOut.pages) {
+    // W4b.3: cooperative cancellation at the PAGE boundary — an aborted job stops BEFORE the next
+    // page's external chain starts (the throw propagates out of the whole handler, so the
+    // downstream reconcile never runs against a partial livePageIds — F-40 stays intact).
+    signal.throwIfAborted();
     // F-40 (confluence_sync_workflow.py:192-205): the page_id is appended to livePageIds BEFORE the
     // per-page try so a transient page failure does NOT get its chunks soft-deleted by the downstream
     // reconcile. If a page keeps failing across many cycles, an operator follow-up signal is needed —
@@ -213,6 +229,7 @@ async function syncOneConfluenceSpace(
         spaceKey,
         pageId: pageRef.page_id,
         cycleStartedAt,
+        signal,
       });
 
       // Page survived all 4 activities.
@@ -224,6 +241,12 @@ async function syncOneConfluenceSpace(
         stats.chunks_quarantined += 1;
       }
     } catch (e) {
+      // W4b.3: an ABORT is NOT a per-page fail-open case — re-throw so the cancellation propagates
+      // out of the fan-out (no next page, no reconcile) instead of being swallowed as one more
+      // transient page failure that would keep the orphaned loop fetching/embedding post-settle.
+      if (signal.aborted) {
+        throw e;
+      }
       // Per-PAGE fail-open (F-40): bump the failure counter + continue with the next page. The page_id
       // is already in livePageIds (appended before the try) so reconcile won't soft-delete its chunks.
       stats.pages_failed += 1;
@@ -438,7 +461,8 @@ export function registerCronHandlers(registry: HandlerRegistry, deps: CronHandle
   // workflow BODY (the orchestration) as a handler; the 7 confluence activities are REUSED, not
   // rewritten. BOTH fail-open layers are preserved EXACTLY:
   //   • per-SPACE: a space whose sync throws is recorded in failed_spaces + the loop CONTINUES (ALL
-  //     exceptions caught, no auth carve-out) — one broken space cannot abort the full cycle. The
+  //     exceptions caught, no auth carve-out — the ONLY carve-out is the W4b.3 abort re-throw, the
+  //     module-doc cancellation posture) — one broken space cannot abort the full cycle. The
   //     broken space's reconcile is never reached, so its existing corpus is untouched.
   //   • per-PAGE (F-40): each page_id is appended to live_page_ids BEFORE the per-page try inside
   //     syncOneConfluenceSpace, so a transiently-failed page is NOT soft-deleted by reconcile.
@@ -450,7 +474,7 @@ export function registerCronHandlers(registry: HandlerRegistry, deps: CronHandle
   // lazy client/embedder are closed over ONCE at registration so their memos persist across cycles.
   const confluenceClient = deps.confluenceClient ?? makeLazyConfluenceChunkClient();
   const confluenceEmbeddings = deps.confluenceEmbeddings ?? makeLazyConfluenceEmbeddings();
-  registry.register("confluence_ingest", async (payload, _signal, handlerDeps) => {
+  registry.register("confluence_ingest", async (payload, signal, handlerDeps) => {
     ConfluenceIngestCronInput.parse(payload);
     const dsn = deps.dsn ?? process.env.CODEMASTER_PG_CORE_DSN;
     if (dsn === undefined || dsn === "") {
@@ -485,8 +509,11 @@ export function registerCronHandlers(registry: HandlerRegistry, deps: CronHandle
     const failedSpaces: Array<string> = [];
 
     for (const spaceRef of spacesOut.spaces) {
+      // W4b.3: cooperative cancellation at the SPACE boundary — an aborted job stops BEFORE the
+      // next space's fan-out starts (module-doc cancellation posture).
+      signal.throwIfAborted();
       try {
-        const stats = await syncOneConfluenceSpace(acts, spaceRef.space_key, cycleStartedAt);
+        const stats = await syncOneConfluenceSpace(acts, spaceRef.space_key, cycleStartedAt, signal);
         pagesProcessed += stats.pages_processed;
         chunksUpserted += stats.chunks_upserted;
         chunksRejectedNoApproval += stats.chunks_rejected_no_approval;
@@ -494,6 +521,12 @@ export function registerCronHandlers(registry: HandlerRegistry, deps: CronHandle
         chunksQuarantined += stats.chunks_quarantined;
         pagesSoftDeleted += stats.pages_soft_deleted;
       } catch (e) {
+        // W4b.3: an ABORT is NOT a per-space fail-open case — re-throw so the cancellation fails the
+        // attempt instead of being recorded as one more failed space while the loop keeps driving
+        // external work the runner already settled away.
+        if (signal.aborted) {
+          throw e;
+        }
         // Per-SPACE failure is non-fatal (confluence_sync_workflow.py:146-153): record the space_key +
         // continue so other spaces still get processed this cycle. ALL exceptions caught (no auth
         // carve-out) — 1:1 with the workflow body's bare catch.

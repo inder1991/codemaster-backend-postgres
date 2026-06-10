@@ -80,13 +80,18 @@ import {
 //
 // ## Cancellation (`signal`) posture
 // The 3 reconcile/repair activities are single-batch idempotent upserts (INSERT … ON CONFLICT DO
-// UPDATE) with no internal await seam worth aborting between — the adapters deliberately do not
-// thread `signal`, matching the cron adapters' posture. A lease-lost duplicate dispatch
-// re-upserting is harmless. The 2 knowledge producers carry NO AbortSignal seam either
-// (CacheGitCloner.clone enforces its OWN subprocess timeout — DEFAULT_TIMEOUT_SECONDS=300 — and
-// the refresh body is bounded by the runner's hard runtime ceiling); both are idempotent by
-// construction (the clone wipes a stale target before re-cloning; the refresh upsert is
-// content-addressed UUIDv5 + natural-key ON CONFLICT), so a lease-lost duplicate re-run converges.
+// UPDATE) with no internal await seam worth aborting between — those adapters deliberately do not
+// thread `signal` (the sweep-cron posture). A lease-lost duplicate dispatch re-upserting is
+// harmless. The MULTI-STEP handlers DO honor the signal cooperatively (W4b.3 — review blocker #4):
+// refresh_semantic_docs checks `signal.throwIfAborted()` before the clone AND before the refresh
+// (the two expensive steps — a GitHub clone and the discover→EMBED→persist sequence);
+// trigger_page_resync checks before its per-page chain, and the shared chain itself checks before
+// each of its 4 activities (_confluence_page_sync.ts). Without the checkpoints the runner settles
+// the attempt (lease loss / hard runtime ceiling) while the orphaned handler keeps driving
+// external/cost calls the retry then duplicates. The throw is `signal.reason` — the runner settles
+// it failed (markFailed/lease_lost). Idempotency is unchanged and still the backstop for aborts
+// that land MID-step (the clone wipes a stale target before re-cloning; the refresh/resync upserts
+// are content-addressed + natural-key ON CONFLICT), so a redriven attempt converges.
 //
 // ## W3d.2 retry semantics vs the Temporal per-step curves
 // The Temporal sync_code_owners proxy retried 5× (non-retryable GitHubAppUnauthorized /
@@ -399,9 +404,13 @@ export function registerEventHandlers(registry: HandlerRegistry, deps: EventHand
     }
     return refreshEmbedderMemo;
   };
-  registry.register("refresh_semantic_docs", async (payload, _signal, handlerDeps) => {
+  registry.register("refresh_semantic_docs", async (payload, signal, handlerDeps) => {
     const parsed = RefreshSemanticDocsInputV1.parse(payload);
     const dsn = requireDsn(deps, "refresh_semantic_docs");
+
+    // W4b.3: cooperative cancellation BEFORE the clone — no NEW external call (token mint + git
+    // fetch) starts on an already-aborted job (module-doc cancellation posture).
+    signal.throwIfAborted();
 
     // Step 1: clone the repository → workspace path (1:1 with the workflow body's Step 1; the
     // cloner/resolveRepo fall to the activity's REAL production defaults unless a test injects).
@@ -417,6 +426,10 @@ export function registerEventHandlers(registry: HandlerRegistry, deps: EventHand
         ...(deps.refreshCloner !== undefined ? { cloner: deps.refreshCloner } : {}),
       },
     );
+
+    // W4b.3: cooperative cancellation BEFORE the refresh — an abort that landed during the clone
+    // stops here, so the discover→EMBED→persist sequence (the cost step) never starts post-settle.
+    signal.throwIfAborted();
 
     // Step 2: discover + chunk + embed + upsert (1:1 with the workflow body's Step 2).
     const holder = new RefreshSemanticDocsActivity({
@@ -463,13 +476,14 @@ export function registerEventHandlers(registry: HandlerRegistry, deps: EventHand
   //
   // ## Result handling + cancellation
   // Returns void (the platform persists job OUTCOME, not TriggerPageResyncOutputV1 — consumed by
-  // nobody but observability on the Temporal side); the upsert tally is logged. No `signal`
-  // threading: the chain is a bounded 4-step sequence over idempotent activities (the upsert is
-  // content-addressed ON CONFLICT), so a lease-lost duplicate re-run converges — the cron adapters'
-  // posture.
+  // nobody but observability on the Temporal side); the upsert tally is logged. `signal` threads
+  // into the shared per-page chain (W4b.3 — the module-doc cancellation posture): the chain checks
+  // `throwIfAborted()` before each of its 4 activities, so an aborted job stops before its next
+  // external/cost step. Idempotency (the content-addressed ON CONFLICT upsert) remains the backstop
+  // for aborts landing MID-step — a lease-lost duplicate re-run still converges.
   const resyncConfluenceClient = deps.confluenceClient ?? makeLazyConfluenceChunkClient();
   const resyncConfluenceEmbeddings = deps.confluenceEmbeddings ?? makeLazyConfluenceEmbeddings();
-  registry.register("trigger_page_resync", async (payload, _signal, handlerDeps) => {
+  registry.register("trigger_page_resync", async (payload, signal, handlerDeps) => {
     const parsed = TriggerPageResyncInputV1.parse(payload);
     const dsn = requireDsn(deps, "trigger_page_resync");
     const acts = buildConfluenceSyncActivities({
@@ -483,10 +497,14 @@ export function registerEventHandlers(registry: HandlerRegistry, deps: EventHand
     // instant the TS workflow pins via workflowInfo().startTime; `.toISOString()` yields the
     // tz-aware Z-suffixed RFC3339 string the offset:true constraint requires).
     const cycleStartedAt = handlerDeps.clock.now().toISOString();
+    // W4b.3: cooperative cancellation BEFORE the per-page chain (the chain re-checks before each
+    // of its 4 activities) — no NEW external call starts on an already-aborted job.
+    signal.throwIfAborted();
     const upsertOut = await syncOneConfluencePage(acts, {
       spaceKey: parsed.space_key,
       pageId: parsed.page_id,
       cycleStartedAt,
+      signal,
     });
     console.info(
       `trigger_page_resync applied: space_key=${parsed.space_key} page_id=${parsed.page_id} ` +
