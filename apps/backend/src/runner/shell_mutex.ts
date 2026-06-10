@@ -41,6 +41,7 @@ import { type Pool } from "pg";
 
 import {
   acquirePrReviewMutex,
+  releasePrReviewMutex,
   renewPrReviewMutexLease,
   withMutexTransaction,
 } from "#backend/concurrency/pr_mutex.js";
@@ -53,16 +54,23 @@ import { type ReviewJobsRepo } from "./review_jobs_repo.js";
 
 /**
  * The outcome of {@link acquireOrReuseMutex}:
- *   - `acquired` — a fresh live mutex was minted for this PR (first run, or a re-acquire after a stale/foreign
+ *   - `acquired`   — a fresh live mutex was minted for this PR (first run, or a re-acquire after a stale/foreign
  *     reuse target). `mutexId` is the new id (also persisted on the job row).
- *   - `reused`   — the job's persisted `mutex_id` passed ownership validation and was renewed; `mutexId` is it.
- *   - `busy`     — a FOREIGN live lease already holds this PR; the caller (W5.2) maps this to a terminal
+ *   - `reused`     — the job's persisted `mutex_id` passed ownership validation and was renewed; `mutexId` is it.
+ *   - `busy`       — a FOREIGN live lease already holds this PR; the caller (W5.2) maps this to a terminal
  *     cancel (never spin). `mutexId` is `null`.
+ *   - `lease_lost` — the fresh acquire SUCCEEDED but the FENCED `persistMutexId` did NOT (`applied:false`): the
+ *     job lease was STOLEN/reclaimed between the acquire and the persist (a newer worker owns the lease now).
+ *     We RELEASE the freshly-acquired mutex immediately (so it is not stranded on NO job row until the janitor
+ *     sweeps it — a 30-min PR-blocking window) and report `lease_lost`. The caller (W5.2) maps this to a
+ *     NON-terminal stop: this attempt yields to the worker that legitimately owns the lease (the run stays
+ *     RUNNING for that worker — NOT a terminal-cancel, which `busy` would wrongly trigger). `mutexId` is `null`.
  */
 export type AcquireOrReuseResult =
   | { status: "acquired"; mutexId: string }
   | { status: "reused"; mutexId: string }
-  | { status: "busy"; mutexId: null };
+  | { status: "busy"; mutexId: null }
+  | { status: "lease_lost"; mutexId: null };
 
 /** Raised when the tenancy re-check fails the same way the gate raises (repository row missing). */
 export class MutexTenancyRaceError extends Error {
@@ -157,14 +165,31 @@ export async function acquireOrReuseMutex(args: {
     return { status: "busy", mutexId: null };
   }
 
-  // Persist the fresh id on the job row (fenced) so a re-run reuses it. A stolen lease ⇒ applied:false; we
-  // still return `acquired` (the mutex IS held) — the fence merely guards the row-write against a stale owner.
-  await repo.persistMutexId({
+  // Persist the fresh id on the job row (fenced) so a re-run reuses it. A stolen lease ⇒ applied:false: the
+  // job lease was reclaimed (owner/token changed) between the acquire and this persist, so the mutex we just
+  // minted is now recorded on NO job row. If we returned `acquired`, this worker would HOLD a live PR mutex
+  // stranded until the janitor sweeps it (a 30-min PR-blocking window) — and the worker that stole the lease,
+  // on its own fresh acquire, would see this mutex foreign-owned and terminal-cancel the legitimate review.
+  // So: RELEASE the freshly-acquired mutex and report `lease_lost` (the caller maps it to a non-terminal stop).
+  const persistResult = await repo.persistMutexId({
     jobId: job.job_id,
     owner: job.lease_owner as string,
     token: job.attempt_token as string,
     mutexId: acquired.mutexId,
   });
+  if (!persistResult.applied) {
+    // Release by the just-acquired mutexId (same release primitive the shell/janitor use) so no live row is
+    // stranded; the worker that now owns the lease will do its own fresh acquire against a freed PR.
+    await withMutexTransaction(pool, (client) =>
+      releasePrReviewMutex({
+        client,
+        installationId: payload.installation_id,
+        mutexId: acquired.mutexId as string,
+        clock,
+      }),
+    );
+    return { status: "lease_lost", mutexId: null };
+  }
 
   return { status: "acquired", mutexId: acquired.mutexId };
 }

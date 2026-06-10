@@ -222,6 +222,16 @@ export function runReviewJob(deps: RunReviewJobDeps): JobHandler {
     if (mutexRes.status === "busy") {
       throw new TerminalCancelError("mutex-busy", new Error("a FOREIGN review owns the PR mutex"));
     }
+    if (mutexRes.status === "lease_lost") {
+      // F1: the fresh acquire succeeded but the fenced persist did NOT — OUR job lease was STOLEN/reclaimed
+      // between the acquire and the persist (a newer worker owns the lease now), and acquireOrReuseMutex has
+      // ALREADY released the freshly-acquired mutex (nothing to clean up). STOP this attempt as a NON-terminal
+      // lease-loss: return WITHOUT throwing and WITHOUT transitioning the run — the run stays RUNNING for the
+      // worker that legitimately owns the lease. runOneJob's settlement is fenced on OUR (now stale) token, so
+      // its markDone affects 0 rows and the attempt settles `lease_lost` (NOT a terminal-cancel of the run,
+      // which `busy` → TerminalCancelError would wrongly trigger against a review another worker owns).
+      return;
+    }
     const mutexId = mutexRes.mutexId;
 
     // (4) COMPOSED ABORT (v3-F3) — a shell-local controller composed with the runner signal. The mutex-renew

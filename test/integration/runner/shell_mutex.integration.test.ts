@@ -341,3 +341,62 @@ describeDb("acquireOrReuseMutex — mismatch / released re-acquires fresh (F6)",
     }
   });
 });
+
+/** Read a single mutex row's `released_at` by id (NULL ⇒ still live). Returns `undefined` if the row is gone. */
+async function releasedAtFor(mutexId: string): Promise<string | null | undefined> {
+  const r = await sql<{ released_at: string | null }>`SELECT released_at FROM core.pr_review_mutex
+      WHERE mutex_id = ${mutexId}`.execute(db);
+  return r.rows[0]?.released_at;
+}
+
+describeDb("acquireOrReuseMutex — fresh acquire whose fenced persist fails (F1: lease stolen between acquire+persist)", () => {
+  it("(e) lease STOLEN between the fresh acquire and the fenced persist → RELEASE the mutex + return lease_lost (no stranding)", async () => {
+    const repo = new ReviewJobsRepo(db);
+    const seed = await seedTenant(77);
+    try {
+      // owner A claims the job (lease_owner='owner-a', a minted attempt_token). This is the legitimate worker.
+      const jobA = await enqueueAndClaim(repo, seed, "owner-a");
+      expect(jobA.mutex_id ?? null).toBeNull();
+
+      // STEAL the lease BEFORE the acquire path persists: a second worker (owner B) re-claims the job row, so
+      // lease_owner/attempt_token no longer match jobA's fence. persistMutexId(jobA.owner, jobA.token) will then
+      // affect 0 rows (applied:false) — the exact race F1 describes (lease reclaimed between acquire and persist).
+      const newToken = randomUUID();
+      await sql`UPDATE core.review_jobs
+          SET lease_owner = 'owner-b', attempt_token = ${newToken}
+        WHERE job_id = ${jobA.job_id}`.execute(db);
+
+      // owner A runs the acquire path with its now-STALE fence (the in-hand jobA still carries owner-a + old token).
+      const res = await acquireOrReuseMutex({ payload: payloadFor(seed), job: jobA, repo, pool, clock });
+
+      // F1: the fresh acquire SUCCEEDED but the fenced persist did NOT — the mutex would be stranded if we
+      // returned 'acquired'. Instead we RELEASE the freshly-acquired mutex and report lease_lost (NOT busy —
+      // busy would terminal-cancel a review owner B legitimately owns).
+      expect(res.status).toBe("lease_lost");
+      expect(res.mutexId).toBeNull();
+
+      // The job row carries NO mutex id (the fenced persist never landed under owner A's stale token).
+      expect((await repo.getById(jobA.job_id))!.mutex_id ?? null).toBeNull();
+
+      // CRITICAL: no live mutex row is stranded — every row this PR ever had is released (the fresh acquire's
+      // row was released by the fix; there is no 30-min PR-blocking window).
+      expect(await liveRowCount(seed)).toBe(0);
+
+      // owner B (the legitimate lease holder) can now do its OWN fresh acquire — the mutex was freed, so this
+      // is NOT a self-skipped_busy against a stranded foreign row.
+      const jobB = (await repo.getById(jobA.job_id))!;
+      expect(jobB.lease_owner).toBe("owner-b");
+      const resB = await acquireOrReuseMutex({ payload: payloadFor(seed), job: jobB, repo, pool, clock });
+      expect(resB.status).toBe("acquired");
+      if (resB.status !== "acquired") throw new Error("unreachable: expected acquired");
+      // owner B's fresh acquire is now the single live row; its persist landed under owner B's live fence.
+      expect(await liveRowCount(seed)).toBe(1);
+      expect(jobB.attempt_token).toBe(newToken);
+      const releasedB = await releasedAtFor(resB.mutexId);
+      expect(releasedB).toBeNull(); // owner B's mutex is LIVE (not released)
+      expect((await repo.getById(jobA.job_id))!.mutex_id).toBe(resB.mutexId);
+    } finally {
+      await cleanup(seed);
+    }
+  });
+});
