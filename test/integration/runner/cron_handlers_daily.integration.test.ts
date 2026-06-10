@@ -85,6 +85,7 @@ beforeEach(async () => {
  *  seconds at most — never grazing 300s), huge sleeps (the single-shot drive seams never enter them). */
 const TEST_CONFIG: BackgroundRunnerConfig = {
   owner: "w3b2-cron-test", leaseS: 30, heartbeatS: 5, maxRuntimeS: 300, idleS: 30, pollIntervalS: 600,
+  outboxIdleS: 600, outboxMaxAttempts: 5,
 };
 
 // ─── confluence_chunks fixtures (the mark_stale_chunks parity seeds) ──────────────────────────────

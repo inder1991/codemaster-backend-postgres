@@ -2,6 +2,9 @@ import { hostname } from "node:os";
 
 import type { Kysely } from "kysely";
 
+import { OutboxDispatchActivities } from "#backend/activities/outbox_dispatch.activity.js";
+import { PostgresOutboxRepo } from "#backend/domain/repos/outbox_repo.js";
+
 import type { Clock } from "#platform/clock.js";
 import { WallClock } from "#platform/clock.js";
 import { disposePool, tenantKysely } from "#platform/db/database.js";
@@ -15,13 +18,16 @@ import {
 import { ensureScheduledJobs } from "./cron_schedules.js";
 import { HandlerRegistry } from "./handler_registry.js";
 import { registerCronHandlers } from "./handlers/cron_handlers.js";
+import { OutboxDispatcherLoop } from "./outbox_dispatcher_loop.js";
 import { SchedulerLoop, pollAndEnqueue } from "./scheduler.js";
 
 // Phase 3a W4: the background-runner PROCESS ENTRYPOINT — composes the W2b BackgroundRunnerLoop
 // (claim/dispatch/settle over core.background_jobs) + the W3 SchedulerLoop (the Postgres poller
 // replacing Temporal Schedules) + the W2b HandlerRegistry into ONE Temporal-free runtime process.
 // Closes the F6 review finding's composition gap: the three pieces existed but nothing wired them
-// into a bootable process.
+// into a bootable process. Phase 3c adds the OutboxDispatcherLoop (the Postgres leased drain loop
+// replacing the OutboxDispatcherWorkflow singleton) over the SAME shared pool/clock — the
+// temporal_workflow_start sink still dispatches via the RealTemporalClient until Phase 3d.
 //
 // ## NOT STARTED IN PRODUCTION YET (deliberate)
 //
@@ -37,18 +43,18 @@ import { SchedulerLoop, pollAndEnqueue } from "./scheduler.js";
 //
 // ## Shape
 //
-//   * {@link buildBackgroundRunner} — the PURE composition seam: constructs registry + both loops
-//     over ONE shared db/clock/repo (the ADR-0062 single-pool invariant: `tenantKysely(dsn)` in
+//   * {@link buildBackgroundRunner} — the PURE composition seam: constructs registry + the three
+//     loops over ONE shared db/clock (the ADR-0062 single-pool invariant: `tenantKysely(dsn)` in
 //     prod; tests inject their own Kysely + FakeClock). Also returns single-shot drive seams
-//     (`runOneCycle` / `pollOnce`) bound to the SAME pieces the loops own, so tests and operator
-//     diagnostics can drive exactly one claim/dispatch/settle or one poll pass without the loops.
+//     (`runOneCycle` / `pollOnce` / `drainOutboxOnce`) bound to the SAME pieces the loops own, so
+//     tests and operator diagnostics can drive exactly one cycle/pass without the infinite loops.
 //   * {@link resolveBackgroundRunnerConfig} — env parsing, fail-loud (missing DSN / garbage numbers
 //     refuse to boot; a half-configured runner is worse than no runner).
-//   * {@link runBackgroundRunner} — the process entrypoint: build, run BOTH loops concurrently,
-//     wire SIGINT/SIGTERM → stop() both + drain (an in-flight job/poll always completes; the loops'
-//     cancellableSleep wakes immediately), then dispose the shared pool. A crash in EITHER loop
-//     stops the other, drains it, and re-throws — fail-loud; supervision is the platform's restart
-//     policy (same posture as SchedulerLoop.run's propagating poll errors).
+//   * {@link runBackgroundRunner} — the process entrypoint: build, run ALL loops concurrently,
+//     wire SIGINT/SIGTERM → stop() all + drain (an in-flight job/poll/drain always completes; the
+//     loops' cancellableSleep wakes immediately), then dispose the shared pool. A crash in ANY loop
+//     stops the others, drains them, and re-throws — fail-loud; supervision is the platform's
+//     restart policy (same posture as SchedulerLoop.run's propagating poll errors).
 
 /** Tunables for both loops. Resolved from env in prod ({@link resolveBackgroundRunnerConfig}). */
 export type BackgroundRunnerConfig = {
@@ -64,6 +70,13 @@ export type BackgroundRunnerConfig = {
   idleS: number;
   /** Scheduler poll cadence (seconds) over core.scheduled_jobs. */
   pollIntervalS: number;
+  /** Outbox drain-loop idle sleep between empty claims (seconds) — the workflow's
+   *  DEFAULT_DRAIN_INTERVAL_SECONDS=2 (Phase 3c). */
+  outboxIdleS: number;
+  /** Outbox dead-letter threshold. Resolved from the SAME env var the Temporal composition root
+   *  reads (`CODEMASTER_OUTBOX_MAX_ATTEMPTS`, default 5 — build_outbox_activities.ts): both
+   *  runtimes drain the same `core.outbox` table and MUST share one threshold. */
+  outboxMaxAttempts: number;
 };
 
 /** What {@link buildBackgroundRunner} composes over: ONE shared Kysely (ADR-0062 pool) + Clock. */
@@ -81,10 +94,16 @@ export type BackgroundRunnerHandles = {
   registry: HandlerRegistry;
   runnerLoop: BackgroundRunnerLoop;
   schedulerLoop: SchedulerLoop;
+  /** Phase 3c: the Postgres leased outbox drain loop (replaces the OutboxDispatcherWorkflow
+   *  singleton). Run ONE per deployment — the rows are leased (SKIP LOCKED) so extra drainers are
+   *  SAFE, but the original singleton intent (global created_at-ordered draining) wants one. */
+  outboxLoop: OutboxDispatcherLoop;
   /** Drive exactly ONE claim → dispatch → settle cycle over the SAME pieces `runnerLoop` owns. */
   runOneCycle(): Promise<{ outcome: BackgroundRunOutcome; jobId?: string }>;
   /** Drive exactly ONE scheduler poll pass over the SAME pieces `schedulerLoop` owns. */
   pollOnce(): Promise<number>;
+  /** Drive exactly ONE outbox drain pass over the SAME pieces `outboxLoop` owns. */
+  drainOutboxOnce(): Promise<number>;
 };
 
 /**
@@ -118,12 +137,36 @@ export function buildBackgroundRunner(deps: BackgroundRunnerDeps): BackgroundRun
   };
   const schedulerArgs = { repo, db, clock };
 
+  // Phase 3c: the outbox drain loop — REUSES the proven Postgres-backed dispatch activities
+  // (OutboxDispatchActivities, the exact 4 the Temporal worker registers via
+  // buildOutboxActivities) over the SAME shared db/clock (ADR-0062). The dispatchRow sink routing
+  // is untouched: temporal_workflow_start still dispatches via the RealTemporalClient until
+  // Phase 3d rewires that sink.
+  const outboxActivities = new OutboxDispatchActivities({
+    repo: new PostgresOutboxRepo({ clock }),
+    db,
+    clock,
+    maxAttempts: config.outboxMaxAttempts,
+  });
+  const outboxLoop = new OutboxDispatcherLoop({
+    activities: {
+      claimPendingRows: outboxActivities.claimPendingRows,
+      dispatchRow: outboxActivities.dispatchRow,
+      markDispatched: outboxActivities.markDispatched,
+      markAttemptFailed: outboxActivities.markAttemptFailed,
+    },
+    clock,
+    idleS: config.outboxIdleS,
+  });
+
   return {
     registry,
     runnerLoop: new BackgroundRunnerLoop({ ...runnerArgs, idleS: config.idleS }),
     schedulerLoop: new SchedulerLoop({ ...schedulerArgs, pollIntervalS: config.pollIntervalS }),
+    outboxLoop,
     runOneCycle: async () => runOneBackgroundJob(runnerArgs),
     pollOnce: async () => pollAndEnqueue(schedulerArgs),
+    drainOutboxOnce: async () => outboxLoop.drainOnce(),
   };
 }
 
@@ -143,12 +186,29 @@ function envPositiveSeconds(env: NodeJS.ProcessEnv, name: string, fallback: numb
   return n;
 }
 
+/** Parse a positive integer from env, falling back when unset/empty; fail-loud on garbage. */
+function envPositiveInt(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  // `name` is a bounded set of CODEMASTER_* literals from resolveBackgroundRunnerConfig — not an
+  // attacker-controlled object-key sink; the prototype-pollution threat model does not apply.
+  // eslint-disable-next-line security/detect-object-injection
+  const raw = env[name];
+  if (raw === undefined || raw === "") {
+    return fallback;
+  }
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(`${name} must be a positive integer; got '${raw}'`);
+  }
+  return n;
+}
+
 /**
  * Resolve the DSN + loop tunables from env. Fail-loud: a missing DSN or a non-positive/garbage
  * interval refuses to boot (a half-configured runner silently mis-leasing jobs is worse than a
  * crash-loop the platform surfaces). Defaults: lease 60s / heartbeat 15s / hard ceiling 900s
  * (background work — Confluence sync, retention — runs minutes, not the review pipeline's seconds) /
- * idle 5s / scheduler poll 30s. `owner` is hostname+pid — traceable to the pod, no random seam.
+ * idle 5s / scheduler poll 30s / outbox idle 2s (the workflow's drain interval) / outbox
+ * dead-letter threshold 5. `owner` is hostname+pid — traceable to the pod, no random seam.
  */
 export function resolveBackgroundRunnerConfig(
   env: NodeJS.ProcessEnv,
@@ -168,17 +228,19 @@ export function resolveBackgroundRunnerConfig(
       maxRuntimeS: envPositiveSeconds(env, "CODEMASTER_BG_MAX_RUNTIME_S", 900),
       idleS: envPositiveSeconds(env, "CODEMASTER_BG_IDLE_S", 5),
       pollIntervalS: envPositiveSeconds(env, "CODEMASTER_BG_SCHEDULER_POLL_S", 30),
+      outboxIdleS: envPositiveSeconds(env, "CODEMASTER_BG_OUTBOX_IDLE_S", 2),
+      outboxMaxAttempts: envPositiveInt(env, "CODEMASTER_OUTBOX_MAX_ATTEMPTS", 5),
     },
   };
 }
 
 /**
- * The process entrypoint: build over the ADR-0062 shared pool + WallClock, run BOTH loops
- * concurrently, and shut down gracefully — SIGINT/SIGTERM stop() both loops, which DRAIN (an
- * in-flight job/poll pass always completes; the idle/poll cancellableSleep wakes immediately).
- * A crash in either loop stops + drains the other before the error re-throws (fail-loud; the
- * platform's restart policy is the supervisor). The shared pool is disposed after both loops
- * settle so no socket leaks across the exit path.
+ * The process entrypoint: build over the ADR-0062 shared pool + WallClock, run ALL THREE loops
+ * (runner + scheduler + outbox drain) concurrently, and shut down gracefully — SIGINT/SIGTERM
+ * stop() every loop, which DRAIN (an in-flight job/poll/drain pass always completes; the
+ * idle/poll cancellableSleep wakes immediately). A crash in any loop stops + drains the others
+ * before the error re-throws (fail-loud; the platform's restart policy is the supervisor). The
+ * shared pool is disposed after all loops settle so no socket leaks across the exit path.
  *
  * NOT booted by any deployment yet — see the module doc (Phase 3b+ registers handlers first).
  */
@@ -193,35 +255,41 @@ export async function runBackgroundRunner(): Promise<void> {
   // cannot reach core.scheduled_jobs at boot should crash-loop visibly, not run schedule-less.
   await ensureScheduledJobs(db, clock);
 
-  const stopBoth = (): void => {
+  const stopAll = (): void => {
     handles.runnerLoop.stop();
     handles.schedulerLoop.stop();
+    handles.outboxLoop.stop();
   };
-  process.once("SIGINT", stopBoth);
-  process.once("SIGTERM", stopBoth);
+  process.once("SIGINT", stopAll);
+  process.once("SIGTERM", stopAll);
 
   console.info(
     `background runner starting: owner=${config.owner} ` +
       `registered_job_types=[${handles.registry.registeredTypes().join(", ")}] ` +
       `(lease=${config.leaseS}s heartbeat=${config.heartbeatS}s maxRuntime=${config.maxRuntimeS}s ` +
-      `idle=${config.idleS}s schedulerPoll=${config.pollIntervalS}s)`,
+      `idle=${config.idleS}s schedulerPoll=${config.pollIntervalS}s ` +
+      `outboxIdle=${config.outboxIdleS}s outboxMaxAttempts=${config.outboxMaxAttempts})`,
   );
 
-  // allSettled (not all) so a crash in one loop still WAITS for the other to drain after stopBoth()
-  // — Promise.all would reject immediately and leave the survivor's rejection unobserved.
+  // allSettled (not all) so a crash in one loop still WAITS for the others to drain after stopAll()
+  // — Promise.all would reject immediately and leave the survivors' rejections unobserved.
   const results = await Promise.allSettled([
     handles.runnerLoop.run().catch((e: unknown) => {
-      stopBoth();
+      stopAll();
       throw e;
     }),
     handles.schedulerLoop.run().catch((e: unknown) => {
-      stopBoth();
+      stopAll();
+      throw e;
+    }),
+    handles.outboxLoop.run().catch((e: unknown) => {
+      stopAll();
       throw e;
     }),
   ]);
 
-  process.removeListener("SIGINT", stopBoth);
-  process.removeListener("SIGTERM", stopBoth);
+  process.removeListener("SIGINT", stopAll);
+  process.removeListener("SIGTERM", stopAll);
   await disposePool(dsn);
 
   const failure = results.find((r): r is PromiseRejectedResult => r.status === "rejected");

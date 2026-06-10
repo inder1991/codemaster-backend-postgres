@@ -1,0 +1,148 @@
+// Phase 3c (de-Temporal full-removal program): the Postgres leased drain loop replacing the
+// OutboxDispatcherWorkflow's CONTINUOUS-LOOP singleton body (outbox_dispatcher.workflow.ts) in the
+// Temporal-free runtime. SAME drain logic — claim a batch → dispatch + mark each row in claim order
+// → idle when the batch is empty — but as a plain in-process loop over the SAME 4 proven
+// Postgres-backed activities (OutboxDispatchActivities: claimPendingRows / dispatchRow /
+// markDispatched / markAttemptFailed). The outbox dispatch logic itself is UNCHANGED; the Temporal
+// workflow stays in place until Phase 4 deletes it, and the temporal_workflow_start sink still
+// dispatches via the RealTemporalClient until Phase 3d rewires that sink.
+//
+// ## Temporal-only machinery deliberately DROPPED (a plain loop has no history)
+//   * continueAsNew / workflowInfo().continueAsNewSuggested — the BF-12 history boundary exists
+//     only because Temporal accumulates event history; this loop holds no history at all.
+//   * The per-activity proxyActivities retry curves (retryDb ×5 / retryDispatch ×2). Dispatch-level
+//     retry rides the ROW's durable `attempts` column instead: a failed dispatch is recorded via
+//     markAttemptFailed (lease released → re-claimable; atomically dead-lettered at the threshold),
+//     so retries survive process restarts exactly as they did under Temporal. A DB error on
+//     claim/mark propagates OUT of {@link OutboxDispatcherLoop.run} — fail-loud; the composition
+//     root's restart policy is the supervisor (the same posture as SchedulerLoop.run).
+//   * The isCancellation re-throw in the per-row catch — Temporal injects cancellation into
+//     activity awaits on worker shutdown; this runtime's stop() NEVER interrupts an in-flight
+//     drain pass (it only wakes the idle sleep), so a dispatch failure here is ALWAYS a real
+//     dispatch failure and is ALWAYS recorded as an attempt.
+//
+// ## Concurrency + ordering
+// The outbox rows are LEASED: claimPendingRows takes `FOR UPDATE OF o SKIP LOCKED` row locks and
+// stamps `leased_until`, so multiple concurrent drainers are SAFE (they partition the pending set;
+// a crashed drainer's rows become re-claimable after the lease expires). Run ONE loop per
+// deployment regardless — that preserves the original singleton-workflow intent (global
+// created_at-ordered draining); N drainers would interleave batches and the cross-batch order
+// guarantee degrades to per-drainer. WITHIN a batch, dispatch order is the claim order
+// (`ORDER BY o.created_at`), 1:1 with the workflow body's `for (const row of rows)`.
+
+import type { OutboxRow } from "#backend/domain/repos/outbox_repo.js";
+import type {
+  ClaimPendingRowsInputV1,
+  DispatchRowInputV1,
+  MarkAttemptFailedInputV1,
+  MarkDispatchedInputV1,
+} from "#contracts/outbox_dispatch.v1.js";
+
+import type { Clock } from "#platform/clock.js";
+
+import { cancellableSleep } from "./clock_async.js";
+
+/** The 4-activity surface the loop drains through — the arrow-property methods of
+ *  OutboxDispatchActivities satisfy it structurally (buildBackgroundRunner wires them; tests
+ *  substitute a recording dispatchRow). */
+export type OutboxActivityFns = {
+  claimPendingRows(input: ClaimPendingRowsInputV1): Promise<Array<OutboxRow>>;
+  dispatchRow(input: DispatchRowInputV1): Promise<void>;
+  markDispatched(input: MarkDispatchedInputV1): Promise<void>;
+  markAttemptFailed(input: MarkAttemptFailedInputV1): Promise<void>;
+};
+
+// Loop tuning — 1:1 with the workflow module constants (outbox_dispatcher.workflow.ts:24-26).
+// DEFAULT_OUTBOX_LEASE_SECONDS=10 is passed EXPLICITLY on every claim — it intentionally differs
+// from the contract default (60); the dispatch activity's lease heartbeat re-extends to a 10s
+// window, so a "simplification" that drops this would silently 6× the lease.
+export const DEFAULT_OUTBOX_BATCH_SIZE = 100;
+export const DEFAULT_OUTBOX_LEASE_SECONDS = 10;
+export const DEFAULT_OUTBOX_DRAIN_INTERVAL_SECONDS = 2;
+
+/**
+ * The dispatcher loop — mirrors BackgroundRunnerLoop/SchedulerLoop: drain, then `cancellableSleep`
+ * for `idleS` ONLY when the claim came back empty (busy-loop on success: a drained batch
+ * immediately re-claims, 1:1 with the workflow body); {@link stop} interrupts the idle sleep
+ * immediately and ends the loop after the in-flight pass completes (wire to
+ * `process.on('SIGTERM', () => loop.stop())`).
+ */
+export class OutboxDispatcherLoop {
+  #stopped = false;
+  readonly #stop = new AbortController();                  // wakes the idle sleep immediately on stop()
+  readonly #batchSize: number;
+  readonly #leaseSeconds: number;
+  readonly #idleS: number;
+
+  public constructor(
+    private o: {
+      activities: OutboxActivityFns;
+      clock: Clock;
+      batchSize?: number;
+      leaseSeconds?: number;
+      idleS?: number;
+    },
+  ) {
+    this.#batchSize = o.batchSize ?? DEFAULT_OUTBOX_BATCH_SIZE;
+    this.#leaseSeconds = o.leaseSeconds ?? DEFAULT_OUTBOX_LEASE_SECONDS;
+    this.#idleS = o.idleS ?? DEFAULT_OUTBOX_DRAIN_INTERVAL_SECONDS;
+  }
+
+  public stop(): void { this.#stopped = true; this.#stop.abort(); }
+
+  /**
+   * ONE drain pass — the single-cycle drive seam (the scheduler's pollOnce idiom): claim a batch,
+   * then for each row IN CLAIM ORDER dispatch + markDispatched, with the workflow body's PER-ROW
+   * try/catch (a dispatch failure marks THAT row's attempt via markAttemptFailed — atomically
+   * dead-lettered at the threshold — and the rest of the batch still drains). Returns the number
+   * of rows claimed (0 → the caller idles).
+   */
+  public async drainOnce(): Promise<number> {
+    const rows = await this.o.activities.claimPendingRows({
+      batch_size: this.#batchSize,
+      lease_seconds: this.#leaseSeconds,
+    });
+
+    for (const row of rows) {
+      try {
+        await this.o.activities.dispatchRow({
+          schema_version: 2,
+          row_id: row.id,
+          sink: row.sink,
+          payload: row.payload,
+          trace_context: row.traceContext as Record<string, string>,
+          run_id: row.runId,
+          review_id: row.reviewId,
+          provider: row.provider,
+          installation_id: row.installationId,
+          // Tagged-union: a null installation_id MUST carry orphan_reason='bootstrap_sink' (the
+          // DispatchRow contract validator). Review-causal rows always have a UUID installation_id
+          // → orphan_reason null. (1:1 with the workflow body.)
+          orphan_reason: row.installationId === null ? "bootstrap_sink" : null,
+        });
+        await this.o.activities.markDispatched({ row_id: row.id });
+      } catch (e) {
+        // mark_attempt_failed atomically dead-letters at the threshold; expected_attempts =
+        // row.attempts (the pre-attempt snapshot from claimPendingRows) makes a duplicate
+        // settlement a no-op (R-6).
+        await this.o.activities.markAttemptFailed({
+          row_id: row.id,
+          error: (e instanceof Error ? e.message : String(e)).slice(0, 1024),
+          expected_attempts: row.attempts,
+        });
+      }
+    }
+    return rows.length;
+  }
+
+  public async run(): Promise<void> {
+    while (!this.#stopped) {
+      const claimed = await this.drainOnce();              // an in-flight pass ALWAYS completes (drain)
+      if (claimed === 0 && !this.#stopped) {
+        // Busy-loop on success (no sleep between a drained batch and the re-claim); idle ONLY on
+        // an empty claim — 1:1 with the workflow body's sleep-on-empty.
+        await cancellableSleep(this.o.clock, this.#idleS, this.#stop.signal); // stop() interrupts
+      }
+    }
+  }
+}

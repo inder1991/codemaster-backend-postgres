@@ -29,6 +29,7 @@ import { describeDb, INTEGRATION_DSN } from "../_db.js";
 import { BackgroundJobsRepo } from "#backend/runner/background_jobs_repo.js";
 import { BackgroundRunnerLoop } from "#backend/runner/background_runner.js";
 import { HandlerRegistry } from "#backend/runner/handler_registry.js";
+import { OutboxDispatcherLoop } from "#backend/runner/outbox_dispatcher_loop.js";
 import { SchedulerLoop } from "#backend/runner/scheduler.js";
 import {
   buildBackgroundRunner,
@@ -57,6 +58,7 @@ beforeEach(async () => {
  *  proves stop() interrupts them rather than waiting them out). */
 const TEST_CONFIG: BackgroundRunnerConfig = {
   owner: "w4-main-test", leaseS: 2, heartbeatS: 0.2, maxRuntimeS: 60, idleS: 30, pollIntervalS: 600,
+  outboxIdleS: 600, outboxMaxAttempts: 5,
 };
 
 /** Per-test-unique ids so assertions are traceable to the test that minted the rows. */
@@ -76,10 +78,15 @@ async function seedSchedule(opts: {
 }
 
 describeDb("background_runner_main — buildBackgroundRunner composition (Phase 3a W4)", () => {
-  it("(1) returns the three composed pieces; the registry boots with the W3b.1 cron handlers pre-registered", () => {
+  it("(1) returns the composed pieces; the registry boots with the W3b.1 cron handlers pre-registered", () => {
     const handles = buildBackgroundRunner({ db, clock: new FakeClock(), config: TEST_CONFIG });
     expect(handles.runnerLoop).toBeInstanceOf(BackgroundRunnerLoop);
     expect(handles.schedulerLoop).toBeInstanceOf(SchedulerLoop);
+    // Phase 3c: the outbox drain loop composes over the SAME shared db/clock; its drain behavior is
+    // proven in outbox_dispatcher_loop.integration.test.ts (driving the REAL dispatchRow here would
+    // route leftover rows into the real sink registry).
+    expect(handles.outboxLoop).toBeInstanceOf(OutboxDispatcherLoop);
+    expect(typeof handles.drainOutboxOnce).toBe("function");
     expect(handles.registry).toBeInstanceOf(HandlerRegistry);
     // W3b.1 + W3b.2: the 2 interval + 2 daily crons register at composition; later Phase 3b waves
     // append here.
@@ -167,6 +174,8 @@ describe("resolveBackgroundRunnerConfig", () => {
     expect(config.maxRuntimeS).toBe(900);
     expect(config.idleS).toBe(5);
     expect(config.pollIntervalS).toBe(30);
+    expect(config.outboxIdleS).toBe(2);       // the workflow's DEFAULT_DRAIN_INTERVAL_SECONDS
+    expect(config.outboxMaxAttempts).toBe(5); // parity with build_outbox_activities.ts
     expect(config.owner).toMatch(/^bg-runner-/); // hostname+pid — traceable to the pod, no random seam
   });
 
@@ -175,11 +184,19 @@ describe("resolveBackgroundRunnerConfig", () => {
       CODEMASTER_PG_CORE_DSN: "postgresql://x/y",
       CODEMASTER_BG_LEASE_S: "120", CODEMASTER_BG_HEARTBEAT_S: "30", CODEMASTER_BG_MAX_RUNTIME_S: "1800",
       CODEMASTER_BG_IDLE_S: "2.5", CODEMASTER_BG_SCHEDULER_POLL_S: "10",
+      CODEMASTER_BG_OUTBOX_IDLE_S: "7", CODEMASTER_OUTBOX_MAX_ATTEMPTS: "3",
     });
-    expect(config).toMatchObject({ leaseS: 120, heartbeatS: 30, maxRuntimeS: 1800, idleS: 2.5, pollIntervalS: 10 });
+    expect(config).toMatchObject({ leaseS: 120, heartbeatS: 30, maxRuntimeS: 1800, idleS: 2.5, pollIntervalS: 10,
+      outboxIdleS: 7, outboxMaxAttempts: 3 });
     expect(() => resolveBackgroundRunnerConfig({ CODEMASTER_PG_CORE_DSN: "postgresql://x/y",
       CODEMASTER_BG_LEASE_S: "0" })).toThrow(/CODEMASTER_BG_LEASE_S/);
     expect(() => resolveBackgroundRunnerConfig({ CODEMASTER_PG_CORE_DSN: "postgresql://x/y",
       CODEMASTER_BG_IDLE_S: "soon" })).toThrow(/CODEMASTER_BG_IDLE_S/);
+    // The dead-letter threshold must be a positive INTEGER (a fractional / zero threshold would
+    // silently never dead-letter or dead-letter instantly).
+    expect(() => resolveBackgroundRunnerConfig({ CODEMASTER_PG_CORE_DSN: "postgresql://x/y",
+      CODEMASTER_OUTBOX_MAX_ATTEMPTS: "2.5" })).toThrow(/CODEMASTER_OUTBOX_MAX_ATTEMPTS/);
+    expect(() => resolveBackgroundRunnerConfig({ CODEMASTER_PG_CORE_DSN: "postgresql://x/y",
+      CODEMASTER_OUTBOX_MAX_ATTEMPTS: "0" })).toThrow(/CODEMASTER_OUTBOX_MAX_ATTEMPTS/);
   });
 });

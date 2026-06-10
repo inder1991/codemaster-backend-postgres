@@ -78,6 +78,7 @@ beforeEach(async () => {
  *  them), huge sleeps (the single-shot drive seams never enter them). */
 const TEST_CONFIG: BackgroundRunnerConfig = {
   owner: "w3b1-cron-test", leaseS: 2, heartbeatS: 0.2, maxRuntimeS: 60, idleS: 30, pollIntervalS: 600,
+  outboxIdleS: 600, outboxMaxAttempts: 5,
 };
 
 /** A bigint that fits the GitHub-id columns and is process-unique. */
