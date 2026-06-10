@@ -1,6 +1,8 @@
+import { ZodError } from "zod";
 import type { Clock } from "#platform/clock.js";
 import type { BackgroundJobsRepo } from "./background_jobs_repo.js";
 import type { HandlerDeps, HandlerRegistry } from "./handler_registry.js";
+import { PermanentJobError } from "./errors.js";
 import { cancellableSleep } from "./clock_async.js";
 import {
   recordBackgroundJobOutcome,
@@ -26,6 +28,10 @@ import {
 //     conjure a handler; the wiring bug surfaces once per enqueue, not max_attempts times).
 //   * The payload is hash-VERIFIED (BackgroundJobsRepo.verifyPayload) BEFORE the handler runs; a
 //     mismatch is a POISON PILL → terminalSettle dead (retry cannot fix corrupted bytes).
+//   * Handler throws are CLASSIFIED at the settle seam (Phase 4a W4a.1, mirroring the outbox's
+//     RetryableSinkError/PermanentSinkError split): PermanentJobError (./errors.js) and a bare
+//     ZodError (the payload fails its contract — the SAME bytes re-parse identically on retry)
+//     dead-letter IMMEDIATELY; everything else keeps the bounded markFailed retry/backoff curve.
 //   * settleFailure has NO isLastAttempt fork: BackgroundJobsRepo.markFailed ALREADY dead-letters
 //     atomically at exhaustion (CASE state→'dead' + dead_reason + finished_at in ONE fenced
 //     UPDATE) — there is no review_run second row to keep in lockstep, so runOneJob's
@@ -50,7 +56,7 @@ export async function runOneBackgroundJob(o: { repo: BackgroundJobsRepo; registr
   const token = job.attempt_token!;
   if (job.attempts > 1) recordLeaseSteal();   // a reclaim minted attempts > 1 → a prior owner crashed
 
-  /** Terminal poison-pill settle (no-handler / payload-integrity): job→dead REGARDLESS of attempts. */
+  /** Terminal poison-pill settle (no-handler / payload-integrity / permanent error): job→dead REGARDLESS of attempts. */
   const settlePoison = async (reason: string, outcome: BackgroundRunOutcome): Promise<BackgroundRunOutcome> => {
     const r = await o.repo.terminalSettle({ jobId: job.job_id, owner: o.owner, token, reason });
     if (!r.applied) recordStaleTokenWrite({ op: "markFailed" });   // lease was stolen → loser; bounded op label
@@ -136,7 +142,16 @@ export async function runOneBackgroundJob(o: { repo: BackgroundJobsRepo; registr
       outcome = done.applied ? "done" : "lease_lost";
     }
   } catch (e) {
-    outcome = await settleFailure(e instanceof Error ? e.message : String(e));
+    // Dispatch seam ③ — permanent-failure classification (Phase 4a W4a.1; mirrors the outbox's
+    // RetryableSinkError/PermanentSinkError split). PermanentJobError is the handler-declared
+    // "retry CANNOT succeed" signal; a bare ZodError means the stored payload failed its contract —
+    // the SAME bytes re-parse identically on every retry. Both dead-letter IMMEDIATELY
+    // (terminalSettle, dead_reason = the message) instead of burning the bounded attempts.
+    // Everything else is presumed transient → the markFailed retry/backoff curve.
+    const msg = e instanceof Error ? e.message : String(e);
+    outcome = (e instanceof PermanentJobError || e instanceof ZodError)
+      ? await settlePoison(msg, "failed")
+      : await settleFailure(msg);
   } finally { stop.abort(); await hb; await hardTimeout; }   // immediate stop (cancellableSleep wakes); helpers never mask `outcome`
   recordHandlerDurationMs((o.clock.monotonic() - handlerStart) * 1000);
   recordBackgroundJobOutcome({ outcome });

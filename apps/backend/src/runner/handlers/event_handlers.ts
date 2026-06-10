@@ -66,11 +66,12 @@ import {
 // ## Retry semantics (the platform analogue of the Temporal RetryPolicy)
 // The Temporal proxies mark ZodError non-retryable and let everything else redrive (notably the
 // reconcile-repositories out-of-order plain Error — `installation_repositories` arriving BEFORE
-// `installation.created` — and the hydrate 5xx GitHubApiUnavailableError). The platform has ONE
-// retry curve: markFailed re-enqueues 'ready' with exponential backoff and dead-letters at
-// max_attempts. A permanently-bad payload therefore burns its bounded attempts and deads with the
-// ZodError persisted (bounded waste vs the Temporal short-circuit — accepted; the payload hash gate
-// already dead-letters tampered rows outright). Transient faults redrive exactly as before.
+// `installation.created` — and the hydrate 5xx GitHubApiUnavailableError). The platform matches
+// that split since Phase 4a W4a.1: the runner classifies a propagating ZodError (or a
+// handler-thrown PermanentJobError, see ../errors.js) as PERMANENT → terminalSettle dead-letters
+// IMMEDIATELY with the error as dead_reason (no retry burn — the same stored bytes re-parse
+// identically on every attempt). Everything else keeps the bounded retry curve: markFailed
+// re-enqueues 'ready' with exponential backoff and dead-letters at max_attempts.
 //
 // ## Result handling
 // The handlers return void — the platform persists job OUTCOME, not the activity result contracts
@@ -91,8 +92,9 @@ import {
 // The Temporal sync_code_owners proxy retried 5× (non-retryable GitHubAppUnauthorized /
 // GitHubNotFoundError); the refresh proxy retried clone 3× (same non-retryables) and refresh 3×
 // (non-retryable WrongVectorDimensionError). The platform has ONE retry curve (module doc above):
-// a permanently-bad fault burns its bounded attempts and dead-letters with the error persisted —
-// the same accepted trade as the reconcile adapters' ZodError note. Embed-service degradation is
+// these PLAIN-Error faults burn their bounded attempts and dead-letter with the error persisted —
+// a W4a.1 follow-up may wrap them in PermanentJobError to short-circuit like the ZodError path
+// (the runner already classifies; only the throw sites need the wrap). Embed-service degradation is
 // NOT a throw: the refresh activity returns `retrieval_degraded=true` and the job settles done
 // with the degradation logged (1:1 with the Temporal workflow surfacing the result verbatim).
 //
@@ -456,8 +458,8 @@ export function registerEventHandlers(registry: HandlerRegistry, deps: EventHand
   // from the DELETE-approval endpoint). On the platform the handler THROWS instead: the runner's
   // markFailed retry/backoff redrives the attempt and dead-letters at max_attempts with last_error
   // persisted — the platform retry IS the retry the resync_complete=false contract asked the absent
-  // caller to perform. A malformed payload (ZodError) burns its bounded attempts and deads with the
-  // error persisted (the module-doc retry-semantics trade, same as every event handler above).
+  // caller to perform. A malformed payload (ZodError) dead-letters IMMEDIATELY — the runner's W4a.1
+  // permanent-error classification (the module-doc retry-semantics note, same as every handler above).
   //
   // ## Result handling + cancellation
   // Returns void (the platform persists job OUTCOME, not TriggerPageResyncOutputV1 — consumed by
