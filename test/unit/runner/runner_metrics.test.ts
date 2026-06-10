@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   CLAIM_LATENCY_MS_NAME,
+  LOOP_CRASHED_NAME,
   CRASH_LOOP_REAPED_NAME,
   HANDLER_DURATION_MS_NAME,
   HANDLER_ORPHAN_SETTLED_NAME,
@@ -29,6 +30,7 @@ import {
   recordJobOutcome,
   recordLeaseSteal,
   recordRetryAttempt,
+  recordRunnerLoopCrashed,
   recordSchedulerScheduleError,
   recordStaleTokenWrite,
 } from "#backend/runner/runner_metrics.js";
@@ -45,6 +47,7 @@ describe("runner_metrics — metric names (Grafana-stable)", () => {
     expect(CRASH_LOOP_REAPED_NAME).toBe("codemaster_runner_crash_loop_reaped_total");
     expect(HANDLER_ORPHAN_SETTLED_NAME).toBe("codemaster_runner_handler_orphan_settled_total");
     expect(SCHEDULER_SCHEDULE_ERRORS_NAME).toBe("codemaster_runner_scheduler_schedule_errors_total");
+    expect(LOOP_CRASHED_NAME).toBe("codemaster_runner_loop_crashed_total");
   });
 });
 
@@ -68,5 +71,8 @@ describe("runner_metrics — emit functions are no-throw before exporter wiring"
     expect(() => recordCrashLoopReaped(3)).not.toThrow();
     expect(() => recordHandlerOrphanSettled({ phase: "after_hard_timeout" })).not.toThrow();
     expect(() => recordSchedulerScheduleError()).not.toThrow();
+    expect(() => recordRunnerLoopCrashed({ loop: "runner" })).not.toThrow();
+    expect(() => recordRunnerLoopCrashed({ loop: "scheduler" })).not.toThrow();
+    expect(() => recordRunnerLoopCrashed({ loop: "outbox" })).not.toThrow();
   });
 });

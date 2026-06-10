@@ -25,6 +25,7 @@ import { HandlerRegistry } from "./handler_registry.js";
 import { registerCronHandlers } from "./handlers/cron_handlers.js";
 import { registerEventHandlers } from "./handlers/event_handlers.js";
 import { OutboxDispatcherLoop } from "./outbox_dispatcher_loop.js";
+import { recordRunnerLoopCrashed } from "./runner_metrics.js";
 import { SchedulerLoop, pollAndEnqueue } from "./scheduler.js";
 
 // Phase 3a W4: the background-runner PROCESS ENTRYPOINT — composes the W2b BackgroundRunnerLoop
@@ -59,11 +60,19 @@ import { SchedulerLoop, pollAndEnqueue } from "./scheduler.js";
 //     tests and operator diagnostics can drive exactly one cycle/pass without the infinite loops.
 //   * {@link resolveBackgroundRunnerConfig} — env parsing, fail-loud (missing DSN / garbage numbers
 //     refuse to boot; a half-configured runner is worse than no runner).
-//   * {@link runBackgroundRunner} — the process entrypoint: build, run ALL loops concurrently,
-//     wire SIGINT/SIGTERM → stop() all + drain (an in-flight job/poll/drain always completes; the
-//     loops' cancellableSleep wakes immediately), then dispose the shared pool. A crash in ANY loop
-//     stops the others, drains them, and re-throws — fail-loud; supervision is the platform's
-//     restart policy (same posture as SchedulerLoop.run's propagating poll errors).
+//   * {@link runSupervisedLoops} — the PER-LOOP SUPERVISION seam (Phase 4b W4b.2, review blocker
+//     #3): each loop's run() is awaited behind its OWN catch boundary, so one loop's escaped error
+//     stops THAT loop alone (logged + codemaster_runner_loop_crashed_total{loop}) while the others
+//     KEEP RUNNING. Pre-W4b.2 the composition tied the three run() promises into a fail-fast race
+//     (any crash fired stopAll()) — a scheduler fault stopped background-job execution AND outbox
+//     draining.
+//   * {@link runBackgroundRunner} — the process entrypoint: build, run ALL loops concurrently under
+//     runSupervisedLoops, wire SIGINT/SIGTERM → stop() all + drain (an in-flight job/poll/drain
+//     always completes; the loops' cancellableSleep wakes immediately), then dispose the shared
+//     pool. stopAll() fires ONLY on the signal path — NEVER as a side effect of one loop's failure.
+//     The entrypoint returns once ALL loops have ended (graceful stop or crash), re-throwing
+//     fail-loud when any loop crashed, so a fully-crashed runner exits non-zero and the platform
+//     restarts it instead of lingering as a zombie.
 
 /** Tunables for both loops. Resolved from env in prod ({@link resolveBackgroundRunnerConfig}). */
 export type BackgroundRunnerConfig = {
@@ -357,13 +366,74 @@ export function resolveBackgroundRunnerConfig(
   return { dsn, config };
 }
 
+/** Bounded loop-name vocabulary of the supervision seam — doubles as the
+ *  `codemaster_runner_loop_crashed_total{loop}` counter label (cardinality discipline). */
+export type SupervisedLoopName = "runner" | "scheduler" | "outbox";
+
+/** One crashed loop, as observed (caught + logged + metered) by {@link runSupervisedLoops}. */
+export type LoopCrash = { loop: SupervisedLoopName; error: Error };
+
+/** The narrow run() surface the supervisor needs — all three loop classes satisfy it structurally. */
+type RunnableLoop = { run(): Promise<void> };
+
+/**
+ * Supervise ONE loop: await its run() behind a catch boundary so an escaped error CANNOT reach the
+ * composition's Promise machinery as a rejection. On a crash: meter the bounded
+ * `codemaster_runner_loop_crashed_total{loop}` counter, ERROR-log which loop + the error, and
+ * resolve with the {@link LoopCrash} — the crashed loop has stopped ON ITS OWN (its run() exited);
+ * nothing here touches the sibling loops. NEVER rejects (the catch body is metric-fail-safe +
+ * console only), so the caller's Promise.all cannot fail-fast.
+ */
+async function superviseLoop(loop: SupervisedLoopName, runnable: RunnableLoop): Promise<LoopCrash | undefined> {
+  try {
+    await runnable.run();
+    return undefined; // graceful: stop() ended the loop
+  } catch (e) {
+    const error = e instanceof Error ? e : new Error(String(e));
+    recordRunnerLoopCrashed({ loop });
+    console.error(
+      `background runner: ${loop} loop CRASHED and stopped — the other loops KEEP RUNNING ` +
+        `(W4b.2 per-loop supervision; this pod is DEGRADED until restarted): ${error.stack ?? error.message}`,
+    );
+    return { loop, error };
+  }
+}
+
+/**
+ * Run ALL THREE loops concurrently under PER-LOOP SUPERVISION (Phase 4b W4b.2, review blocker #3):
+ * one loop's escaped error (a pass-level DB fault in the scheduler, a claim error in the runner /
+ * outbox drainer — the loops' documented fail-loud run() contract) is caught at ITS OWN boundary,
+ * logged + metered, and stops THAT loop alone; the other loops KEEP RUNNING. Resolves only when
+ * EVERY loop has ended — graceful stop() or crash — with the list of observed crashes (empty on a
+ * clean shutdown). The composition deliberately does NOT tie the run() promises into a fail-fast
+ * race: superviseLoop never rejects, so this Promise.all cannot reject either. Calling the loops'
+ * stop() is the CALLER's job (the SIGINT/SIGTERM path in {@link runBackgroundRunner}) — never a
+ * side effect of one loop's failure.
+ */
+export async function runSupervisedLoops(loops: {
+  runnerLoop: RunnableLoop;
+  schedulerLoop: RunnableLoop;
+  outboxLoop: RunnableLoop;
+}): Promise<Array<LoopCrash>> {
+  const outcomes = await Promise.all([
+    superviseLoop("runner", loops.runnerLoop),
+    superviseLoop("scheduler", loops.schedulerLoop),
+    superviseLoop("outbox", loops.outboxLoop),
+  ]);
+  return outcomes.filter((o): o is LoopCrash => o !== undefined);
+}
+
 /**
  * The process entrypoint: build over the ADR-0062 shared pool + WallClock, run ALL THREE loops
- * (runner + scheduler + outbox drain) concurrently, and shut down gracefully — SIGINT/SIGTERM
- * stop() every loop, which DRAIN (an in-flight job/poll/drain pass always completes; the
- * idle/poll cancellableSleep wakes immediately). A crash in any loop stops + drains the others
- * before the error re-throws (fail-loud; the platform's restart policy is the supervisor). The
- * shared pool is disposed after all loops settle so no socket leaks across the exit path.
+ * (runner + scheduler + outbox drain) concurrently under {@link runSupervisedLoops}, and shut down
+ * gracefully — SIGINT/SIGTERM stop() every loop, which DRAIN (an in-flight job/poll/drain pass
+ * always completes; the idle/poll cancellableSleep wakes immediately). A crash in ONE loop stops
+ * that loop ALONE (logged + metered; W4b.2 — pre-fix it fired stopAll() and tore down job
+ * execution AND outbox draining together); the survivors keep running until a signal arrives. Once
+ * ALL loops have ended the shared pool is disposed (no socket leaks across the exit path) and any
+ * observed crash re-throws — fail-loud: a run in which a loop crashed never exits 0, and when EVERY
+ * loop has crashed nothing keeps the process useful, so the throw lets the platform restart it
+ * instead of leaving a zombie pod that looks healthy with zero live loops.
  *
  * NOT booted by any deployment yet — see the module doc (Phase 3b+ registers handlers first).
  */
@@ -384,6 +454,9 @@ export async function runBackgroundRunner(): Promise<void> {
   // cannot reach core.scheduled_jobs at boot should crash-loop visibly, not run schedule-less.
   await ensureScheduledJobs(db, clock);
 
+  // stopAll fires ONLY here — the SIGINT/SIGTERM shutdown path. NEVER wire it to a loop's failure
+  // (W4b.2 review blocker #3: the pre-fix .catch(stopAll) tie meant one loop's crash tore down all
+  // three); a crashed loop stops alone inside runSupervisedLoops while the others keep running.
   const stopAll = (): void => {
     handles.runnerLoop.stop();
     handles.schedulerLoop.stop();
@@ -400,30 +473,26 @@ export async function runBackgroundRunner(): Promise<void> {
       `outboxIdle=${config.outboxIdleS}s outboxMaxAttempts=${config.outboxMaxAttempts})`,
   );
 
-  // allSettled (not all) so a crash in one loop still WAITS for the others to drain after stopAll()
-  // — Promise.all would reject immediately and leave the survivors' rejections unobserved.
-  const results = await Promise.allSettled([
-    handles.runnerLoop.run().catch((e: unknown) => {
-      stopAll();
-      throw e;
-    }),
-    handles.schedulerLoop.run().catch((e: unknown) => {
-      stopAll();
-      throw e;
-    }),
-    handles.outboxLoop.run().catch((e: unknown) => {
-      stopAll();
-      throw e;
-    }),
-  ]);
+  // Per-loop SUPERVISION (W4b.2): resolves only when ALL THREE loops have ended — graceful stop()
+  // via the signal path above, or a crash that stopped ITS loop alone. The process therefore stays
+  // alive (and the survivors keep working) past any single loop's crash; if EVERY loop crashes,
+  // nothing is left running, this await completes, and the fail-loud throw below exits the process
+  // so the platform restarts it.
+  const crashes = await runSupervisedLoops(handles);
 
   process.removeListener("SIGINT", stopAll);
   process.removeListener("SIGTERM", stopAll);
   await disposePool(dsn);
 
-  const failure = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
-  if (failure !== undefined) {
-    throw failure.reason instanceof Error ? failure.reason : new Error(String(failure.reason));
+  if (crashes.length > 0) {
+    // Fail-loud at EXIT: even when the surviving loops drained gracefully on SIGTERM, a run in
+    // which any loop crashed must not exit 0 — the non-zero exit + the aggregate message record
+    // the degraded run for the platform and the logs.
+    throw new AggregateError(
+      crashes.map((c) => c.error),
+      `background runner: ${crashes.length} loop(s) crashed during this run — ` +
+        crashes.map((c) => `${c.loop}: ${c.error.message}`).join("; "),
+    );
   }
 }
 

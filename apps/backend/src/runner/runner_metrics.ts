@@ -55,9 +55,19 @@
  *                                                  carries the id. A sustained non-zero rate = a permanently
  *                                                  bad schedule an operator must fix or disable.
  *
+ * Phase 4b W4b.2 — the COMPOSITION ROOT (background_runner_main.ts::runSupervisedLoops) adds one:
+ *   * codemaster_runner_loop_crashed_total{loop}  — counter: ONE supervised loop's run() ended with an escaped
+ *                                                  error and was stopped ALONE — the sibling loops KEEP RUNNING
+ *                                                  (review blocker #3: pre-W4b.2 any loop's crash fired stopAll()
+ *                                                  and tore down the whole process). loop ∈ {runner, scheduler,
+ *                                                  outbox}. ANY non-zero value = a DEGRADED runner pod: that
+ *                                                  loop's work (job execution / schedule polling / outbox
+ *                                                  draining) has stopped until the pod restarts — alert on it.
+ *
  * ## Cardinality discipline
  * Bounded-enum labels ONLY: `op` ∈ {markDone, markFailed}; `outcome` ∈ {idle, done, failed, lease_lost, cancelled}
- * (review) / {idle, done, failed, lease_lost, no_handler} (background); `phase` ∈ {after_hard_timeout}.
+ * (review) / {idle, done, failed, lease_lost, no_handler} (background); `phase` ∈ {after_hard_timeout};
+ * `loop` ∈ {runner, scheduler, outbox}.
  * NEVER per-tenant / per-installation / per-PR / per-job labels — same discipline the sibling modules enforce.
  *
  * Fail-safe: every emit swallows meter errors so telemetry never perturbs the runner loop.
@@ -78,6 +88,7 @@ export const HANDLER_ORPHAN_SETTLED_NAME = "codemaster_runner_handler_orphan_set
 export const BACKGROUND_JOBS_TOTAL_NAME = "codemaster_runner_background_jobs_total";
 export const BACKGROUND_NO_HANDLER_NAME = "codemaster_runner_background_no_handler_total";
 export const SCHEDULER_SCHEDULE_ERRORS_NAME = "codemaster_runner_scheduler_schedule_errors_total";
+export const LOOP_CRASHED_NAME = "codemaster_runner_loop_crashed_total";
 
 // Meter + instruments cached at MODULE scope (created once at import).
 const METER = getMeter("codemaster.runner");
@@ -141,6 +152,13 @@ const SCHEDULER_SCHEDULE_ERRORS_COUNTER: Counter = METER.createCounter(SCHEDULER
     "and were isolated — skipped + left unadvanced while the pass continued over the healthy schedules. NO " +
     "schedule_id label (operator-minted ids are unbounded-cardinality); the paired WARN log carries the id. A " +
     "sustained non-zero rate signals a permanently-bad schedule an operator must fix or disable.",
+});
+const LOOP_CRASHED_COUNTER: Counter = METER.createCounter(LOOP_CRASHED_NAME, {
+  description:
+    "Count of supervised runtime loops whose run() ended with an ESCAPED error — the loop was stopped ALONE " +
+    "(logged + metered) while its sibling loops kept running (W4b.2 per-loop supervision; pre-W4b.2 any loop's " +
+    "crash fired stopAll() and tore down the whole process). Bounded label loop ∈ {runner, scheduler, outbox}. " +
+    "ANY non-zero value = a degraded runner pod: that loop's work has stopped until the pod restarts — alert on it.",
 });
 const BACKGROUND_NO_HANDLER_COUNTER: Counter = METER.createCounter(BACKGROUND_NO_HANDLER_NAME, {
   description:
@@ -214,4 +232,10 @@ export function recordNoHandlerDeadLetter(): void {
 /** Record one schedule isolated (skipped + unadvanced) inside a pollAndEnqueue pass. Fail-safe. */
 export function recordSchedulerScheduleError(): void {
   try { SCHEDULER_SCHEDULE_ERRORS_COUNTER.add(1); } catch { /* telemetry never perturbs the scheduler */ }
+}
+
+/** Record one supervised loop crash (its run() ended with an escaped error; the loop stopped ALONE
+ *  while its siblings kept running — W4b.2). `loop` ∈ {runner, scheduler, outbox}. Fail-safe. */
+export function recordRunnerLoopCrashed(args: { loop: "runner" | "scheduler" | "outbox" }): void {
+  try { LOOP_CRASHED_COUNTER.add(1, { loop: args.loop }); } catch { /* telemetry never perturbs the runner */ }
 }
