@@ -12,7 +12,9 @@ import {
   runOneBackgroundJob,
   type BackgroundRunOutcome,
 } from "./background_runner.js";
+import { ensureScheduledJobs } from "./cron_schedules.js";
 import { HandlerRegistry } from "./handler_registry.js";
+import { registerCronHandlers } from "./handlers/cron_handlers.js";
 import { SchedulerLoop, pollAndEnqueue } from "./scheduler.js";
 
 // Phase 3a W4: the background-runner PROCESS ENTRYPOINT — composes the W2b BackgroundRunnerLoop
@@ -23,14 +25,15 @@ import { SchedulerLoop, pollAndEnqueue } from "./scheduler.js";
 //
 // ## NOT STARTED IN PRODUCTION YET (deliberate)
 //
-// The registry boots EMPTY — no job handler exists until the Phase 3b+ workflow migrations land and
-// register their handlers in {@link buildBackgroundRunner} (the buildActivities idiom: composition-
-// root services are closed over at registration time, not threaded through HandlerDeps). Until then
-// NO deployment manifest / Helm chart / Procfile boots this entrypoint: the file is wired but cold.
-// Booting it early would be harmless-but-useless (an empty registry dead-letters any claimed job as
-// `no handler for <job_type>` rather than retry-looping — the W2b no-handler posture), but the
-// schedules that feed core.scheduled_jobs are also Phase 3b+ work, so the process stays unbooted
-// until there is real work to run.
+// Phase 3b W3b.1 registered the FIRST handlers (registerCronHandlers: mutex_janitor +
+// review_run_reaper — the 2 interval crons migrated off Temporal Schedules) and runBackgroundRunner
+// seeds their core.scheduled_jobs rows at startup (ensureScheduledJobs — the ensureCronSchedule
+// idempotency, as ON CONFLICT DO NOTHING). The process itself stays COLD: NO deployment manifest /
+// Helm chart / Procfile boots this entrypoint yet; the Temporal schedules keep firing the same
+// idempotent sweeps until the runner is deployed (and Phase 4 deletes the Temporal side). Later
+// Phase 3b waves register their handlers in {@link buildBackgroundRunner} (the buildActivities
+// idiom: composition-root services are closed over at registration time, not threaded through
+// HandlerDeps) and append their CRON_SCHEDULES entries.
 //
 // ## Shape
 //
@@ -73,7 +76,8 @@ export type BackgroundRunnerDeps = {
 
 /** The composed runtime pieces + single-shot drive seams (tests / operator diagnostics). */
 export type BackgroundRunnerHandles = {
-  /** The job_type → handler dispatch seam. EMPTY at W4; Phase 3b+ migrations register here. */
+  /** The job_type → handler dispatch seam. W3b.1 cron handlers pre-registered; later Phase 3b
+   *  migrations register here. */
   registry: HandlerRegistry;
   runnerLoop: BackgroundRunnerLoop;
   schedulerLoop: SchedulerLoop;
@@ -92,11 +96,14 @@ export function buildBackgroundRunner(deps: BackgroundRunnerDeps): BackgroundRun
   const { db, clock, config } = deps;
   const repo = new BackgroundJobsRepo(db);
 
-  // Phase 3b+ registers job handlers HERE as the workflow migrations land (one register() per
+  // Phase 3b waves register job handlers HERE as the workflow migrations land (one register() per
   // job_type, composition-root services closed over at registration — the buildActivities idiom).
-  // EMPTY at W4 ship: a claimed job with no handler dead-letters (`no handler for <job_type>`),
-  // never retry-loops, so an accidentally-early enqueue surfaces once instead of burning attempts.
+  // A claimed job with no handler dead-letters (`no handler for <job_type>`), never retry-loops, so
+  // an accidentally-early enqueue surfaces once instead of burning attempts.
   const registry = new HandlerRegistry();
+  // W3b.1: the 2 interval crons (mutex_janitor / review_run_reaper). No dsn override here — the
+  // activities self-resolve CODEMASTER_PG_CORE_DSN, exactly as under their Temporal dispatch.
+  registerCronHandlers(registry, {});
 
   const runnerArgs = {
     repo,
@@ -176,7 +183,13 @@ export function resolveBackgroundRunnerConfig(
 export async function runBackgroundRunner(): Promise<void> {
   const { dsn, config } = resolveBackgroundRunnerConfig(process.env);
   const db = tenantKysely<unknown>(dsn); // THE shared ADR-0062 pool for this DSN
-  const handles = buildBackgroundRunner({ db, clock: new WallClock(), config });
+  const clock = new WallClock();
+  const handles = buildBackgroundRunner({ db, clock, config });
+
+  // Seed the cron schedules BEFORE the loops start (W3b.1) — idempotent ON CONFLICT DO NOTHING, so
+  // concurrent pods / redeploys never clobber operator-paused/edited rows. Fail-loud: a runner that
+  // cannot reach core.scheduled_jobs at boot should crash-loop visibly, not run schedule-less.
+  await ensureScheduledJobs(db, clock);
 
   const stopBoth = (): void => {
     handles.runnerLoop.stop();

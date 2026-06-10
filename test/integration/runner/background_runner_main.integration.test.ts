@@ -1,8 +1,9 @@
 // Phase 3a W4: the background-runner PROCESS ENTRYPOINT composition (background_runner_main.ts) —
 // buildBackgroundRunner wires HandlerRegistry + BackgroundRunnerLoop + SchedulerLoop over ONE shared
 // db/clock/repo (the ADR-0062 single-pool seam in prod; the test injects its own Kysely). Proves:
-//   (1) buildBackgroundRunner() returns the three composed pieces; the registry boots EMPTY
-//       (handlers register in Phase 3b+ as the workflow migrations land);
+//   (1) buildBackgroundRunner() returns the three composed pieces; the registry boots with the
+//       W3b.1 cron handlers pre-registered (mutex_janitor / review_run_reaper — later Phase 3b
+//       waves append to it as the workflow migrations land);
 //   (2) END-TO-END composition: a fake handler registered on the RETURNED registry + a directly
 //       enqueued job + a DUE schedule → ONE scheduler poll (pollOnce) enqueues the scheduled job
 //       (dedup_key = schedule_id) and TWO runner cycles (runOneCycle) dispatch BOTH jobs through the
@@ -75,12 +76,13 @@ async function seedSchedule(opts: {
 }
 
 describeDb("background_runner_main — buildBackgroundRunner composition (Phase 3a W4)", () => {
-  it("(1) returns the three composed pieces; the registry boots EMPTY (handlers arrive in Phase 3b+)", () => {
+  it("(1) returns the three composed pieces; the registry boots with the W3b.1 cron handlers pre-registered", () => {
     const handles = buildBackgroundRunner({ db, clock: new FakeClock(), config: TEST_CONFIG });
     expect(handles.runnerLoop).toBeInstanceOf(BackgroundRunnerLoop);
     expect(handles.schedulerLoop).toBeInstanceOf(SchedulerLoop);
     expect(handles.registry).toBeInstanceOf(HandlerRegistry);
-    expect(handles.registry.registeredTypes()).toEqual([]); // EMPTY until Phase 3b+ registers handlers
+    // W3b.1: the 2 interval crons register at composition; later Phase 3b waves append here.
+    expect([...handles.registry.registeredTypes()].sort()).toEqual(["mutex_janitor", "review_run_reaper"]);
   });
 
   it("(2) END-TO-END: one poll enqueues the due schedule's job; runner cycles dispatch BOTH jobs through the returned registry to 'done'", async () => {
