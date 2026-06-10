@@ -21,6 +21,7 @@ import {
   type BackgroundRunOutcome,
 } from "./background_runner.js";
 import { ensureScheduledJobs } from "./cron_schedules.js";
+import { DisposableRegistry } from "./disposables.js";
 import { HandlerRegistry } from "./handler_registry.js";
 import { registerCronHandlers } from "./handlers/cron_handlers.js";
 import { registerEventHandlers } from "./handlers/event_handlers.js";
@@ -116,6 +117,10 @@ export type BackgroundRunnerHandles = {
    *  singleton). Run ONE per deployment — the rows are leased (SKIP LOCKED) so extra drainers are
    *  SAFE, but the original singleton intent (global created_at-ordered draining) wants one. */
   outboxLoop: OutboxDispatcherLoop;
+  /** W4c.2 #10: the shared dispose registry the handler modules registered their lazily-built
+   *  background resources on (the Confluence token-refresh loops). runBackgroundRunner's DISPOSE
+   *  PHASE drains it once ALL loops have ended so the process exits promptly after SIGTERM. */
+  disposables: DisposableRegistry;
   /** Drive exactly ONE claim → dispatch → settle cycle over the SAME pieces `runnerLoop` owns. */
   runOneCycle(): Promise<{ outcome: BackgroundRunOutcome; jobId?: string }>;
   /** Drive exactly ONE scheduler poll pass over the SAME pieces `schedulerLoop` owns. */
@@ -138,6 +143,10 @@ export function buildBackgroundRunner(deps: BackgroundRunnerDeps): BackgroundRun
   // A claimed job with no handler dead-letters (`no handler for <job_type>`), never retry-loops, so
   // an accidentally-early enqueue surfaces once instead of burning attempts.
   const registry = new HandlerRegistry();
+  // W4c.2 #10: the shared dispose registry — the handler modules register their DEFAULT lazy
+  // clients' background-resource dispose handles (the Confluence token-refresh loops) here, and
+  // runBackgroundRunner's dispose phase drains it after the loops end.
+  const disposables = new DisposableRegistry();
   // W3b.1 + W3b.2 + W3d.1 + W3e.1: the 3 interval crons (mutex_janitor / review_run_reaper /
   // workspace_retention — the multi-step per-id fail-open janitor chain) + the 3 daily crons
   // (mark_stale_chunks / partition_maintenance / run_id_retention). No dsn / GitHub-client /
@@ -145,12 +154,12 @@ export function buildBackgroundRunner(deps: BackgroundRunnerDeps): BackgroundRun
   // partition maintenance prefers CODEMASTER_PG_MAINT_DSN; the workspace release activity reads
   // CODEMASTER_WORKSPACE_ROOT), exactly as under their Temporal dispatch, and the retention PR-closer
   // builds its deferred-Vault GitHub client on first use.
-  registerCronHandlers(registry, {});
+  registerCronHandlers(registry, { disposables });
   // W3d.1: the 3 reconcile/repair EVENT-DRIVEN job_types (reconcile_installation /
   // reconcile_repositories / repair_installation_repositories). The next wave's outbox
   // temporal_workflow_start cutover routes the producers' workflow_type strings onto these via
   // workflow_job_map.ts.
-  registerEventHandlers(registry, {});
+  registerEventHandlers(registry, { disposables });
 
   const runnerArgs = {
     repo,
@@ -190,6 +199,7 @@ export function buildBackgroundRunner(deps: BackgroundRunnerDeps): BackgroundRun
     runnerLoop: new BackgroundRunnerLoop({ ...runnerArgs, idleS: config.idleS }),
     schedulerLoop: new SchedulerLoop({ ...schedulerArgs, pollIntervalS: config.pollIntervalS }),
     outboxLoop,
+    disposables,
     runOneCycle: async () => runOneBackgroundJob(runnerArgs),
     pollOnce: async () => pollAndEnqueue(schedulerArgs),
     drainOutboxOnce: async () => outboxLoop.drainOnce(),
@@ -482,6 +492,14 @@ export async function runBackgroundRunner(): Promise<void> {
 
   process.removeListener("SIGINT", stopAll);
   process.removeListener("SIGTERM", stopAll);
+
+  // W4c.2 #10 DISPOSE PHASE: once ALL loops have ended, stop the background resources the handlers
+  // lazily constructed (the Confluence token-refresh loops — LIVE WallClock timers that otherwise
+  // keep the event loop alive and hang the SIGTERM'd process). Error-safe (disposeAll never throws)
+  // and runs BEFORE the pool disposal + the fail-loud crash re-throw, so every exit path — graceful
+  // AND crashed — leaves no live timer behind.
+  await handles.disposables.disposeAll();
+
   await disposePool(dsn);
 
   if (crashes.length > 0) {

@@ -32,6 +32,7 @@ import { WallClock } from "#platform/clock.js";
 import { RefreshConfluenceInputV1 } from "#contracts/confluence_sync.v1.js";
 import { MarkStaleChunksInputV1 } from "#contracts/confluence_sync_stale.v1.js";
 
+import type { DisposableRegistry } from "../disposables.js";
 import type { HandlerRegistry } from "../handler_registry.js";
 import {
   buildConfluenceSyncActivities,
@@ -300,6 +301,11 @@ export type CronHandlersDeps = {
    *  ({@link makeLazyConfluenceEmbeddings}), so a runner without embedder env vars still boots AND
    *  runs empty (zero-space / zero-page) cycles green. */
   readonly confluenceEmbeddings?: EmbeddingsPort;
+  /** OPTIONAL dispose registry (W4c.2 #10): the composition root (buildBackgroundRunner) threads its
+   *  shared registry so the DEFAULT lazy Confluence client's token-refresh loop gets a dispose
+   *  handle for the runner's post-SIGTERM dispose phase. Omitted by tests that inject their own
+   *  `confluenceClient` (an injected client owns its own lifecycle — nothing is registered). */
+  readonly disposables?: DisposableRegistry;
 };
 
 /**
@@ -472,7 +478,20 @@ export function registerCronHandlers(registry: HandlerRegistry, deps: CronHandle
   // failure after its RetryPolicy exhausts. The holder is constructed PER DISPATCH over the resolved
   // DSN (the sync_code_owners idiom — repos are thin wrappers over the shared memoized pool); the
   // lazy client/embedder are closed over ONCE at registration so their memos persist across cycles.
-  const confluenceClient = deps.confluenceClient ?? makeLazyConfluenceChunkClient();
+  let confluenceClient: ConfluenceChunkClient;
+  if (deps.confluenceClient !== undefined) {
+    confluenceClient = deps.confluenceClient;
+  } else {
+    // W4c.2 #10: the DEFAULT lazy client starts the ConfluenceTokenProvider refresh loop (a LIVE
+    // timer) on first use; hand its dispose to the composition root's shared registry so the
+    // runner's post-SIGTERM dispose phase can stop it and the process exits promptly.
+    const lazyClient = makeLazyConfluenceChunkClient();
+    deps.disposables?.register({
+      name: "confluence_ingest.confluence_chunk_client",
+      dispose: lazyClient.dispose,
+    });
+    confluenceClient = lazyClient.client;
+  }
   const confluenceEmbeddings = deps.confluenceEmbeddings ?? makeLazyConfluenceEmbeddings();
   registry.register("confluence_ingest", async (payload, signal, handlerDeps) => {
     ConfluenceIngestCronInput.parse(payload);

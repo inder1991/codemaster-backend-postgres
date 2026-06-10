@@ -4,6 +4,7 @@
 
 import { VaultHttpPort } from "#backend/adapters/vault_http.js";
 import { registerAdminRoutes } from "#backend/api/admin/admin_routes.js";
+import { OutboxPageResyncDispatcher } from "#backend/api/admin/page_resync_dispatcher.js";
 import { getPreflightValidator } from "#backend/integrations/llm/preflight_validator_real.js";
 import { registerAuthRoutes } from "#backend/api/auth/auth_routes.js";
 import { makeAuthSecretsProvider } from "#backend/api/auth/auth_secrets_provider.js";
@@ -81,8 +82,18 @@ export async function runServer(): Promise<void> {
     // D2 — admin READ + WRITE endpoints, behind the same makeRequireRole gate + signing key. vault +
     // getPreflightValidator make the LLM credential-rotation routes (llm-provider-config / bedrock-config /
     // llm-models test) LIVE; the Confluence-validator + platform-credential-probe seams stay unwired (those
-    // routes 503) pending their real, live-tested external adapters.
-    await registerAdminRoutes(app, { db: coreDb, signingKey, clock, registry, vault, getPreflightValidator });
+    // routes 503) pending their real, live-tested external adapters. pageResyncDispatcher (W4c.2 #5) makes
+    // approval revocation enqueue the trigger_page_resync outbox row (revocation → outbox → (cutover) →
+    // background job) instead of silently skipping the resync.
+    await registerAdminRoutes(app, {
+      db: coreDb,
+      signingKey,
+      clock,
+      registry,
+      vault,
+      getPreflightValidator,
+      pageResyncDispatcher: new OutboxPageResyncDispatcher({ db: coreDb }),
+    });
   }
 
   // ── More routers register here as they land ──

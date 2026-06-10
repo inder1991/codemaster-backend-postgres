@@ -36,6 +36,33 @@ import type { UpsertChunksOutputV1 } from "#contracts/confluence_sync.v1.js";
 export const CONFLUENCE_EMBED_MODEL_NAME = "qwen3-embed-0.6b";
 
 /**
+ * The narrow ConfluenceTokenProvider slice the disposable lazy builder drives: start/stop the
+ * refresh loop + the client-construction inputs. The REAL `ConfluenceTokenProvider` satisfies it
+ * structurally; unit tests inject a recording fake (runner_dispose.test.ts) so the refresh-loop
+ * lifecycle is observable without Vault/Confluence.
+ */
+export type ConfluenceTokenProviderLike = {
+  startRefreshLoop(): void;
+  stop(): Promise<void>;
+  getToken(): Promise<string>;
+  readonly baseUrl: string;
+  readonly authEmail: string | null;
+};
+
+/**
+ * A lazily-built {@link ConfluenceChunkClient} plus the dispose handle for the background resource
+ * its construction starts (W4c.2 review blocker #10): the ConfluenceTokenProvider refresh loop is a
+ * LIVE WallClock.sleep timer — without `dispose()` a SIGTERM'd runner hangs on it after the loops
+ * stop. `dispose()` is idempotent, never triggers the deferred construction itself (a never-used
+ * client disposes as a clean no-op), and stops the loop even when a LATER construction step failed
+ * after the loop already started.
+ */
+export type DisposableConfluenceChunkClient = {
+  client: ConfluenceChunkClient;
+  dispose(): Promise<void>;
+};
+
+/**
  * A {@link ConfluenceChunkClient} (the narrow listPages/getPage slice) that builds the REAL
  * Vault-token-backed ConfluenceClient on first use and memoizes it — 1:1 with the Temporal composition
  * root's `makeLazyConfluenceClient` (build_activities.ts). The Confluence Vault token is ABSENT in dev
@@ -46,20 +73,36 @@ export const CONFLUENCE_EMBED_MODEL_NAME = "qwen3-embed-0.6b";
  * attempt failed with the Vault error in last_error instead of crashing the runner at boot.) Dynamic
  * imports (the hydrate-activity idiom) keep the Vault/Confluence wiring off this module's static
  * import graph.
+ *
+ * W4c.2 #10: returns a DISPOSABLE — the registration sites hand `dispose` to the runner's shared
+ * {@link import("../disposables.js").DisposableRegistry} so runBackgroundRunner's dispose phase can
+ * stop the token-refresh loop after SIGTERM. `makeTokenProvider` is the unit-test seam (a recording
+ * fake provider); omitted in prod — the deferred-Vault `ConfluenceTokenProvider.fromVault`.
  */
-export function makeLazyConfluenceChunkClient(): ConfluenceChunkClient {
+export function makeLazyConfluenceChunkClient(
+  opts: { makeTokenProvider?: () => Promise<ConfluenceTokenProviderLike> } = {},
+): DisposableConfluenceChunkClient {
   let memo: Promise<ConfluenceChunkClient> | undefined;
+  // Recorded the instant the provider exists — BEFORE startRefreshLoop and BEFORE any later
+  // construction step that could fail — so dispose() can stop a partially-constructed client too.
+  let provider: ConfluenceTokenProviderLike | undefined;
   const lazy = (): Promise<ConfluenceChunkClient> => {
     if (memo === undefined) {
       memo = (async (): Promise<ConfluenceChunkClient> => {
         const { ConfluenceClient } = await import("#backend/integrations/confluence/client.js");
-        const { ConfluenceTokenProvider } = await import(
-          "#backend/integrations/confluence/token_provider.js"
-        );
-        const { VaultHttpPort } = await import("#backend/adapters/vault_http.js");
         const clock = new WallClock();
-        const vault = VaultHttpPort.fromEnv();
-        const tokenProvider = await ConfluenceTokenProvider.fromVault({ vault, clock });
+        const makeTokenProvider =
+          opts.makeTokenProvider ??
+          (async (): Promise<ConfluenceTokenProviderLike> => {
+            const { ConfluenceTokenProvider } = await import(
+              "#backend/integrations/confluence/token_provider.js"
+            );
+            const { VaultHttpPort } = await import("#backend/adapters/vault_http.js");
+            const vault = VaultHttpPort.fromEnv();
+            return await ConfluenceTokenProvider.fromVault({ vault, clock });
+          });
+        const tokenProvider = await makeTokenProvider();
+        provider = tokenProvider;
         tokenProvider.startRefreshLoop();
         // `authEmail` selects HTTP-Basic (Atlassian Cloud) vs Bearer (Server/DC PAT); OMITTED (not
         // set to undefined) when absent, per exactOptionalPropertyTypes.
@@ -75,8 +118,24 @@ export function makeLazyConfluenceChunkClient(): ConfluenceChunkClient {
     return memo;
   };
   return {
-    listPages: async (args) => (await lazy()).listPages(args),
-    getPage: async (args) => (await lazy()).getPage(args),
+    client: {
+      listPages: async (args) => (await lazy()).listPages(args),
+      getPage: async (args) => (await lazy()).getPage(args),
+    },
+    dispose: async (): Promise<void> => {
+      // NEVER triggers the deferred construction: a never-used client (memo undefined) is a no-op.
+      if (memo !== undefined) {
+        // Let an IN-FLIGHT construction settle (either way) so we never race startRefreshLoop —
+        // the rejection itself is the job attempt's concern (already persisted in last_error),
+        // not the dispose phase's.
+        await memo.catch(() => undefined);
+      }
+      const p = provider;
+      provider = undefined; // idempotent: a second dispose() is a no-op (no double-stop)
+      if (p !== undefined) {
+        await p.stop();
+      }
+    },
   };
 }
 

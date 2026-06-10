@@ -35,6 +35,7 @@ import { RepairInstallationRepositoriesPayloadV1 } from "#contracts/repair_insta
 import { SyncCodeOwnersPayloadV1 } from "#contracts/sync_code_owners_payload.v1.js";
 import { TriggerPageResyncInputV1 } from "#contracts/trigger_page_resync.v1.js";
 
+import type { DisposableRegistry } from "../disposables.js";
 import type { HandlerRegistry } from "../handler_registry.js";
 import {
   buildConfluenceSyncActivities,
@@ -156,6 +157,11 @@ export type EventHandlersDeps = {
    *  embedder resolved LAZILY on the FIRST embed call + memoized
    *  (_confluence_page_sync.ts::makeLazyConfluenceEmbeddings, ADR-0059). */
   readonly confluenceEmbeddings?: EmbeddingsPort;
+  /** OPTIONAL dispose registry (W4c.2 #10): the composition root (buildBackgroundRunner) threads its
+   *  shared registry so the DEFAULT lazy Confluence client's token-refresh loop gets a dispose
+   *  handle for the runner's post-SIGTERM dispose phase. Omitted by tests that inject their own
+   *  `confluenceClient` (an injected client owns its own lifecycle — nothing is registered). */
+  readonly disposables?: DisposableRegistry;
 };
 
 /**
@@ -481,7 +487,20 @@ export function registerEventHandlers(registry: HandlerRegistry, deps: EventHand
   // `throwIfAborted()` before each of its 4 activities, so an aborted job stops before its next
   // external/cost step. Idempotency (the content-addressed ON CONFLICT upsert) remains the backstop
   // for aborts landing MID-step — a lease-lost duplicate re-run still converges.
-  const resyncConfluenceClient = deps.confluenceClient ?? makeLazyConfluenceChunkClient();
+  let resyncConfluenceClient: ConfluenceChunkClient;
+  if (deps.confluenceClient !== undefined) {
+    resyncConfluenceClient = deps.confluenceClient;
+  } else {
+    // W4c.2 #10: the DEFAULT lazy client starts the ConfluenceTokenProvider refresh loop (a LIVE
+    // timer) on first use; hand its dispose to the composition root's shared registry so the
+    // runner's post-SIGTERM dispose phase can stop it and the process exits promptly.
+    const lazyClient = makeLazyConfluenceChunkClient();
+    deps.disposables?.register({
+      name: "trigger_page_resync.confluence_chunk_client",
+      dispose: lazyClient.dispose,
+    });
+    resyncConfluenceClient = lazyClient.client;
+  }
   const resyncConfluenceEmbeddings = deps.confluenceEmbeddings ?? makeLazyConfluenceEmbeddings();
   registry.register("trigger_page_resync", async (payload, signal, handlerDeps) => {
     const parsed = TriggerPageResyncInputV1.parse(payload);

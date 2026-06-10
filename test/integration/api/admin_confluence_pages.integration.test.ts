@@ -20,9 +20,11 @@ import { FakeClock } from "#platform/clock.js";
 
 import { PageWithApprovalV1, PagesListPageV1 } from "#contracts/admin.v1.js";
 import { QuarantinedChunkV1, QuarantinedChunksPageV1 } from "#contracts/admin.v1.js";
+import { TemporalWorkflowStartPayloadV1 } from "#contracts/outbox_payloads.v1.js";
 
 import { buildApp } from "#backend/api/app.js";
 import { registerAdminRoutes } from "#backend/api/admin/admin_routes.js";
+import { OutboxPageResyncDispatcher } from "#backend/api/admin/page_resync_dispatcher.js";
 import { SESSION_COOKIE_NAME } from "#backend/api/auth/auth_routes.js";
 import type { Role } from "#backend/api/auth/roles.js";
 import { issueCookie } from "#backend/api/auth/session.js";
@@ -35,6 +37,8 @@ import {
   createPageApproval,
   revokePageApproval,
 } from "#backend/api/admin/confluence_pages_write.js";
+import { PLATFORM_SCOPE_AUDIT_INSTALLATION_ID } from "#backend/infra/sentinels.js";
+import { WORKFLOW_TYPE_TO_JOB_TYPE } from "#backend/runner/workflow_job_map.js";
 
 import { describeDb, INTEGRATION_DSN } from "../_db.js";
 
@@ -74,10 +78,15 @@ let pool: Pool;
 let db: Kysely<unknown>;
 
 /** Clear only the mutable approval rows so each test starts from a deterministic "no approvals" baseline
- *  (the suite runs under vitest sequence.shuffle, so order-coupling on approval state must not exist). */
+ *  (the suite runs under vitest sequence.shuffle, so order-coupling on approval state must not exist).
+ *  Also clears this suite's deterministic trigger_page_resync outbox rows (W4c.2 #5) — the workflow_id
+ *  is `trigger-page-resync/<space>/<page>`, so the prefix scopes the wipe to this suite's space. */
 async function resetApprovals(): Promise<void> {
   // tenant:exempt reason=test-fixture-cleanup follow_up=PERMANENT-EXEMPTION-confluence-corpus
   await sql`DELETE FROM core.confluence_page_approvals WHERE space_key = ${SPACE_KEY}`.execute(db);
+  // tenant:exempt reason=test-fixture-cleanup follow_up=PERMANENT-EXEMPTION-confluence-corpus
+  await sql`DELETE FROM core.outbox
+             WHERE payload->>'workflow_id' LIKE ${`trigger-page-resync/${SPACE_KEY}/%`}`.execute(db);
 }
 
 async function cleanup(): Promise<void> {
@@ -93,6 +102,18 @@ beforeAll(async () => {
   pool = new Pool({ connectionString: INTEGRATION_DSN, max: 4 });
   db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) });
   await cleanup();
+
+  // The W4c.2 #5 outbox producer stamps the PLATFORM_SCOPE_AUDIT sentinel installation on its rows
+  // (ck_outbox_installation_id_required forbids NULL on the temporal_workflow_start sink; the
+  // column FKs core.installations). Migration 0002 seeds the row in every real DB, but sibling
+  // suites' cleanups can wipe it on the shared disposable DB — re-seed idempotently (same shape as
+  // the 0002 INSERT; github_installation_id -1 is the seed's reserved non-GitHub value).
+  // tenant:exempt reason=test-fixture-seed follow_up=PERMANENT-EXEMPTION-confluence-corpus
+  await sql`
+    INSERT INTO core.installations (installation_id, github_installation_id, account_login, account_type)
+    VALUES (${PLATFORM_SCOPE_AUDIT_INSTALLATION_ID}, -1, '__platform_sentinel__', 'Organization')
+    ON CONFLICT (installation_id) DO NOTHING
+  `.execute(db);
 
   // The confluence_space integration whose config_json carries the space_key the routes resolve.
   await sql`
@@ -331,6 +352,80 @@ describeDb("confluence pages admin endpoints (disposable PG)", () => {
         cookies: { [SESSION_COOKIE_NAME]: mintCookie("platform_owner") },
       });
       expect(delAgain.statusCode).toBe(404);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("DELETE /approval — enqueues the trigger_page_resync outbox row via the concrete dispatcher (W4c.2 #5)", async () => {
+    // The PRODUCER WIRING test: with the concrete OutboxPageResyncDispatcher threaded (the same
+    // wiring server.ts now performs), revoking an approval appends a `temporal_workflow_start`
+    // outbox row carrying workflow_type='triggerPageResyncWorkflow' + the TriggerPageResyncInputV1
+    // args[0] — so revocation → outbox → (cutover) → background job → the trigger_page_resync
+    // handler. Pre-fix server.ts passed NO dispatcher and revocation skipped the enqueue entirely.
+    const app = buildApp({});
+    await registerAdminRoutes(app, {
+      db,
+      signingKey: SIGNING_KEY,
+      clock: new FakeClock({ now: NOW }),
+      pageResyncDispatcher: new OutboxPageResyncDispatcher({ db }),
+    });
+    await app.ready();
+    try {
+      const post = await app.inject({
+        method: "POST",
+        url: `${PAGES_BASE}/${PAGE_A}/approval`,
+        cookies: { [SESSION_COOKIE_NAME]: mintCookie("platform_owner") },
+        payload: approvalBody(),
+      });
+      expect(post.statusCode).toBe(201);
+
+      // No outbox row yet — approval creation does not resync.
+      // tenant:exempt reason=test-assertion-scoped-by-workflow-id follow_up=PERMANENT-EXEMPTION-confluence-corpus
+      const before = await sql<{ n: string }>`SELECT count(*) AS n FROM core.outbox
+        WHERE payload->>'workflow_id' = ${`trigger-page-resync/${SPACE_KEY}/${PAGE_A}`}`.execute(db);
+      expect(Number(before.rows[0]!.n)).toBe(0);
+
+      const del = await app.inject({
+        method: "DELETE",
+        url: `${PAGES_BASE}/${PAGE_A}/approval`,
+        cookies: { [SESSION_COOKIE_NAME]: mintCookie("platform_owner") },
+      });
+      expect(del.statusCode).toBe(204);
+
+      // THE row exists: sink + state + the platform-sentinel installation (Confluence is
+      // platform-scoped; ck_outbox_installation_id_required forbids NULL on this sink).
+      // tenant:exempt reason=test-assertion-scoped-by-workflow-id follow_up=PERMANENT-EXEMPTION-confluence-corpus
+      const rows = await sql<{
+        sink: string;
+        state: string;
+        installation_id: string | null;
+        run_id: string | null;
+        payload: Record<string, unknown>;
+      }>`SELECT sink, state, installation_id, run_id, payload FROM core.outbox
+          WHERE payload->>'workflow_id' = ${`trigger-page-resync/${SPACE_KEY}/${PAGE_A}`}`.execute(db);
+      expect(rows.rows).toHaveLength(1);
+      const row = rows.rows[0]!;
+      expect(row.sink).toBe("temporal_workflow_start");
+      expect(row.state).toBe("pending");
+      expect(row.installation_id).toBe(PLATFORM_SCOPE_AUDIT_INSTALLATION_ID);
+      expect(row.run_id).toBeNull(); // bootstrap-sink dispatch — no review-run causality
+
+      // The envelope parses with the SINK's contract (dispatchable by both the Temporal sink and
+      // the cutover BackgroundJobsTemporalPort) and routes through WORKFLOW_TYPE_TO_JOB_TYPE onto
+      // the registered trigger_page_resync handler.
+      const envelope = TemporalWorkflowStartPayloadV1.parse(row.payload);
+      expect(envelope.workflow_type).toBe("triggerPageResyncWorkflow");
+      expect(WORKFLOW_TYPE_TO_JOB_TYPE[envelope.workflow_type]).toBe("trigger_page_resync");
+      expect(envelope.args).toHaveLength(1);
+      // args[0] IS the TriggerPageResyncInputV1 the handler parses; triggered_by_user_id is the
+      // session-derived revoking admin (audit P0-1 — never body-supplied).
+      expect(envelope.args[0]).toMatchObject({
+        schema_version: 1,
+        space_key: SPACE_KEY,
+        page_id: PAGE_A,
+        triggered_by_user_id: USER,
+      });
     } finally {
       await app.close();
     }
