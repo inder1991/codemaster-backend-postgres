@@ -35,13 +35,26 @@
 //     single core.background_jobs table, and no producer sets search attributes (the
 //     RealTemporalClient already fail-louds on that).
 //
+// ## The review trigger rides the REVIEW-JOBS platform, not this map (Phase 4d W4d.1 F6)
+// `reviewPullRequest` (REVIEW_WORKFLOW_TYPE — imported from the producer,
+// ingest/github_webhook_persistence.ts, so the stamp and the route share ONE definition) is
+// SPECIAL-CASED ahead of the WORKFLOW_TYPE_TO_JOB_TYPE lookup: its args[0] is the fully-allocated
+// ReviewPullRequestPayloadV1 (allocateRun runs BEFORE the outbox row, so run_id/review_id/
+// installation_id are already minted), parsed here and enqueued via ReviewJobsRepo.enqueue —
+// core.review_jobs is the durable workflow-argument store the REVIEW runner shell claims from
+// (lease + verifyPayload + the PR-mutex protocol), a different platform than the coarse
+// background_jobs handlers. The returned string is the review job_id. A payload that does not
+// parse throws PermanentSinkError (the drifted-producer posture below); the tenant identity
+// persisted on the job is the PAYLOAD's installation_id (identity-asserted inside enqueue against
+// the run/review ids), not the port's 2nd param.
+//
 // ## Unmapped workflow_type = fail-loud, never a silent drop
 // WORKFLOW_TYPE_TO_JOB_TYPE carries ONLY the migrated workflow types. A row stamped with an
-// unmigrated type (e.g. `reviewPullRequest`, which rides the review-jobs platform, not this map)
-// throws PermanentSinkError: the drain loop records the attempt with the error persisted in
-// last_error and the row dead-letters at the threshold — visible in the outbox dead-letter signal,
-// instead of vanishing. Flipping the cutover flag before every event-driven workflow_type is mapped
-// is an operator error this adapter SURFACES rather than papers over.
+// unmigrated, non-review type throws PermanentSinkError: the drain loop records the attempt with
+// the error persisted in last_error and the row dead-letters at the threshold — visible in the
+// outbox dead-letter signal, instead of vanishing. Flipping the cutover flag before every
+// event-driven workflow_type is mapped is an operator error this adapter SURFACES rather than
+// papers over.
 //
 // ## cancel / signal are structurally unreachable from the outbox sinks
 // makeTemporalWorkflowStartHandler only ever calls startWorkflow. The review supersede path is the
@@ -51,9 +64,12 @@
 // wiring bug to surface at the first call, not a capability to emulate.
 
 import { type StartWorkflowCall, type TemporalClientPort } from "#backend/adapters/temporal_port.js";
+import { REVIEW_WORKFLOW_TYPE } from "#backend/ingest/github_webhook_persistence.js";
 import { PermanentSinkError } from "#backend/outbox/sink_registry.js";
+import { ReviewPullRequestPayloadV1 } from "#contracts/review_pull_request.v1.js";
 
 import type { BackgroundJobsRepo } from "./background_jobs_repo.js";
+import type { ReviewJobsRepo } from "./review_jobs_repo.js";
 import { WORKFLOW_TYPE_TO_JOB_TYPE } from "./workflow_job_map.js";
 
 /** The cutover flag (read by {@link resolveOutboxPort}). Unset/false (DEFAULT): the outbox sinks
@@ -62,24 +78,43 @@ import { WORKFLOW_TYPE_TO_JOB_TYPE } from "./workflow_job_map.js";
  *  to be BOOTED — the runner loop is the only consumer of the enqueued jobs. */
 export const OUTBOX_USE_BACKGROUND_JOBS_ENV = "CODEMASTER_OUTBOX_USE_BACKGROUND_JOBS";
 
-/** A {@link TemporalClientPort} whose startWorkflow enqueues a core.background_jobs row (module doc:
- *  the cutover hinge). Construct ONE per composition root over the shared-pool BackgroundJobsRepo. */
+/** A {@link TemporalClientPort} whose startWorkflow enqueues a core.background_jobs row — or, for
+ *  {@link REVIEW_WORKFLOW_TYPE}, a core.review_jobs row (module doc: the cutover hinge + the W4d.1
+ *  review route). Construct ONE per composition root over the shared-pool repos. */
 export class BackgroundJobsTemporalPort implements TemporalClientPort {
   readonly #repo: BackgroundJobsRepo;
+  /** The REVIEW-JOBS platform repo the {@link REVIEW_WORKFLOW_TYPE} route enqueues through (W4d.1
+   *  F6) — the review runner shell, NOT the coarse background_jobs handlers, executes these. */
+  readonly #reviewJobs: ReviewJobsRepo;
   /** A Map (never the raw record): a payload-controlled workflow_type like "constructor" must miss,
    *  not resolve through Object.prototype (`record["constructor"]` is a function, not undefined). */
   readonly #jobTypeByWorkflowType: ReadonlyMap<string, string>;
 
   public constructor(o: {
     repo: BackgroundJobsRepo;
+    /** The review-jobs repo the REVIEW route enqueues through (W4d.1 F6). */
+    reviewJobs: ReviewJobsRepo;
     /** The translation registry — production passes {@link WORKFLOW_TYPE_TO_JOB_TYPE}. */
     workflowTypeToJobType: Readonly<Record<string, string>>;
   }) {
     this.#repo = o.repo;
+    this.#reviewJobs = o.reviewJobs;
     this.#jobTypeByWorkflowType = new Map(Object.entries(o.workflowTypeToJobType));
   }
 
   public async startWorkflow(call: StartWorkflowCall, installationId?: string | null): Promise<string> {
+    // args → payload (module doc): the producers stamp exactly ONE positional input, a plain JSON
+    // object — for BOTH routes. Enforce both halves here so a drifted producer surfaces as THIS
+    // clear error in the outbox row's last_error rather than a Zod throw from deep inside enqueue.
+    const payload = this.#singlePositionalPayload(call);
+
+    // The review trigger (W4d.1 F6): reviewPullRequest rides the REVIEW-JOBS platform, never the
+    // workflow_type→job_type map (module doc). Checked BEFORE the map lookup so a review row can
+    // never be mis-translated by a future (erroneous) map entry.
+    if (call.workflowType === REVIEW_WORKFLOW_TYPE) {
+      return this.#enqueueReviewJob(call, payload);
+    }
+
     const jobType = this.#jobTypeByWorkflowType.get(call.workflowType);
     if (jobType === undefined) {
       throw new PermanentSinkError(
@@ -90,9 +125,22 @@ export class BackgroundJobsTemporalPort implements TemporalClientPort {
       );
     }
 
-    // args → payload (module doc): the producers stamp exactly ONE positional input, a plain JSON
-    // object. Enforce both halves here so a drifted producer surfaces as THIS clear error in the
-    // outbox row's last_error rather than a Zod throw from deep inside enqueue.
+    // Tenant identity survives the cutover (W4b.1 review blocker #1): the sink handler threads
+    // SinkContext.installationId — i.e. the dispatching outbox ROW's installation_id — through the
+    // port's 2nd param, and it lands as core.background_jobs.installation_id. null/omitted stays
+    // NULL = platform-scoped by design (e.g. appendReconcile rows, whose outbox installation_id is
+    // NULL under the ck_outbox_installation_id_required bootstrap-sink exemption).
+    return this.#repo.enqueue({
+      jobType,
+      payload,
+      dedupKey: call.workflowId,
+      installationId: installationId ?? null,
+    });
+  }
+
+  /** Extract + validate the single positional workflow input (`args: [payload]` — every producer's
+   *  shape, both review and event-driven). Fail-loud BEFORE any enqueue. */
+  #singlePositionalPayload(call: StartWorkflowCall): object {
     if (call.args.length !== 1) {
       throw new PermanentSinkError(
         `workflow_type '${call.workflowType}' (workflow_id '${call.workflowId}') dispatched with ` +
@@ -107,17 +155,33 @@ export class BackgroundJobsTemporalPort implements TemporalClientPort {
           `plain JSON object; the background-jobs payload column requires one`,
       );
     }
+    return payload;
+  }
 
-    // Tenant identity survives the cutover (W4b.1 review blocker #1): the sink handler threads
-    // SinkContext.installationId — i.e. the dispatching outbox ROW's installation_id — through the
-    // port's 2nd param, and it lands as core.background_jobs.installation_id. null/omitted stays
-    // NULL = platform-scoped by design (e.g. appendReconcile rows, whose outbox installation_id is
-    // NULL under the ck_outbox_installation_id_required bootstrap-sink exemption).
-    return this.#repo.enqueue({
-      jobType,
-      payload,
-      dedupKey: call.workflowId,
-      installationId: installationId ?? null,
+  /** The W4d.1 F6 review route: parse the fully-allocated ReviewPullRequestPayloadV1 the webhook
+   *  producer stamped (allocateRun ran BEFORE the outbox row, so run_id/review_id/installation_id
+   *  are minted) and enqueue it on core.review_jobs — the durable workflow-argument store the
+   *  review runner shell claims from. ReviewJobsRepo.enqueue re-validates, identity-asserts the
+   *  envelope against the payload, canonicalizes + hashes; the returned string is the review
+   *  job_id. A non-parsing payload is a drifted producer → PermanentSinkError (the row's
+   *  last_error names it; dead-letters at the threshold — never a silent drop). */
+  async #enqueueReviewJob(call: StartWorkflowCall, payload: object): Promise<string> {
+    let parsed: ReviewPullRequestPayloadV1;
+    try {
+      parsed = ReviewPullRequestPayloadV1.parse(payload);
+    } catch (e) {
+      throw new PermanentSinkError(
+        `workflow_type '${call.workflowType}' (workflow_id '${call.workflowId}') args[0] does not ` +
+          `parse as ReviewPullRequestPayloadV1 — the review route enqueues core.review_jobs and a ` +
+          `drifted producer payload must surface here, not three layers deeper: ` +
+          `${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    return this.#reviewJobs.enqueue({
+      runId: parsed.run_id,
+      reviewId: parsed.review_id,
+      installationId: parsed.installation_id,
+      payload: parsed,
     });
   }
 
@@ -164,6 +228,9 @@ export type ResolveOutboxPortDeps = {
   env: NodeJS.ProcessEnv;
   /** The shared-pool repo the flag-ON port enqueues through (ADR-0062: ONE Kysely per process). */
   backgroundJobs: BackgroundJobsRepo;
+  /** The shared-pool review-jobs repo the flag-ON port routes {@link REVIEW_WORKFLOW_TYPE} rows
+   *  through (W4d.1 F6 — the review trigger leaves Temporal onto the review runner). */
+  reviewJobs: ReviewJobsRepo;
   /** Builds the flag-OFF Temporal port (production: the RealTemporalClient over a connected
    *  Client; tests: a RecordingTemporalClient). Invoked ONLY when the flag is off. */
   makeTemporalPort: () => TemporalClientPort | Promise<TemporalClientPort>;
@@ -181,6 +248,7 @@ export async function resolveOutboxPort(deps: ResolveOutboxPortDeps): Promise<Te
   if (readUseBackgroundJobsFlag(deps.env)) {
     return new BackgroundJobsTemporalPort({
       repo: deps.backgroundJobs,
+      reviewJobs: deps.reviewJobs,
       workflowTypeToJobType: WORKFLOW_TYPE_TO_JOB_TYPE,
     });
   }

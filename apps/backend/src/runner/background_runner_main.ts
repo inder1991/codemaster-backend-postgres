@@ -26,6 +26,7 @@ import { HandlerRegistry } from "./handler_registry.js";
 import { registerCronHandlers } from "./handlers/cron_handlers.js";
 import { registerEventHandlers } from "./handlers/event_handlers.js";
 import { OutboxDispatcherLoop } from "./outbox_dispatcher_loop.js";
+import { ReviewJobsRepo } from "./review_jobs_repo.js";
 import { recordRunnerLoopCrashed } from "./runner_metrics.js";
 import { SchedulerLoop, pollAndEnqueue } from "./scheduler.js";
 
@@ -247,9 +248,11 @@ async function makeRealTemporalPort(): Promise<TemporalClientPort> {
  *     work executes.
  *   * true: the BackgroundJobsTemporalPort — rows enqueue core.background_jobs jobs that THIS
  *     process's runner loop executes (workflow_job_map.ts translation; an unmapped workflow_type
- *     fails loud into the row's last_error). Flipping this flag IS the Phase-4 cutover and
- *     REQUIRES this background runner process to be BOOTED — the runner loop is the only consumer
- *     of the enqueued jobs; with the flag on and no runner, jobs pile up unexecuted.
+ *     fails loud into the row's last_error), and `reviewPullRequest` rows enqueue core.review_jobs
+ *     (W4d.1 F6 — the REVIEW-JOBS platform the review shell runner claims from). Flipping this
+ *     flag IS the Phase-4 cutover and REQUIRES this background runner process AND the review-jobs
+ *     runner to be BOOTED — they are the only consumers of the enqueued jobs; with the flag on and
+ *     no runner, jobs pile up unexecuted.
  *
  * Called once at process boot (runBackgroundRunner), BEFORE the drain loop starts — registerSink
  * throws on duplicates, so double-wiring fails loud.
@@ -258,6 +261,9 @@ async function wireOutboxSinks(db: Kysely<unknown>): Promise<void> {
   const port = await resolveOutboxPort({
     env: process.env,
     backgroundJobs: new BackgroundJobsRepo(db),
+    // W4d.1 F6: the flag-ON port routes `reviewPullRequest` rows onto core.review_jobs (the REVIEW
+    // runner platform) — the review trigger leaves Temporal with the same flag flip.
+    reviewJobs: new ReviewJobsRepo(db),
     makeTemporalPort: makeRealTemporalPort,
   });
   registerTemporalWorkflowStartSink(port);

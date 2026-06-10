@@ -59,8 +59,12 @@ import type { IssueLink } from "#contracts/issue_link.v1.js";
  * `_REVIEW_WORKFLOW_TYPE = "ReviewPullRequestWorkflow"`: Temporal starts a workflow by its REGISTERED type
  * name, which in the TS worker is the exported function name `reviewPullRequest`. A payload carrying the
  * Python string would dead-letter ("workflow type not registered"). See the staged-plan R1 resolution.
+ *
+ * EXPORTED (Phase 4d W4d.1 F6): the cutover BackgroundJobsTemporalPort imports this producer string to
+ * special-case the review trigger onto the review-jobs platform (core.review_jobs) — ONE definition, so
+ * the producer stamp and the cutover route can never drift apart.
  */
-const REVIEW_WORKFLOW_TYPE = "reviewPullRequest";
+export const REVIEW_WORKFLOW_TYPE = "reviewPullRequest";
 const REVIEW_TASK_QUEUE = resolveReviewTaskQueue();
 
 /**
