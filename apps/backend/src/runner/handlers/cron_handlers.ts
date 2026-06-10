@@ -1,5 +1,11 @@
 import { z } from "zod";
 
+import {
+  ConfluenceSyncActivities,
+  PoolExistingChunkRowsReader,
+  type ConfluenceChunkClient,
+} from "#backend/activities/confluence_sync.activity.js";
+import { ListActiveConfluenceSpacesActivity } from "#backend/activities/list_active_confluence_spaces.activity.js";
 import { MarkStaleChunksActivity } from "#backend/activities/mark_stale_chunks.activity.js";
 import { mutexJanitorActivity } from "#backend/activities/mutex_janitor.activity.js";
 import { runPgPartmanMaintenanceActivity } from "#backend/activities/partition_maintenance.activity.js";
@@ -19,26 +25,35 @@ import {
   runWorkspaceReleasedRetentionActivity,
 } from "#backend/activities/workspace_retention.activity.js";
 
+import { makeLazyEmbedderCache } from "#backend/adapters/embedder_cache.js";
+import type { EmbeddingsPort } from "#backend/adapters/embeddings_port.js";
+import { PostgresConfluenceChunksRepo } from "#backend/domain/repos/confluence_chunks_repo.js";
+import { PostgresConfluencePageApprovalsRepo } from "#backend/domain/repos/confluence_page_approvals_repo.js";
 import type { GitHubApiClient } from "#backend/integrations/github/api_client.js";
 
 import { WallClock } from "#platform/clock.js";
+import { tenantKysely } from "#platform/db/database.js";
 
+import { RefreshConfluenceInputV1 } from "#contracts/confluence_sync.v1.js";
 import { MarkStaleChunksInputV1 } from "#contracts/confluence_sync_stale.v1.js";
 
 import type { HandlerRegistry } from "../handler_registry.js";
 
-// Phase 3b W3b.1 + W3b.2 + Phase 3d W3d.1 + Phase 3e W3e.1: job_type → handler ADAPTERS for the 6
-// crons migrated off Temporal Schedules — the 2 INTERVAL crons (mutex_janitor every 5min +
+// Phase 3b W3b.1 + W3b.2 + Phase 3d W3d.1 + Phase 3e W3e.1 + W3e.2: job_type → handler ADAPTERS for
+// the 7 crons migrated off Temporal Schedules — the 2 INTERVAL crons (mutex_janitor every 5min +
 // review_run_reaper every 10min), the 2 DAILY crons (mark_stale_chunks + partition_maintenance, both
 // 02:00 UTC), the run_id_retention DAILY cron (03:00 UTC — the 3-sweep close→retire→delete chain the
-// Temporal runIdRetentionWorkflow composes), and the workspace_retention INTERVAL cron (every 5min —
+// Temporal runIdRetentionWorkflow composes), the workspace_retention INTERVAL cron (every 5min —
 // the FIRST MULTI-STEP workflow BODY ported: the orphan-sweep → per-id reap/release loop →
-// retention-purge orchestration of workspaceRetentionWorkflow, with its per-id fail-open invariant).
+// retention-purge orchestration of workspaceRetentionWorkflow, with its per-id fail-open invariant),
+// and the confluence_ingest INTERVAL cron (every 6h — the per-space × per-page NESTED FAN-OUT of
+// confluenceIngestWorkflow, with BOTH fail-open layers + the F-40 live_page_ids-before-try ordering).
 // Each adapter is a JobHandler over the EXISTING, tested activity bodies
 // (apps/backend/src/activities/*) — the activity logic is NOT rewritten here; this is the de-Temporal
 // analogue of the workflow bodies (mutex_janitor.workflow.ts / review_run_reaper.workflow.ts /
 // mark_stale_chunks.workflow.ts / partition_maintenance.workflow.ts / run_id_retention.workflow.ts /
-// workspace_retention.workflow.ts), which stay in place until Phase 4 deletes the Temporal side.
+// workspace_retention.workflow.ts / confluence_ingest.workflow.ts), which stay in place until Phase 4
+// deletes the Temporal side.
 //
 // ## Input contracts (handler-owned parsing — the W2b opaque-payload posture)
 // The Temporal workflows dispatch their activities zero-arg or with the empty marker input (the
@@ -138,6 +153,187 @@ function makeLazyRetentionGithubClient(): GitHubApiClient {
   } as unknown as GitHubApiClient;
 }
 
+// ── W3e.2 confluence_ingest collaborators ──────────────────────────────────────────────────────────
+
+/** The model name every confluence chunk embed routes through — byte-identical with the Temporal
+ *  composition root's wiring (build_activities.ts) and the event_handlers REFRESH_EMBED_MODEL_NAME. */
+const CONFLUENCE_EMBED_MODEL_NAME = "qwen3-embed-0.6b";
+
+/** confluence_ingest scheduled input — the REAL `RefreshConfluenceInputV1` (the ADR-0047
+ *  single-typed-input marker — `.strict()` with only the defaulted `schema_version`), exactly what the
+ *  Temporal Schedule dispatches into confluenceIngestWorkflow (the mark_stale_chunks parse posture). */
+const ConfluenceIngestCronInput = RefreshConfluenceInputV1;
+
+/**
+ * A {@link ConfluenceChunkClient} (the narrow listPages/getPage slice) that builds the REAL
+ * Vault-token-backed ConfluenceClient on first use and memoizes it — 1:1 with the Temporal composition
+ * root's `makeLazyConfluenceClient` (build_activities.ts). The Confluence Vault token is ABSENT in dev
+ * (ADR-0075) and `ConfluenceTokenProvider.fromVault` is fail-HARD, so construction is deferred to the
+ * FIRST `listPages`/`getPage` call: in dev, `list_active_confluence_spaces_activity` returns ZERO
+ * spaces → the per-space loop never runs → the client is NEVER built → the absent token cannot fail
+ * the 6h cycle. Dynamic imports (the hydrate-activity idiom) keep the Vault/Confluence wiring off this
+ * module's static import graph.
+ */
+function makeLazyConfluenceChunkClient(): ConfluenceChunkClient {
+  let memo: Promise<ConfluenceChunkClient> | undefined;
+  const lazy = (): Promise<ConfluenceChunkClient> => {
+    if (memo === undefined) {
+      memo = (async (): Promise<ConfluenceChunkClient> => {
+        const { ConfluenceClient } = await import("#backend/integrations/confluence/client.js");
+        const { ConfluenceTokenProvider } = await import(
+          "#backend/integrations/confluence/token_provider.js"
+        );
+        const { VaultHttpPort } = await import("#backend/adapters/vault_http.js");
+        const clock = new WallClock();
+        const vault = VaultHttpPort.fromEnv();
+        const tokenProvider = await ConfluenceTokenProvider.fromVault({ vault, clock });
+        tokenProvider.startRefreshLoop();
+        // `authEmail` selects HTTP-Basic (Atlassian Cloud) vs Bearer (Server/DC PAT); OMITTED (not
+        // set to undefined) when absent, per exactOptionalPropertyTypes.
+        const authEmail = tokenProvider.authEmail;
+        return new ConfluenceClient({
+          baseUrl: tokenProvider.baseUrl,
+          tokenProvider: tokenProvider.getToken.bind(tokenProvider),
+          ...(authEmail !== null ? { authEmail } : {}),
+          clock,
+        });
+      })();
+    }
+    return memo;
+  };
+  return {
+    listPages: async (args) => (await lazy()).listPages(args),
+    getPage: async (args) => (await lazy()).getPage(args),
+  };
+}
+
+/**
+ * An {@link EmbeddingsPort} that resolves the REAL env-selected platform embedder
+ * (resolveEmbeddingsConsumer, ADR-0059 — fail-loud on missing env) on the FIRST `embed` call and
+ * memoizes it (the event_handlers `resolveRefreshEmbeddings` idiom, pushed one seam deeper). Deferring
+ * to the first EMBED (not the first dispatch) keeps the dev posture intact: a cycle over zero
+ * spaces/pages never embeds → never resolves → a runner without embedder env vars both BOOTS and runs
+ * empty 6h cycles green; the fail-loud env error surfaces on the first real chunk embed, settling the
+ * attempt failed with last_error persisted.
+ */
+function makeLazyConfluenceEmbeddings(): EmbeddingsPort {
+  let memo: EmbeddingsPort | undefined;
+  return {
+    embed: async (req) => {
+      if (memo === undefined) {
+        // Dynamic import keeps the Qwen/OpenAI adapter graph off this module's static imports.
+        const { resolveEmbeddingsConsumer } = await import("#backend/adapters/resolve_embeddings.js");
+        memo = resolveEmbeddingsConsumer();
+      }
+      return memo.embed(req);
+    },
+  };
+}
+
+/** Per-space accumulator (1:1 with the workflow body's SpaceStats, including the F-40 `pages_failed`
+ *  counter — observability-only, never aggregated into the cross-space tally). */
+type ConfluenceSpaceStats = {
+  pages_processed: number;
+  pages_failed: number;
+  chunks_upserted: number;
+  chunks_rejected_no_approval: number;
+  chunks_rejected_default_cap: number;
+  chunks_quarantined: number;
+  pages_soft_deleted: number;
+};
+
+/**
+ * Sync one Confluence space end-to-end; return per-space stats. 1:1 with the workflow body's
+ * `syncOneSpace` (confluence_ingest.workflow.ts) / the frozen Python `_sync_one_space` — the SAME
+ * activity sequence over the SAME holder methods, dispatched in-process instead of via proxies.
+ */
+async function syncOneConfluenceSpace(
+  acts: ConfluenceSyncActivities,
+  spaceKey: string,
+  cycleStartedAt: string,
+): Promise<ConfluenceSpaceStats> {
+  // Fetch all page references in the space.
+  const pagesOut = await acts.fetchSpacePages({ schema_version: 1, space_key: spaceKey });
+
+  const stats: ConfluenceSpaceStats = {
+    pages_processed: 0,
+    pages_failed: 0, // F-40: per-page failure counter (observability only; never returned).
+    chunks_upserted: 0,
+    chunks_rejected_no_approval: 0,
+    chunks_rejected_default_cap: 0,
+    chunks_quarantined: 0,
+    pages_soft_deleted: 0,
+  };
+  const livePageIds: Array<string> = [];
+
+  for (const pageRef of pagesOut.pages) {
+    // F-40 (confluence_sync_workflow.py:192-205): the page_id is appended to livePageIds BEFORE the
+    // per-page try so a transient page failure does NOT get its chunks soft-deleted by the downstream
+    // reconcile. If a page keeps failing across many cycles, an operator follow-up signal is needed —
+    // silently flushing chunks would hide that.
+    livePageIds.push(pageRef.page_id);
+    try {
+      const bodyOut = await acts.fetchPageBody({
+        schema_version: 1,
+        page_id: pageRef.page_id,
+        space_key: spaceKey,
+      });
+
+      const sanitizedOut = await acts.sanitizePage({
+        schema_version: 1,
+        page: bodyOut.page,
+        last_modified_at: cycleStartedAt,
+      });
+
+      const chunkedOut = await acts.chunkAndEmbed({
+        schema_version: 1,
+        sanitized: sanitizedOut.sanitized,
+      });
+
+      const upsertOut = await acts.upsertChunks({
+        schema_version: 1,
+        space_key: spaceKey,
+        page_id: bodyOut.page.page_id,
+        page_title: bodyOut.page.title,
+        // F-37: pass page_version from the fetched body.
+        page_version: bodyOut.page.version,
+        page_status: bodyOut.page.status,
+        last_modified_at: cycleStartedAt,
+        raw_labels: bodyOut.page.labels,
+        injection_flags: sanitizedOut.sanitized.injection_flags,
+        chunks: chunkedOut.chunks,
+      });
+
+      // Page survived all 4 activities.
+      stats.pages_processed += 1;
+      stats.chunks_upserted += upsertOut.upserted;
+      stats.chunks_rejected_no_approval += upsertOut.rejected_no_approval;
+      stats.chunks_rejected_default_cap += upsertOut.rejected_default_cap;
+      if (upsertOut.quarantined) {
+        stats.chunks_quarantined += 1;
+      }
+    } catch (e) {
+      // Per-PAGE fail-open (F-40): bump the failure counter + continue with the next page. The page_id
+      // is already in livePageIds (appended before the try) so reconcile won't soft-delete its chunks.
+      stats.pages_failed += 1;
+      console.warn(
+        `confluence_ingest: page ${pageRef.page_id} in space ${spaceKey} failed; its chunks stay ` +
+          `protected from reconcile (F-40): ${e instanceof Error ? e.message : String(e)}`,
+      );
+      continue;
+    }
+  }
+
+  // Reconcile deletions: soft-delete chunks for pages absent this cycle.
+  const reconcileOut = await acts.reconcileDeletions({
+    schema_version: 1,
+    space_key: spaceKey,
+    live_page_ids: livePageIds,
+  });
+  stats.pages_soft_deleted += reconcileOut.soft_deleted;
+  return stats;
+}
+
 /**
  * Composition-root collaborators the cron adapters close over (the buildActivities idiom). The W3b.2
  * daily pair landed needing only the same dsn seam (MarkStaleChunksActivity is constructed over it at
@@ -159,6 +355,17 @@ export type CronHandlersDeps = {
    *  `CODEMASTER_WORKSPACE_ROOT`), exactly as under its Temporal `releaseWorkspace` registration;
    *  the runner's clock threads in as the default time seam either way. */
   readonly releaseWorkspaceDeps?: ReleaseWorkspaceDeps;
+  /** OPTIONAL Confluence listPages/getPage slice for the confluence_ingest fan-out (integration tests
+   *  inject a scripted fake). Omitted in prod — the handler builds the deferred-Vault lazy
+   *  ConfluenceClient ({@link makeLazyConfluenceChunkClient}), 1:1 with the Temporal composition
+   *  root's makeLazyConfluenceClient (build_activities.ts). */
+  readonly confluenceClient?: ConfluenceChunkClient;
+  /** OPTIONAL embeddings port for the confluence_ingest chunk embeds (integration tests inject the
+   *  deterministic RecordingEmbeddingsClient). Omitted in prod — the env-selected platform embedder
+   *  (resolveEmbeddingsConsumer, ADR-0059) resolved LAZILY on the FIRST embed call + memoized
+   *  ({@link makeLazyConfluenceEmbeddings}), so a runner without embedder env vars still boots AND
+   *  runs empty (zero-space / zero-page) cycles green. */
+  readonly confluenceEmbeddings?: EmbeddingsPort;
 };
 
 /**
@@ -310,6 +517,101 @@ export function registerCronHandlers(registry: HandlerRegistry, deps: CronHandle
     console.info(
       `workspace_retention swept: orphaned=${orphan.orphaned_count} reaped=${reaped} ` +
         `retention_deleted=${purge.deleted_count} job_id=${handlerDeps.job.job_id}`,
+    );
+  });
+
+  // W3e.2: confluence_ingest — the every-6h per-space × per-page NESTED FAN-OUT the Temporal
+  // confluenceIngestWorkflow body composes (confluence_ingest.workflow.ts / the frozen Python
+  // ConfluenceIngestWorkflow.run): list_active_spaces → per space (syncOneConfluenceSpace) → per page
+  // (fetch_body → sanitize → chunk_and_embed → upsert) → reconcile_deletions. This re-implements the
+  // workflow BODY (the orchestration) as a handler; the 7 confluence activities are REUSED, not
+  // rewritten. BOTH fail-open layers are preserved EXACTLY:
+  //   • per-SPACE: a space whose sync throws is recorded in failed_spaces + the loop CONTINUES (ALL
+  //     exceptions caught, no auth carve-out) — one broken space cannot abort the full cycle. The
+  //     broken space's reconcile is never reached, so its existing corpus is untouched.
+  //   • per-PAGE (F-40): each page_id is appended to live_page_ids BEFORE the per-page try inside
+  //     syncOneConfluenceSpace, so a transiently-failed page is NOT soft-deleted by reconcile.
+  // A throw from list_active_spaces (or a per-space reconcile slipping the catch — it can't; the
+  // catch wraps the whole space) propagates and fails the attempt (markFailed: backoff re-enqueue,
+  // then dead at exhaustion) — the platform analogue of the workflow surfacing the listing activity's
+  // failure after its RetryPolicy exhausts. The holder is constructed PER DISPATCH over the resolved
+  // DSN (the sync_code_owners idiom — repos are thin wrappers over the shared memoized pool); the
+  // lazy client/embedder are closed over ONCE at registration so their memos persist across cycles.
+  const confluenceClient = deps.confluenceClient ?? makeLazyConfluenceChunkClient();
+  const confluenceEmbeddings = deps.confluenceEmbeddings ?? makeLazyConfluenceEmbeddings();
+  registry.register("confluence_ingest", async (payload, _signal, handlerDeps) => {
+    ConfluenceIngestCronInput.parse(payload);
+    const dsn = deps.dsn ?? process.env.CODEMASTER_PG_CORE_DSN;
+    if (dsn === undefined || dsn === "") {
+      throw new Error("CODEMASTER_PG_CORE_DSN is not set; cannot run the confluence_ingest handler");
+    }
+    const db = tenantKysely<unknown>(dsn);
+    // The SAME collaborator set the Temporal composition root wires into ConfluenceSyncActivities
+    // (build_activities.ts): the chunks repo satisfies BOTH the idempotency-lookup and writer slices;
+    // the approvals repo the reader slice; the pool reader the hard-limit candidate fetch; the lazy
+    // DSN-memoized EmbedderCache the SCOPE-A dual-write (refresh() builds the singleton on the first
+    // upsert — an empty cycle never touches it). Clock = the runner's seam (prod IS a WallClock).
+    const chunksRepo = new PostgresConfluenceChunksRepo({ db, clock: handlerDeps.clock });
+    const acts = new ConfluenceSyncActivities({
+      client: confluenceClient,
+      embeddings: confluenceEmbeddings,
+      modelName: CONFLUENCE_EMBED_MODEL_NAME,
+      chunkEmbeddingLookup: chunksRepo,
+      chunksWriter: chunksRepo,
+      approvalsReader: new PostgresConfluencePageApprovalsRepo({ db }),
+      existingChunkRowsReader: new PoolExistingChunkRowsReader({ dsn }),
+      embedderCache: makeLazyEmbedderCache(dsn, { clock: handlerDeps.clock }),
+    });
+    const listActivity = new ListActiveConfluenceSpacesActivity({ dsn });
+
+    // Step 1: list active spaces (1:1 with the workflow body's first activity).
+    const spacesOut = await listActivity.listActiveSpaces({ schema_version: 1 });
+
+    // Deterministic cycle timestamp threaded as last_modified_at into sanitize + upsert — the
+    // job-dispatch instant off the runner's Clock seam (the handler analogue of the workflow-start
+    // instant the TS workflow pins via workflowInfo().startTime; constant across all spaces).
+    // `.toISOString()` yields a tz-aware Z-suffixed RFC3339 string (the offset:true constraint).
+    const cycleStartedAt = handlerDeps.clock.now().toISOString();
+
+    let pagesProcessed = 0;
+    let chunksUpserted = 0;
+    let chunksRejectedNoApproval = 0;
+    let chunksRejectedDefaultCap = 0;
+    let chunksQuarantined = 0;
+    let pagesSoftDeleted = 0;
+    const failedSpaces: Array<string> = [];
+
+    for (const spaceRef of spacesOut.spaces) {
+      try {
+        const stats = await syncOneConfluenceSpace(acts, spaceRef.space_key, cycleStartedAt);
+        pagesProcessed += stats.pages_processed;
+        chunksUpserted += stats.chunks_upserted;
+        chunksRejectedNoApproval += stats.chunks_rejected_no_approval;
+        chunksRejectedDefaultCap += stats.chunks_rejected_default_cap;
+        chunksQuarantined += stats.chunks_quarantined;
+        pagesSoftDeleted += stats.pages_soft_deleted;
+      } catch (e) {
+        // Per-SPACE failure is non-fatal (confluence_sync_workflow.py:146-153): record the space_key +
+        // continue so other spaces still get processed this cycle. ALL exceptions caught (no auth
+        // carve-out) — 1:1 with the workflow body's bare catch.
+        failedSpaces.push(spaceRef.space_key);
+        console.warn(
+          `confluence_ingest: space ${spaceRef.space_key} failed this cycle; continuing with the ` +
+            `remaining spaces: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        continue;
+      }
+    }
+
+    // The workflow body's RefreshConfluenceOutputV1 result fields, as the log tally (the platform
+    // persists job OUTCOME, not results — pages_failed stays per-space-internal, 1:1 with the Python
+    // never returning it).
+    console.info(
+      `confluence_ingest swept: pages_processed=${pagesProcessed} chunks_upserted=${chunksUpserted} ` +
+        `chunks_rejected_no_approval=${chunksRejectedNoApproval} ` +
+        `chunks_rejected_default_cap=${chunksRejectedDefaultCap} ` +
+        `chunks_quarantined=${chunksQuarantined} pages_soft_deleted=${pagesSoftDeleted} ` +
+        `failed_spaces=${JSON.stringify(failedSpaces)} job_id=${handlerDeps.job.job_id}`,
     );
   });
 }

@@ -107,6 +107,24 @@ export const CRON_SCHEDULES: ReadonlyArray<CronScheduleSeed> = [
     cadence_spec: "300", // every 5 minutes — parity with the Temporal every-5-min interval Schedule
     input: {},
   },
+  // W3e.2: the Confluence corpus ingest — the per-space × per-page nested fan-out workflow body
+  // (list_active_spaces → per space: fetch_space_pages → per page: fetch_body → sanitize →
+  // chunk_and_embed → upsert → reconcile_deletions; handlers/cron_handlers.ts carries BOTH fail-open
+  // layers + the F-40 live_page_ids ordering). Cadence parity with the Temporal Schedule
+  // (confluence_ingest.workflow.ts: CONFLUENCE_SYNC_INTERVAL_SECONDS = 6*60*60, overlap=SKIP — which
+  // falls out of dedup_key = schedule_id here). ONE deliberate schedule_id divergence (the W3b.2
+  // mark-stale precedent): the Temporal id is "refresh-confluence-corpus"
+  // (CONFLUENCE_SYNC_SCHEDULE_ID); the platform row carries the codemaster- operator-correlation
+  // prefix every other entry has. The literal is duplicated rather than imported because the workflow
+  // module statically imports `@temporalio/workflow` — a runtime edge the Temporal-free runner
+  // process must not grow; the cron_handlers_daily literal test pins the two in lockstep.
+  {
+    schedule_id: "codemaster-confluence-ingest",
+    job_type: "confluence_ingest",
+    cadence_kind: "interval",
+    cadence_spec: "21600", // every 6 hours — parity with the Temporal ScheduleIntervalSpec(hours=6)
+    input: {},
+  },
 ];
 
 /**
