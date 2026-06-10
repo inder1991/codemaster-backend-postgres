@@ -204,6 +204,77 @@ export class ReviewJobsRepo {
     return { applied: r.rows.length === 1, terminal: r.rows[0]?.terminal ?? false };
   }
 
+  /**
+   * Atomically settle a job AND its run terminal in ONE transaction (F4 — no split-brain). The job and the
+   * run can only move TOGETHER: a single fenced `db.transaction()` (a) fence-updates `core.review_jobs`
+   * (state → `jobState` ∈ {cancelled,dead}, `cancel_reason`/`dead_reason`, `finished_at`, ALL lease metadata
+   * cleared) exactly like {@link markCancelled}/{@link markFailed}, and (b) iff that fence applied, updates
+   * `core.review_runs` (lifecycle_state → `runState` ∈ {CANCELLED,FAILED}, stamping the matching terminal
+   * timestamp so the AD-7 biconditional CHECKs `CANCELLED ⇔ cancelled_at` / `FAILED ⇔ failed_at` hold).
+   *
+   * Fenced like {@link markDone}: a STALE token affects 0 job rows → the run update is SKIPPED and the whole
+   * transaction is a no-op (`applied:false`). So a stolen lease (the superseded loser) can neither cancel the
+   * job nor strand the run — and a `terminalSettle` that throws mid-way (e.g. a txn-level failure on the run
+   * update) ROLLS BACK both writes, leaving `job=leased` + `run=RUNNING` for the runner to reclaim and re-run
+   * (convergence WITHOUT the age-sweep).
+   *
+   * The run's `cancel_reason` (CANCELLED only) is a separate, CHECK-constrained column on `core.review_runs`
+   * (∈ superseded|operator_cancelled|timeout|repository_disabled|installation_suspended|shutdown) — it is the
+   * `runCancelReason` arg (default `'operator_cancelled'`), DISTINCT from the job's free-text `reason` (which
+   * carries the human-readable cause onto `review_jobs.cancel_reason`/`dead_reason`). The default avoids the
+   * run-side `'superseded'` value on purpose: `'superseded'` carries a COUPLED invariant
+   * (`ck_review_runs_supersede_reason` requires `superseded_by_run_id IS NOT NULL`), which the upstream
+   * supersede primitive — NOT this terminal-settle — is responsible for setting. FAILED runs carry no
+   * `cancel_reason` (left untouched).
+   */
+  async terminalSettle(a: {
+    jobId: string; owner: string; token: string; runId: string;
+    jobState: "cancelled" | "dead"; runState: "CANCELLED" | "FAILED";
+    reason: string; runCancelReason?: string;
+  }): Promise<FencedResult> {
+    return this.db.transaction().execute(async (tx) => {
+      // (a) Fence-update the JOB exactly like markCancelled/markFailed: only the owning lease may settle it.
+      //     `reason` lands on cancel_reason (cancelled) or dead_reason (dead). A stale token → 0 rows.
+      let jobAffected: bigint;
+      if (a.jobState === "cancelled") {
+        // tenant:exempt reason=PK-update-by-job_id-fenced follow_up=FOLLOW-UP-gf3-error-mode
+        const r = await sql`UPDATE core.review_jobs
+            SET state = 'cancelled', cancel_reason = left(${a.reason}, 2000), finished_at = now(),
+                leased_until = NULL, lease_owner = NULL, attempt_token = NULL, timeout_at = NULL, heartbeat_at = NULL
+          WHERE job_id = ${a.jobId} AND state = 'leased' AND lease_owner = ${a.owner} AND attempt_token = ${a.token}`
+          .execute(tx);
+        jobAffected = r.numAffectedRows ?? 0n;
+      } else {
+        // tenant:exempt reason=PK-update-by-job_id-fenced follow_up=FOLLOW-UP-gf3-error-mode
+        const r = await sql`UPDATE core.review_jobs
+            SET state = 'dead', dead_reason = left(${a.reason}, 2000), finished_at = now(),
+                leased_until = NULL, lease_owner = NULL, attempt_token = NULL, timeout_at = NULL, heartbeat_at = NULL
+          WHERE job_id = ${a.jobId} AND state = 'leased' AND lease_owner = ${a.owner} AND attempt_token = ${a.token}`
+          .execute(tx);
+        jobAffected = r.numAffectedRows ?? 0n;
+      }
+      if (Number(jobAffected) !== 1) {
+        // Stale token: the job fence affected 0 rows. Touch NOTHING on the run — committing here changes no
+        // row, so the run stays in its prior (e.g. RUNNING) state. No split-brain.
+        return { applied: false };
+      }
+      // (b) The job settled → settle the RUN in lockstep. Stamp the matching terminal timestamp so the
+      //     biconditional AD-7 CHECKs (CANCELLED ⇔ cancelled_at, FAILED ⇔ failed_at) hold at COMMIT.
+      if (a.runState === "CANCELLED") {
+        // tenant:exempt reason=PK-update-by-run_id-lockstep-with-job follow_up=FOLLOW-UP-gf3-error-mode
+        await sql`UPDATE core.review_runs
+            SET lifecycle_state = 'CANCELLED', cancelled_at = now(), cancel_reason = ${a.runCancelReason ?? "operator_cancelled"}
+          WHERE run_id = ${a.runId}`.execute(tx);
+      } else {
+        // tenant:exempt reason=PK-update-by-run_id-lockstep-with-job follow_up=FOLLOW-UP-gf3-error-mode
+        await sql`UPDATE core.review_runs
+            SET lifecycle_state = 'FAILED', failed_at = now()
+          WHERE run_id = ${a.runId}`.execute(tx);
+      }
+      return { applied: true };
+    });
+  }
+
   async reapCrashLooped(): Promise<number> {
     // tenant:exempt reason=watchdog-sweep-across-tenants follow_up=FOLLOW-UP-gf3-error-mode
     const r = await sql`UPDATE core.review_jobs

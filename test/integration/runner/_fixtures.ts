@@ -19,6 +19,18 @@ import {
  *    started_at, created_at.
  */
 export async function seedRun(db: Kysely<unknown>): Promise<{ runId: string; reviewId: string; installationId: string }> {
+  return seedRunWithState(db, "PENDING");
+}
+
+/**
+ * Like {@link seedRun} but seeds the run in an explicit `lifecycle_state` (W5.1b: terminalSettle tests need a
+ * run in `RUNNING` so the atomic job+run terminal transition can be asserted from `RUNNING → CANCELLED/FAILED`).
+ * The same uniqueness derivation as {@link seedRun} keeps both UNIQUE indexes collision-proof across seeds.
+ */
+export async function seedRunWithState(
+  db: Kysely<unknown>,
+  lifecycleState: string,
+): Promise<{ runId: string; reviewId: string; installationId: string }> {
   const runId = randomUUID(), reviewId = randomUUID(), installationId = randomUUID();
   // Derive uniqueness from the globally-unique reviewId so NEITHER unique index can flake:
   //   provider_pr_id carries the full reviewId  → UNIQUE (provider, provider_pr_id) holds.
@@ -30,8 +42,20 @@ export async function seedRun(db: Kysely<unknown>): Promise<{ runId: string; rev
     VALUES (${reviewId}, 'github', ${repoId}, 1, ${`gh-${reviewId}`}, 'open', now())`.execute(db);
   await sql`INSERT INTO core.review_runs
       (run_id, review_id, trigger_type, attempt_number, lifecycle_state, is_ephemeral, started_at, created_at)
-    VALUES (${runId}, ${reviewId}, 'pr_opened', 1, 'PENDING', false, now(), now())`.execute(db);
+    VALUES (${runId}, ${reviewId}, 'pr_opened', 1, ${lifecycleState}, false, now(), now())`.execute(db);
   return { runId, reviewId, installationId };
+}
+
+/** Read a run row's lifecycle_state + terminal-timestamp columns for terminalSettle assertions. */
+export async function readRun(
+  db: Kysely<unknown>,
+  runId: string,
+): Promise<{ lifecycle_state: string; cancelled_at: string | null; failed_at: string | null; cancel_reason: string | null }> {
+  const r = await sql<{
+    lifecycle_state: string; cancelled_at: string | null; failed_at: string | null; cancel_reason: string | null;
+  }>`SELECT lifecycle_state, cancelled_at, failed_at, cancel_reason FROM core.review_runs WHERE run_id = ${runId}`
+    .execute(db);
+  return r.rows[0]!;
 }
 
 /**

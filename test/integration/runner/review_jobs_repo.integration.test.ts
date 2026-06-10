@@ -4,7 +4,7 @@ import { Pool } from "pg";
 import { createHash } from "node:crypto"; // test/ is OUT of the clock/random gate's scope
 import { describeDb, INTEGRATION_DSN } from "../_db.js";
 import { PayloadIntegrityError, ReviewJobsRepo } from "#backend/runner/review_jobs_repo.js";
-import { minimalReviewPayload, seedRun } from "./_fixtures.js";
+import { minimalReviewPayload, readRun, seedRun, seedRunWithState } from "./_fixtures.js";
 
 let db: Kysely<unknown>; let pool: Pool;
 if (INTEGRATION_DSN) { pool = new Pool({ connectionString: INTEGRATION_DSN, max: 4 });
@@ -171,6 +171,70 @@ describeDb("ReviewJobsRepo.markFailed", () => {
     expect(r2).toEqual({ applied: true, terminal: true });
     const dead = await repo.getById(c2!.job_id); expect(dead!.state).toBe("dead"); expect((dead as Record<string, unknown>).dead_reason).toContain("boom2");
     expect((await repo.markFailed({ jobId: c2!.job_id, owner: "w1", token: crypto.randomUUID(), error: "x", baseBackoffMs: 1 })).applied).toBe(false);
+  });
+});
+
+// ─── W5.1b: terminalSettle (F4) — atomic job+run terminal transition in ONE transaction (no split-brain) ───
+describeDb("ReviewJobsRepo.terminalSettle", () => {
+  it("flips BOTH job→cancelled and run→CANCELLED in one txn (cancelled_at set, run cancel_reason valid)", async () => {
+    const repo = new ReviewJobsRepo(db);
+    const s = await seedRunWithState(db, "RUNNING");           // the shell's run starts RUNNING
+    await repo.enqueue({ ...s, payload: minimalReviewPayload(s) });
+    const c = await repo.claim({ owner: "w1", leaseMs: 1000, maxRuntimeMs: 60_000 });
+    // The JOB's free-text reason ("superseded") lands on review_jobs.cancel_reason; the RUN's CHECK-constrained
+    // cancel_reason is the SEPARATE runCancelReason ('operator_cancelled' — a CHECK-valid value with no coupled
+    // superseded_by_run_id requirement, unlike the run-side 'superseded' value).
+    const r = await repo.terminalSettle({
+      jobId: c!.job_id, owner: "w1", token: c!.attempt_token!, runId: s.runId,
+      jobState: "cancelled", runState: "CANCELLED", reason: "superseded", runCancelReason: "operator_cancelled",
+    });
+    expect(r.applied).toBe(true);
+    const job = await repo.getById(c!.job_id);
+    expect(job!.state).toBe("cancelled");
+    expect((job as Record<string, unknown>).cancel_reason).toBe("superseded");   // job carries the free-text cause
+    expect((job as Record<string, unknown>).finished_at).toBeTruthy();
+    expect((job as Record<string, unknown>).attempt_token).toBeNull();          // ALL lease metadata cleared
+    expect((job as Record<string, unknown>).lease_owner).toBeNull();
+    const run = await readRun(db, s.runId);
+    expect(run.lifecycle_state).toBe("CANCELLED");
+    expect(run.cancelled_at).toBeTruthy();                                       // biconditional CANCELLED ⇔ cancelled_at
+    expect(run.failed_at).toBeNull();
+    expect(run.cancel_reason).toBe("operator_cancelled");                        // the CHECK-valid run reason
+  });
+
+  it("flips BOTH job→dead and run→FAILED in one txn (failed_at set; no run cancel_reason)", async () => {
+    const repo = new ReviewJobsRepo(db);
+    const s = await seedRunWithState(db, "RUNNING");
+    await repo.enqueue({ ...s, payload: minimalReviewPayload(s) });
+    const c = await repo.claim({ owner: "w1", leaseMs: 1000, maxRuntimeMs: 60_000 });
+    const r = await repo.terminalSettle({
+      jobId: c!.job_id, owner: "w1", token: c!.attempt_token!, runId: s.runId,
+      jobState: "dead", runState: "FAILED", reason: "max runtime exceeded",
+    });
+    expect(r.applied).toBe(true);
+    const job = await repo.getById(c!.job_id);
+    expect(job!.state).toBe("dead");
+    expect((job as Record<string, unknown>).dead_reason).toContain("max runtime");
+    expect((job as Record<string, unknown>).finished_at).toBeTruthy();
+    const run = await readRun(db, s.runId);
+    expect(run.lifecycle_state).toBe("FAILED");
+    expect(run.failed_at).toBeTruthy();                                          // biconditional FAILED ⇔ failed_at
+    expect(run.cancelled_at).toBeNull();
+  });
+
+  it("a STALE token settles NEITHER row (applied:false; job stays leased, run stays RUNNING — no split-brain)", async () => {
+    const repo = new ReviewJobsRepo(db);
+    const s = await seedRunWithState(db, "RUNNING");
+    await repo.enqueue({ ...s, payload: minimalReviewPayload(s) });
+    const c = await repo.claim({ owner: "w1", leaseMs: 1000, maxRuntimeMs: 60_000 });
+    const r = await repo.terminalSettle({
+      jobId: c!.job_id, owner: "w1", token: crypto.randomUUID(), runId: s.runId,
+      jobState: "cancelled", runState: "CANCELLED", reason: "superseded", runCancelReason: "operator_cancelled",
+    });
+    expect(r.applied).toBe(false);
+    // ATOMIC: the fenced job-update affected 0 rows → the WHOLE txn rolled back → the run is untouched too.
+    expect((await repo.getById(c!.job_id))!.state).toBe("leased");
+    expect((await readRun(db, s.runId)).lifecycle_state).toBe("RUNNING");
   });
 });
 
