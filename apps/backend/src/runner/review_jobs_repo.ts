@@ -153,6 +153,41 @@ export class ReviewJobsRepo {
     return { applied: Number(r.numAffectedRows ?? 0n) === 1 };
   }
 
+  /**
+   * Persist the acquired PR-mutex id onto the job row (D3/F6) so a re-run can REUSE it instead of a fresh
+   * competing acquire. Fenced exactly like {@link markDone} — only the owning `lease_owner`+`attempt_token`
+   * on a still-`leased` row may write, so a stolen lease (the superseded loser) cannot stamp a mutex id over
+   * the rightful owner's. A stale token affects 0 rows → `applied:false`. Idempotent on re-write of the same id.
+   */
+  async persistMutexId(a: { jobId: string; owner: string; token: string; mutexId: string }): Promise<FencedResult> {
+    // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
+    const r = await sql`UPDATE core.review_jobs SET mutex_id = ${a.mutexId}
+      WHERE job_id = ${a.jobId} AND state = 'leased' AND lease_owner = ${a.owner} AND attempt_token = ${a.token}`
+      .execute(this.db);
+    return { applied: Number(r.numAffectedRows ?? 0n) === 1 };
+  }
+
+  /**
+   * Read the identity columns of a `core.pr_review_mutex` row by `mutex_id` for the shell's OWNERSHIP
+   * VALIDATION (F6): the reuse path asserts the referenced row's (installation_id, repository_id, pr_number)
+   * MATCH the job payload AND it is still live (`released_at IS NULL`), else it re-acquires fresh. The FK
+   * `review_jobs.mutex_id → pr_review_mutex(mutex_id)` (migration 0037) guarantees the row EXISTS; this read
+   * lets the code prove it is the RIGHT row. Returns `null` only if the row was hard-deleted (FK uses
+   * ON DELETE SET NULL, so a deleted parent would already have nulled `mutex_id` — defensive).
+   */
+  async readMutexRow(mutexId: string): Promise<{
+    mutex_id: string; installation_id: string; repository_id: string; pr_number: number;
+    released_at: string | null;
+  } | null> {
+    // tenant:exempt reason=PK-lookup-by-mutex_id-for-ownership-validation follow_up=FOLLOW-UP-gf3-error-mode
+    const r = await sql<{
+      mutex_id: string; installation_id: string; repository_id: string; pr_number: number;
+      released_at: string | null;
+    }>`SELECT mutex_id, installation_id, repository_id, pr_number, released_at
+       FROM core.pr_review_mutex WHERE mutex_id = ${mutexId}`.execute(this.db);
+    return r.rows[0] ?? null;
+  }
+
   async markFailed(a: { jobId: string; owner: string; token: string; error: string; baseBackoffMs: number }):
     Promise<{ applied: boolean; terminal: boolean }> {
     // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
