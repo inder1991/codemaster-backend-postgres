@@ -585,3 +585,98 @@ describe("GitSubprocessCloner failure taxonomy", () => {
     ).rejects.toThrow(new GitCloneFailedError("git clone failed to spawn: spawn git ENOENT"));
   });
 });
+
+// ─── AbortSignal threading (W4.1 / de-Temporal gate ①) ─────────────────────────────────────────────
+
+describe("GitSubprocessCloner AbortSignal threading", () => {
+  it("pre-spawn abort: an already-aborted signal throws and spawns NO subprocess", async () => {
+    const recorder = new SpawnRecorder();
+    const { provider } = fakeTokenProvider();
+    const cloner = new GitSubprocessCloner({
+      tokenProvider: provider,
+      spawnFn: recorder.spawn,
+    });
+    const workspace = await makeWorkspace();
+    const aborted = AbortSignal.abort(new Error("pre-spawn-abort"));
+
+    await expect(
+      cloner.clone({
+        workspace,
+        repoUrl: "https://github.com/acme/widget.git",
+        headSha: VALID_SHA,
+        installationId: INSTALLATION_ID,
+        paths: [],
+        signal: aborted,
+      }),
+    ).rejects.toThrow(/pre-spawn-abort/);
+
+    // The gate fired before the first runGit → ZERO subprocesses.
+    expect(recorder.calls).toEqual([]);
+    // And the askpass helper directory was cleaned up (the finally ran on the abort path).
+    await expect(
+      fs.access(path.join(workspace, ".codemaster-askpass", "askpass.sh")),
+    ).rejects.toThrow();
+  });
+
+  it("mid-clone abort: the SIGTERM→SIGKILL teardown fires AND the askpass script is removed", async () => {
+    let hangProc: FakeProcess | undefined;
+    // The first (clone) process hangs — it never closes on its own; only an abort or timeout ends it.
+    const hangingRecorder = new SpawnRecorder([{ hang: true }]);
+    const { provider } = fakeTokenProvider();
+    const controller = new AbortController();
+    const cloner = new GitSubprocessCloner({
+      tokenProvider: provider,
+      // A long transport timeout so the ABORT (not the timeout) is unambiguously what tore it down.
+      timeoutSeconds: 3600,
+      spawnFn: (command, args, options) => {
+        const proc = hangingRecorder.spawn(command, args, options);
+        hangProc ??= proc as unknown as FakeProcess;
+        // Abort the external signal once the clone subprocess is in-flight (mid-clone).
+        queueMicrotask(() => controller.abort(new Error("mid-clone-abort")));
+        return proc;
+      },
+    });
+    const workspace = await makeWorkspace();
+
+    await expect(
+      cloner.clone({
+        workspace,
+        repoUrl: "https://github.com/acme/widget.git",
+        headSha: VALID_SHA,
+        installationId: INSTALLATION_ID,
+        paths: [],
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow(/mid-clone-abort/);
+
+    // The EXISTING teardown ran: at least a SIGTERM was delivered to the hung subprocess.
+    expect(hangProc?.killCount).toBeGreaterThanOrEqual(1);
+    expect(hangProc?.killSignals[0]).toBe("SIGTERM");
+    // The finally MUST run on the abort path → the askpass helper is gone.
+    await expect(
+      fs.access(path.join(workspace, ".codemaster-askpass", "askpass.sh")),
+    ).rejects.toThrow();
+  }, 15_000);
+
+  it("no signal passed → byte-identical clone (the existing 3-command sequence, no abort plumbing)", async () => {
+    const recorder = new SpawnRecorder();
+    const { provider } = fakeTokenProvider();
+    const cloner = new GitSubprocessCloner({
+      tokenProvider: provider,
+      spawnFn: recorder.spawn,
+    });
+    const workspace = await makeWorkspace();
+
+    await cloner.clone({
+      workspace,
+      repoUrl: "https://github.com/acme/widget.git",
+      headSha: VALID_SHA,
+      installationId: INSTALLATION_ID,
+      paths: [],
+    });
+
+    // Absent signal → identical to the pre-W4.1 path: clone, fetch, checkout.
+    expect(recorder.calls.length).toBe(3);
+    expect(recorder.calls.map((c) => c.argv[1])).toEqual(["clone", "fetch", "checkout"]);
+  });
+});

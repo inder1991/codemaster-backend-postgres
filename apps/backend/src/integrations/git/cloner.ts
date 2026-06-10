@@ -65,6 +65,12 @@ export type GitCloner = {
     installationId: number;
     paths: ReadonlyArray<string>;
     prNumber?: number | null;
+    /**
+     * OPTIONAL external abort signal (W4.1 / de-Temporal gate ①). A pre-spawn abort throws BEFORE any
+     * subprocess; an abort mid-clone runs the EXISTING SIGTERM→SIGKILL teardown and the askpass-cleanup
+     * `finally`. Absent → byte-identical to the pre-W4.1 cloner.
+     */
+    signal?: AbortSignal;
   }): Promise<void>;
 };
 
@@ -100,6 +106,7 @@ export class GitSubprocessCloner implements GitCloner {
     headSha,
     installationId,
     prNumber = null,
+    signal,
   }: {
     workspace: string;
     repoUrl: string;
@@ -107,6 +114,7 @@ export class GitSubprocessCloner implements GitCloner {
     installationId: number;
     paths: ReadonlyArray<string>;
     prNumber?: number | null;
+    signal?: AbortSignal;
   }): Promise<void> {
     // Defense-in-depth: validate inputs BEFORE the subprocess. `spawn` (argv form) doesn't use a
     // shell, but rejecting bad inputs early protects against future refactors.
@@ -128,6 +136,10 @@ export class GitSubprocessCloner implements GitCloner {
       throw new Error(`github_installation_id must be >= 1, got ${installationId}`);
     }
 
+    // W4.1 / gate ①: a PRE-SPAWN abort throws BEFORE any token fetch / askpass write / subprocess —
+    // no NEW external work STARTS after abort. `signal` is OPTIONAL; absent → byte-identical.
+    signal?.throwIfAborted();
+
     const token = await this.tokenProvider(installationId);
 
     // Write a per-clone GIT_ASKPASS helper so the token is not in argv. The helper just prints the
@@ -145,6 +157,9 @@ export class GitSubprocessCloner implements GitCloner {
     const fetchRef = prNumber !== null && prNumber !== undefined ? `pull/${prNumber}/head` : headSha;
 
     try {
+      // Gate before EACH spawn (gate ①): an abort between the clone/fetch/checkout stages does not
+      // start the next subprocess. An in-flight subprocess is torn down by `runGit` (signal forwarded).
+      signal?.throwIfAborted();
       await this.runGit(
         [
           "git",
@@ -155,15 +170,22 @@ export class GitSubprocessCloner implements GitCloner {
           repoUrl,
           path.join(workspace, REPO_SUBDIR),
         ],
-        { env, cwd: workspace },
+        // Conditional spread (NOT `signal,`) so the optional `signal?: AbortSignal` property is
+        // OMITTED — not set to `undefined` — when absent (codebase `exactOptionalPropertyTypes` rule,
+        // same idiom as the api_client request options).
+        { env, cwd: workspace, ...(signal !== undefined ? { signal } : {}) },
       );
+      signal?.throwIfAborted();
       await this.runGit(["git", "fetch", "--depth=1", "origin", fetchRef], {
         env,
         cwd: path.join(workspace, REPO_SUBDIR),
+        ...(signal !== undefined ? { signal } : {}),
       });
+      signal?.throwIfAborted();
       await this.runGit(["git", "checkout", "--detach", headSha], {
         env,
         cwd: path.join(workspace, REPO_SUBDIR),
+        ...(signal !== undefined ? { signal } : {}),
       });
     } finally {
       // Remove the askpass helper as soon as the clone completes (success or failure) so a stale
@@ -208,7 +230,7 @@ export class GitSubprocessCloner implements GitCloner {
    */
   private async runGit(
     args: ReadonlyArray<string>,
-    { env, cwd }: { env: Record<string, string>; cwd: string },
+    { env, cwd, signal }: { env: Record<string, string>; cwd: string; signal?: AbortSignal },
   ): Promise<void> {
     const verb = args.length > 1 ? (args[1] ?? "?") : "?";
     const proc = this.spawnFn(args[0] ?? "git", args.slice(1), {
@@ -232,7 +254,7 @@ export class GitSubprocessCloner implements GitCloner {
       );
     });
 
-    const exitCode = await Promise.race([this.awaitWithTimeout(proc, verb), spawnFailed]);
+    const exitCode = await Promise.race([this.awaitWithTimeout(proc, verb, signal), spawnFailed]);
 
     if (exitCode !== 0) {
       const stderrText = Buffer.concat(stderrChunks).toString("utf8");
@@ -244,13 +266,21 @@ export class GitSubprocessCloner implements GitCloner {
   }
 
   /**
-   * Wait for `proc` to exit, bounded by `timeoutSeconds`. On timeout: SIGTERM, then a 5s
-   * SIGKILL-grace, then SIGKILL, then a final 5s grace; either way raise {@link GitCloneTimeoutError}.
+   * Wait for `proc` to exit, bounded by `timeoutSeconds` AND (W4.1 / gate ①) an optional external
+   * abort `signal`. On timeout: SIGTERM, then a 5s SIGKILL-grace, then SIGKILL, then a final 5s grace;
+   * either way raise {@link GitCloneTimeoutError}. On an external abort: the SAME SIGTERM→SIGKILL
+   * teardown runs (so the in-flight git subprocess is reaped, never orphaned), then the abort REASON
+   * is re-thrown (via `signal.throwIfAborted()`) so the caller's cancel cause (e.g. the composed
+   * `TerminalCancelError`) propagates. The caller's `finally` removes the askpass script on EITHER path.
    *
    * The timeout + grace timers are armed through the transport-timeout seam (`transportAbortSignal`)
    * — NOT a raw `setTimeout` — so this driver stays clean under the `check_clock_random` gate.
    */
-  private async awaitWithTimeout(proc: ChildProcess, verb: string): Promise<number> {
+  private async awaitWithTimeout(
+    proc: ChildProcess,
+    verb: string,
+    signal?: AbortSignal,
+  ): Promise<number> {
     const closed = new Promise<number>((resolve) => {
       // `close` fires after stdio is flushed and the process has exited; the code is the exit code
       // (or null if killed by signal, which we coerce to a non-zero sentinel for the failed-error
@@ -258,30 +288,48 @@ export class GitSubprocessCloner implements GitCloner {
       proc.on("close", (code) => resolve(code ?? -1));
     });
 
+    // The graceful SIGTERM→SIGKILL teardown, shared by the timeout AND the external-abort paths so the
+    // subprocess is reaped identically either way (no orphaned git process after a mid-clone abort).
+    const teardown = async (): Promise<void> => {
+      proc.kill("SIGTERM");
+      const exitedAfterTerm = await Promise.race([
+        closed.then(() => true),
+        abortAfter(KILL_TIMEOUT_SECONDS).then(() => false),
+      ]);
+      if (!exitedAfterTerm) {
+        proc.kill("SIGKILL");
+        await Promise.race([
+          closed.then(() => true),
+          abortAfter(KILL_TIMEOUT_SECONDS).then(() => false),
+        ]);
+        // If it's STILL stuck the OS reaper will clean up; we proceed to raise.
+      }
+    };
+
     const timedOut = abortAfter(this.timeoutSeconds);
+    const aborted = signalFired(signal);
     const winner = await Promise.race([
       closed.then(() => "closed" as const),
       timedOut.then(() => "timeout" as const),
+      aborted.then(() => "aborted" as const),
     ]);
 
     if (winner === "closed") {
       return await closed;
     }
 
-    // Timeout path: graceful SIGTERM first, then SIGKILL if it doesn't exit within the kill grace.
-    proc.kill("SIGTERM");
-    const exitedAfterTerm = await Promise.race([
-      closed.then(() => true),
-      abortAfter(KILL_TIMEOUT_SECONDS).then(() => false),
-    ]);
-    if (!exitedAfterTerm) {
-      proc.kill("SIGKILL");
-      await Promise.race([
-        closed.then(() => true),
-        abortAfter(KILL_TIMEOUT_SECONDS).then(() => false),
-      ]);
-      // If it's STILL stuck the OS reaper will clean up; we proceed to raise.
+    if (winner === "aborted") {
+      // External cancel mid-clone: tear the subprocess down (same SIGTERM→SIGKILL grace as a timeout),
+      // then re-throw the abort reason so the cancel cause propagates to the caller.
+      await teardown();
+      signal?.throwIfAborted();
+      // Defensive: `throwIfAborted` above always throws when we reached the abort branch, but keep a
+      // typed fallback so the function never returns silently on a hand-fired signal without a reason.
+      throw new GitCloneFailedError(`git ${verb} aborted`);
     }
+
+    // Timeout path: the same graceful SIGTERM→SIGKILL teardown, then raise the timeout error.
+    await teardown();
     throw new GitCloneTimeoutError(`git ${verb} exceeded timeout ${this.timeoutSeconds}s`);
   }
 }
@@ -293,6 +341,27 @@ export class GitSubprocessCloner implements GitCloner {
  */
 function abortAfter(seconds: number): Promise<void> {
   const signal = transportAbortSignal(seconds * 1000);
+  return new Promise<void>((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+}
+
+/**
+ * Resolve when `signal` fires (W4.1 / gate ①). When `signal` is undefined the returned promise NEVER
+ * settles — so it never wins the `Promise.race` against close/timeout for callers without an external
+ * cancel (the pre-W4.1 path stays byte-identical). This only OBSERVES the `abort` event — no timer —
+ * so the file stays clean under the `check_clock_random` gate.
+ */
+function signalFired(signal?: AbortSignal): Promise<void> {
+  if (signal === undefined) {
+    return new Promise<void>(() => {
+      /* never resolves — no external abort to observe */
+    });
+  }
   return new Promise<void>((resolve) => {
     if (signal.aborted) {
       resolve();
