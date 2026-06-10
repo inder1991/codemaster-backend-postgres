@@ -25,6 +25,9 @@ function validRow(): Record<string, unknown> {
     heartbeat_at: null,
     attempts: 0,
     max_attempts: 3,
+    finished_at: null, // W2a.1 (migration 0041): dead-letter triple, review_jobs parity
+    dead_reason: null,
+    last_error: null,
     dedup_key: null,
     created_at: new Date("2026-06-10T00:00:00Z"),
     updated_at: new Date("2026-06-10T00:00:00Z"),
@@ -75,6 +78,21 @@ describe("BackgroundJobV1", () => {
 
   it("rejects an unknown state", () => {
     expect(() => BackgroundJobV1.parse({ ...validRow(), state: "running" })).toThrow();
+  });
+
+  it("parses a DEAD-LETTERED row (W2a.1 / migration 0041): dead_reason + last_error + finished_at populated", () => {
+    const parsed = BackgroundJobV1.parse({
+      ...validRow(),
+      state: "dead",
+      attempts: 3,
+      last_error: "boom",
+      dead_reason: "boom",
+      finished_at: "2026-06-10T00:10:00Z", // JSON wire shape — must coerce like the pg Date shape
+    });
+    expect(parsed.state).toBe("dead");
+    expect(parsed.last_error).toBe("boom");
+    expect(parsed.dead_reason).toBe("boom");
+    expect(parsed.finished_at).toEqual(new Date("2026-06-10T00:10:00Z"));
   });
 
   it("rejects a payload_sha256 that is not 64 lowercase hex chars", () => {

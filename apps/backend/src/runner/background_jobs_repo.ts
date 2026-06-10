@@ -13,10 +13,10 @@ import { BackgroundJobV1 } from "#contracts/background_job.v1.js";
 //   * payload is an OPAQUE JSON object (z.record) — the platform has no inner contract; each
 //     job_type's HANDLER owns parsing it (the W2b dispatch seam). verifyPayload still proves the
 //     stored bytes are intact (hash check) before any handler runs.
-//   * NO last_error / dead_reason / finished_at columns exist on 0039 — markFailed/terminalSettle
-//     accept the error/reason string for 1:1 interface parity with ReviewJobsRepo (so the W2b
-//     runner loop lifts verbatim) and surface it via a structured console.warn on the TERMINAL
-//     transition; the caller (runner loop) owns durable logging/metrics.
+//   * last_error / dead_reason / finished_at (migration 0041, W2a.1 review_jobs parity): wired
+//     1:1 with ReviewJobsRepo — markDone stamps finished_at; markFailed persists last_error on
+//     EVERY failure and dead_reason+finished_at on the terminal one; terminalSettle/reapStuckRuns
+//     stamp dead_reason+finished_at. (0039 omitted the triple; 0041 closed the gap.)
 //   * NO review_run / PR-mutex lockstep: terminalSettle is the fenced atomic job→dead settle and
 //     reapStuckRuns flips stuck jobs→dead in one statement — there is no second row to keep in
 //     lockstep, so neither needs the raw-pg transaction ReviewJobsRepo.terminalSettle carries.
@@ -176,7 +176,7 @@ export class BackgroundJobsRepo {
   async markDone(a: { jobId: string; owner: string; token: string }): Promise<FencedResult> {
     // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
     const r = await sql`UPDATE core.background_jobs
-        SET state = 'done', updated_at = now(),
+        SET state = 'done', finished_at = now(), updated_at = now(),
             leased_until = NULL, lease_owner = NULL, attempt_token = NULL, timeout_at = NULL, heartbeat_at = NULL
       WHERE job_id = ${a.jobId} AND state = 'leased' AND lease_owner = ${a.owner} AND attempt_token = ${a.token}`
       .execute(this.db);
@@ -186,70 +186,62 @@ export class BackgroundJobsRepo {
   /**
    * Fail the current attempt: re-enqueue with exponential backoff while attempts remain, else
    * dead-letter. Fenced exactly like {@link markDone} (owning lease_owner+attempt_token on a
-   * still-`leased` row; a stale token affects 0 rows → applied:false). `error` is NOT persisted
-   * (0039 carries no last_error/dead_reason column — see the module doc); the TERMINAL transition
-   * surfaces it via console.warn so a dead-letter is never silent.
+   * still-`leased` row; a stale token affects 0 rows → applied:false). Mirrors
+   * ReviewJobsRepo.markFailed (W2a.1 / migration 0041): `last_error` is persisted on EVERY failure
+   * (re-enqueue AND dead); the TERMINAL transition additionally stamps dead_reason + finished_at.
    */
   async markFailed(a: { jobId: string; owner: string; token: string; error: string; baseBackoffMs: number }):
     Promise<{ applied: boolean; terminal: boolean }> {
     // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
     const r = await sql<{ terminal: boolean }>`UPDATE core.background_jobs SET
+        last_error  = left(${a.error}, 2000),
         state       = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'ready' END,
+        dead_reason = CASE WHEN attempts >= max_attempts THEN left(${a.error}, 2000) ELSE dead_reason END,
+        finished_at = CASE WHEN attempts >= max_attempts THEN now() ELSE finished_at END,
         -- exponential backoff with ±25% jitter (avoid a herd re-claiming after an incident):
         run_after   = now() + ((${a.baseBackoffMs}::double precision * power(2, attempts - 1)) * (0.75 + random() * 0.5) / 1000) * interval '1 second',
         lease_owner = NULL, attempt_token = NULL, leased_until = NULL, timeout_at = NULL, heartbeat_at = NULL,
         updated_at  = now()
       WHERE job_id = ${a.jobId} AND state = 'leased' AND lease_owner = ${a.owner} AND attempt_token = ${a.token}
       RETURNING (state = 'dead') AS terminal`.execute(this.db);
-    const applied = r.rows.length === 1;
-    const terminal = r.rows[0]?.terminal ?? false;
-    if (terminal) {
-      console.warn(`background_jobs.markFailed: job ${a.jobId} dead-lettered (attempts exhausted): ${a.error.slice(0, 2000)}`);
-    }
-    return { applied, terminal };
+    return { applied: r.rows.length === 1, terminal: r.rows[0]?.terminal ?? false };
   }
 
   /**
    * Terminally settle a job → `dead` REGARDLESS of attempts remaining (the poison-pill / operator
    * path) — it is never re-enqueued. Fenced exactly like {@link markDone}. Atomic by construction:
    * ONE fenced UPDATE (the generic platform has no review_run/mutex second row to keep in lockstep,
-   * unlike ReviewJobsRepo.terminalSettle's job+run transaction). `reason` is surfaced via
-   * console.warn (no dead_reason column on 0039 — see the module doc).
+   * unlike ReviewJobsRepo.terminalSettle's job+run transaction). Mirrors the review_jobs dead branch
+   * (W2a.1 / migration 0041): `reason` lands on dead_reason and finished_at is stamped.
    */
   async terminalSettle(a: { jobId: string; owner: string; token: string; reason: string }): Promise<FencedResult> {
     // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
     const r = await sql`UPDATE core.background_jobs
-        SET state = 'dead', updated_at = now(),
+        SET state = 'dead', dead_reason = left(${a.reason}, 2000), finished_at = now(), updated_at = now(),
             leased_until = NULL, lease_owner = NULL, attempt_token = NULL, timeout_at = NULL, heartbeat_at = NULL
       WHERE job_id = ${a.jobId} AND state = 'leased' AND lease_owner = ${a.owner} AND attempt_token = ${a.token}`
       .execute(this.db);
-    const applied = Number(r.numAffectedRows ?? 0n) === 1;
-    if (applied) {
-      console.warn(`background_jobs.terminalSettle: job ${a.jobId} → dead: ${a.reason.slice(0, 2000)}`);
-    }
-    return { applied };
+    return { applied: Number(r.numAffectedRows ?? 0n) === 1 };
   }
 
   /**
    * The stuck-job reaper (liveness backstop): every job whose lease EXPIRED with attempts EXHAUSTED
    * — `state='leased' AND leased_until < now() AND attempts >= max_attempts`, i.e. the rows
-   * {@link claim} will NEVER reclaim — is flipped → `dead` with ALL lease metadata cleared. An
-   * expired lease with attempts REMAINING is deliberately LEFT for claim() to reclaim. ONE
-   * statement, cross-tenant by design (it MUST see every tenant's stuck jobs). Returns the count.
+   * {@link claim} will NEVER reclaim — is flipped → `dead` with ALL lease metadata cleared and the
+   * dead-letter columns stamped (dead_reason COALESCE'd + finished_at, mirroring
+   * ReviewJobsRepo.reapStuckRuns step 1 — W2a.1 / migration 0041). An expired lease with attempts
+   * REMAINING is deliberately LEFT for claim() to reclaim. ONE statement, cross-tenant by design
+   * (it MUST see every tenant's stuck jobs). Returns the count.
    */
   async reapStuckRuns(): Promise<number> {
     // tenant:exempt reason=worker-pool-claim-across-tenants follow_up=FOLLOW-UP-gf3-error-mode
-    const r = await sql<{ job_id: string; job_type: string }>`UPDATE core.background_jobs
-        SET state = 'dead', updated_at = now(),
+    const r = await sql<{ job_id: string }>`UPDATE core.background_jobs
+        SET state = 'dead',
+            dead_reason = COALESCE(dead_reason, 'lease expired with attempts exhausted (stuck run)'),
+            finished_at = now(), updated_at = now(),
             leased_until = NULL, lease_owner = NULL, attempt_token = NULL, timeout_at = NULL, heartbeat_at = NULL
       WHERE state = 'leased' AND leased_until < now() AND attempts >= max_attempts
-      RETURNING job_id, job_type`.execute(this.db);
-    for (const row of r.rows) {
-      console.warn(
-        `background_jobs.reapStuckRuns: job ${row.job_id} (job_type=${row.job_type}) → dead ` +
-          "(lease expired with attempts exhausted)",
-      );
-    }
+      RETURNING job_id`.execute(this.db);
     return r.rows.length;
   }
 }

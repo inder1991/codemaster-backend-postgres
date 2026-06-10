@@ -41,6 +41,13 @@ export const BackgroundJobV1 = z
     heartbeat_at: z.coerce.date().nullable(),
     attempts: z.number().int(),
     max_attempts: z.number().int(),
+    // W2a.1 (migration 0041, review_jobs parity — 0036 lines 26-29): the dead-letter triple.
+    // finished_at is stamped on EVERY terminal transition (done/dead); last_error on every
+    // markFailed; dead_reason on the terminal dead transitions (markFailed exhaustion,
+    // terminalSettle, reap).
+    finished_at: z.coerce.date().nullable(),
+    dead_reason: z.string().nullable(),
+    last_error: z.string().nullable(),
     dedup_key: z.string().nullable(),
     created_at: z.coerce.date(),
     updated_at: z.coerce.date(),

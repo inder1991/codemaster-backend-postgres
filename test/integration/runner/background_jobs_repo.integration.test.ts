@@ -69,6 +69,11 @@ describeDb("BackgroundJobsRepo — enqueue → claim → markDone happy path", (
     expect(done!.leased_until).toBeNull();
     expect(done!.timeout_at).toBeNull();
     expect(done!.heartbeat_at).toBeNull();
+    // W2a.1 (migration 0041, review_jobs parity): markDone stamps finished_at; a clean done row
+    // carries NO dead-letter diagnostics.
+    expect(done!.finished_at).toBeInstanceOf(Date);
+    expect(done!.dead_reason).toBeNull();
+    expect(done!.last_error).toBeNull();
   });
 
   it("verifyPayload round-trips the stored payload; a corrupted sha256 throws PayloadIntegrityError", async () => {
@@ -141,13 +146,23 @@ describeDb("BackgroundJobsRepo.markFailed — backoff re-enqueue until attempts=
     expect(requeued!.attempt_token).toBeNull();     // ALL lease metadata cleared on requeue
     expect(requeued!.lease_owner).toBeNull();
     expect(requeued!.leased_until).toBeNull();
+    // W2a.1 (migration 0041, review_jobs parity): the RE-ENQUEUE path persists last_error (so the
+    // most recent failure is always inspectable) but does NOT terminal-stamp dead_reason/finished_at.
+    expect(requeued!.last_error).toBe("boom");
+    expect(requeued!.dead_reason).toBeNull();
+    expect(requeued!.finished_at).toBeNull();
 
     await new Promise((r) => setTimeout(r, 30));    // let the (jittered 1ms-base) backoff elapse
     const c2 = await repo.claim({ owner: "w1", leaseMs: 60_000, maxRuntimeMs: 120_000 }); // attempts → 2 (== max)
     expect(c2!.attempts).toBe(2);
     const r2 = await repo.markFailed({ jobId: c2!.job_id, owner: "w1", token: c2!.attempt_token!, error: "boom2", baseBackoffMs: 1 });
     expect(r2).toEqual({ applied: true, terminal: true });
-    expect((await repo.getById(c2!.job_id))!.state).toBe("dead");
+    const deadRow = await repo.getById(c2!.job_id);
+    expect(deadRow!.state).toBe("dead");
+    // W2a.1: the TERMINAL transition persists the full dead-letter triple (mirrors review_jobs).
+    expect(deadRow!.last_error).toBe("boom2");
+    expect(deadRow!.dead_reason).toBe("boom2");
+    expect(deadRow!.finished_at).toBeInstanceOf(Date);
 
     // a stale token after settle affects 0 rows.
     expect((await repo.markFailed({ jobId: c2!.job_id, owner: "w1", token: randomUUID(), error: "x", baseBackoffMs: 1 })).applied).toBe(false);
@@ -166,6 +181,10 @@ describeDb("BackgroundJobsRepo.markFailed — backoff re-enqueue until attempts=
     expect(dead!.state).toBe("dead");
     expect(dead!.attempt_token).toBeNull();
     expect(dead!.lease_owner).toBeNull();
+    // W2a.1 (migration 0041, review_jobs parity): terminalSettle persists dead_reason + finished_at.
+    expect(dead!.dead_reason).toBe("poison");
+    expect(dead!.finished_at).toBeInstanceOf(Date);
+    expect(dead!.last_error).toBeNull(); // poison-pill path never ran markFailed
     // Terminal: a dead job is NOT re-driven by claim().
     expect(await repo.claim({ owner: "w2", leaseMs: 60_000, maxRuntimeMs: 120_000 })).toBeNull();
   });
@@ -199,6 +218,9 @@ describeDb("BackgroundJobsRepo.reapStuckRuns", () => {
     expect(a!.state).toBe("dead");
     expect(a!.attempt_token).toBeNull();         // lease metadata cleared on reap
     expect(a!.lease_owner).toBeNull();
+    // W2a.1 (migration 0041, review_jobs parity): the reaper terminal-stamps the dead-letter columns.
+    expect(a!.dead_reason).toBe("lease expired with attempts exhausted (stuck run)");
+    expect(a!.finished_at).toBeInstanceOf(Date);
     expect((await repo.getById(idB))!.state).toBe("leased"); // claim() owns reclaiming B
     expect((await repo.getById(idC))!.state).toBe("leased"); // live lease untouched
   });
