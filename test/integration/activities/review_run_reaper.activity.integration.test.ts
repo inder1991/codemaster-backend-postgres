@@ -150,7 +150,9 @@ async function seedInstallation(installationId: string): Promise<void> {
  * `state='leased'` + a FUTURE `leased_until` models a LIVE job: the gate-④ `NOT EXISTS` predicate (state IN
  * ('ready','leased')) must shield the run from the age-sweep reaper while this row exists. NOT NULL columns
  * `payload`/`payload_sha256` (migration 0037, no DB default) are stamped with inert placeholders — the reaper
- * predicate reads neither; only `run_id` + `state` are load-bearing. Returns the job_id for later dead-letter.
+ * predicate reads neither; only `run_id` + `state` are load-bearing. The `payload_sha256` placeholder MUST be
+ * 64 lowercase hex chars to satisfy migration 0038's `ck_review_jobs_payload_sha256_hex` CHECK. Returns the
+ * job_id for later dead-letter.
  */
 async function seedReviewJob(args: {
   runId: string;
@@ -163,7 +165,7 @@ async function seedReviewJob(args: {
   await pool.query(
     `INSERT INTO core.review_jobs
        (job_id, run_id, review_id, installation_id, state, leased_until, payload, payload_sha256)
-     VALUES ($1, $2, $3, $4, $5, ${args.leasedUntilSql}, '{}'::jsonb, '')`,
+     VALUES ($1, $2, $3, $4, $5, ${args.leasedUntilSql}, '{}'::jsonb, repeat('0', 64))`,
     [jobId, args.runId, args.reviewId, args.installationId, args.state],
   );
   return jobId;
