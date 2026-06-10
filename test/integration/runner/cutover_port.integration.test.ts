@@ -165,10 +165,10 @@ function startCall(o: {
 
 type JobRow = {
   job_id: string; job_type: string; payload: Record<string, unknown>;
-  dedup_key: string | null; state: string;
+  dedup_key: string | null; state: string; installation_id: string | null;
 };
 async function allJobs(): Promise<Array<JobRow>> {
-  const r = await sql<JobRow>`SELECT job_id, job_type, payload, dedup_key, state
+  const r = await sql<JobRow>`SELECT job_id, job_type, payload, dedup_key, state, installation_id
     FROM core.background_jobs ORDER BY created_at`.execute(db);
   return r.rows;
 }
@@ -231,6 +231,35 @@ describeDb("BackgroundJobsTemporalPort + flag-gated outbox sink port (Phase 3d.3
     const second = await port.startWorkflow(call);
     expect(second).toBe(first);                    // dedup overlap=SKIP coalesced the re-dispatch
     expect(await allJobs()).toHaveLength(1);
+  });
+
+  it("(1c) startWorkflow threads the caller's installationId onto the enqueued row; omitted → NULL (platform-scoped)", async () => {
+    // W4b.1 review blocker #1 (tenant identity lost in cutover) — port-level half: the port's
+    // 2nd param lands as core.background_jobs.installation_id (the column is FK-free by design,
+    // so any UUID exercises it).
+    const gid = nextGhIid();
+    const login = `cutover-${gid}`;
+    const port = new BackgroundJobsTemporalPort({
+      repo: new BackgroundJobsRepo(db),
+      workflowTypeToJobType: WORKFLOW_TYPE_TO_JOB_TYPE,
+    });
+    const tenantUuid = randomUUID();
+    const input = installationPayload({ action: "created", gid, login });
+
+    await port.startWorkflow(
+      startCall({ workflowType: "reconcileInstallation", workflowId: "wf-tenant", args: [input] }),
+      tenantUuid,
+    );
+    await port.startWorkflow(
+      startCall({ workflowType: "reconcileInstallation", workflowId: "wf-platform", args: [input] }),
+      // installationId omitted — the platform-scoped (NULL) default
+    );
+
+    const jobs = await allJobs();
+    expect(jobs).toHaveLength(2);
+    const byKey = new Map(jobs.map((j) => [j.dedup_key, j]));
+    expect(byKey.get("wf-tenant")!.installation_id).toBe(tenantUuid);   // tenant identity SURVIVES
+    expect(byKey.get("wf-platform")!.installation_id).toBeNull();       // platform-scoped by design
   });
 
   it("(2) an UNMAPPED workflowType throws PermanentSinkError naming it; nothing is enqueued", async () => {
@@ -349,6 +378,9 @@ describeDb("BackgroundJobsTemporalPort + flag-gated outbox sink port (Phase 3d.3
     expect(jobs[0]!.job_type).toBe("reconcile_installation");
     expect(jobs[0]!.dedup_key).toBe(`reconcile-installation/${gid}`); // workflow_id → dedup_key
     expect(jobs[0]!.payload).toEqual(installationPayload({ action: "suspended", gid, login }));
+    // W4b.1 review blocker #1 — full-chain half: the outbox row's installation_id rode
+    // DispatchRow → SinkContext → sink handler → port → enqueue; tenant identity SURVIVES cutover.
+    expect(jobs[0]!.installation_id).toBe(installationUuid);
 
     // ONE runner cycle: the registered reconcile_installation handler applies the DB effect.
     const cycle = await handles.runOneCycle();
@@ -387,6 +419,9 @@ describeDb("BackgroundJobsTemporalPort + flag-gated outbox sink port (Phase 3d.3
     const jobs = await allJobs();
     expect(jobs).toHaveLength(1);
     expect(jobs[0]!.job_type).toBe("reconcile_installation");
+    // appendReconcile writes a NULL-installation_id outbox row (the schema exemption) → the
+    // SinkContext carries installationId=null → the job stays platform-scoped (NULL) by design.
+    expect(jobs[0]!.installation_id).toBeNull();
 
     expect((await handles.runOneCycle()).outcome).toBe("done");
     const created = await pool.query<{ account_login: string; suspended_at: Date | null }>(

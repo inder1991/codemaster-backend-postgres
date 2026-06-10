@@ -25,8 +25,16 @@ export type StartWorkflowCall = {
 
 /** The triggering surface cross-cutting code depends on (Python `TemporalClientPort` Protocol). */
 export type TemporalClientPort = {
-  /** Start a workflow. Returns the run_id. Idempotent w.r.t. `workflowId`. */
-  startWorkflow(call: StartWorkflowCall): Promise<string>;
+  /** Start a workflow. Returns the run_id. Idempotent w.r.t. `workflowId`.
+   *
+   *  `installationId` (W4b.1 review blocker #1 — tenant identity must survive the cutover): the
+   *  dispatching outbox row's tenant identity (SinkContext.installationId); null/omitted = a
+   *  platform-scoped dispatch. Temporal-backed implementations IGNORE it — Temporal does not
+   *  tenant-scope workflow starts (the workflow input payload already carries whatever tenant
+   *  identity the handler needs) — but the cutover BackgroundJobsTemporalPort persists it onto the
+   *  enqueued core.background_jobs row, so the tenancy column does not silently degrade to NULL
+   *  when the outbox sinks stop dispatching through Temporal. */
+  startWorkflow(call: StartWorkflowCall, installationId?: string | null): Promise<string>;
   /** Cancel a running workflow by ID. No-op if already finished / missing. */
   cancelWorkflow(args: { workflowId: string }): Promise<void>;
   /** Send a signal to a running workflow. */

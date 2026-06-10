@@ -205,4 +205,52 @@ describe("resolveBackgroundRunnerConfig", () => {
     expect(() => resolveBackgroundRunnerConfig({ CODEMASTER_PG_CORE_DSN: "postgresql://x/y",
       CODEMASTER_OUTBOX_MAX_ATTEMPTS: "0" })).toThrow(/CODEMASTER_OUTBOX_MAX_ATTEMPTS/);
   });
+
+  // ── W4b.1 review blocker #2: lease/heartbeat invariants validated at boot, not at 3am ─────────
+  it("REFUSES heartbeatS > leaseS/2 (a heartbeat that can't beat twice per lease risks duplicate execution)", () => {
+    // The reviewed case verbatim: heartbeat 60 / lease 30 — the heartbeat could NEVER extend the
+    // lease before it expires mid-handler.
+    expect(() => resolveBackgroundRunnerConfig({ CODEMASTER_PG_CORE_DSN: "postgresql://x/y",
+      CODEMASTER_BG_HEARTBEAT_S: "60", CODEMASTER_BG_LEASE_S: "30" }))
+      .toThrow(/CODEMASTER_BG_HEARTBEAT_S.*CODEMASTER_BG_LEASE_S/);
+    // Each var individually in-range but the PAIR violates the invariant (40 > 60/2).
+    expect(() => resolveBackgroundRunnerConfig({ CODEMASTER_PG_CORE_DSN: "postgresql://x/y",
+      CODEMASTER_BG_HEARTBEAT_S: "40", CODEMASTER_BG_LEASE_S: "60" }))
+      .toThrow(/CODEMASTER_BG_HEARTBEAT_S/);
+  });
+
+  it("ACCEPTS a valid config (heartbeat 15 / lease 60 / maxRuntime 900) and the exact lease/2 boundary", () => {
+    const { config } = resolveBackgroundRunnerConfig({ CODEMASTER_PG_CORE_DSN: "postgresql://x/y",
+      CODEMASTER_BG_HEARTBEAT_S: "15", CODEMASTER_BG_LEASE_S: "60", CODEMASTER_BG_MAX_RUNTIME_S: "900" });
+    expect(config).toMatchObject({ heartbeatS: 15, leaseS: 60, maxRuntimeS: 900 });
+    // Boundary: heartbeat == lease/2 is the last ACCEPTED value (two beats per lease window).
+    const boundary = resolveBackgroundRunnerConfig({ CODEMASTER_PG_CORE_DSN: "postgresql://x/y",
+      CODEMASTER_BG_HEARTBEAT_S: "30", CODEMASTER_BG_LEASE_S: "60" });
+    expect(boundary.config).toMatchObject({ heartbeatS: 30, leaseS: 60 });
+  });
+
+  it("REFUSES leaseS > maxRuntimeS (a lease longer than the hard runtime ceiling is nonsensical)", () => {
+    expect(() => resolveBackgroundRunnerConfig({ CODEMASTER_PG_CORE_DSN: "postgresql://x/y",
+      CODEMASTER_BG_LEASE_S: "1200", CODEMASTER_BG_MAX_RUNTIME_S: "900" }))
+      .toThrow(/CODEMASTER_BG_LEASE_S.*CODEMASTER_BG_MAX_RUNTIME_S/);
+  });
+
+  it("REFUSES absurdly-large values, naming the var + its documented ceiling (ms-pasted-into-s typo guard)", () => {
+    // 999999 "seconds" is a milliseconds value fat-fingered into a seconds var (lease ceiling: 3600).
+    expect(() => resolveBackgroundRunnerConfig({ CODEMASTER_PG_CORE_DSN: "postgresql://x/y",
+      CODEMASTER_BG_LEASE_S: "999999" })).toThrow(/CODEMASTER_BG_LEASE_S.*3600/);
+    // maxRuntime ceiling: 86400 (24h) — background work runs minutes, a day-plus ceiling is a typo.
+    expect(() => resolveBackgroundRunnerConfig({ CODEMASTER_PG_CORE_DSN: "postgresql://x/y",
+      CODEMASTER_BG_MAX_RUNTIME_S: "172800" })).toThrow(/CODEMASTER_BG_MAX_RUNTIME_S.*86400/);
+    // idle / scheduler-poll / outbox-idle ceiling: 3600 (1h) — longer sleeps starve the queue.
+    expect(() => resolveBackgroundRunnerConfig({ CODEMASTER_PG_CORE_DSN: "postgresql://x/y",
+      CODEMASTER_BG_IDLE_S: "7200" })).toThrow(/CODEMASTER_BG_IDLE_S.*3600/);
+    expect(() => resolveBackgroundRunnerConfig({ CODEMASTER_PG_CORE_DSN: "postgresql://x/y",
+      CODEMASTER_BG_SCHEDULER_POLL_S: "7200" })).toThrow(/CODEMASTER_BG_SCHEDULER_POLL_S.*3600/);
+    expect(() => resolveBackgroundRunnerConfig({ CODEMASTER_PG_CORE_DSN: "postgresql://x/y",
+      CODEMASTER_BG_OUTBOX_IDLE_S: "7200" })).toThrow(/CODEMASTER_BG_OUTBOX_IDLE_S.*3600/);
+    // heartbeat ceiling: 1800 — structurally <= lease/2, so this only catches parse-level typos.
+    expect(() => resolveBackgroundRunnerConfig({ CODEMASTER_PG_CORE_DSN: "postgresql://x/y",
+      CODEMASTER_BG_HEARTBEAT_S: "999999" })).toThrow(/CODEMASTER_BG_HEARTBEAT_S.*1800/);
+  });
 });

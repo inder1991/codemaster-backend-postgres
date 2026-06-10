@@ -34,7 +34,7 @@ export const SINK_NAME = OUTBOX_SINK_TEMPORAL_WORKFLOW_START;
 
 /** Build the sink handler bound to a {@link TemporalClientPort} (Python `make_handler`). */
 export function makeTemporalWorkflowStartHandler(port: TemporalClientPort): SinkHandler {
-  return async ({ payload }) => {
+  return async ({ payload, context }) => {
     let req: TemporalWorkflowStartPayloadV1;
     try {
       req = TemporalWorkflowStartPayloadV1.parse(payload);
@@ -55,7 +55,12 @@ export function makeTemporalWorkflowStartHandler(port: TemporalClientPort): Sink
     };
 
     try {
-      await port.startWorkflow(call);
+      // Thread the dispatching row's tenant identity (SinkContext.installationId) through the port
+      // (W4b.1 review blocker #1): Temporal-backed ports ignore it; the cutover
+      // BackgroundJobsTemporalPort persists it onto the enqueued core.background_jobs row. A null
+      // context installationId (the bootstrap-sink rows, e.g. installation_reconcile) stays
+      // platform-scoped (NULL) by design.
+      await port.startWorkflow(call, context.installationId ?? null);
     } catch (e) {
       if (e instanceof WorkflowAlreadyStarted) {
         throw new PermanentSinkError(`workflow already started: ${e.message}`);

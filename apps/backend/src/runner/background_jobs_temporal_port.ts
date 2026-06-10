@@ -26,6 +26,10 @@
 //     the key, exactly as a closed workflow frees its workflow_id under ALLOW_DUPLICATE reuse.
 //   * The returned string (the port contract's "run_id") is the enqueued job_id — the platform's
 //     execution identity for the dispatched work.
+//   * `installationId` (the port's 2nd param — the sink threads SinkContext.installationId, i.e.
+//     the outbox ROW's installation_id) lands as core.background_jobs.installation_id, so tenant
+//     identity survives the cutover (W4b.1 review blocker #1). NULL = platform-scoped, exactly as
+//     the NULL-installation_id bootstrap-sink outbox rows are.
 //   * task_queue / execution+run timeouts / search_attributes / id_reuse_policy are NOT translated:
 //     the runner's lease + hard-runtime ceilings replace the Temporal timeouts, queueing is the
 //     single core.background_jobs table, and no producer sets search attributes (the
@@ -75,7 +79,7 @@ export class BackgroundJobsTemporalPort implements TemporalClientPort {
     this.#jobTypeByWorkflowType = new Map(Object.entries(o.workflowTypeToJobType));
   }
 
-  public async startWorkflow(call: StartWorkflowCall): Promise<string> {
+  public async startWorkflow(call: StartWorkflowCall, installationId?: string | null): Promise<string> {
     const jobType = this.#jobTypeByWorkflowType.get(call.workflowType);
     if (jobType === undefined) {
       throw new PermanentSinkError(
@@ -104,7 +108,17 @@ export class BackgroundJobsTemporalPort implements TemporalClientPort {
       );
     }
 
-    return this.#repo.enqueue({ jobType, payload, dedupKey: call.workflowId });
+    // Tenant identity survives the cutover (W4b.1 review blocker #1): the sink handler threads
+    // SinkContext.installationId — i.e. the dispatching outbox ROW's installation_id — through the
+    // port's 2nd param, and it lands as core.background_jobs.installation_id. null/omitted stays
+    // NULL = platform-scoped by design (e.g. appendReconcile rows, whose outbox installation_id is
+    // NULL under the ck_outbox_installation_id_required bootstrap-sink exemption).
+    return this.#repo.enqueue({
+      jobType,
+      payload,
+      dedupKey: call.workflowId,
+      installationId: installationId ?? null,
+    });
   }
 
   // Both rejection methods omit their parameters entirely (a TS implementation may take fewer

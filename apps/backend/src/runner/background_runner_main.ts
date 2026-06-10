@@ -245,8 +245,27 @@ async function wireOutboxSinks(db: Kysely<unknown>): Promise<void> {
   registerInstallationReconcileSink(port);
 }
 
-/** Parse a positive finite number from env, falling back when unset/empty; fail-loud on garbage. */
-function envPositiveSeconds(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+// Upper bounds for the loop tunables (W4b.1 review blocker #2 — lease/heartbeat config was
+// previously unguarded above zero). These are sanity ceilings that catch unit typos (a
+// milliseconds value fat-fingered into a seconds var), not tuning guidance — the defaults sit
+// 1–2 orders of magnitude below every bound. Rationale per bound:
+//   * lease ≤ 3600 (1h): a crashed runner's leased job is un-reclaimable until the lease expires;
+//     an hours-long lease turns a pod crash into an hours-long stall of that job.
+//   * heartbeat ≤ 1800 (30min): structurally ≤ lease/2 (cross-field check below), so this only
+//     catches parse-level typos before the cross-field check names the pair.
+//   * max runtime ≤ 86400 (24h): background work (Confluence sync, retention) runs minutes; a
+//     day-plus hard ceiling is a typo and timeout_at-based reaping would effectively never fire.
+//   * idle / scheduler-poll / outbox-idle ≤ 3600 (1h): a sleep above an hour starves the queue /
+//     skips cron cadences within their evaluation window.
+const MAX_LEASE_S = 3_600;
+const MAX_HEARTBEAT_S = 1_800;
+const MAX_RUNTIME_CEILING_S = 86_400;
+const MAX_IDLE_OR_POLL_S = 3_600;
+
+/** Parse a positive finite number from env, falling back when unset/empty; fail-loud on garbage,
+ *  non-positive values, and values above the var's documented ceiling `maxS` (the absurdly-large
+ *  guard — W4b.1 review blocker #2). */
+function envPositiveSeconds(env: NodeJS.ProcessEnv, name: string, fallback: number, maxS: number): number {
   // `name` is a bounded set of CODEMASTER_BG_* literals from resolveBackgroundRunnerConfig — not an
   // attacker-controlled object-key sink; the prototype-pollution threat model does not apply.
   // eslint-disable-next-line security/detect-object-injection
@@ -257,6 +276,13 @@ function envPositiveSeconds(env: NodeJS.ProcessEnv, name: string, fallback: numb
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) {
     throw new Error(`${name} must be a positive number of seconds; got '${raw}'`);
+  }
+  if (n > maxS) {
+    throw new Error(
+      `${name} must be <= ${maxS} seconds; got '${raw}' — an absurdly large value is almost ` +
+        `certainly a unit typo (milliseconds pasted into a seconds var) and must refuse boot, ` +
+        `not silently configure an hours-long loop`,
+    );
   }
   return n;
 }
@@ -278,12 +304,21 @@ function envPositiveInt(env: NodeJS.ProcessEnv, name: string, fallback: number):
 }
 
 /**
- * Resolve the DSN + loop tunables from env. Fail-loud: a missing DSN or a non-positive/garbage
- * interval refuses to boot (a half-configured runner silently mis-leasing jobs is worse than a
- * crash-loop the platform surfaces). Defaults: lease 60s / heartbeat 15s / hard ceiling 900s
- * (background work — Confluence sync, retention — runs minutes, not the review pipeline's seconds) /
- * idle 5s / scheduler poll 30s / outbox idle 2s (the workflow's drain interval) / outbox
- * dead-letter threshold 5. `owner` is hostname+pid — traceable to the pod, no random seam.
+ * Resolve the DSN + loop tunables from env. Fail-loud: a missing DSN, a non-positive/garbage
+ * interval, a value above its documented ceiling, or an invalid lease/heartbeat/runtime PAIR
+ * refuses to boot (a half-configured runner silently mis-leasing jobs is worse than a crash-loop
+ * the platform surfaces). Defaults: lease 60s / heartbeat 15s / hard ceiling 900s (background
+ * work — Confluence sync, retention — runs minutes, not the review pipeline's seconds) / idle 5s /
+ * scheduler poll 30s / outbox idle 2s (the workflow's drain interval) / outbox dead-letter
+ * threshold 5. `owner` is hostname+pid — traceable to the pod, no random seam.
+ *
+ * Cross-field invariants (W4b.1 review blocker #2), validated AFTER parse so each error names the
+ * offending env var(s) + the constraint:
+ *   * heartbeatS <= leaseS/2 — the heartbeat must be able to beat at least TWICE per lease window;
+ *     a heartbeat that can't outrun its own lease risks lease expiry mid-handler, at which point a
+ *     second runner claims the still-running job → duplicate execution.
+ *   * leaseS <= maxRuntimeS — a lease window longer than the hard runtime ceiling is nonsensical
+ *     (the job would hit timeout_at and be reaped while its first lease is still live).
  */
 export function resolveBackgroundRunnerConfig(
   env: NodeJS.ProcessEnv,
@@ -294,19 +329,32 @@ export function resolveBackgroundRunnerConfig(
       "CODEMASTER_PG_CORE_DSN is not set; the background runner cannot start without the core Postgres DSN",
     );
   }
-  return {
-    dsn,
-    config: {
-      owner: `bg-runner-${hostname()}-${process.pid}`,
-      leaseS: envPositiveSeconds(env, "CODEMASTER_BG_LEASE_S", 60),
-      heartbeatS: envPositiveSeconds(env, "CODEMASTER_BG_HEARTBEAT_S", 15),
-      maxRuntimeS: envPositiveSeconds(env, "CODEMASTER_BG_MAX_RUNTIME_S", 900),
-      idleS: envPositiveSeconds(env, "CODEMASTER_BG_IDLE_S", 5),
-      pollIntervalS: envPositiveSeconds(env, "CODEMASTER_BG_SCHEDULER_POLL_S", 30),
-      outboxIdleS: envPositiveSeconds(env, "CODEMASTER_BG_OUTBOX_IDLE_S", 2),
-      outboxMaxAttempts: envPositiveInt(env, "CODEMASTER_OUTBOX_MAX_ATTEMPTS", 5),
-    },
+  const config: BackgroundRunnerConfig = {
+    owner: `bg-runner-${hostname()}-${process.pid}`,
+    leaseS: envPositiveSeconds(env, "CODEMASTER_BG_LEASE_S", 60, MAX_LEASE_S),
+    heartbeatS: envPositiveSeconds(env, "CODEMASTER_BG_HEARTBEAT_S", 15, MAX_HEARTBEAT_S),
+    maxRuntimeS: envPositiveSeconds(env, "CODEMASTER_BG_MAX_RUNTIME_S", 900, MAX_RUNTIME_CEILING_S),
+    idleS: envPositiveSeconds(env, "CODEMASTER_BG_IDLE_S", 5, MAX_IDLE_OR_POLL_S),
+    pollIntervalS: envPositiveSeconds(env, "CODEMASTER_BG_SCHEDULER_POLL_S", 30, MAX_IDLE_OR_POLL_S),
+    outboxIdleS: envPositiveSeconds(env, "CODEMASTER_BG_OUTBOX_IDLE_S", 2, MAX_IDLE_OR_POLL_S),
+    outboxMaxAttempts: envPositiveInt(env, "CODEMASTER_OUTBOX_MAX_ATTEMPTS", 5),
   };
+  if (config.heartbeatS > config.leaseS / 2) {
+    throw new Error(
+      `CODEMASTER_BG_HEARTBEAT_S (${config.heartbeatS}s) must be <= CODEMASTER_BG_LEASE_S/2 ` +
+        `(lease=${config.leaseS}s → max heartbeat ${config.leaseS / 2}s): the heartbeat must beat ` +
+        `at least twice per lease window, else the lease expires mid-handler and a second runner ` +
+        `claims the still-running job → duplicate execution`,
+    );
+  }
+  if (config.leaseS > config.maxRuntimeS) {
+    throw new Error(
+      `CODEMASTER_BG_LEASE_S (${config.leaseS}s) must be <= CODEMASTER_BG_MAX_RUNTIME_S ` +
+        `(${config.maxRuntimeS}s): a lease window longer than the hard runtime ceiling is ` +
+        `nonsensical — the job would be reaped at timeout_at while its first lease is still live`,
+    );
+  }
+  return { dsn, config };
 }
 
 /**
