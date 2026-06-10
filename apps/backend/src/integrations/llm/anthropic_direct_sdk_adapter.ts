@@ -51,9 +51,26 @@ export type AnthropicDirectCreateParams = {
  */
 export type AnthropicDirectSdk = {
   readonly messages: {
-    create(params: AnthropicDirectCreateParams): Promise<Record<string, unknown>>;
+    create(
+      params: AnthropicDirectCreateParams,
+      options?: AnthropicDirectRequestOptions,
+    ): Promise<Record<string, unknown>>;
   };
   close?(): Promise<void>;
+};
+
+/**
+ * The minimal `RequestOptions`-shaped slice this adapter passes as the SECOND positional arg of
+ * `messages.create(params, options?)` — only the cooperative-cancellation `signal` (de-Temporal Phase 2
+ * W4.2b, gate ①). `@anthropic-ai/sdk` ^0.100 `messages.create(body, options?: RequestOptions)` accepts
+ * this options object (`RequestOptions.signal?: AbortSignal | undefined | null`, confirmed in the installed
+ * `internal/request-options.d.ts`), so the real SDK (reached via the `as unknown as AnthropicDirectSdk`
+ * cast in {@link defaultAnthropicDirectSdkFactory}) structurally satisfies this — and a recorded-response
+ * test double captures the arg WITHOUT a static `@anthropic-ai/*` import. Mirrors the Bedrock sibling's
+ * `BedrockRequestOptions`; structural-minimal on purpose (the adapter only ever forwards `signal`).
+ */
+export type AnthropicDirectRequestOptions = {
+  readonly signal?: AbortSignal;
 };
 
 /** Constructs an {@link AnthropicDirectSdk} from a credential triple. */
@@ -105,6 +122,11 @@ export class AnthropicDirectSdkAdapter {
     maxTokens: number;
     tools?: Array<Record<string, unknown>> | null;
     role: "primary" | "secondary";
+    // de-Temporal Phase 2 (W4.2b, gate ①) — OPTIONAL cooperative-cancellation signal threaded down from
+    // {@link LlmClient.invokeModel}'s paid-MISS edge. Forwarded into the SDK request options below so an
+    // in-flight Anthropic Direct call RECEIVES it and aborts when the job is cancelled mid-flight. Absent
+    // → the 2nd `messages.create` arg is omitted entirely (byte-identical to the pre-W4.2b path).
+    signal?: AbortSignal;
   }): Promise<Record<string, unknown>> {
     const creds = await this.provider.current(args.role);
     // Per-call construct (+ close) — NO caching, so a key rotation propagates on the next call.
@@ -121,7 +143,13 @@ export class AnthropicDirectSdkAdapter {
     };
 
     try {
-      const response = await sdk.messages.create(params);
+      // W4.2b (gate ①) — pass the caller's signal as the SDK's `RequestOptions.signal`. Array-spread the
+      // OPTIONAL second positional arg so the absent case calls `create(params)` with exactly one arg
+      // (byte-identical to the pre-W4.2b path); the present case calls `create(params, { signal })`.
+      const response = await sdk.messages.create(
+        params,
+        ...(args.signal !== undefined ? [{ signal: args.signal }] : []),
+      );
       await closeQuietly(sdk);
       return response;
     } catch (exc) {

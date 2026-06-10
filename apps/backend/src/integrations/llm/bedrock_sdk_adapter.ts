@@ -83,10 +83,27 @@ import {
  */
 export type BedrockSdk = {
   readonly messages: {
-    create(params: BedrockCreateParams): Promise<Record<string, unknown>>;
+    create(
+      params: BedrockCreateParams,
+      options?: BedrockRequestOptions,
+    ): Promise<Record<string, unknown>>;
   };
   /** Close the SDK's connection pool (the Python `close()`, NOT `aclose()`). Optional — a double may omit it. */
   close?(): Promise<void>;
+};
+
+/**
+ * The minimal `RequestOptions`-shaped slice this adapter passes as the SECOND positional arg of
+ * `messages.create(params, options?)` — only the cooperative-cancellation `signal` (de-Temporal Phase 2
+ * W4.2b, gate ①). `@anthropic-ai/sdk` ^0.100 `messages.create(body, options?: RequestOptions)` accepts
+ * this options object (`RequestOptions.signal?: AbortSignal | undefined | null`, confirmed in the installed
+ * `internal/request-options.d.ts`), and `@anthropic-ai/bedrock-sdk` ^0.29 re-exports the same SDK surface,
+ * so the real SDK (reached via the `as unknown as BedrockSdk` cast in {@link defaultBedrockSdkFactory})
+ * structurally satisfies this — and a recorded-response test double captures the arg WITHOUT a static
+ * `@anthropic-ai/*` import. Structural-minimal on purpose: the adapter only ever forwards `signal`.
+ */
+export type BedrockRequestOptions = {
+  readonly signal?: AbortSignal;
 };
 
 /** The `messages.create` request shape — the kwargs the Python builds (system/tools are conditional). */
@@ -269,6 +286,11 @@ export class AnthropicBedrockSdkAdapter {
     maxTokens: number;
     tools?: Array<Record<string, unknown>> | null;
     role: "primary" | "secondary";
+    // de-Temporal Phase 2 (W4.2b, gate ①) — OPTIONAL cooperative-cancellation signal threaded down from
+    // {@link LlmClient.invokeModel}'s paid-MISS edge. Forwarded into the SDK request options below so an
+    // in-flight Bedrock call RECEIVES it and aborts when the job is cancelled mid-flight. Absent → the
+    // 2nd `messages.create` arg is omitted entirely (byte-identical to the pre-W4.2b / Temporal path).
+    signal?: AbortSignal;
   }): Promise<Record<string, unknown>> {
     const creds = await this.provider.current(args.role);
     const sdk = await this.sdkFor(creds);
@@ -284,7 +306,13 @@ export class AnthropicBedrockSdkAdapter {
     };
 
     try {
-      return await sdk.messages.create(params);
+      // W4.2b (gate ①) — pass the caller's signal as the SDK's `RequestOptions.signal`. Array-spread the
+      // OPTIONAL second positional arg so the absent case calls `create(params)` with exactly one arg
+      // (byte-identical to the Temporal path); the present case calls `create(params, { signal })`.
+      return await sdk.messages.create(
+        params,
+        ...(args.signal !== undefined ? [{ signal: args.signal }] : []),
+      );
     } catch (exc) {
       if (exc instanceof LlmInvocationError) {
         throw exc;

@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import {
   AnthropicDirectSdkAdapter,
   type AnthropicDirectCreateParams,
+  type AnthropicDirectRequestOptions,
   type AnthropicDirectSdk,
 } from "#backend/integrations/llm/anthropic_direct_sdk_adapter.js";
 import {
@@ -27,6 +28,10 @@ import { APIConnectionError, AuthenticationError } from "@anthropic-ai/sdk";
 
 class RecordedSdk implements AnthropicDirectSdk {
   public readonly calls: Array<AnthropicDirectCreateParams> = [];
+  // W4.2b — capture the 2nd `RequestOptions`-shaped arg of `messages.create` (one slot per call,
+  // `undefined` when no opts arg was passed) so a test can assert a forwarded `signal` reaches the SDK
+  // request options AND that the absent case passes NO opts arg (byte-identical to the pre-W4.2b call).
+  public readonly optsCalls: Array<AnthropicDirectRequestOptions | undefined> = [];
   public closed = 0;
   private readonly response: Record<string, unknown>;
   private readonly throwOnCreate: unknown;
@@ -37,8 +42,12 @@ class RecordedSdk implements AnthropicDirectSdk {
   }
 
   public readonly messages = {
-    create: async (params: AnthropicDirectCreateParams): Promise<Record<string, unknown>> => {
+    create: async (
+      params: AnthropicDirectCreateParams,
+      opts?: AnthropicDirectRequestOptions,
+    ): Promise<Record<string, unknown>> => {
       this.calls.push(params);
+      this.optsCalls.push(opts);
       if (this.throwOnCreate !== undefined) {
         throw this.throwOnCreate;
       }
@@ -128,6 +137,56 @@ describe("AnthropicDirectSdkAdapter.createMessage — request/response transform
     expect("system" in params).toBe(false);
     expect("tools" in params).toBe(false);
     expect(params.messages).toEqual([{ role: "user", content: "no system here" }]);
+  });
+});
+
+describe("AnthropicDirectSdkAdapter.createMessage — AbortSignal threading (W4.2b, gate ①)", () => {
+  it("forwards a passed `signal` into the SDK request options (2nd arg)", async () => {
+    const repo = new StubRepo();
+    repo.set("primary", settings());
+    const sdk = new RecordedSdk({});
+    const adapter = new AnthropicDirectSdkAdapter({
+      provider: providerFor(repo),
+      sdkFactory: async () => sdk,
+    });
+
+    const controller = new AbortController();
+    await adapter.createMessage({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "x" }],
+      maxTokens: 16,
+      tools: null,
+      role: "primary",
+      signal: controller.signal,
+    });
+
+    // The in-flight Anthropic Direct call RECEIVES the caller's signal via `RequestOptions.signal`.
+    expect(sdk.optsCalls).toHaveLength(1);
+    expect(sdk.optsCalls[0]).toEqual({ signal: controller.signal });
+    expect(sdk.optsCalls[0]!.signal).toBe(controller.signal);
+  });
+
+  it("passes NO opts arg when `signal` is absent (byte-identical to the pre-W4.2b call)", async () => {
+    const repo = new StubRepo();
+    repo.set("primary", settings());
+    const sdk = new RecordedSdk({});
+    const adapter = new AnthropicDirectSdkAdapter({
+      provider: providerFor(repo),
+      sdkFactory: async () => sdk,
+    });
+
+    await adapter.createMessage({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "x" }],
+      maxTokens: 16,
+      tools: null,
+      role: "primary",
+    });
+
+    // No `signal` → the SDK is called with exactly ONE positional arg (the params); the 2nd opts arg is
+    // never supplied, so an absent-signal call is byte-identical to the Temporal path.
+    expect(sdk.optsCalls).toHaveLength(1);
+    expect(sdk.optsCalls[0]).toBeUndefined();
   });
 });
 

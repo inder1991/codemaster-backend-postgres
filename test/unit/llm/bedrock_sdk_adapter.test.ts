@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import {
   AnthropicBedrockSdkAdapter,
   type BedrockCreateParams,
+  type BedrockRequestOptions,
   type BedrockSdk,
   hoistSystemMessages,
   mapAnthropicException,
@@ -52,6 +53,10 @@ import {
  */
 class RecordedSdk implements BedrockSdk {
   public readonly calls: Array<BedrockCreateParams> = [];
+  // W4.2b — capture the 2nd `RequestOptions`-shaped arg of `messages.create` (one slot per call,
+  // `undefined` when no opts arg was passed) so a test can assert a forwarded `signal` reaches the SDK
+  // request options AND that the absent case passes NO opts arg (byte-identical to the pre-W4.2b call).
+  public readonly optsCalls: Array<BedrockRequestOptions | undefined> = [];
   public closed = 0;
   private readonly response: Record<string, unknown>;
   private readonly throwOnCreate: unknown;
@@ -62,8 +67,12 @@ class RecordedSdk implements BedrockSdk {
   }
 
   public readonly messages = {
-    create: async (params: BedrockCreateParams): Promise<Record<string, unknown>> => {
+    create: async (
+      params: BedrockCreateParams,
+      opts?: BedrockRequestOptions,
+    ): Promise<Record<string, unknown>> => {
       this.calls.push(params);
+      this.optsCalls.push(opts);
       if (this.throwOnCreate !== undefined) {
         throw this.throwOnCreate;
       }
@@ -191,6 +200,56 @@ describe("AnthropicBedrockSdkAdapter.createMessage — request/response transfor
 
     expect(sdk.calls[0]!.system).toBe("first\n\nsecond");
     expect(sdk.calls[0]!.messages).toEqual([{ role: "user", content: "u" }]);
+  });
+});
+
+describe("AnthropicBedrockSdkAdapter.createMessage — AbortSignal threading (W4.2b, gate ①)", () => {
+  it("forwards a passed `signal` into the SDK request options (2nd arg)", async () => {
+    const repo = new StubRepo();
+    repo.set("primary", settings());
+    const sdk = new RecordedSdk({});
+    const adapter = new AnthropicBedrockSdkAdapter({
+      provider: providerFor(repo),
+      sdkFactory: async () => sdk,
+    });
+
+    const controller = new AbortController();
+    await adapter.createMessage({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "x" }],
+      maxTokens: 16,
+      tools: null,
+      role: "primary",
+      signal: controller.signal,
+    });
+
+    // The in-flight Bedrock call RECEIVES the caller's signal via `RequestOptions.signal`.
+    expect(sdk.optsCalls).toHaveLength(1);
+    expect(sdk.optsCalls[0]).toEqual({ signal: controller.signal });
+    expect(sdk.optsCalls[0]!.signal).toBe(controller.signal);
+  });
+
+  it("passes NO opts arg when `signal` is absent (byte-identical to the pre-W4.2b call)", async () => {
+    const repo = new StubRepo();
+    repo.set("primary", settings());
+    const sdk = new RecordedSdk({});
+    const adapter = new AnthropicBedrockSdkAdapter({
+      provider: providerFor(repo),
+      sdkFactory: async () => sdk,
+    });
+
+    await adapter.createMessage({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "x" }],
+      maxTokens: 16,
+      tools: null,
+      role: "primary",
+    });
+
+    // No `signal` → the SDK is called with exactly ONE positional arg (the params); the 2nd opts arg is
+    // never supplied, so an absent-signal call is byte-identical to the Temporal path.
+    expect(sdk.optsCalls).toHaveLength(1);
+    expect(sdk.optsCalls[0]).toBeUndefined();
   });
 });
 
