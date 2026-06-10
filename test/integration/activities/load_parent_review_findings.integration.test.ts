@@ -19,12 +19,22 @@ import { describeDb, INTEGRATION_DSN } from "../_db.js";
 
 let pool: Pool;
 
+let priorCarryForwardFlag: string | undefined;
+
 beforeAll(() => {
   if (!INTEGRATION_DSN) return;
   pool = new Pool({ connectionString: INTEGRATION_DSN, max: 6 });
+  // The loader activity is gated default-OFF behind CODEMASTER_CARRY_FORWARD_ENABLED and short-circuits to
+  // the empty parent set before any DB read when unset (load_parent_review_findings.activity.ts). Enable it
+  // for this file so the load path is actually exercised; restore the prior value in afterAll so the flag
+  // does not leak into other files under --no-file-parallelism.
+  priorCarryForwardFlag = process.env.CODEMASTER_CARRY_FORWARD_ENABLED;
+  process.env.CODEMASTER_CARRY_FORWARD_ENABLED = "true";
 });
 
 afterAll(async () => {
+  if (priorCarryForwardFlag === undefined) delete process.env.CODEMASTER_CARRY_FORWARD_ENABLED;
+  else process.env.CODEMASTER_CARRY_FORWARD_ENABLED = priorCarryForwardFlag;
   await pool?.end();
   await disposeAllPools();
 });

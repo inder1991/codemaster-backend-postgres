@@ -158,6 +158,10 @@ function input(seed: Seed, workspacePath: string): CloneRepoIntoWorkspaceInput {
     head_sha: HEAD_SHA,
     changed_paths: ["src/foo.ts"],
     pr_number: 42,
+    // The per-review-routing change made cloneRepoIntoWorkspace fail-closed when github_installation_id is
+    // null (it is needed to mint the installation token for the clone). Provide it so the ALLOCATED-lease
+    // success path actually reaches the clone instead of throwing CloneFailedError("missing github_installation_id").
+    github_installation_id: 900000042,
   });
 }
 

@@ -40,9 +40,22 @@ beforeAll(async () => {
   if (!INTEGRATION_DSN) return;
   pool = new Pool({ connectionString: INTEGRATION_DSN, max: 4 });
   db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) });
+  // The outbox row this suite inserts carries installation_id=INST (sink≠reconcile CHECK requires it), and
+  // core.outbox.installation_id has an FK → core.installations. Seed the parent installation so the insert
+  // satisfies fk_outbox_installation_id_installations. Idempotent (fixed INST uuid → ON CONFLICT DO NOTHING).
+  await sql`INSERT INTO core.installations
+      (installation_id, github_installation_id, account_login, account_type)
+    VALUES (${INST}::uuid, 900000001, 'admin-timeline-acct', 'Organization')
+    ON CONFLICT (installation_id) DO NOTHING`.execute(db);
 });
 
 afterAll(async () => {
+  // Leave no orphan rows for the cross-tenant-scan suites under the shared :5434 DB: drop the outbox rows
+  // this file minted (delivery_id is time-keyed → delete by tenant) + the seeded installation.
+  if (INTEGRATION_DSN) {
+    await sql`DELETE FROM core.outbox WHERE installation_id = ${INST}::uuid`.execute(db);
+    await sql`DELETE FROM core.installations WHERE installation_id = ${INST}::uuid`.execute(db);
+  }
   await db?.destroy();
 });
 
