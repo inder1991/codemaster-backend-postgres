@@ -101,8 +101,10 @@ export function buildBackgroundRunner(deps: BackgroundRunnerDeps): BackgroundRun
   // A claimed job with no handler dead-letters (`no handler for <job_type>`), never retry-loops, so
   // an accidentally-early enqueue surfaces once instead of burning attempts.
   const registry = new HandlerRegistry();
-  // W3b.1: the 2 interval crons (mutex_janitor / review_run_reaper). No dsn override here — the
-  // activities self-resolve CODEMASTER_PG_CORE_DSN, exactly as under their Temporal dispatch.
+  // W3b.1 + W3b.2: the 2 interval crons (mutex_janitor / review_run_reaper) + the 2 daily crons
+  // (mark_stale_chunks / partition_maintenance). No dsn override here — the activities self-resolve
+  // their env DSNs (CODEMASTER_PG_CORE_DSN; partition maintenance prefers CODEMASTER_PG_MAINT_DSN),
+  // exactly as under their Temporal dispatch.
   registerCronHandlers(registry, {});
 
   const runnerArgs = {

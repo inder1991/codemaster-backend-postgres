@@ -169,12 +169,13 @@ describeDb("cron_handlers — interval crons on the background-jobs platform (Ph
     const t0 = new Date("2026-06-10T00:00:00.000Z");
     await ensureScheduledJobs(db, new FakeClock({ now: t0 }));
 
+    // Count-agnostic: W3b.2+ waves append entries; this suite owns the 2 INTERVAL rows only (the
+    // full 4-entry registry shape is pinned by cron_handlers_daily.integration.test.ts).
     const first = await readSchedules();
-    expect(first.map((r) => r.schedule_id)).toEqual([
-      "codemaster-mutex-janitor",
-      "codemaster-review-run-reaper",
-    ]);
-    const [janitor, reaper] = [first[0]!, first[1]!];
+    expect(first.map((r) => r.schedule_id)).toContain("codemaster-mutex-janitor");
+    expect(first.map((r) => r.schedule_id)).toContain("codemaster-review-run-reaper");
+    const janitor = first.find((r) => r.schedule_id === "codemaster-mutex-janitor")!;
+    const reaper = first.find((r) => r.schedule_id === "codemaster-review-run-reaper")!;
     expect(janitor.job_type).toBe("mutex_janitor");
     expect(janitor.cadence_kind).toBe("interval");
     expect(janitor.cadence_spec).toBe("300");              // every 5 minutes (Python */5 cron parity)
@@ -198,7 +199,7 @@ describeDb("cron_handlers — interval crons on the background-jobs platform (Ph
     // Second call (an hour later): no duplicate rows, no clobber, no next_run_at reset.
     await ensureScheduledJobs(db, new FakeClock({ now: new Date("2026-06-10T01:00:00.000Z") }));
     const second = await readSchedules();
-    expect(second).toHaveLength(2);
+    expect(second).toHaveLength(first.length);             // idempotent — nothing duplicated
     const janitor2 = second.find((r) => r.schedule_id === "codemaster-mutex-janitor")!;
     expect(janitor2.enabled).toBe(false);                  // operator pause survived
     expect(janitor2.cadence_spec).toBe("999");             // operator re-cadence survived
@@ -275,14 +276,14 @@ describeDb("cron_handlers — interval crons on the background-jobs platform (Ph
     }
   });
 
-  it("(4) schedule→handler chain: every CRON_SCHEDULES job_type is registered; one poll enqueues both jobs (dedup_key = schedule_id)", async () => {
+  it("(4) schedule→handler chain: every CRON_SCHEDULES job_type is registered; one poll enqueues every seeded job (dedup_key = schedule_id)", async () => {
     const handles = buildBackgroundRunner({ db, clock: new WallClock(), config: TEST_CONFIG });
     for (const s of CRON_SCHEDULES) {
       expect(handles.registry.registeredTypes()).toContain(s.job_type);
     }
 
     await ensureScheduledJobs(db, new WallClock());
-    expect(await handles.pollOnce()).toBe(2);
+    expect(await handles.pollOnce()).toBe(CRON_SCHEDULES.length); // count-agnostic: later waves append
     for (const s of CRON_SCHEDULES) {
       const r = await sql<{ job_type: string; state: string }>`
         SELECT job_type, state FROM core.background_jobs WHERE dedup_key = ${s.schedule_id}`.execute(db);
@@ -296,9 +297,11 @@ describeDb("cron_handlers — interval crons on the background-jobs platform (Ph
 // ─── CRON_SCHEDULES literal shape (pure — no DB) ──────────────────────────────────────────────────
 describe("CRON_SCHEDULES (Phase 3b W3b.1 entries)", () => {
   it("carries the 2 interval entries with the Temporal-parity cadences", () => {
-    expect(CRON_SCHEDULES).toEqual([
+    // arrayContaining (not toEqual): later Phase 3b waves append entries; this suite owns the 2
+    // interval ones. The FULL registry literal is pinned by cron_handlers_daily.integration.test.ts.
+    expect(CRON_SCHEDULES).toEqual(expect.arrayContaining([
       { schedule_id: "codemaster-mutex-janitor", job_type: "mutex_janitor", cadence_kind: "interval", cadence_spec: "300", input: {} },
       { schedule_id: "codemaster-review-run-reaper", job_type: "review_run_reaper", cadence_kind: "interval", cadence_spec: "600", input: {} },
-    ]);
+    ]));
   });
 });

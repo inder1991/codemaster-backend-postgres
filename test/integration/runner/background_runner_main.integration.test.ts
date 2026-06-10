@@ -81,8 +81,11 @@ describeDb("background_runner_main — buildBackgroundRunner composition (Phase 
     expect(handles.runnerLoop).toBeInstanceOf(BackgroundRunnerLoop);
     expect(handles.schedulerLoop).toBeInstanceOf(SchedulerLoop);
     expect(handles.registry).toBeInstanceOf(HandlerRegistry);
-    // W3b.1: the 2 interval crons register at composition; later Phase 3b waves append here.
-    expect([...handles.registry.registeredTypes()].sort()).toEqual(["mutex_janitor", "review_run_reaper"]);
+    // W3b.1 + W3b.2: the 2 interval + 2 daily crons register at composition; later Phase 3b waves
+    // append here.
+    expect([...handles.registry.registeredTypes()].sort()).toEqual([
+      "mark_stale_chunks", "mutex_janitor", "partition_maintenance", "review_run_reaper",
+    ]);
   });
 
   it("(2) END-TO-END: one poll enqueues the due schedule's job; runner cycles dispatch BOTH jobs through the returned registry to 'done'", async () => {

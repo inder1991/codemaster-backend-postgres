@@ -21,10 +21,16 @@ import type { CadenceKind } from "#contracts/scheduled_job.v1.js";
 //
 // ## schedule_id continuity
 // The schedule_ids are byte-identical to the Temporal schedule ids ("codemaster-mutex-janitor" /
-// "codemaster-review-run-reaper") so operators correlate the migrated cadence with the Temporal
-// schedule it replaces (Phase 4 deletes the Temporal side; until then BOTH fire — safe, because both
-// sweeps are idempotent + FOR UPDATE SKIP LOCKED, and the platform side stays COLD until the
-// background-runner process is actually booted).
+// "codemaster-review-run-reaper" / "codemaster-partition-maintenance") so operators correlate the
+// migrated cadence with the Temporal schedule it replaces (Phase 4 deletes the Temporal side; until
+// then BOTH fire — safe, because the sweeps are idempotent + FOR UPDATE SKIP LOCKED / WHERE-guarded
+// UPDATEs, and the platform side stays COLD until the background-runner process is actually booted).
+// ONE deliberate W3b.2 divergence: the Temporal mark-stale schedule id is
+// "mark-stale-confluence-chunks" (mark_stale_chunks.workflow.ts, an every-24h INTERVAL schedule);
+// the platform row is renamed "codemaster-mark-stale-chunks" (the codemaster- operator-correlation
+// prefix every other entry carries) and normalized to the daily-cron "0 2 * * *" — wall-aligned
+// daily ≙ every-24h for a staleness sweep whose thresholds are 90/180 DAYS; aligning it with the
+// partition-maintenance 02:00 UTC window puts both daily sweeps in the same low-traffic slot.
 
 /** One seeded schedule row. snake_case mirrors the core.scheduled_jobs columns (migration 0040). */
 export type CronScheduleSeed = {
@@ -55,6 +61,24 @@ export const CRON_SCHEDULES: ReadonlyArray<CronScheduleSeed> = [
     job_type: "review_run_reaper",
     cadence_kind: "interval",
     cadence_spec: "600", // every 10 minutes — parity with the Temporal "*/10 * * * *" schedule
+    input: {},
+  },
+  // W3b.2: the 2 DAILY crons. "0 2 * * *" is INSIDE the scheduler's deliberately-narrow cron
+  // vocabulary (scheduler.ts::computeNextRun supports exactly "M H * * *" daily shapes) — pinned by
+  // the cron_handlers_daily suite so a vocabulary regression surfaces at PR time, not as a poisoned
+  // poll pass in production.
+  {
+    schedule_id: "codemaster-mark-stale-chunks",
+    job_type: "mark_stale_chunks",
+    cadence_kind: "cron",
+    cadence_spec: "0 2 * * *", // daily 02:00 UTC — the Temporal every-24h schedule, wall-aligned (see module doc)
+    input: {}, // MarkStaleChunksInputV1's zero-config shape (schema_version defaults at the handler's parse)
+  },
+  {
+    schedule_id: "codemaster-partition-maintenance",
+    job_type: "partition_maintenance",
+    cadence_kind: "cron",
+    cadence_spec: "0 2 * * *", // daily 02:00 UTC — byte-identical with the Temporal "0 2 * * *" schedule
     input: {},
   },
 ];
