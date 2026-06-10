@@ -164,6 +164,13 @@ export type LlmSdk = {
     maxTokens: number;
     tools: Array<Record<string, unknown>> | null;
     role: "primary" | "secondary";
+    // de-Temporal Phase 2 (W4.2, gate ①) — OPTIONAL cooperative-cancellation signal. The client forwards
+    // the caller's `signal` here ONLY on the paid MISS edge, so an in-flight Bedrock call RECEIVES it: the
+    // real adapter threads it into the `@anthropic-ai/sdk` request options (`RequestOptions.signal?:
+    // AbortSignal` — preflight #8 confirmed), aborting an on-the-wire call when the job is cancelled
+    // mid-flight. Absent → byte-identical to the pre-W4.2 client (every existing adapter/double ignores the
+    // extra optional field structurally).
+    signal?: AbortSignal;
   }): Promise<Record<string, unknown>>;
 };
 
@@ -412,6 +419,15 @@ export class LlmClient {
       // the metric label falls back to `"unknown"` (a wiring smell, not a normal path).
       ledgerPurpose?: string;
     };
+    // de-Temporal Phase 2 (W4.2, gate ①) — OPTIONAL cooperative-cancellation signal. The enforceable
+    // guarantee (F7) is "no NEW paid call STARTS after abort": on a ledger MISS the pre-write gate
+    // (`signal?.throwIfAborted()`) sits exactly BETWEEN the ledger-miss and the cost-cap reservation, so an
+    // already-aborted signal rejects BEFORE the SDK call AND before any cost-cap spend is reserved. A ledger
+    // HIT is a PURE READ (replay) and is NOT gated — it never reaches the paid edge. When present, `signal`
+    // is ALSO forwarded into the SDK request options on the MISS edge so an in-flight call RECEIVES it.
+    // Absent (the Temporal-legacy path / unit tests) → byte-identical to the pre-W4.2 client (no gate, no
+    // signal forwarded).
+    signal?: AbortSignal;
   }): Promise<LlmInvokeResultV1> {
     const maxTokens = args.maxTokens ?? 1024;
     const purpose = args.purpose ?? "review";
@@ -491,6 +507,14 @@ export class LlmClient {
       if (this.ledger !== undefined && idempotencyKey !== null) {
         recordLedgerMiss(ledgerPurpose);
       }
+      // W4.2 (gate ①) — the pre-write abort gate. This is the ONLY paid edge (a ledger MISS about to call
+      // the SDK); a replay HIT never reaches here. The gate sits EXACTLY between the ledger-miss above and
+      // the cost-cap `checkOrRaise` below, so an already-aborted `signal` rejects BEFORE the SDK call AND
+      // before ANY cost-cap reservation — the enforceable F7 guarantee "no NEW paid call STARTS after
+      // abort" (a counting cost-cap / SDK stub sees ZERO). `throwIfAborted()` raises the signal's `reason`
+      // (default `AbortError`), matching the W4.1 GitHub-client / cloner convention. `signal` is OPTIONAL;
+      // absent → a no-op and the path is byte-identical to the pre-W4.2 client.
+      args.signal?.throwIfAborted();
       // F4 (strict-ledger mode) — in the shell path a paid call MUST carry an idempotency context. A MISS
       // with NO context here means an un-ledgered paid Bedrock call is about to happen: forbid it BEFORE
       // the cost-cap reservation and the SDK call (gate ②). A replay HIT never reaches this branch, and a
@@ -558,6 +582,12 @@ export class LlmClient {
           maxTokens,
           tools,
           role: args.role,
+          // W4.2 (gate ①) — forward the caller's signal into the SDK request options so an in-flight
+          // Bedrock call RECEIVES it (the real adapter threads it to `RequestOptions.signal`; preflight #8
+          // confirmed the @anthropic-ai/sdk request options accept `signal?: AbortSignal`). Conditionally
+          // spread so the absent case stays byte-identical (the SDK arg carries no `signal` key at all),
+          // matching exactOptionalPropertyTypes + the W4.1 GitHub-client idiom.
+          ...(args.signal !== undefined ? { signal: args.signal } : {}),
         });
       } catch (e) {
         // The Python distinguishes TimeoutError (status='timeout') from any other exception
