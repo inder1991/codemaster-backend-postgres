@@ -21,7 +21,7 @@
 
 Plus **4 owner-mandated workstreams** (backpressure, payload versioning, review-state SSOT, external-boundary idempotency) and **6 runtime-review findings** (`RT1`–`RT6`) — deduped against the audit IDs below.
 
-After ruthless dedup the 173 raw findings collapse into **~110 unique root issues** organized into **6 tiers / 41 waves**. Every raw ID appears below — in a wave's "Closes" list or the explicit Deferred/Low register at the end. **Nothing is dropped.**
+After ruthless dedup the 173 raw findings collapse into **~110 unique root issues** organized into **6 tiers / 53 waves** (the wave count rose from the original 41 because several over-broad waves were split into independently-shippable units — most notably the old W0.10 fail-open bundle and the W0.5 logging-vs-metrics split — and the OTel/metrics waves were carved out as DEFERRED per the owner steer). Every raw ID appears below — in a wave's "Closes" list or the explicit Deferred/Low register at the end. **Nothing is dropped.**
 
 ---
 
@@ -72,7 +72,16 @@ Effort key: **S** ≈ ≤1 day · **M** ≈ 2–4 days · **L** ≈ ≥1 week. E
 *The cutover is unsafe today. These prevent silent data loss, full outages, and blind operation. Tier 0 is the hard gate on the de-Temporal flip.*
 
 **W0.1 — Explicit runtime MODE (`temporal|postgres|shadow`); make the two worlds mutually exclusive.** **[M]**
-Replace the additive boolean flags with one `CODEMASTER_RUNTIME_MODE`. In `postgres` mode, `resolveBootTasks` boots ONLY the background-runner + review-jobs runner and does NOT boot the Temporal worker or the Temporal outbox dispatcher; in `temporal` mode the inverse; `shadow` runs the Postgres runtime read-only/observe alongside Temporal for validation. Single sink-registration owner per mode. This is the root fix for the no-exclusivity criticals.
+Replace the additive boolean flags with one `CODEMASTER_RUNTIME_MODE`. In `postgres` mode, `resolveBootTasks` boots ONLY the background-runner + review-jobs runner and does NOT boot the Temporal worker or the Temporal outbox dispatcher; in `temporal` mode the inverse. Single sink-registration owner per mode. This is the root fix for the no-exclusivity criticals.
+
+**`shadow` mode — precise no-side-effects definition (NORMATIVE).** `shadow` runs the Postgres runtime alongside Temporal for validation, exercising the claim/route/orchestrate path WITHOUT any externally-observable or production-state effect. In shadow mode the runtime MUST NOT:
+- make any **GitHub write** (no review post, no check-run create/update, no PR-description update, no fix-prompt comment — no GitHub mutating call of any kind);
+- make any **LLM call** (no Bedrock/Anthropic invocation — curator, chunk review, walkthrough, arbitration all stubbed/skipped);
+- **mark any outbox row dispatched** (`markDispatched` / dead-letter transitions are forbidden);
+- **advance any schedule** (`scheduled_jobs.next_run_at` MUST NOT move; no cadence tick is committed);
+- **mutate any production table** — the only writes permitted are to dedicated **shadow tables** (e.g. `shadow.review_jobs`, `shadow.outbox_observations`) used purely to record what the Postgres runtime *would* have done for diff against the Temporal world.
+
+Any code path reachable in shadow mode that performs one of the above is a defect; shadow mode is enforced at the seam (the sink/port/client layer short-circuits when `mode=shadow`), and CS1's test asserts these forbidden effects do not occur.
 *Closes:* **RT1**, **C7**, **C9**, **RC8** (double sink-register crash), **C8** (Helm knob — render `runtime.mode` to ConfigMap + `values.schema.json`), **OC4-guard** (no Temporal/Postgres coexistence).
 
 **W0.2 — Compose & boot the review-jobs RunnerLoop + the unified reaper; fail-loud if a sink has no consumer.** **[M]**
@@ -83,37 +92,74 @@ Construct the review-jobs `RunnerLoop` (bound to `runReviewJob`) and `ReviewJobs
 Run `reapStuckRuns()` on a throttled wall-clock timer inside the loop (mirror the review runner's monotonic prune throttle), independent of `claim()` outcome, so it fires under saturation — exactly when crashed-pod leases accumulate. A single exhausted-lease row must not wedge an entire interval cron via its dedup key.
 *Closes:* **OC3**.
 
-**W0.4 — Register a `MeterProvider`/exporter at boot; assert non-no-op in production.** **[M]**
-Construct a `MeterProvider` with `PeriodicExportingMetricReader` → OTLP (or a Prometheus `/metrics` route + ServiceMonitor) before boot tasks; call `setGlobalMeterProvider()`. Boot assertion + test that a non-no-op provider is registered when `nodeEnv=production`. **This unblocks every downstream alert.**
-*Closes:* **XC5**.
+**W0.4 — [DEFERRED — OTel/metrics, owner steer] Register a `MeterProvider`/exporter at boot; assert non-no-op in production.** **[M]**
+**DEFERRED per the OWNER STEER (2026-06-11) — "we don't need OTel right now."** This wave is NOT in the Tier-0 count and is NOT a cutover gate; it is parked with the rest of the OTel/metrics pipeline (see the "Deferred — OTel/metrics (owner steer)" subsection at the end of Tier 0). Construct a `MeterProvider` with `PeriodicExportingMetricReader` → OTLP (or a Prometheus `/metrics` route + ServiceMonitor) before boot tasks; call `setGlobalMeterProvider()`. Boot assertion + test that a non-no-op provider is registered when `nodeEnv=production`. This unblocks every downstream alert — but alerts-via-metrics are explicitly parked until production go-live.
+*Closes:* **XC5** (deferred).
 
-**W0.5 — Decouple stage/lifecycle/security metrics from `inWorkflowContext`; structured logging; outbox metrics.** **[M]**
-Route `recordStage`, finding-lifecycle, and policy-invariant counters through the platform OTel meter with a non-workflow emit branch (keep replay-safety where a workflow context exists). Replace the discard `StageLogger` (`void msg`) with a structured pino sink carrying run_id/installation_id/head_sha/repo/trace_id. Add a `codemaster_outbox_dispatch_total{sink,outcome}` counter + structured WARN at the per-row catch + dead-letter backlog gauge.
-*Closes:* **C3**, **C4**, **H10**, **H11**, **H12**, **RM4**, **L12** (trace correlation), **XM14**(structured-logs slice).
+**W0.5a — Structured logging for degraded reviews (the discard-logger fix).** **[S]** — *Tier 0, NOW.*
+Replace the discard `StageLogger` (`void msg`) with a structured pino sink carrying run_id/installation_id/head_sha/repo/stage/outcome/trace_id, so a degraded review is visible *in logs* (no OTel dependency). Add a structured WARN at the outbox per-row catch and at every `stageOutcome` degradation path. This is the logging half of the de-Temporal observability fix and is a hard cutover gate.
+*Closes:* **C4**, **L12** (trace correlation), **XM14** (structured-logs slice).
 
-**W0.6 — Wire real readiness/liveness reflecting loop health; pair loop supervision with `/readyz`.** **[M]**
-Wire `buildApp({ postgresCheck: SELECT 1, vaultCheck, loopLivenessCheck })`. Each supervised loop publishes a last-tick heartbeat; `/readyz` sheds traffic and `/healthz` 503s when a *required* loop is stale or DB/Vault is down (so a dead loop ⇒ pod unready, not isolate-and-continue-silently). Trip `stopAll` + fail-loud re-throw on the first required-loop crash so K8s restarts the pod; page on `loop_crashed`.
+**W0.5b — [DEFERRED — OTel/metrics, owner steer] Decouple stage/lifecycle/security metrics from `inWorkflowContext`; outbox metrics.** **[M]**
+**DEFERRED per the OWNER STEER (2026-06-11)** — the *metric-emission* halves are parked with XC5/W0.4. Route `recordStage`, finding-lifecycle, and policy-invariant counters through the platform OTel meter with a non-workflow emit branch (keep replay-safety where a workflow context exists). Add a `codemaster_outbox_dispatch_total{sink,outcome}` counter + dead-letter backlog gauge. These metric instruments emit into a no-op Meter until W0.4 lands, so this wave is deferred together with it.
+*Closes:* **C3**, **H10**, **H11**, **H12**, **RM4** (all deferred with W0.4/XC5).
+
+**W0.6 — Wire real readiness/liveness with CORRECT K8s semantics; pair loop supervision with `/readyz`.** **[M]**
+Wire `buildApp({ postgresCheck: SELECT 1, vaultCheck, loopLivenessCheck })`. Each supervised loop publishes a last-tick heartbeat. The two probes have **distinct, non-interchangeable semantics**:
+
+- **`/readyz` (readiness) — fails on DEPENDENCY issues.** Returns NOT-READY when DB or Vault is unreachable, or when a *required* supervised loop is stale (no recent heartbeat). Effect: Kubernetes **stops routing traffic** to the pod, and the rollout controller replaces a persistently-degraded pod via a normal rolling-replace. This sheds traffic and self-heals **without crash-looping** — the pod is allowed to recover its dependency internally and flip back to Ready.
+- **`/healthz` (liveness) — fails ONLY on a WEDGE.** Returns unhealthy ONLY when the process itself is wedged / cannot make progress even after its internal recovery attempts (e.g. the event loop is stuck, a required loop crashed unrecoverably and `stopAll` was tripped, or the supervisor can no longer schedule ticks). Liveness MUST NOT fail merely because a downstream dependency (DB/Vault) is transiently down — doing so causes **restart storms during downstream outages** (every pod kill-restarts in lockstep while the dependency is the actual problem). Liveness is the last-resort "this process is unrecoverable, restart it" signal.
+
+On the first *required-loop crash* that the supervisor cannot recover, trip `stopAll` and transition the pod to liveness-fail so K8s restarts it; routine dependency staleness stays a readiness-only condition. Page on `loop_crashed`.
 *Closes:* **C5**, **H7**, **XH11**, **RT2** (loop-health → readiness).
 
-**W0.7 — Load the field-encryption key registry at worker/runner boot, fail-loud; CLEARTEXT-secret fix.** **[M]**
-Call `loadFieldEncryptionKeyRegistry(VaultHttpPort.fromEnv()) + setAuditKeyRegistry(...)` unconditionally at `worker/main.ts` and `background_runner_main.ts` boot (decoupled from `CODEMASTER_AUTH_ROUTES_ENABLED`), with a startup self-check that crashes the pod if the registry is null. Stop storing the pre-redaction `original_text` in cleartext — encrypt the audit `before` payload with the AES-GCM-AAD codec (fail-closed) or drop `original_text` entirely.
+**W0.7 — Load the field-encryption key registry at worker/runner boot, fail-loud (PROD); explicit dev/test key source; CLEARTEXT-secret fix.** **[M]**
+Call `loadFieldEncryptionKeyRegistry(...) + setAuditKeyRegistry(...)` at `worker/main.ts` and `background_runner_main.ts` boot, decoupled from `CODEMASTER_AUTH_ROUTES_ENABLED`, with a startup self-check on the registry.
+
+**Dev/test posture (NORMATIVE — unconditional Vault loading would break dev/test where no Vault exists):**
+- In **production** (`nodeEnv=production`): the registry MUST load from Vault and the self-check **fail-loud `process.exit(1)`** if the registry is null. No silent degradation.
+- In **dev/test**: provide an **explicit non-Vault key source** — a file-backed / Vault-Agent-sidecar key source selected by env (e.g. `CODEMASTER_FIELD_KEY_SOURCE=file|vault-agent|vault`) — **OR** explicitly **disable the audit-emitting routes** in dev so no encrypt path is exercised. Dev/test MUST NOT require a live Vault, and MUST NOT silently fall back to an unencrypted write.
+
+Stop storing the pre-redaction `original_text` in cleartext — encrypt the audit `before` payload with the AES-GCM-AAD codec (fail-closed) or drop `original_text` entirely.
 *Closes:* **EC5**, **RC1**.
 
-**W0.8 — Postgres HA/DR before cutover (or document SPOF + accept).** **[L]**
-Streaming standby + automated failover (CloudNativePG/Patroni) + WAL archiving + continuous base backups (pgBackRest/wal-g → BlobStore) for PITR; document RPO/RTO + `docs/runbooks/postgres-disaster-recovery.md` with cutover-specific recovery (rebuild outbox/job/mutex after restore); quarterly restore drill. *Until a replica exists, the cutover decision must explicitly accept Postgres as a known SPOF.*
+**W0.8 — [PRODUCTION GO-LIVE gate, NOT a merge/cutover-code gate] Postgres HA/DR.** **[L]**
+**This is a PRODUCTION GO-LIVE gate, not a cutover-code / merge gate.** It does NOT block landing the Postgres-runtime cutover code, and it does NOT block flipping `MODE=postgres` in **dev/stage** — those environments may run on a single Postgres with an **explicit, recorded SPOF acceptance**. What it DOES block is putting real production traffic for the 60 orgs onto the Postgres runtime: production go-live requires this defended.
+Streaming standby + automated failover (CloudNativePG/Patroni) + WAL archiving + continuous base backups (pgBackRest/wal-g → BlobStore) for PITR; document RPO/RTO + `docs/runbooks/postgres-disaster-recovery.md` with cutover-specific recovery (rebuild outbox/job/mutex after restore); quarterly restore drill. For dev/stage cutover the decision must explicitly record Postgres as an accepted known SPOF.
 *Closes:* **XC1**.
+*Cutover-code gate:* **NO** (production go-live gate). *Dev/stage:* allowed with explicit SPOF acceptance.
 
 **W0.9 — TS DB-revision boot preflight (fail-loud); migration 0042 cold-only guard.** **[S]**
 Read the applied head from `pgmigrations`, assert it equals the image's compiled-in expected head (+ fingerprint); `process.exit(1)` on mismatch before binding HTTP and before runner loops. Add a preflight/cleanup guard (or explicit cold-only assertion that aborts if rows exist) to migration 0042, which `DROP`s a CHECK + index and `CREATE`s indexes non-concurrently on the assumption `core.background_jobs` is empty.
 *Closes:* **XH7**, **L16**, **RT6** (0042 cold-table guard).
 
-**W0.10 — Restore fail-OPEN core-loop resilience: Tier-1 fail-open, fan-out fail-soft, per-activity retry, rate-limit-aware backoff.** **[L]**
-(a) Wrap `ports.staticAnalysis` in a fail-open `stageOutcome` substituting an empty-valid result + a degradation note; make the curator fail-open on retryable `LlmInvocationError` + never re-raise `BedrockBudgetExceededError` (C1). (b) Make the chunk fan-out fail-soft (`raiseAfterLog:false` / isolation slot) so one chunk's failure contributes zero findings + a note, not a whole-review abort (C2). (c) Wire `runWithRetry` (zero prod callers today) into the retryable idempotent ports parameterized from `RETRY_POLICIES` (H1). (d) Plumb GitHub/Bedrock `Retry-After`/`resetAt` into `run_after` without burning an attempt (H3/RC6/XH2). (e) Carry per-workflow-type retry budgets across the cutover map (RC5). (f) Honor `PermanentSinkError` vs `RetryableSinkError` in the outbox drain (RC7); wrap permanent event-handler faults in `PermanentJobError` (T2).
-*Closes:* **C1**, **C2**, **H1**, **H3**, **RC5**, **RC6**, **RC7**, **XH2**, **T2**, **M2** (classify/dedup/aggregate `stageOutcome` wraps).
+**W0.10 — CUTOVER-GATE minimal resilience slice: delivery_id + idempotent enqueue + retryable/permanent classification + ONE minimal retry/backoff path.** **[M]** — *Tier 0, cutover gate.*
+This is the *minimal* resilience required to flip the cutover safely — NOT the full fail-open/fanout hardening (that is split out into W1.9a–e in Tier 1). The cutover gate is exactly:
+- **delivery_id persisted on the review enqueue** — thread `delivery_id` through `#enqueueReviewJob` (it currently omits `deliveryId:`, so the column is always NULL and `assertPayloadIdentityMatchesEnvelope`'s delivery_id cross-check is silently skipped); assert it is present (RT3).
+- **idempotent review enqueue** — `ON CONFLICT DO NOTHING RETURNING` + re-SELECT on the dispatch identity (catch the `uq_review_jobs_active_run` 23505 / return the existing active `job_id`) so a webhook redelivery does not double-post (H9, idempotency slice).
+- **retryable-vs-permanent classification** — honor `PermanentSinkError` vs `RetryableSinkError` in the outbox drain (RC7); wrap permanent event-handler faults in `PermanentJobError` (T2). A permanent fault dead-letters; a retryable one re-claims.
+- **ONE minimal retry/backoff path** — wire a single retryable-idempotent retry path with rate-limit-aware backoff: plumb GitHub/Bedrock `Retry-After`/`resetAt` into `run_after` without burning an attempt (H3/RC6/XH2). This is the one path that prevents routine throttling from dead-lettering a review a single retry would have saved.
+
+*Closes:* **RC7**, **T2**, **H3**, **RC6**, **XH2**, **RT3 (delivery_id slice)**, **H9 (idempotency slice)**.
+
+> The broader fail-open / fan-out / per-activity-retry-policy / per-workflow-budget hardening is NOT a cutover blocker — it is split into the Tier-1 quality waves **W1.9a–e** below. The cutover degrades gracefully without them (a chunk blip or a Tier-1 hiccup costs findings, not correctness or recoverability); they raise *quality*, not *safety*.
 
 **W0.11 — `validate-fast` fail-loud when security tiers are unexercised; port the four bug-class gates.** **[M]**
 Fail (not skip) under `CI=1` when the Python oracle or DSN is missing; remove `passWithNoTests:true` from the default lane; `git submodule update --init`; print a skipped-test census. Port the four load-bearing gates mapping to real shipped incidents: JSON-safe-activity-input, LLM-output-coercion, workflow-silent-degradation, migration-safety (expand-contract + archive-before-DELETE).
 *Closes:* **XC2**, **XH1** (four bug-class gates; remaining ~31 gates → Tier 5 / deferred register).
+
+**W0.12 — Scheduler per-schedule transaction isolation (savepoint / per-schedule txn).** **[S]** — *moved into Tier 0: the scheduler is part of the cutover surface.*
+The scheduler currently advances all due schedules in ONE transaction, so a single poisoned `UPDATE` (bad row, constraint violation) rolls back and **cascade-reticks the whole batch**. Wrap each schedule's claim+advance in its own `SAVEPOINT` (or a per-schedule transaction) so one poisoned schedule isolates itself and the rest of the due batch advances cleanly. This is the cutover-relevant slice of RT4/M13; the cron-vocabulary expansion and the remaining scheduler robustness items stay in Tier 3 (W3.8).
+*Closes:* **RT4 (per-schedule isolation slice)**, **M13 (per-schedule txn isolation slice)**.
+
+#### Deferred — OTel/metrics (owner steer)
+
+Per the OWNER STEER (2026-06-11) — *"we don't need OTel right now"* — the OTel/metrics pipeline is parked and is **NOT a cutover-code gate**. These two waves are listed in Tier 0 only for ID-tracking continuity (so their finding IDs remain accounted for); they are **excluded from the active Tier-0 count** and re-enter scope at production go-live alongside W0.8:
+
+- **W0.4** — register a `MeterProvider`/exporter at boot (closes **XC5**, deferred).
+- **W0.5b** — decouple stage/lifecycle/security metric *emission* from `inWorkflowContext` + outbox metrics (closes **C3 / H10 / H11 / H12 / RM4**, deferred).
+
+The **logging** half of de-Temporal observability (**W0.5a**, closing **C4**) and the **K8s readiness/liveness probes** (**W0.6**) are NOT OTel and **remain hard Tier-0 cutover gates** — a degraded review stays visible in logs and a dead loop still sheds traffic without any metrics pipeline.
 
 ---
 
@@ -152,6 +198,30 @@ Persist a retrieval trace + three counters (retrieved-vs-below-threshold, rerank
 **W1.8 — Output-quality polish: confidence calibration/floor, proximity dedup, walkthrough prompt, suggestions, re-anchor.** **[M]**
 Add calibration anchors + a configurable confidence floor (Q1). Line-proximity-aware dedup collapsing same-file overlapping findings incl. linter↔LLM cross-source (Q2). Dedicated walkthrough system prompt + compact per-file change manifest (Q3). Encourage concrete `suggestion` blocks (Q4). Re-anchor out-of-hunk findings to the nearest valid line before dropping to the collapsed section (XM7).
 *Closes:* **Q1**, **Q2**, **Q3**, **Q4**, **XM7**.
+
+---
+
+*The following five waves are the BROADER fail-open / fan-out / retry hardening split out of the old W0.10. They are **NOT cutover blockers** (only the minimal slice in W0.10 is). They raise review quality and resilience under load; the cutover degrades gracefully without them.*
+
+**W1.9a — Chunk fan-out fail-soft.** **[M]**
+Make the chunk fan-out fail-soft (`raiseAfterLog:false` / isolation slot) so one chunk's failure contributes zero findings + a degradation note, not a whole-review abort (C2). Wrap the classify/dedup/aggregate stages in `stageOutcome` so a single-stage fault degrades rather than aborts (M2).
+*Closes:* **C2**, **M2**.
+
+**W1.9b — Tier-1 static-analysis fail-open + curator fail-open.** **[M]**
+Wrap `ports.staticAnalysis` in a fail-open `stageOutcome` substituting an empty-valid result + a degradation note; make the curator fail-open on retryable `LlmInvocationError` and never re-raise `BedrockBudgetExceededError` as a whole-review-fatal (C1). A Tier-1 budget hit or analyzer hiccup contributes a note, not a dead review.
+*Closes:* **C1**.
+
+**W1.9c — Per-activity retry via `runWithRetry` + `RETRY_POLICIES`.** **[M]**
+Wire `runWithRetry` (zero prod callers today) into the retryable idempotent ports, parameterized from `RETRY_POLICIES`, so a transient blip on an idempotent port retries in place instead of failing the stage (H1).
+*Closes:* **H1**.
+
+**W1.9d — Carry per-workflow-type retry budgets across the cutover map.** **[S]**
+Preserve Temporal's per-workflow-type retry budgets in the runner cutover map so each job type keeps its tuned attempt budget instead of collapsing to one runner default (RC5).
+*Closes:* **RC5**.
+
+**W1.9e — Broaden idempotent-enqueue + delivery_id discipline across all enqueue paths.** **[M]**
+Extend the minimal cutover idempotency slice (W0.10) to the remaining enqueue/dispatch paths and the destination-side at-least-once hardening folded with W3.2 (full `delivery_id` threading, destination idempotency keyed on outbox row id, per-dispatch lease/heartbeat). Cutover only needs the *review-enqueue* slice; this generalizes it.
+*Closes:* (generalizes RT3/H9 beyond the cutover slice; the canonical at-least-once outbox hardening remains tracked in **W3.2**.)
 
 ---
 
@@ -217,9 +287,9 @@ Wire `maybeEnqueueRepair` on `installation_created` + raise reconcile attempts s
 Port the 30-min field-encryption key-refresh loop (EH4). Classify Vault 401/403 as retryable with token-file re-read (EH11). Make `activate()` atomic across both generation tables + add a reconciler (EH1); strengthen activate preconditions (EM1). Unify the two installation-token providers to one bounded server-time-freshness path (EM2/EM3); bound the negative cache (EL2). Distinguish vault-unavailable from corruption on audit-decrypt (EM6); fix the audit-events cursor microsecond skew (EM7).
 *Closes:* **EH4**, **EH11**, **EH1**, **EM1**, **EM2**, **EM3**, **EL2**, **EM6**, **EM7**.
 
-**W3.8 — Scheduler robustness + per-schedule isolation.** **[M]**
-Per-schedule txn/savepoint so one poisoned UPDATE doesn't cascade-retick the whole batch (M13/RT4 NEW-confirm). Extend `computeNextRun` to the common cron subset (`*/N`, lists, ranges) or validate `cron_spec` at insert (M12). Cadence-lateness gauge/alert over `scheduled_jobs` (OM11). Validate scheduled-row `input` against the target `job_type`'s contract at enqueue (RM7). Higher `max_attempts`/backoff for long-cadence crons (RM11). WARN on missed-window drift; size partman premake ≥2 (OM6).
-*Closes:* **M13**, **RT4 (scheduler per-schedule isolation)**, **M12**, **OM11**, **RM7**, **RM11**, **OM6**.
+**W3.8 — Scheduler robustness: cron-vocabulary expansion + cadence/contract guards.** **[M]**
+*(The per-schedule transaction isolation — RT4/M13 — moved to Tier 0 as **W0.12** because the scheduler is part of the cutover surface; this wave keeps the non-cutover scheduler robustness work.)* Extend `computeNextRun` to the common cron subset (`*/N`, lists, ranges) or validate `cron_spec` at insert (M12). Cadence-lateness gauge/alert over `scheduled_jobs` (OM11). Validate scheduled-row `input` against the target `job_type`'s contract at enqueue (RM7). Higher `max_attempts`/backoff for long-cadence crons (RM11). WARN on missed-window drift; size partman premake ≥2 (OM6).
+*Closes:* **M12**, **OM11**, **RM7**, **RM11**, **OM6**. *(RT4/M13 per-schedule isolation → **W0.12**.)*
 
 **W3.9 — SLOs, alert rules, per-alert runbooks; complete the review-timeline trail.** **[M]**
 Author an SLO doc + PrometheusRule set (after W0.4), each alert linked to a `docs/runbooks/` detect/diagnose/remediate runbook using the W3.1 operator endpoints. Complete the review-timeline trail so "why did PR X get no review" is answerable in one request.
@@ -279,35 +349,40 @@ Port the remaining unported gates with explicit follow-up stories (worker-regist
 
 ---
 
-## 3. DO-THIS-FIRST — the ≤10 gating blockers before the cutover can be flipped
+## 3. DO-THIS-FIRST — the gating blockers before the cutover can be flipped
 
-These MUST land (and be verified green) before `CODEMASTER_RUNTIME_MODE=postgres` is flipped in any environment carrying real traffic. They are the intersection of "flipping today causes an outage / silent black-hole / unrecoverable data loss" and "no signal exists to even detect it."
+These MUST land (and be verified green) before `CODEMASTER_RUNTIME_MODE=postgres` is flipped in any environment carrying real traffic. They are the intersection of "flipping today causes an outage / silent black-hole / unrecoverable data loss" and "no signal exists in **logs or K8s probes** to even detect it."
 
-1. **RT1 / C7 / C9 / RC8 / C8 — Runtime MODE exclusivity (W0.1).** Replace the additive boolean flags with `MODE=temporal|postgres|shadow`; in postgres mode do NOT boot the Temporal worker/outbox dispatcher. Closes the double-register crash-loop, the double-cron, and the missing Helm knob. *Without this the documented cutover action instantly crash-loops the production pod.*
+> **OTel/metrics removed from this list per the OWNER STEER (2026-06-11).** The old item #4 (XC5 — register a MeterProvider) is **gone** — OTel/metrics is deferred (W0.4 / W0.5b). The observability cutover gate is now **logs + K8s probes only**: item 4 below is the *structured-logging* half (W0.5a), and item 5 is readiness/liveness (W0.6). Metrics-based alerting is a production-go-live concern, not a cutover-code gate.
+
+1. **RT1 / C7 / C9 / RC8 / C8 — Runtime MODE exclusivity (W0.1).** Replace the additive boolean flags with `MODE=temporal|postgres|shadow`; in postgres mode do NOT boot the Temporal worker/outbox dispatcher; `shadow` honors the precise no-side-effects definition in W0.1. Closes the double-register crash-loop, the double-cron, and the missing Helm knob. *Without this the documented cutover action instantly crash-loops the production pod.*
 2. **C6 / OC4 — Boot the review-jobs RunnerLoop + unified reaper; fail-loud if a sink has no consumer (W0.2).** *Without this the cutover enqueues every review into a table nothing drains — a silent black-hole with a green webhook 200.*
 3. **OC3 — Wall-clock reaper, not idle-gated (W0.3).** *Without this one exhausted-lease row wedges every interval cron forever under steady load.*
-4. **XC5 — Register a MeterProvider/exporter (W0.4).** *Without this all ~62 metrics emit to a black hole; no alert can fire on any failure the rest of this list introduces detection for.*
-5. **C3 / C4 / H10 / H11 / H12 / RM4 — De-Temporal observability + structured logging (W0.5).** *Without this every degraded review is invisible — no stage metric, no log, no diagnosis.*
-6. **C5 / H7 / XH11 / RT2 — Real readiness/liveness + loop-health → /readyz (W0.6).** *Without this a degraded pod (dead scheduler/outbox/runner loop, dead DB/Vault) stays Ready+Live and is never self-healed.*
-7. **EC5 / RC1 — Load the key registry on worker/runner fail-loud + stop storing cleartext secrets (W0.7).** *Without this every self-healing audit-emit throws and re-wedges the ADR-0064 stuck-review class; and detected secrets sit in cleartext at rest.*
-8. **XC1 — Postgres HA/DR or an explicit accept-the-SPOF decision (W0.8).** *The cutover concentrates ALL durable state onto an undefended single Postgres with no backup/PITR/replica; a disk/AZ loss is unbounded-RTO total data loss for 60 orgs.*
-9. **XH7 / L16 / RT6 — DB-revision boot preflight + migration-0042 cold-only guard (W0.9).** *Without this a pod serves traffic against a drifted/un-migrated schema — the exact 2-week silent-drift class — and 0042 corrupts a non-cold table.*
-10. **C1 / C2 / H1 / H3 / RC5 / RC6 / RC7 / RT3 — Fail-open core loop + per-activity retry + rate-limit backoff + idempotent enqueue with delivery_id (W0.10 + the W3.2 delivery_id/idempotency slice).** *Without this routine Bedrock throttling / a single-chunk blip / a Tier-1 cost-cap hit dead-letters reviews a single retry would have saved, and the non-idempotent enqueue double-posts on redelivery.*
+4. **C4 — Structured logging for degraded reviews (W0.5a).** Replace the discard `StageLogger` with real logs carrying run_id/installation_id/head_sha/repo/stage/outcome. *Without this every degraded review is invisible in logs — no diagnosis.* *(The metric-emission halves — C3/H10/H11/H12/RM4 — are DEFERRED with OTel in W0.5b/W0.4 and are NOT cutover gates.)*
+5. **C5 / H7 / XH11 / RT2 — Real readiness/liveness with correct K8s semantics + loop-health → /readyz (W0.6).** A dead required loop / DB / Vault ⇒ `/readyz` unready (K8s stops routing, rollout replaces the pod); `/healthz` fails ONLY on an unrecoverable wedge (no restart storms during downstream outages). *Without this a degraded pod stays Ready+Live and is never self-healed.*
+6. **EC5 / RC1 — Load the key registry on worker/runner fail-loud in PROD (explicit dev/test key source) + stop storing cleartext secrets (W0.7).** *Without this every self-healing audit-emit throws and re-wedges the ADR-0064 stuck-review class; and detected secrets sit in cleartext at rest.*
+7. **XH7 / L16 / RT6 — DB-revision boot preflight + migration-0042 cold-only guard (W0.9).** *Without this a pod serves traffic against a drifted/un-migrated schema — the exact 2-week silent-drift class — and 0042 corrupts a non-cold table.*
+8. **RT4 / M13 — Scheduler per-schedule transaction isolation (W0.12).** Savepoint/per-schedule txn so one poisoned schedule UPDATE doesn't cascade-retick the whole due batch. *Without this the cutover scheduler is a single-poison-row hazard.*
+9. **RC7 / T2 / H3 / RC6 / XH2 / RT3 / H9 — CUTOVER-GATE minimal resilience slice (W0.10).** The MINIMAL slice only: `delivery_id` persisted on the review enqueue, idempotent review enqueue (catch `uq_review_jobs_active_run` 23505 / return existing active job_id — no double-post on redelivery), retryable-vs-permanent classification, and ONE minimal rate-limit-aware retry/backoff path. *Without this a webhook redelivery double-posts, and routine Bedrock throttling dead-letters a review a single retry would have saved.* *(The broader fail-open/fan-out/per-activity-retry/per-workflow-budget hardening — C1/C2/H1/RC5/M2 — is split into Tier-1 quality waves W1.9a–e and is **NOT a cutover gate**.)*
 
+> **NOT cutover-code gates (tracked separately):**
+> - **XC1 — Postgres HA/DR (W0.8)** is a **PRODUCTION GO-LIVE gate**, not a merge/cutover-code gate. Dev/stage may flip `MODE=postgres` on a single Postgres with an explicit, recorded SPOF acceptance. Production traffic for the 60 orgs additionally requires a defended Postgres (replica/PITR/failover/runbook).
+> - **OTel metrics (W0.4 / W0.5b)** are deferred per the owner steer; metrics-based alerting is a production-go-live concern.
+>
 > Note: **EC4 (CSRF) + EH7 (audit emission) + EM4 (revoked-role)** are P0-security in the edge audit. If the admin/auth surface is exposed in the same cutover, fold W4.7's EC4/EH7/EM4 into this do-this-first list (they gate exposing the privileged surface, not the review cutover per se).
 
 ---
 
 ## 4. Dedup ledger & completeness register
 
-**Final deduped total: ~110 unique root issues across 41 waves** (from 173 raw audit IDs + 4 owner workstreams + 6 runtime findings). The reduction is from merging the same root across audits — examples:
+**Final deduped total: ~110 unique root issues across 53 waves** (from 173 raw audit IDs + 4 owner workstreams + 6 runtime findings). The wave count rose from 41 because over-broad waves were split into independently-shippable units (W0.10 → minimal-cutover slice + W1.9a–e; W0.5 → W0.5a logging / W0.5b metrics; W0.12 scheduler isolation carved out of W3.8) and the OTel/metrics waves were marked DEFERRED. The *issue-count* reduction is from merging the same root across audits — examples:
 
 - **Double sink-register crash:** C7 = RC8 (one root, W0.1).
 - **Review-runner never booted / unified reaper dead:** C6 = OC4 (W0.2).
 - **Cutover flags additive, no exclusivity:** C9 + C7 + C8 → RT1 (W0.1).
-- **Observability-dark metrics:** C3 + H10 are *symptoms*; XC5 is the *root* — fixed together (W0.4 + W0.5).
-- **Rate-limit Retry-After discarded:** H3 = RC6 = XH2 (W0.10).
-- **Per-activity retry deleted:** H1 + RC5 (W0.10).
+- **Observability-dark metrics:** C3 + H10 are *symptoms*; XC5 is the *root* — fixed together in **W0.4 + W0.5b, both DEFERRED (OTel/metrics owner steer)**. The structured-logging half (C4) splits to **W0.5a**, which stays a Tier-0 cutover gate.
+- **Rate-limit Retry-After discarded:** H3 = RC6 = XH2 (W0.10 — minimal cutover slice).
+- **Per-activity retry deleted:** H1 (W1.9c) + RC5 (W1.9d) — split out of the old W0.10 bundle into Tier-1 quality (NOT cutover gates); the minimal retry/backoff path stays in W0.10.
 - **`maybeEnqueueRepair` unwired:** H4 = RH13 (W3.6).
 - **Dead-letter no operator surface:** H8 = XC6 = EH8 = RM5 (W3.1).
 - **Readiness reflects nothing:** C5 = XH11 = RT2 (W0.6).
@@ -319,20 +394,22 @@ These MUST land (and be verified green) before `CODEMASTER_RUNTIME_MODE=postgres
 
 | Tier | Waves | Theme |
 |------|-------|-------|
-| Tier 0 | 11 (W0.1–W0.11) | Stop-the-bleeding before cutover |
-| Tier 1 | 8 (W1.1–W1.8) | Review-quality differentiator |
+| Tier 0 | 13 (W0.1, W0.2, W0.3, W0.4*, W0.5a, W0.5b*, W0.6–W0.12) | Stop-the-bleeding before cutover |
+| Tier 1 | 13 (W1.1–W1.8, W1.9a–e) | Review-quality differentiator |
 | Tier 2 | 7 (W2.1–W2.7) | Scale & cost |
 | Tier 3 | 10 (W3.1–W3.10) | Self-healing / operability |
 | Tier 4 | 7 (W4.1–W4.7) | Correctness / contracts / payload-versioning / edge-cases |
 | Tier 5 | 3 (W5.1–W5.3) | Clean-code + Temporal teardown |
-| **Total** | **46 waves** | |
+| **Total** | **53 waves** | |
+
+\* **W0.4** (MeterProvider) and **W0.5b** (metric emission) are **DEFERRED — OTel/metrics, owner steer**; they are listed under Tier 0 for ID-tracking continuity but are NOT cutover gates and NOT counted among the 11 active Tier-0 cutover blockers. **Active Tier-0 (cutover-relevant) waves = 11**: W0.1, W0.2, W0.3, W0.5a, W0.6, W0.7, W0.8, W0.9, W0.10, W0.11, W0.12 — of which **W0.8 (Postgres HA/DR) is a production-go-live gate, not a merge/cutover-code gate** (10 are true cutover-code gates).
 
 ### Genuinely-NEW runtime findings (not in the five audits)
 
 - **RT1** — runtime MODE enum replacing the additive booleans (the *real* fix for the no-exclusivity criticals C7/C9/RC8; the audits propose per-symptom fixes, this is the structural root). → W0.1.
 - **RT2** — loop-health wired into `/readyz` (audits flagged dead loops C5/H7/XH11 and the *isolate-and-continue* anti-pattern separately; pairing supervision WITH readiness is the synthesis). → W0.6.
-- **RT3 (NEW)** — F6 review enqueue drops `delivery_id` (`#enqueueReviewJob` omits `deliveryId:`; verified the column is then always NULL and `assertPayloadIdentityMatchesEnvelope`'s delivery_id cross-check at line 75 is silently skipped). Related to but distinct from H9/RC8's idempotency framing. → W3.2.
-- **RT4** — scheduler per-schedule isolation is only partial (one txn for all due schedules; a DB UPDATE failure poisons it) — overlaps M13 but the runtime review confirms the savepoint-per-schedule requirement. → W3.8.
+- **RT3 (NEW)** — F6 review enqueue drops `delivery_id` (`#enqueueReviewJob` omits `deliveryId:`; verified the column is then always NULL and `assertPayloadIdentityMatchesEnvelope`'s delivery_id cross-check at line 75 is silently skipped). Related to but distinct from H9/RC8's idempotency framing. → **W0.10** (cutover-gate minimal slice); generalized at-least-once hardening tracked in **W3.2 / W1.9e**.
+- **RT4** — scheduler per-schedule isolation is only partial (one txn for all due schedules; a DB UPDATE failure poisons it) — overlaps M13 but the runtime review confirms the savepoint-per-schedule requirement. → **W0.12** (moved into Tier 0: the scheduler is part of the cutover surface). The cron-vocabulary expansion stays in **W3.8**.
 - **RT5 (NEW)** — abort is boundary-only; `AbortSignal` is not threaded INTO the embed (Qwen consumer takes no signal) / provider clients, and provider calls have no per-call timeout race. Adjacent to H6 (sync policy compute) but a distinct client-plumbing gap. → W4.1.
 - **RT6** — migration 0042 assumes a cold table (drops CHECK/index directly, creates indexes non-concurrently); verified the comment asserts cold-only but there is no preflight/cleanup guard. → W0.9.
 
@@ -349,7 +426,7 @@ Every Low-severity ID is assigned to a wave above:
 
 - **L1** outbox per-tenant fairness → W2.3.
 - **L2** GitHub 5xx backoff jitter → *Deferred-Low* (fold into W0.10 rate-limit work; tracked here so it isn't lost).
-- **L3** review_jobs claim indexes → W4.6. **L4** review_jobs retention → W4.6. **L5** cache_idempotency prune → W4.6. **L6** partman seed → W3.5. **L7** posted_reviews CHECK expand-contract → W4.6. **L8** schema_version column → W4.1. **L9** dedup_key doc fix → W4.1. **L10** BF-9 allocation guard → W4.2. **L11** dispose all pools on SIGTERM → W3.10. **L12** trace correlation → W0.5. **L13** heartbeat error detail → W4.6. **L14** micro-cent cost → W4.6. **L15** runner/pool tunables in chart → W2.7. **L16** DB-INVARIANT preflight → W0.9. **L17** queue-depth HPA → W2.7.
+- **L3** review_jobs claim indexes → W4.6. **L4** review_jobs retention → W4.6. **L5** cache_idempotency prune → W4.6. **L6** partman seed → W3.5. **L7** posted_reviews CHECK expand-contract → W4.6. **L8** schema_version column → W4.1. **L9** dedup_key doc fix → W4.1. **L10** BF-9 allocation guard → W4.2. **L11** dispose all pools on SIGTERM → W3.10. **L12** trace correlation → W0.5a (structured-logging half; Tier 0). **L13** heartbeat error detail → W4.6. **L14** micro-cent cost → W4.6. **L15** runner/pool tunables in chart → W2.7. **L16** DB-INVARIANT preflight → W0.9. **L17** queue-depth HPA → W2.7.
 - **EL1** LLM-provider slot re-read → W4.7. **EL2** negative-cache bound → W3.7.
 - **RL1** sentinel UUIDs → W4.2. **RL2** Confluence per-space failure metric → W4.5. **RL3** pgvector float bind → W1.3. **RL4** lazy embedder-cache backoff → W4.5. **RL5** floor token budget → W1.3. RL-appendix lifecycle items (cooldown-DELETE-on-success, suspend-disable-repos, unbounded list pagination, dedup_key coalescing) → W4.4. RL-appendix embed-mode item → W1.3 (folded into RC4). RL-appendix retrieval-quality-loop item → W1.7.
 
