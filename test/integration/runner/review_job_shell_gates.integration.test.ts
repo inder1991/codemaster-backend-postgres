@@ -24,15 +24,23 @@ import { ReviewJobsRepo } from "#backend/runner/review_jobs_repo.js";
 import { runOneJob } from "#backend/runner/review_job_runner.js";
 import { runReviewJob } from "#backend/runner/review_job_shell.js";
 import { doPost } from "#backend/activities/post_review_results.activity.js";
+import {
+  FixPromptActivities,
+  fixPromptMarkerFor,
+  type FixPromptIssueCommentClient,
+} from "#backend/activities/generate_fix_prompt.activity.js";
+import { FixPromptRepo } from "#backend/domain/repos/fix_prompt_repo.js";
+import { allocateRun } from "#backend/ingest/_review_run_allocator.js";
 import { REVIEW_TOOL_SCHEMA_VERSION } from "#backend/review/review_activity.js";
 import { WALKTHROUGH_TOOL_SCHEMA_VERSION } from "#backend/review/walkthrough_activity.js";
 import { purposeChunkId } from "#backend/integrations/llm/invocation_ledger.js";
-import { disposeAllPools } from "#platform/db/database.js";
+import { disposeAllPools, tenantKysely } from "#platform/db/database.js";
 import { WallClock } from "#platform/clock.js";
 
 import { type PostReviewInputV1 } from "#contracts/post_review_input.v1.js";
 import { type PrMetaV1, type WalkthroughV1, WalkthroughV1 as WalkthroughV1Schema } from "#contracts/walkthrough.v1.js";
 import { AggregatedFindingsV1 } from "#contracts/aggregated_findings.v1.js";
+import { GenerateFixPromptInputV1 } from "#contracts/generate_fix_prompt.v1.js";
 import { type ReviewFindingV1 } from "#contracts/review_findings.v1.js";
 import { type CreatedReviewV1 } from "#backend/integrations/github/review_client.js";
 import { type DiffChunkV1, computeChunkId } from "#contracts/diff_chunking.v1.js";
@@ -666,6 +674,458 @@ describeDb("G2 — crash after chunk-fanout + walkthrough; re-run replays every 
       expect(run1Bodies.size).toBe(chunks.length + 1);
     } finally {
       await purgeLedgerScenarioRows(db, seed.installationId);
+      await cleanup(db, seed, { prId: payload.pr_id });
+    }
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+// G3 — post-review idempotency ③ (D4 + supersede + v3 post-success-before-record recovery).
+//
+// The LARGEST gate — four sub-scenarios proving the spine NEVER double-posts (a review or a fix-prompt
+// comment) and NEVER splits its terminal state across a supersede, driven against the REAL durable seams:
+//
+//   (a)  lost-claim returns the STORED comment_ids (D4) + the fix-prompt crash-BEFORE-post recovery (F3).
+//   (a2) v3-F1: createReview succeeded remotely but the posted_reviews row stayed NULL → the re-run's
+//        sameRunTakeover RECOVERS the orphan by marker (findExistingReviewByMarker) — ZERO 2nd createReview.
+//   (a3) v3-F2: the fix-prompt createIssueComment succeeded (555) but recordCommentPosted crashed → the
+//        re-run's listIssueComments operational-marker scan recovers 555 — ZERO 2nd comment.
+//   (b)  supersede (no split-brain): a checkpoint port flips current_run_id to a freshly-allocated R2 while
+//        R1 runs; R1's E4 readCurrentRunId != run_id fail-closes → settles cancelled (job+run ATOMICALLY)
+//        + releases its mutex + posts NOTHING.
+//
+// Every assertion counts a REAL external call (the scripted GhReviewClient driven by the REAL doPost /
+// the REAL FixPromptActivities.generateFixPrompt) or a REAL durable row (core.posted_reviews /
+// core.fix_prompts / core.review_runs / core.review_jobs / core.pr_review_mutex), so deleting the guard
+// under test turns the gate red. DB-gated (:5434 only). --no-file-parallelism.
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+
+// A FixPromptRepo over the SAME ADR-0062 shared pool the rest of the gate uses (tenantKysely memoizes the
+// engine per DSN, so this shares G1.3/G2's pool — disposeAllPools in afterAll ends it once).
+const fixPromptRepo: FixPromptRepo | undefined = INTEGRATION_DSN
+  ? new FixPromptRepo({ db: tenantKysely(INTEGRATION_DSN) })
+  : undefined;
+
+/** A cache whose forRole REJECTS so buildFixPrompt degrades to the (always-correct) deterministic base —
+ *  no real LLM call. G3(a)/(a3) exercise the post-claim/marker recovery, NOT theme synthesis. */
+const NO_LLM_CACHE = {
+  forRole: async (): Promise<never> => {
+    throw new Error("no LLM in G3 (deterministic fix-prompt only)");
+  },
+};
+
+/** A recording fix-prompt issue-comment client (the slice generateFixPrompt uses: createIssueComment +
+ *  listIssueComments, each with a per-call installationId). `seed` is the shared "remote" comment list — a
+ *  created comment is pushed onto it so a later listIssueComments scan can recover it (mirrors the GitHub
+ *  round-trip). The crash hooks model the two F2/F3 windows. EXTRACTED idiom from
+ *  generate_fix_prompt.activity.integration.test.ts::makeGh. */
+type RecordingFixPromptGh = FixPromptIssueCommentClient & {
+  createCalls: Array<{ body: string }>;
+  listCalls: number;
+};
+function makeFixPromptGh(opts: {
+  nextCreateId?: number;
+  onBeforeCreate?: () => void;
+  onAfterCreate?: () => void;
+  seed?: Array<{ id: number; body: string }>;
+}): RecordingFixPromptGh {
+  const seed = opts.seed ?? [];
+  const gh: RecordingFixPromptGh = {
+    createCalls: [],
+    listCalls: 0,
+    createIssueComment: async ({ body }) => {
+      gh.createCalls.push({ body });
+      opts.onBeforeCreate?.();
+      const id = opts.nextCreateId ?? 4242;
+      // The created (marked) comment becomes visible to a subsequent listIssueComments scan — the recovery
+      // oracle for the "post landed, record crashed" window.
+      seed.push({ id, body });
+      opts.onAfterCreate?.();
+      return id;
+    },
+    listIssueComments: async () => {
+      gh.listCalls += 1;
+      return seed.map((c) => ({ id: c.id, body: c.body }) as Record<string, unknown>);
+    },
+  };
+  return gh;
+}
+
+/** A valid GenerateFixPromptInputV1 tied to a seed (ONE finding → the activity does NOT short-circuit). The
+ *  numeric github_installation_id is the per-PR routing id the advisory comment posts under. */
+function fixPromptInputFor(seed: Seed): GenerateFixPromptInputV1 {
+  return GenerateFixPromptInputV1.parse({
+    review_id: seed.reviewId,
+    installation_id: seed.installationId,
+    github_installation_id: 12345,
+    pr_number: seed.prNumber,
+    owner: "acme",
+    repo: "widgets",
+    aggregated: {
+      schema_version: 1,
+      findings: [
+        {
+          file: "src/app.ts",
+          start_line: 10,
+          end_line: 10,
+          severity: "issue",
+          category: "bug",
+          title: "Null deref",
+          body: "Possible null dereference here.",
+          confidence: 0.9,
+        },
+      ],
+      dedupe_stats: { input_count: 1, exact_dropped: 0, semantic_merged: 0, capped: 0 },
+      policy_revision: 0,
+    },
+  });
+}
+
+/** Purge the fix_prompts row a G3 fix-prompt sub-scenario wrote (keyed by review_id). */
+async function purgeFixPrompt(reviewId: string): Promise<void> {
+  await sql`DELETE FROM core.fix_prompts WHERE review_id = ${reviewId}`.execute(db);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// G3 (a) — lost-claim returns the STORED comment_ids (D4) + fix-prompt crash-BEFORE-post recovery (F3).
+//
+// review post: run #1 drives the REAL doPost to completion (scripted createReview → reviewId 999 + ONE
+// comment id) → the Phase-2 UPDATE stores github_review_id=999 + comment_ids=[7001]. Run #2 (the re-run
+// after a crash before finalization) drives the SAME doPost: it LOSES the claim, reads the STORED comment
+// ids back from the column, dispatches exactly ONE updateReview (idempotent body refresh), and RETURNS the
+// stored ids. EXACTLY ONE createReview total, ONE updateReview (re-run only), ONE posted_reviews row.
+//
+// fix-prompt (F3 crash BEFORE post): run #1 of the REAL generateFixPrompt persists the record + claims the
+// post lease, then createIssueComment THROWS (crash between claim and post) → comment_posted_at stays NULL
+// (never lost). Run #2 (TTL=0 → the lease is reclaimable) re-claims, the marker scan finds nothing (the
+// post never landed), and posts → the fix-prompt comment is posted EXACTLY ONCE across both runs.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describeDb("G3 (a) — lost-claim returns stored comment_ids (D4) + fix-prompt crash-before-post recovery (F3)", () => {
+  it("review: ONE createReview + ONE updateReview (re-run) + ONE row carrying stored comment_ids; fix-prompt posted exactly once", async () => {
+    const seed = await seedTenant(db, 301);
+    const prId = payloadFor(seed).pr_id;
+    // createReview returns 999 + ONE comment id on the FIRST run; an empty createSeq on the re-run means any
+    // 2nd createReview would THROW ("called more times than programmed") — so "exactly one createReview" is
+    // a hard control, not a soft count.
+    const gh = makeScriptedGhClient({
+      createReview: [{ reviewId: 999, commentIds: [7001] } satisfies CreatedReviewV1],
+      existingReviewByMarker: null,
+    });
+    const input = postInputFor(seed, prId);
+    const postDeps = { ghClient: gh.client, dsn: INTEGRATION_DSN!, sameRunTakeover: true } as const;
+
+    const fpGh = makeFixPromptGh({ nextCreateId: 4321 });
+    const fpInput = fixPromptInputFor(seed);
+
+    try {
+      // ── review run #1: wins the claim, posts (999 + [7001]), Phase-2 UPDATE stores the row. ──
+      const r1 = await doPost(input, { ...postDeps, signal: new AbortController().signal });
+      expect(r1.review_id).toBe(999);
+      expect(r1.comment_ids).toEqual([7001]);
+      expect(gh.calls.filter((c) => c.method === "createReview")).toHaveLength(1);
+      const row1 = await sql<{ github_review_id: string | null; comment_ids: string }>`
+        SELECT github_review_id, comment_ids::text AS comment_ids FROM core.posted_reviews WHERE pr_id = ${prId}`.execute(db);
+      expect(Number(row1.rows[0]!.github_review_id)).toBe(999);
+      expect(JSON.parse(row1.rows[0]!.comment_ids)).toEqual([7001]);
+
+      // ── review run #2 (the re-run after a crash before finalization): SAME input → LOSES the claim → reads
+      //    the STORED comment_ids → dispatches ONE updateReview → returns the stored ids. ──
+      const r2 = await doPost(input, { ...postDeps, signal: new AbortController().signal });
+
+      // (a) MEANINGFUL — the lost-claim path returned the STORED comment_ids (NOT [] and NOT a re-fetch). Remove
+      // the `comment_ids: storedCommentIds` read (parseStoredCommentIds) and r2.comment_ids would be empty.
+      expect(r2.review_id).toBe(999);
+      expect(r2.was_update).toBe(true);
+      expect(r2.comment_ids).toEqual([7001]);
+
+      // (a) MEANINGFUL — EXACTLY one createReview total (the re-run did NOT re-create), exactly one updateReview
+      // (only on the re-run's lost-claim path), exactly one posted_reviews row. Remove the abort/lost-claim
+      // arbitration (or the ON CONFLICT DO NOTHING claim) and the re-run would createReview again → TWO creates.
+      expect(gh.calls.filter((c) => c.method === "createReview")).toHaveLength(1);
+      expect(gh.calls.filter((c) => c.method === "updateReview")).toHaveLength(1);
+      const rows = await sql<{ n: string }>`
+        SELECT count(*) AS n FROM core.posted_reviews WHERE pr_id = ${prId}`.execute(db);
+      expect(Number(rows.rows[0]!.n)).toBe(1);
+
+      // ── fix-prompt F3: run #1 crashes BETWEEN claim and createIssueComment (post NEVER made). ──
+      const fpAct1 = new FixPromptActivities({
+        cache: NO_LLM_CACHE,
+        repo: fixPromptRepo!,
+        gh: makeFixPromptGh({
+          nextCreateId: 4321,
+          onBeforeCreate: () => {
+            throw new Error("G3a CRASH between claim and fix-prompt post");
+          },
+        }),
+        clock,
+      });
+      await expect(fpAct1.generateFixPrompt(fpInput, undefined, { claimTtlSeconds: 0 })).rejects.toThrow(
+        /CRASH between claim and fix-prompt post/,
+      );
+      // The crash happened AFTER claim, BEFORE a successful post → comment_posted_at stays NULL (never lost).
+      const fpMid = await sql<{ posted: string | null }>`
+        SELECT comment_posted_at::text AS posted FROM core.fix_prompts WHERE review_id = ${seed.reviewId}`.execute(db);
+      expect(fpMid.rows[0]!.posted).toBeNull();
+
+      // ── fix-prompt run #2 (TTL=0 → the lease is reclaimable): re-claims, marker scan finds nothing, posts. ──
+      const fpAct2 = new FixPromptActivities({ cache: NO_LLM_CACHE, repo: fixPromptRepo!, gh: fpGh, clock });
+      const fpR2 = await fpAct2.generateFixPrompt(fpInput, undefined, { claimTtlSeconds: 0 });
+
+      // (a) MEANINGFUL — the fix-prompt comment posted EXACTLY ONCE across the crash + the re-run. Remove the
+      // F3 RECOVERABLE-lease design (set comment_posted_at on claim instead of on confirmed post) and the
+      // re-run would short-circuit on isCommentPosted → the comment is PERMANENTLY LOST (zero posts).
+      expect(fpR2.comment_posted).toBe(true);
+      expect(fpGh.createCalls.length).toBe(1);
+      const fpRow = await sql<{ id: string | null; posted: string | null }>`
+        SELECT github_comment_id::text AS id, comment_posted_at::text AS posted
+          FROM core.fix_prompts WHERE review_id = ${seed.reviewId}`.execute(db);
+      expect(fpRow.rows[0]!.id).toBe("4321");
+      expect(fpRow.rows[0]!.posted).not.toBeNull();
+    } finally {
+      await purgeFixPrompt(seed.reviewId);
+      await cleanup(db, seed, { prId });
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// G3 (a2) — v3-F1: review post-succeeded-DB-crashed → marker recovery (ZERO 2nd createReview).
+//
+// The exact crash state F1 recovers: createReview SUCCEEDED remotely (review 999 exists on GitHub) but the
+// Phase-2 UPDATE crashed before storing the id, so the posted_reviews row is still github_review_id IS NULL.
+// run #1 lands the claim row NULL via an already-aborted signal (doPost's pre-write gate throws AFTER the
+// claim INSERT, BEFORE createReview — the crash-equivalent NULL row); the "createReview succeeded remotely"
+// half is modeled by programming the orphaned remote review (existingReviewByMarker=999 + its comment ids)
+// for the re-run to discover. run #2 (sameRunTakeover) LOSES the claim, the NULL-row takeover scans by
+// marker, finds 999, re-fetches its comment ids, and CAS-stores them — NEVER re-creating. createReview is
+// programmed EMPTY so ANY create call would throw: ZERO createReview total, ONE row carrying 999 + the ids.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describeDb("G3 (a2) — v3-F1 review post-succeeded-DB-crashed; marker recovery, ZERO 2nd createReview", () => {
+  it("re-run recovers review 999 by marker (findExistingReviewByMarker) + re-fetches comment_ids; ZERO createReview, ONE row carrying 999 + the ids", async () => {
+    const seed = await seedTenant(db, 302);
+    const prId = payloadFor(seed).pr_id;
+    // The orphaned remote review the crashed self created: review 999 with comment ids [8001, 8002]. The
+    // EMPTY createReview sequence makes ANY createReview throw — so "ZERO createReview" is a hard control.
+    const gh = makeScriptedGhClient({
+      createReview: [],
+      existingReviewByMarker: 999,
+      existingReviewComments: [8001, 8002],
+    });
+    const input = postInputFor(seed, prId);
+    const postDeps = { ghClient: gh.client, dsn: INTEGRATION_DSN!, sameRunTakeover: true } as const;
+
+    try {
+      // ── run #1: aborted signal → the Phase-1 claim INSERTs the row, doPost's pre-write gate throws BEFORE
+      //    createReview → the row stays NULL (the createReview-succeeded-remotely-but-UPDATE-crashed shape). ──
+      await expect(doPost(input, { ...postDeps, signal: AbortSignal.abort() })).rejects.toMatchObject({
+        name: "TerminalCancelError",
+      });
+      const after1 = await sql<{ github_review_id: string | null }>`
+        SELECT github_review_id FROM core.posted_reviews WHERE pr_id = ${prId}`.execute(db);
+      expect(after1.rows[0]).toBeDefined();
+      expect(after1.rows[0]!.github_review_id).toBeNull();
+      expect(gh.calls.filter((c) => c.method === "createReview")).toHaveLength(0);
+
+      // ── run #2 (the re-run): fresh signal, SAME input → LOSES the claim → NULL-row sameRunTakeover scans by
+      //    marker, FINDS 999, re-fetches [8001,8002] via listReviewComments, CAS-stores — NO 2nd createReview. ──
+      const result = await doPost(input, { ...postDeps, signal: new AbortController().signal });
+
+      // (a2) MEANINGFUL — the takeover RECOVERED 999 by marker (NOT a blind re-create). Remove the
+      // findExistingReviewByMarker recovery and run #2 would re-attempt createReview (double-post) — but the
+      // EMPTY createSeq would make that throw, so the recovery branch is load-bearing for this to succeed AT ALL.
+      expect(result.review_id).toBe(999);
+      expect(result.was_update).toBe(true);
+      expect(result.comment_ids).toEqual([8001, 8002]);
+
+      // ZERO createReview total (the recovery scan is a READ — findExistingReviewByMarker — and listReviewComments
+      // is a READ; the only WRITE is the CAS UPDATE), exactly ONE posted_reviews row now carrying 999 + the ids.
+      expect(gh.calls.filter((c) => c.method === "createReview")).toHaveLength(0);
+      expect(gh.calls.filter((c) => c.method === "findExistingReviewByMarker")).toHaveLength(1);
+      expect(gh.calls.filter((c) => c.method === "listReviewComments")).toHaveLength(1);
+      const rows = await sql<{ github_review_id: string | null; comment_ids: string }>`
+        SELECT github_review_id, comment_ids::text AS comment_ids FROM core.posted_reviews WHERE pr_id = ${prId}`.execute(db);
+      expect(rows.rows).toHaveLength(1);
+      expect(Number(rows.rows[0]!.github_review_id)).toBe(999);
+      expect(JSON.parse(rows.rows[0]!.comment_ids)).toEqual([8001, 8002]);
+    } finally {
+      await cleanup(db, seed, { prId });
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// G3 (a3) — v3-F2: fix-prompt comment-succeeded-record-crashed → marker scan recovery (ZERO 2nd comment).
+//
+// run #1 of the REAL generateFixPrompt: persist + claim + createIssueComment SUCCEEDS (id 555, the marked
+// comment lands remotely), then recordCommentPosted CRASHES (onAfterCreate hook) → comment_posted_at stays
+// NULL but the remote comment exists. run #2 (TTL=0 → reclaimable) re-claims; the listIssueComments
+// operational-marker scan finds the marked 555 → recordCommentPosted(555) → NO 2nd createIssueComment.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describeDb("G3 (a3) — v3-F2 fix-prompt comment-succeeded-record-crashed; marker scan recovery, ZERO 2nd comment", () => {
+  it("re-run's listIssueComments marker scan recovers 555; ZERO 2nd createIssueComment; comment_posted_at + github_comment_id=555 set", async () => {
+    const seed = await seedTenant(db, 303);
+    const fpInput = fixPromptInputFor(seed);
+    // The shared "remote" comment list — the created comment 555 lands here on run #1 and is visible to run #2.
+    const remote: Array<{ id: number; body: string }> = [];
+
+    try {
+      // ── run #1: createIssueComment SUCCEEDS (555, marker embedded), then recordCommentPosted crashes. ──
+      const ghCrash = makeFixPromptGh({
+        nextCreateId: 555,
+        seed: remote,
+        onAfterCreate: () => {
+          throw new Error("G3a3 CRASH after fix-prompt post before record");
+        },
+      });
+      const act1 = new FixPromptActivities({ cache: NO_LLM_CACHE, repo: fixPromptRepo!, gh: ghCrash, clock });
+      await expect(act1.generateFixPrompt(fpInput, undefined, { claimTtlSeconds: 0 })).rejects.toThrow(
+        /CRASH after fix-prompt post before record/,
+      );
+      // The marked comment landed remotely (the recovery oracle); the DB record never committed.
+      expect(remote.length).toBe(1);
+      expect(remote[0]!.body).toContain(fixPromptMarkerFor(seed.reviewId));
+      const mid = await sql<{ posted: string | null }>`
+        SELECT comment_posted_at::text AS posted FROM core.fix_prompts WHERE review_id = ${seed.reviewId}`.execute(db);
+      expect(mid.rows[0]!.posted).toBeNull();
+
+      // ── run #2 (the re-run): SHARES the remote seed (555 is visible). The expired lease is reclaimed; the
+      //    marker scan finds 555 → recordCommentPosted(555) → NO new createIssueComment. ──
+      const ghRecover = makeFixPromptGh({ nextCreateId: 999, seed: remote });
+      const act2 = new FixPromptActivities({ cache: NO_LLM_CACHE, repo: fixPromptRepo!, gh: ghRecover, clock });
+      const r2 = await act2.generateFixPrompt(fpInput, undefined, { claimTtlSeconds: 0 });
+
+      // (a3) MEANINGFUL — ZERO 2nd createIssueComment (the marker scan recovered 555). Remove the
+      // listIssueComments operational-marker scan (findPostedCommentByMarker) and run #2 would createIssueComment
+      // again → a DUPLICATE advisory comment (createCalls.length === 1) + the wrong recorded id (999).
+      expect(r2.comment_posted).toBe(true);
+      expect(ghRecover.createCalls.length).toBe(0);
+      expect(ghRecover.listCalls).toBeGreaterThanOrEqual(1);
+      const fpRow = await sql<{ id: string | null; posted: string | null }>`
+        SELECT github_comment_id::text AS id, comment_posted_at::text AS posted
+          FROM core.fix_prompts WHERE review_id = ${seed.reviewId}`.execute(db);
+      expect(fpRow.rows[0]!.id).toBe("555"); // the RECOVERED remote id, not the would-be-new 999
+      expect(fpRow.rows[0]!.posted).not.toBeNull();
+    } finally {
+      await purgeFixPrompt(seed.reviewId);
+      await cleanup(db, seed);
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// G3 (b) — supersede (no split-brain): R1 fail-closes at E4, settles cancelled (job+run atomically),
+// posts NOTHING, releases its mutex.
+//
+// Drive the FULL shell (runReviewJob + runOneJob). A checkpoint port (`dedupFindings`, dispatched right
+// before the orchestrator's before-aggregate claim-check) performs a REAL allocateRun → it SUPERSEDES R1's
+// run + INSERTs a fresh PENDING R2 + flips core.pull_request_reviews.current_run_id to R2. When R1 resumes,
+// the next claim-check's readCurrentRunId reads current_run_id=R2 != R1.run_id → the shell throws
+// TerminalCancelError("superseded"). runOneJob settles via terminalSettle: job→cancelled + run→CANCELLED in
+// ONE transaction (no split-brain). The REAL postReview (doPost over the scripted GH client) is reachable —
+// but the supersede fires BEFORE the post stage, so ZERO createReview.
+//
+// max_attempts=1 so runOneJob's isLastAttempt path is NOT what settles this — a TerminalCancelError ALWAYS
+// routes through the cancelled terminalSettle regardless; the seed's single attempt keeps the run from being
+// re-claimed after settlement.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describeDb("G3 (b) — supersede: E4 fail-close → cancelled (job+run atomic), zero post, mutex released", () => {
+  it("R1's current_run_id != run_id → settles cancelled (no split-brain); zero createReview; mutex released_at set", async () => {
+    const repo = new ReviewJobsRepo(db);
+    const seed = await seedTenant(db, 304);
+    const payload = payloadFor(seed);
+    // The scripted GH client WOULD create review 999 if doPost were ever reached — so "zero createReview" is a
+    // real control: it is zero only because the E4 fail-close fired before the post stage.
+    const gh = makeScriptedGhClient({ createReview: [{ reviewId: 999, commentIds: [1] }] });
+    const calls: Array<string> = [];
+    let r2RunId: string | null = null;
+    let superseded = false;
+
+    try {
+      await repo.enqueue({
+        runId: seed.runId, reviewId: seed.reviewId, installationId: seed.installationId, payload, maxAttempts: 1,
+      });
+
+      // The checkpoint: dedupFindings (dispatched right before the before-aggregate claim-check) performs the
+      // REAL supersede — allocateRun in ONE transaction supersedes R1, inserts R2 PENDING, flips current_run_id
+      // → R2. Fire ONCE (a re-entrant dispatch would re-supersede; the flag guards it).
+      const ports = makeStubPorts(calls, {
+        dedupFindings: async (input) => {
+          calls.push("dedupFindings");
+          if (!superseded) {
+            superseded = true;
+            const outcome = await db.transaction().execute(async (tx) =>
+              allocateRun(tx as unknown as Parameters<typeof allocateRun>[0], {
+                reviewId: seed.reviewId,
+                installationId: seed.installationId,
+                triggerType: "pr_synchronize",
+                triggeredBy: null,
+                provider: "github",
+                deliveryId: null,
+                clock,
+              }),
+            );
+            r2RunId = outcome.newRunId;
+          }
+          // Return a valid DedupedFindingsV1 so, IF the E4 guard were removed, the pipeline would proceed to
+          // the post stage (and createReview would fire — the mutation control for this gate).
+          return { schema_version: 1, findings: [...input.llm_findings], semantic_skipped: false };
+        },
+      });
+      const lifecycle = makeStubLifecycle(calls);
+
+      const handler = runReviewJob({
+        repo, pool, dsn: INTEGRATION_DSN!, clock, mutexRenewIntervalS: 999,
+        ports, lifecycle,
+        // REAL postReview port → real doPost → the scripted GH client. Reachable only if the supersede DOESN'T
+        // fail-close — so a createReview here would PROVE the E4 guard is gone.
+        postReviewGhClient: gh.client,
+      });
+
+      const res = await runOneJob({
+        repo, clock, owner: "g3-b", leaseS: 5, heartbeatS: 1, maxRuntimeS: 60, handler,
+      });
+
+      // The shell reached the checkpoint (the supersede fired) before fail-closing.
+      expect(superseded).toBe(true);
+      expect(r2RunId).not.toBeNull();
+      expect(r2RunId).not.toBe(seed.runId);
+
+      // (b) MEANINGFUL — R1 settled CANCELLED via terminalSettle: BOTH terminal states flipped ATOMICALLY (no
+      // split-brain). Remove the E4 fail-close and R1 would NOT throw superseded → it would post + finalize →
+      // outcome "done", job "done", run "COMPLETED" (and createReview > 0 below).
+      expect(res.outcome).toBe("cancelled");
+      const job = await repo.getById(res.jobId!);
+      expect(job!.state).toBe("cancelled");
+      const run = await sql<{ lifecycle_state: string; cancelled_at: string | null }>`
+        SELECT lifecycle_state, cancelled_at::text AS cancelled_at FROM core.review_runs WHERE run_id = ${seed.runId}`.execute(db);
+      expect(run.rows[0]!.lifecycle_state).toBe("CANCELLED");
+      expect(run.rows[0]!.cancelled_at).not.toBeNull(); // AD-7 biconditional: CANCELLED ⇔ cancelled_at present
+      // The free-text cause on the JOB is the E4 supersede reason (proves the supersede branch, not a timeout).
+      expect(await readJobCancelReason(res.jobId!)).toBe("superseded");
+
+      // (b) MEANINGFUL — R1 posted NOTHING: ZERO createReview (the post stage was never reached). Remove the E4
+      // fail-close and the un-superseded R1 would reach doPost → createReview === 1.
+      expect(gh.calls.filter((c) => c.method === "createReview")).toHaveLength(0);
+      expect(calls).not.toContain("postReview");
+
+      // (b) MEANINGFUL — R1 released its PR mutex on the E6 abort-EXEMPT finally (released_at NOT NULL). A
+      // superseded loser that leaked its mutex would block the next push on the PR forever.
+      expect(job!.mutex_id).toBeTruthy();
+      const mutexRow = await sql<{ released_at: string | null }>`
+        SELECT released_at FROM core.pr_review_mutex WHERE mutex_id = ${job!.mutex_id!}`.execute(db);
+      expect(mutexRow.rows[0]!.released_at).not.toBeNull();
+    } finally {
+      // R2 (the superseding run allocateRun created) + its WEBHOOK_RECEIVED workflow_event must be torn down
+      // before the seed's review/installation delete (FK order). R1↔R2 form a CIRCULAR FK pair
+      // (R1.superseded_by_run_id → R2, R2.supersedes_run_id → R1, both RESTRICT), so NULL R1's
+      // superseded_by_run_id FIRST, then delete R2, then cleanup() deletes R1's row. current_run_id (→ R2) is
+      // ON DELETE SET NULL but we null it explicitly to keep the delete order obvious.
+      if (r2RunId !== null) {
+        await sql`UPDATE core.pull_request_reviews SET current_run_id = NULL WHERE review_id = ${seed.reviewId}`.execute(db);
+        await sql`UPDATE core.review_runs SET superseded_by_run_id = NULL WHERE run_id = ${seed.runId}`.execute(db);
+        await sql`DELETE FROM audit.workflow_events WHERE run_id = ${r2RunId}`.execute(db);
+        await sql`DELETE FROM core.review_runs WHERE run_id = ${r2RunId}`.execute(db);
+      }
       await cleanup(db, seed, { prId: payload.pr_id });
     }
   });
