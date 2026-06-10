@@ -68,6 +68,7 @@ import { cancellableSleep } from "./clock_async.js";
 import { makeInProcessPorts, type InProcessPortDeps } from "./in_process_ports.js";
 
 import type { ReviewActivityPorts } from "#backend/review/pipeline/activity_ports.js";
+import type { GhReviewClient } from "#backend/integrations/github/review_client.js";
 
 /**
  * The direct-dispatch lifecycle/enrichment activities the shell body dispatches OUTSIDE the orchestrate port
@@ -160,6 +161,14 @@ export type RunReviewJobDeps = {
   readonly ports?: Partial<ReviewActivityPorts>;
   /** Direct-dispatch lifecycle/enrichment override (test seam). Default {@link realLifecycleBundle}. */
   readonly lifecycle?: Partial<LifecycleBundle>;
+  /**
+   * COLLABORATOR-INJECTION test seam (Phase-2 chaos gates) — a {@link GhReviewClient} the REAL `postReview`
+   * port (`doPost`) talks to instead of the deferred-Vault production client. Threaded straight into
+   * {@link makeInProcessPorts}; the composed-abort threading + `sameRunTakeover:true` + the real Postgres
+   * atomic claim stay fully real so a gate can count the real createReview/updateReview calls. Omitted in
+   * production (and the happy path) → the real GitHub client is built as before.
+   */
+  readonly postReviewGhClient?: GhReviewClient;
 };
 
 /**
@@ -397,6 +406,7 @@ export function runReviewJob(deps: RunReviewJobDeps): JobHandler {
         dsn: deps.dsn,
         pool: deps.pool,
         ...(deps.ports !== undefined ? { overrides: deps.ports } : {}),
+        ...(deps.postReviewGhClient !== undefined ? { postReviewGhClient: deps.postReviewGhClient } : {}),
       };
       const ctx: ReviewPipelineContext = {
         repo: {

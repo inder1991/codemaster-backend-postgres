@@ -256,6 +256,16 @@ export type InProcessPortDeps = {
    * the real wired fn (still wrapped in the abort gate). The integration test injects counting stubs here.
    */
   readonly overrides?: Partial<ReviewActivityPorts>;
+  /**
+   * COLLABORATOR-INJECTION test seam (Phase-2 chaos gates). When present, the REAL `postReview` port
+   * (`postReviewWithTakeover` → `doPost`) uses THIS {@link GhReviewClient} instead of building the
+   * deferred-Vault production one. This keeps the abort-gate composition + the composed-signal threading +
+   * `sameRunTakeover:true` + the real Postgres atomic claim FULLY real while letting a gate COUNT the real
+   * createReview/updateReview calls (no Vault / GitHub round-trip). Production (and the happy path) omit it
+   * → the real GitHub client is built exactly as before. Distinct from `overrides.postReview`, which would
+   * REPLACE doPost wholesale (and so could not observe the composed signal doPost threads).
+   */
+  readonly postReviewGhClient?: GhReviewClient;
 };
 
 /**
@@ -355,7 +365,12 @@ export function makeInProcessPorts(deps: InProcessPortDeps, signal: AbortSignal)
   };
 
   // postReview: doPost directly with sameRunTakeover:true + the composed signal (E7 / W3.2 / W4.3).
-  const ghClientFor = makeLazyPostReviewGhClient();
+  // The injected `postReviewGhClient` (Phase-2 chaos-gate seam) wins over the deferred-Vault production
+  // client, so a gate can count the REAL createReview/updateReview calls doPost makes while the abort gate,
+  // the composed-signal threading, and the real Postgres atomic claim stay fully real.
+  const lazyGhClientFor = makeLazyPostReviewGhClient();
+  const ghClientFor = async (installationId: number): Promise<GhReviewClient> =>
+    deps.postReviewGhClient ?? lazyGhClientFor(installationId);
   const postReviewWithTakeover = async (input: PostReviewInputV1): Promise<PostedReviewV1> => {
     const installationId = input.github_installation_id;
     if (installationId === null) {
