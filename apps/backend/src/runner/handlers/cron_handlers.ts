@@ -3,12 +3,21 @@ import { z } from "zod";
 import { MarkStaleChunksActivity } from "#backend/activities/mark_stale_chunks.activity.js";
 import { mutexJanitorActivity } from "#backend/activities/mutex_janitor.activity.js";
 import { runPgPartmanMaintenanceActivity } from "#backend/activities/partition_maintenance.activity.js";
+import {
+  releaseWorkspace,
+  type ReleaseWorkspaceDeps,
+} from "#backend/activities/release_workspace.activity.js";
 import { reviewRunReaperActivity } from "#backend/activities/review_run_reaper.activity.js";
 import {
   runIdCloseStalePrsActivity,
   runIdDeleteOldEventsActivity,
   runIdRetireOldRunsActivity,
 } from "#backend/activities/run_id_retention.activity.js";
+import {
+  runWorkspaceOrphanSweepActivity,
+  runWorkspaceReapActivity,
+  runWorkspaceReleasedRetentionActivity,
+} from "#backend/activities/workspace_retention.activity.js";
 
 import type { GitHubApiClient } from "#backend/integrations/github/api_client.js";
 
@@ -18,15 +27,18 @@ import { MarkStaleChunksInputV1 } from "#contracts/confluence_sync_stale.v1.js";
 
 import type { HandlerRegistry } from "../handler_registry.js";
 
-// Phase 3b W3b.1 + W3b.2 + Phase 3d W3d.1: job_type → handler ADAPTERS for the 5 crons migrated off
-// Temporal Schedules — the 2 INTERVAL crons (mutex_janitor every 5min + review_run_reaper every
-// 10min), the 2 DAILY crons (mark_stale_chunks + partition_maintenance, both 02:00 UTC), and the
-// run_id_retention DAILY cron (03:00 UTC — the 3-sweep close→retire→delete chain the Temporal
-// runIdRetentionWorkflow composes). Each adapter is a thin JobHandler shim over the EXISTING, tested
-// activity body (apps/backend/src/activities/*) — the activity logic is NOT rewritten here; this is
-// the de-Temporal analogue of the workflow pass-through bodies (mutex_janitor.workflow.ts /
-// review_run_reaper.workflow.ts / mark_stale_chunks.workflow.ts / partition_maintenance.workflow.ts /
-// run_id_retention.workflow.ts), which stay in place until Phase 4 deletes the Temporal side.
+// Phase 3b W3b.1 + W3b.2 + Phase 3d W3d.1 + Phase 3e W3e.1: job_type → handler ADAPTERS for the 6
+// crons migrated off Temporal Schedules — the 2 INTERVAL crons (mutex_janitor every 5min +
+// review_run_reaper every 10min), the 2 DAILY crons (mark_stale_chunks + partition_maintenance, both
+// 02:00 UTC), the run_id_retention DAILY cron (03:00 UTC — the 3-sweep close→retire→delete chain the
+// Temporal runIdRetentionWorkflow composes), and the workspace_retention INTERVAL cron (every 5min —
+// the FIRST MULTI-STEP workflow BODY ported: the orphan-sweep → per-id reap/release loop →
+// retention-purge orchestration of workspaceRetentionWorkflow, with its per-id fail-open invariant).
+// Each adapter is a JobHandler over the EXISTING, tested activity bodies
+// (apps/backend/src/activities/*) — the activity logic is NOT rewritten here; this is the de-Temporal
+// analogue of the workflow bodies (mutex_janitor.workflow.ts / review_run_reaper.workflow.ts /
+// mark_stale_chunks.workflow.ts / partition_maintenance.workflow.ts / run_id_retention.workflow.ts /
+// workspace_retention.workflow.ts), which stay in place until Phase 4 deletes the Temporal side.
 //
 // ## Input contracts (handler-owned parsing — the W2b opaque-payload posture)
 // The Temporal workflows dispatch their activities zero-arg or with the empty marker input (the
@@ -73,6 +85,11 @@ const RunIdRetentionCronInputV1 = z
     eventTtlDays: z.number().int().min(1),
   })
   .strict();
+
+/** workspace_retention scheduled input — zero-config, 1:1 with the Temporal workflow's zero-arg
+ *  activity dispatches (every timing threshold is a WorkspaceConfig-default module constant resolved
+ *  at the activity boundary — workspace_retention.activity.ts). */
+const WorkspaceRetentionCronInputV1 = z.object({}).strict();
 
 /**
  * A {@link GitHubApiClient} built lazily on first `.get`/`.patch` and memoized — the SAME
@@ -136,6 +153,12 @@ export type CronHandlersDeps = {
    *  inject a fake `{ get, patch }` slice). Omitted in prod — the handler builds the deferred-Vault
    *  lazy client ({@link makeLazyRetentionGithubClient}), 1:1 with the Temporal composition root. */
   readonly retentionGithubClient?: GitHubApiClient;
+  /** OPTIONAL collaborator overrides for the workspace_retention reap loop's per-id releaseWorkspace
+   *  calls (integration tests inject a tmpdir `workspaceRoot` + optionally their disposable db).
+   *  Omitted in prod — the release activity self-resolves env (`CODEMASTER_PG_CORE_DSN` /
+   *  `CODEMASTER_WORKSPACE_ROOT`), exactly as under its Temporal `releaseWorkspace` registration;
+   *  the runner's clock threads in as the default time seam either way. */
+  readonly releaseWorkspaceDeps?: ReleaseWorkspaceDeps;
 };
 
 /**
@@ -231,6 +254,62 @@ export function registerCronHandlers(registry: HandlerRegistry, deps: CronHandle
       `run_id_retention swept: prs_closed=${prCloser.closed} prs_skipped=${prCloser.skipped} ` +
         `runs_retired=${runs.retired} events_deleted=${events.deleted} ` +
         `events_batches=${events.batches} job_id=${handlerDeps.job.job_id}`,
+    );
+  });
+
+  // W3e.1: workspace_retention — the every-5-min MULTI-STEP janitor chain the Temporal
+  // workspaceRetentionWorkflow body composes (workspace_retention.workflow.ts): orphan-sweep → reap
+  // (per-id release loop) → retention-purge, IN ORDER. This re-implements the workflow BODY (the
+  // orchestration) as a handler; the three sweep activities + the release activity are REUSED, not
+  // rewritten. The per-id reap loop preserves the workflow's FAIL-OPEN invariant EXACTLY: each
+  // releaseWorkspace call runs in its OWN try/catch, so ONE bad release (security violation,
+  // transient rm/DB error, StateDrift) logs + leaves THAT lease in FAILED_CLEANUP for the next
+  // sweep's cleanup-backoff window WITHOUT poisoning the rest of the sweep or the job —
+  // releaseWorkspace is idempotent + the UNIVERSAL cleanup mechanism (spec §10.2); this handler does
+  // NOT duplicate cleanup logic. A throw from any of the three SWEEP activities still propagates and
+  // fails the attempt (markFailed: backoff re-enqueue, then dead at exhaustion) — the platform
+  // analogue of the workflow surfacing a sweep-activity failure after its RetryPolicy exhausts.
+  registry.register("workspace_retention", async (payload, _signal, handlerDeps) => {
+    WorkspaceRetentionCronInputV1.parse(payload);
+    const dsnPart = deps.dsn !== undefined ? { dsn: deps.dsn } : {};
+    // Injected overrides win; the runner's clock is the default time seam (the Temporal registration
+    // self-defaults WallClock inside the activity — the runner's prod clock IS a WallClock).
+    const releaseDeps: ReleaseWorkspaceDeps = {
+      clock: handlerDeps.clock,
+      ...(deps.releaseWorkspaceDeps ?? {}),
+    };
+
+    // Step 1 — orphan sweep: ALLOCATED leases whose worker heartbeat is dead → ORPHANED.
+    const orphan = await runWorkspaceOrphanSweepActivity({ ...dsnPart, clock: handlerDeps.clock });
+
+    // Step 2 — reap: the activity returns the SORTED release-retry-eligible workspace_ids (NO side
+    // effects); iterate + release each, fail-open PER ID (1:1 with the workflow body's per-id loop,
+    // which gave each release its own RetryPolicy so one bad reap doesn't poison the whole sweep).
+    const reap = await runWorkspaceReapActivity({ ...dsnPart, clock: handlerDeps.clock });
+    let reaped = 0;
+    for (const workspaceId of reap.workspace_ids) {
+      try {
+        await releaseWorkspace({ schema_version: 1, workspace_id: workspaceId }, releaseDeps);
+        reaped += 1;
+      } catch (e) {
+        // The lease ended in FAILED_CLEANUP and the next sweep re-picks it up within the
+        // cleanup-backoff window. Log + continue — 1:1 with the workflow's log.warn + continue.
+        console.warn(
+          `workspace_retention: releaseWorkspace failed for ${workspaceId}; lease left in ` +
+            `FAILED_CLEANUP for next sweep: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        continue;
+      }
+    }
+
+    // Step 3 — retention purge: hard-delete RELEASED rows past the 7d retention window.
+    const purge = await runWorkspaceReleasedRetentionActivity({ ...dsnPart, clock: handlerDeps.clock });
+
+    // The workflow body's { orphaned, reaped, retention_deleted } result counters, as the log tally
+    // (the platform persists job OUTCOME, not results — same posture as every cron handler above).
+    console.info(
+      `workspace_retention swept: orphaned=${orphan.orphaned_count} reaped=${reaped} ` +
+        `retention_deleted=${purge.deleted_count} job_id=${handlerDeps.job.job_id}`,
     );
   });
 }

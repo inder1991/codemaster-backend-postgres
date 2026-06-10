@@ -95,6 +95,18 @@ export const CRON_SCHEDULES: ReadonlyArray<CronScheduleSeed> = [
     cadence_spec: "0 3 * * *", // daily 03:00 UTC — overlap=SKIP falls out of dedup_key, 1:1 Temporal
     input: { prTtlDays: 7, runTtlDays: 30, eventTtlDays: 90 },
   },
+  // W3e.1: the workspace-retention janitor — the FIRST MULTI-STEP workflow body migrated
+  // (orphan-sweep → per-id reap/release loop → retention-purge; handlers/cron_handlers.ts carries the
+  // fail-open composition). schedule_id + cadence byte-identical with the Temporal Schedule
+  // (workspace_retention.workflow.ts: WORKSPACE_RETENTION_SCHEDULE_ID = "codemaster-workspace-retention",
+  // ScheduleIntervalSpec(every=5min), overlap=SKIP — which falls out of dedup_key = schedule_id here).
+  {
+    schedule_id: "codemaster-workspace-retention",
+    job_type: "workspace_retention",
+    cadence_kind: "interval",
+    cadence_spec: "300", // every 5 minutes — parity with the Temporal every-5-min interval Schedule
+    input: {},
+  },
 ];
 
 /**

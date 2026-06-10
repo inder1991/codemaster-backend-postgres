@@ -129,11 +129,13 @@ export function buildBackgroundRunner(deps: BackgroundRunnerDeps): BackgroundRun
   // A claimed job with no handler dead-letters (`no handler for <job_type>`), never retry-loops, so
   // an accidentally-early enqueue surfaces once instead of burning attempts.
   const registry = new HandlerRegistry();
-  // W3b.1 + W3b.2 + W3d.1: the 2 interval crons (mutex_janitor / review_run_reaper) + the 3 daily
-  // crons (mark_stale_chunks / partition_maintenance / run_id_retention). No dsn / GitHub-client
-  // override here — the activities self-resolve their env DSNs (CODEMASTER_PG_CORE_DSN; partition
-  // maintenance prefers CODEMASTER_PG_MAINT_DSN), exactly as under their Temporal dispatch, and the
-  // retention PR-closer builds its deferred-Vault GitHub client on first use.
+  // W3b.1 + W3b.2 + W3d.1 + W3e.1: the 3 interval crons (mutex_janitor / review_run_reaper /
+  // workspace_retention — the multi-step per-id fail-open janitor chain) + the 3 daily crons
+  // (mark_stale_chunks / partition_maintenance / run_id_retention). No dsn / GitHub-client /
+  // release-deps override here — the activities self-resolve their env config (CODEMASTER_PG_CORE_DSN;
+  // partition maintenance prefers CODEMASTER_PG_MAINT_DSN; the workspace release activity reads
+  // CODEMASTER_WORKSPACE_ROOT), exactly as under their Temporal dispatch, and the retention PR-closer
+  // builds its deferred-Vault GitHub client on first use.
   registerCronHandlers(registry, {});
   // W3d.1: the 3 reconcile/repair EVENT-DRIVEN job_types (reconcile_installation /
   // reconcile_repositories / repair_installation_repositories). The next wave's outbox
