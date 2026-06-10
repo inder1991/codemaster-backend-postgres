@@ -81,6 +81,20 @@ export const CRON_SCHEDULES: ReadonlyArray<CronScheduleSeed> = [
     cadence_spec: "0 2 * * *", // daily 02:00 UTC — byte-identical with the Temporal "0 2 * * *" schedule
     input: {},
   },
+  // W3d.1: the run_id retention daily cron the simple-cron wave missed. schedule_id, cadence AND
+  // the pinned TTL input are byte-identical with the Temporal Schedule
+  // (run_id_retention.workflow.ts: RUN_ID_RETENTION_SCHEDULE_ID = "codemaster-run-id-retention",
+  // RUN_ID_RETENTION_CRON = "0 3 * * *", RUN_ID_RETENTION_DEFAULT_INPUT = { 7, 30, 90 } — the
+  // Python `args=[7, 30, 90]`). The literal is duplicated here rather than imported because the
+  // workflow module statically imports `@temporalio/workflow` — a runtime edge the Temporal-free
+  // runner process must not grow; the cron_handlers_daily literal test pins the two in lockstep.
+  {
+    schedule_id: "codemaster-run-id-retention",
+    job_type: "run_id_retention",
+    cadence_kind: "cron",
+    cadence_spec: "0 3 * * *", // daily 03:00 UTC — overlap=SKIP falls out of dedup_key, 1:1 Temporal
+    input: { prTtlDays: 7, runTtlDays: 30, eventTtlDays: 90 },
+  },
 ];
 
 /**

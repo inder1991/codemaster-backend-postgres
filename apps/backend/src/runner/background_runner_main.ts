@@ -18,6 +18,7 @@ import {
 import { ensureScheduledJobs } from "./cron_schedules.js";
 import { HandlerRegistry } from "./handler_registry.js";
 import { registerCronHandlers } from "./handlers/cron_handlers.js";
+import { registerEventHandlers } from "./handlers/event_handlers.js";
 import { OutboxDispatcherLoop } from "./outbox_dispatcher_loop.js";
 import { SchedulerLoop, pollAndEnqueue } from "./scheduler.js";
 
@@ -120,11 +121,17 @@ export function buildBackgroundRunner(deps: BackgroundRunnerDeps): BackgroundRun
   // A claimed job with no handler dead-letters (`no handler for <job_type>`), never retry-loops, so
   // an accidentally-early enqueue surfaces once instead of burning attempts.
   const registry = new HandlerRegistry();
-  // W3b.1 + W3b.2: the 2 interval crons (mutex_janitor / review_run_reaper) + the 2 daily crons
-  // (mark_stale_chunks / partition_maintenance). No dsn override here — the activities self-resolve
-  // their env DSNs (CODEMASTER_PG_CORE_DSN; partition maintenance prefers CODEMASTER_PG_MAINT_DSN),
-  // exactly as under their Temporal dispatch.
+  // W3b.1 + W3b.2 + W3d.1: the 2 interval crons (mutex_janitor / review_run_reaper) + the 3 daily
+  // crons (mark_stale_chunks / partition_maintenance / run_id_retention). No dsn / GitHub-client
+  // override here — the activities self-resolve their env DSNs (CODEMASTER_PG_CORE_DSN; partition
+  // maintenance prefers CODEMASTER_PG_MAINT_DSN), exactly as under their Temporal dispatch, and the
+  // retention PR-closer builds its deferred-Vault GitHub client on first use.
   registerCronHandlers(registry, {});
+  // W3d.1: the 3 reconcile/repair EVENT-DRIVEN job_types (reconcile_installation /
+  // reconcile_repositories / repair_installation_repositories). The next wave's outbox
+  // temporal_workflow_start cutover routes the producers' workflow_type strings onto these via
+  // workflow_job_map.ts.
+  registerEventHandlers(registry, {});
 
   const runnerArgs = {
     repo,
