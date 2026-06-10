@@ -1,7 +1,7 @@
 // Phase 3a W2a: BackgroundJobsRepo — the GENERIC job-platform repo over core.background_jobs
 // (migration 0039), lifting the PROVEN ReviewJobsRepo primitives 1:1 generalized over job_type:
 // canonicalJson+sha256 payload hashing, FOR UPDATE SKIP LOCKED claim with lease/attempt_token
-// fencing, heartbeat, fenced settle (done/failed/dead), backoff re-enqueue, stuck-job reap, and the
+// fencing, heartbeat, fenced settle (markDone/markFailed/terminalSettle), backoff re-enqueue, stuck-job reap, and the
 // dedup_key overlap=SKIP guard (same job_id returned while an ACTIVE row holds the key).
 //
 // Runs ONLY against an explicitly-set CODEMASTER_PG_CORE_DSN (the disposable :5434 DB) — never a
@@ -10,6 +10,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import { Pool } from "pg";
 import { createHash, randomUUID } from "node:crypto"; // test/ is OUT of the clock/random gate's scope
+import { ZodError } from "zod";
 import { describeDb, INTEGRATION_DSN } from "../_db.js";
 import { BackgroundJobsRepo, PayloadIntegrityError } from "#backend/runner/background_jobs_repo.js";
 
@@ -94,6 +95,79 @@ describeDb("BackgroundJobsRepo — enqueue → claim → markDone happy path", (
     const iid = randomUUID();
     const id = await repo.enqueue({ jobType: jobType(), payload: { x: 1 }, installationId: iid });
     expect((await repo.getById(id))!.installation_id).toBe(iid);
+  });
+});
+
+describeDb("BackgroundJobsRepo.enqueue — strict-JSON payload validation (W4c.1 #9)", () => {
+  it("REJECTS payloads carrying non-JSON values BEFORE the INSERT — no row is ever written", async () => {
+    const repo = new BackgroundJobsRepo(db);
+    const jt = jobType();
+    // Each of these used to slip through z.record(z.unknown()) and be silently dropped/transformed
+    // (or crash mid-INSERT, for bigint) by JSON.stringify — the stored bytes diverged from what the
+    // caller handed us, while payload_sha256 vouched for the DIVERGED bytes.
+    const nonJsonPayloads: Array<Record<string, unknown>> = [
+      { a: undefined }, // JSON.stringify silently DROPS the key
+      { f: () => 1 }, // silently dropped too
+      { big: 123n }, // JSON.stringify THROWS mid-canonicalization
+      { n: Number.NaN }, // silently becomes null
+      { inf: Number.POSITIVE_INFINITY }, // silently becomes null
+      { when: new Date("2026-06-10T00:00:00Z") }, // silently TRANSFORMS to an ISO string
+      { nested: { deep: [1, { bad: undefined }] } }, // non-JSON hiding at depth — recursion must find it
+    ];
+    for (const payload of nonJsonPayloads) {
+      await expect(repo.enqueue({ jobType: jt, payload })).rejects.toThrow(ZodError);
+    }
+    // The throw happened BEFORE any INSERT: zero rows landed for this job_type.
+    const n = await sql<{ n: number }>`SELECT count(*)::int AS n FROM core.background_jobs
+      WHERE job_type = ${jt}`.execute(db);
+    expect(n.rows[0]!.n).toBe(0);
+    // Top-level non-objects are refused too (the column contract is a plain JSON OBJECT).
+    await expect(repo.enqueue({ jobType: jt, payload: [1, 2, 3] })).rejects.toThrow(ZodError);
+    await expect(repo.enqueue({ jobType: jt, payload: "a string" })).rejects.toThrow(ZodError);
+    await expect(repo.enqueue({ jobType: jt, payload: null })).rejects.toThrow(ZodError);
+  });
+
+  it("ACCEPTS a valid deeply-nested all-JSON payload and round-trips it through verifyPayload", async () => {
+    const repo = new BackgroundJobsRepo(db);
+    const payload = {
+      s: "string", i: 42, f: 1.5, neg: -0.25, t: true, off: false, nul: null,
+      arr: [1, "two", null, [true, false], { deep: "ok" }],
+      obj: { nested: { further: [{ leaf: 0 }, "🚀 unicode"] } },
+    };
+    const id = await repo.enqueue({ jobType: jobType(), payload });
+    const job = await repo.getById(id);
+    expect(job!.state).toBe("ready");
+    expect(repo.verifyPayload(job!)).toEqual(payload);
+  });
+});
+
+describeDb("BackgroundJobsRepo.claim — deterministic ordering (W4c.1 #8)", () => {
+  it("priority DESC dominates; equal (priority, run_after, created_at) ties break on job_id ASC", async () => {
+    const repo = new BackgroundJobsRepo(db);
+    const jt = jobType();
+    // Four equal-priority jobs + one HIGH-priority straggler enqueued LAST (latest run_after AND
+    // latest created_at — so only `priority DESC` can put it first).
+    const low: Array<string> = [];
+    for (let i = 0; i < 4; i++) low.push(await repo.enqueue({ jobType: jt, payload: { i } }));
+    const high = await repo.enqueue({ jobType: jt, payload: { which: "high" }, priority: 5 });
+    // Equalize EVERY pre-job_id sort key on the low-priority rows so ONLY the job_id tie-break can
+    // order them (insertion/heap order is deliberately made useless: with 4 random UUIDs the chance
+    // heap order coincides with uuid order is 1/24).
+    // tenant:exempt reason=test-fixture-equalizes-sort-keys follow_up=FOLLOW-UP-gf3-error-mode
+    await sql`UPDATE core.background_jobs
+        SET run_after = now() - interval '1 minute', created_at = timestamptz '2026-06-01T00:00:00Z'
+      WHERE job_id IN (${sql.join(low)})`.execute(db);
+
+    const claimed: Array<string> = [];
+    for (let k = 0; k < 5; k++) {
+      const c = await repo.claim({ owner: "w1", leaseMs: 60_000, maxRuntimeMs: 120_000 });
+      claimed.push(c!.job_id);
+    }
+    // Canonical lowercase-hex UUID strings sort identically to PG's bytewise uuid ordering, so the
+    // expected claim order is: the high-priority job, then the low jobs in job_id ASC order.
+    expect(claimed).toEqual([high, ...[...low].sort()]);
+    // All five are now leased (un-expired) — the pool is drained deterministically to empty.
+    expect(await repo.claim({ owner: "w1", leaseMs: 60_000, maxRuntimeMs: 120_000 })).toBeNull();
   });
 });
 

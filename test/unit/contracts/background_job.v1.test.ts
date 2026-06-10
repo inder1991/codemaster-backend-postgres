@@ -1,6 +1,8 @@
 // Phase 3a W1: BackgroundJobV1 — the row contract for core.background_jobs (migration 0039), the
-// GENERIC job platform generalizing core.review_jobs. Key vocabulary divergence from ReviewJobV1:
-//   - 'failed' IS a persisted resting state here (review_jobs maps it transiently to ready|dead);
+// GENERIC job platform generalizing core.review_jobs. Key vocabulary divergences from ReviewJobV1:
+//   - 'failed' does NOT exist (W4c.1 #7 / migration 0042): markFailed settles ready|dead exactly
+//     like review_jobs, so the once-reserved persisted 'failed' state was unreachable vocabulary —
+//     removed so operators never monitor a state that structurally cannot occur;
 //   - 'cancelled' does NOT exist in the generic vocabulary;
 //   - installation_id is NULLABLE (most job types are not tenant-scoped);
 //   - payload_sha256 is contract-validated as 64 LOWERCASE hex (the sha256hex shape, mirroring the
@@ -70,9 +72,9 @@ describe("BackgroundJobV1", () => {
     expect(parsed.dedup_key).toBe("mark_stale_chunks:bucket-42");
   });
 
-  it("'failed' is a PERSISTED state in the generic vocabulary; 'cancelled' is NOT", () => {
-    expect(BACKGROUND_JOB_STATES).toEqual(["ready", "leased", "done", "failed", "dead"]);
-    expect(BackgroundJobV1.parse({ ...validRow(), state: "failed" }).state).toBe("failed");
+  it("'failed' was REMOVED from the vocabulary (W4c.1 #7 — nothing ever wrote it); 'cancelled' never existed", () => {
+    expect(BACKGROUND_JOB_STATES).toEqual(["ready", "leased", "done", "dead"]);
+    expect(() => BackgroundJobV1.parse({ ...validRow(), state: "failed" })).toThrow();
     expect(() => BackgroundJobV1.parse({ ...validRow(), state: "cancelled" })).toThrow();
   });
 

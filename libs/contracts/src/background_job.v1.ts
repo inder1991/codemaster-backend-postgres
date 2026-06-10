@@ -4,16 +4,19 @@ import { z } from "zod";
 // generalizing the proven core.review_jobs runner (review_jobs.v1.ts is the template; ADR-0077).
 //
 // Vocabulary divergences from ReviewJobV1 (deliberate, per the 2026-06-10 full-removal program):
-//   - 'failed' IS a persisted resting state (review_jobs maps it transiently to ready|dead inside
-//     markFailed; the generic platform persists it so an operator can distinguish "retry scheduled"
-//     from "attempts exhausted" without reading the transition log).
+//   - 'failed' does NOT exist (removed by migration 0042 — W4c.1 review #7). 0039 reserved it as a
+//     persisted resting state, but the shipped repo settles a failed attempt exactly like
+//     review_jobs: 'ready' (retry scheduled, last_error persisted) or 'dead' (attempts exhausted,
+//     dead_reason + finished_at stamped) — nothing ever wrote 'failed', and operators distinguish
+//     the two cases via the 0041 dead-letter columns. Keeping unreachable vocabulary invites
+//     monitoring a state that structurally cannot occur.
 //   - 'cancelled' does NOT exist (supersede semantics are review-pipeline-specific).
 //   - installation_id is NULLABLE: some job types are tenant-scoped, most (crons, outbox drain,
 //     retention) are platform-scoped. NULL = platform-scoped row.
 //   - dedup_key is the scheduler's overlap=SKIP guard: a partial UNIQUE index
 //     (WHERE dedup_key IS NOT NULL AND state IN ('ready','leased')) makes a second ACTIVE row with
 //     the same key an insert-time conflict.
-export const BACKGROUND_JOB_STATES = ["ready", "leased", "done", "failed", "dead"] as const;
+export const BACKGROUND_JOB_STATES = ["ready", "leased", "done", "dead"] as const;
 export const BackgroundJobState = z.enum(BACKGROUND_JOB_STATES);
 export type BackgroundJobState = z.infer<typeof BackgroundJobState>;
 

@@ -10,9 +10,11 @@ import { BackgroundJobV1 } from "#contracts/background_job.v1.js";
 // with lease/attempt_token fencing, heartbeat, fenced settle, backoff re-enqueue, stuck-job reap.
 //
 // Deliberate divergences from ReviewJobsRepo (mirroring the 0039 schema's divergences from 0036):
-//   * payload is an OPAQUE JSON object (z.record) — the platform has no inner contract; each
-//     job_type's HANDLER owns parsing it (the W2b dispatch seam). verifyPayload still proves the
-//     stored bytes are intact (hash check) before any handler runs.
+//   * payload is an OPAQUE JSON object — the platform has no inner contract; each job_type's
+//     HANDLER owns parsing it (the W2b dispatch seam). Opaque is NOT unchecked: enqueue validates
+//     it as a strict recursive JSON-value tree (W4c.1 #9 — non-JSON values are rejected BEFORE the
+//     INSERT instead of being silently dropped/transformed by JSON.stringify), and verifyPayload
+//     proves the stored bytes are intact (hash check) before any handler runs.
 //   * last_error / dead_reason / finished_at (migration 0041, W2a.1 review_jobs parity): wired
 //     1:1 with ReviewJobsRepo — markDone stamps finished_at; markFailed persists last_error on
 //     EVERY failure and dead_reason+finished_at on the terminal one; terminalSettle/reapStuckRuns
@@ -26,7 +28,7 @@ import { BackgroundJobV1 } from "#contracts/background_job.v1.js";
 
 export type EnqueueArgs = {
   jobType: string;
-  payload: unknown; // validated inside enqueue: MUST be a plain JSON object (BackgroundJobV1.payload is z.record)
+  payload: unknown; // validated inside enqueue: MUST be a plain object of STRICT JSON values (no undefined/function/bigint/NaN/Infinity/Date — W4c.1 #9)
   dedupKey?: string | null;
   installationId?: string | null; // NULL = platform-scoped job (crons, retention, outbox drain)
   priority?: number;
@@ -74,8 +76,22 @@ function sha256hex(s: string): string {
   return createHash("sha256").update(Buffer.from(s, "utf-8")).digest("hex");
 }
 
-/** The payload column's shape (BackgroundJobV1.payload): a plain JSON object, validated BEFORE the INSERT. */
-const PayloadObject = z.record(z.unknown());
+// The payload column's shape (BackgroundJobV1.payload): a plain JSON object validated BEFORE the
+// INSERT — as a STRICT recursive JSON-value tree (W4c.1 review #9). The previous z.record(z.unknown())
+// let non-JSON values (undefined, functions, NaN/±Infinity, bigint, Date, symbol) reach
+// JSON.stringify, which silently drops or transforms them (or throws mid-canonicalization, for
+// bigint) — so the stored bytes diverged from what the caller handed us while payload_sha256
+// vouched for the DIVERGED bytes. Rejecting non-JSON at the boundary keeps "stored payload ≡ what
+// the producer enqueued" a real invariant. z.number().finite() rejects NaN/±Infinity; undefined /
+// function / bigint / symbol / Date fall outside the union entirely (Zod types Date as its own
+// parsed type, never a record), so each is a hard parse error.
+type JsonPrimitive = string | number | boolean | null;
+type JsonValue = JsonPrimitive | Array<JsonValue> | { [key: string]: JsonValue };
+const JsonPrimitiveSchema = z.union([z.string(), z.number().finite(), z.boolean(), z.null()]);
+const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
+  z.union([JsonPrimitiveSchema, z.array(JsonValueSchema), z.record(JsonValueSchema)]),
+);
+const PayloadObject = z.record(JsonValueSchema);
 
 export class BackgroundJobsRepo {
   /** @param db Kysely over the (shared, ADR-0062) pool — drives every fenced single-statement op. */
@@ -88,7 +104,7 @@ export class BackgroundJobsRepo {
    * dedupKey (the scheduler's overlap=SKIP guard): the INSERT targets the PARTIAL unique index
    * `uq_background_jobs_dedup_active` with `ON CONFLICT ... DO NOTHING`; when no row was inserted
    * (an ACTIVE 'ready'|'leased' row already holds the key) the EXISTING job_id is re-SELECTed and
-   * returned — both enqueues observe the SAME job. A terminal (done|failed|dead) row frees the key.
+   * returned — both enqueues observe the SAME job. A terminal (done|dead) row frees the key.
    * The conflict→settle→re-SELECT race (the active holder settles between our two statements) is
    * closed with a bounded retry: the next iteration's INSERT then succeeds against the freed key.
    */
@@ -158,7 +174,12 @@ export class BackgroundJobsRepo {
           SELECT job_id FROM core.background_jobs
             WHERE (state = 'ready'  AND run_after <= now())
                OR (state = 'leased' AND leased_until < now() AND attempts < max_attempts)  -- maxed crashes are NOT reclaimed
-            ORDER BY priority DESC, run_after FOR UPDATE SKIP LOCKED LIMIT 1)
+            -- full deterministic order (W4c.1 review #8): created_at then job_id break (priority,
+            -- run_after) ties, so concurrent claimers drain equal-priority backlogs in one stable
+            -- order and EXPLAIN/plan output is reproducible. Key order matches the partial index
+            -- ix_background_jobs_ready_claim (migration 0042); ix_background_jobs_leased_expiry
+            -- serves the reclaim arm.
+            ORDER BY priority DESC, run_after, created_at, job_id FOR UPDATE SKIP LOCKED LIMIT 1)
       RETURNING *`.execute(this.db);
     return r.rows[0] ? BackgroundJobV1.parse(r.rows[0]) : null;
   }

@@ -5,7 +5,8 @@
 //   (a) a valid platform-scoped insert succeeds, the DB defaults land, and the row round-trips
 //       through BackgroundJobV1 (contract ↔ schema drift guard);
 //   (b) a payload_sha256 that is not 64 lowercase hex is REJECTED (ck_background_jobs_payload_sha256_hex);
-//   (c) a state outside the 5-value vocabulary is REJECTED (the state CHECK);
+//   (c) a state outside the 4-value vocabulary is REJECTED (the state CHECK; 'failed' was removed
+//       by migration 0042 — W4c.1 #7 — because nothing ever wrote it: markFailed settles ready|dead);
 //   (d) the PARTIAL UNIQUE index on dedup_key blocks a 2nd ACTIVE ('ready') row with the same key
 //       (the scheduler's overlap=SKIP guard) — and STOPS blocking once the first row is terminal
 //       (state='done'), which is the "partial" half of the invariant.
@@ -90,11 +91,13 @@ describeDb("core.background_jobs schema (migration 0039)", () => {
       .rejects.toThrow(/ck_background_jobs_payload_sha256_hex|check constraint/i);
   });
 
-  it("(c) REJECTS a state outside the 5-value vocabulary ('cancelled' is review_jobs-only)", async () => {
+  it("(c) REJECTS a state outside the 4-value vocabulary ('failed' removed by 0042; 'cancelled' is review_jobs-only)", async () => {
     await expect(rawInsertJob({ state: "running" })).rejects.toThrow(/check constraint/i);
     await expect(rawInsertJob({ state: "cancelled" })).rejects.toThrow(/check constraint/i);
-    // 'failed' IS persisted in the generic vocabulary (divergence from review_jobs):
-    await expect(rawInsertJob({ state: "failed" })).resolves.toBeDefined();
+    // W4c.1 #7 (migration 0042): 'failed' is OUT of the vocabulary — markFailed only ever settles
+    // ready (retry scheduled) | dead (exhausted), so a persisted 'failed' row was unreachable; the
+    // CHECK now refuses it so operators can never be misled into monitoring it.
+    await expect(rawInsertJob({ state: "failed" })).rejects.toThrow(/check constraint/i);
   });
 
   it("(d) dedup_key partial-unique: a 2nd ACTIVE row with the same key is BLOCKED; a terminal first row unblocks it", async () => {
