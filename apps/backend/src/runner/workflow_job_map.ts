@@ -16,17 +16,22 @@
 //       RECONCILE_REPOSITORIES_WORKFLOW_TYPE)
 //   - "repairInstallationRepositories"
 //       ingest/_repair_dispatcher.ts (REPAIR_INSTALLATION_REPOSITORIES_WORKFLOW_TYPE)
+//   - "syncCodeOwners" / "refreshSemanticDocs"
+//       ingest/_push_emitters.ts (SYNC_CODE_OWNERS_WORKFLOW_TYPE /
+//       REFRESH_SEMANTIC_DOCS_WORKFLOW_TYPE)
 //
 // ## VALUES are registered job_types
 // Every value MUST have a matching registration (handlers/event_handlers.ts — and, as later Phase 3d
 // waves widen this map to the remaining workflow_types, whichever handler module carries them).
 //
-// Starts with the 3 reconcile/repair entries; later Phase 3d waves append as their workflow
-// migrations land.
+// Started with the 3 reconcile/repair entries (W3d.1); W3d.2 appended the 2 knowledge producers;
+// later Phase 3d waves append as their workflow migrations land.
 
 /** Temporal workflow_type → platform job_type. Readonly — the cutover reads, never mutates. */
 export const WORKFLOW_TYPE_TO_JOB_TYPE: Readonly<Record<string, string>> = {
   reconcileInstallation: "reconcile_installation",
   reconcileRepositories: "reconcile_repositories",
   repairInstallationRepositories: "repair_installation_repositories",
+  syncCodeOwners: "sync_code_owners",
+  refreshSemanticDocs: "refresh_semantic_docs",
 };

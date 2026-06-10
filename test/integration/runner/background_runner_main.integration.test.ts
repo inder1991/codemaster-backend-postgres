@@ -89,11 +89,13 @@ describeDb("background_runner_main — buildBackgroundRunner composition (Phase 
     expect(typeof handles.drainOutboxOnce).toBe("function");
     expect(handles.registry).toBeInstanceOf(HandlerRegistry);
     // W3b.1 + W3b.2: the 2 interval + 2 daily crons; W3d.1: the run_id_retention daily cron + the
-    // 3 reconcile EVENT-DRIVEN handlers. Later Phase 3d waves append here.
+    // 3 reconcile EVENT-DRIVEN handlers; W3d.2: the 2 knowledge-producer EVENT-DRIVEN handlers
+    // (sync_code_owners / refresh_semantic_docs). Later Phase 3d waves append here.
     expect([...handles.registry.registeredTypes()].sort()).toEqual([
       "mark_stale_chunks", "mutex_janitor", "partition_maintenance",
-      "reconcile_installation", "reconcile_repositories", "repair_installation_repositories",
-      "review_run_reaper", "run_id_retention",
+      "reconcile_installation", "reconcile_repositories", "refresh_semantic_docs",
+      "repair_installation_repositories", "review_run_reaper", "run_id_retention",
+      "sync_code_owners",
     ]);
   });
 

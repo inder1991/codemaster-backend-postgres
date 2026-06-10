@@ -320,16 +320,19 @@ describeDb("event_handlers — reconcile×3 on the background-jobs platform (Pha
 });
 
 // ─── WORKFLOW_TYPE_TO_JOB_TYPE (pure — no DB) ──────────────────────────────────────────────────────
-describe("WORKFLOW_TYPE_TO_JOB_TYPE (Phase 3d W3d.1 registry start)", () => {
-  it("maps the 3 reconcile Temporal workflow_type strings to the registered job_types, byte-exact", () => {
+describe("WORKFLOW_TYPE_TO_JOB_TYPE (Phase 3d W3d.1 registry start + W3d.2 widening)", () => {
+  it("maps the 5 event-driven Temporal workflow_type strings to the registered job_types, byte-exact", () => {
     // Keys are the EXACT workflow_type strings the producers stamp on outbox rows:
-    // github_webhook_persistence.ts (reconcileInstallation / reconcileRepositories) and
-    // _repair_dispatcher.ts (repairInstallationRepositories). The next wave's outbox
+    // github_webhook_persistence.ts (reconcileInstallation / reconcileRepositories),
+    // _repair_dispatcher.ts (repairInstallationRepositories), and _push_emitters.ts
+    // (syncCodeOwners / refreshSemanticDocs — W3d.2). The next wave's outbox
     // temporal_workflow_start cutover reads this map — a drifted key strands the outbox row.
     expect(WORKFLOW_TYPE_TO_JOB_TYPE).toEqual({
       reconcileInstallation: "reconcile_installation",
       reconcileRepositories: "reconcile_repositories",
       repairInstallationRepositories: "repair_installation_repositories",
+      syncCodeOwners: "sync_code_owners",
+      refreshSemanticDocs: "refresh_semantic_docs",
     });
   });
 

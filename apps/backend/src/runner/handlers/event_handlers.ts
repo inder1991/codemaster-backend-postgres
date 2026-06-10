@@ -1,4 +1,8 @@
 import {
+  type CacheGitCloner,
+  cloneRepositoryActivity,
+} from "#backend/activities/clone_repository.activity.js";
+import {
   type GitHubListReposPort,
   doHydrateInstallationRepositories,
   hydrateDbPortFromKysely,
@@ -6,6 +10,17 @@ import {
 } from "#backend/activities/hydrate_installation_repositories.activity.js";
 import { reconcileInstallation } from "#backend/activities/reconcile_installation.activity.js";
 import { reconcileRepositories } from "#backend/activities/reconcile_repositories.activity.js";
+import { RefreshSemanticDocsActivity } from "#backend/activities/refresh_semantic_docs.activity.js";
+import {
+  type CodeOwnersFilePort,
+  type IsEnabled,
+  SyncCodeOwnersActivity,
+} from "#backend/activities/sync_code_owners.activity.js";
+import type { EmbeddingsPort } from "#backend/adapters/embeddings_port.js";
+import { PostgresCodeOwnersRepo } from "#backend/domain/repos/code_owners_repo.js";
+import { PostgresKnowledgeChunkRepo } from "#backend/domain/repos/knowledge_chunks_repo.js";
+import type { GitHubApiClient, TokenProvider } from "#backend/integrations/github/api_client.js";
+import type { GitHubAppTokenProvider } from "#backend/integrations/github/token_provider.js";
 
 import { WallClock } from "#platform/clock.js";
 import { tenantKysely } from "#platform/db/database.js";
@@ -14,20 +29,23 @@ import {
   GitHubInstallationPayloadV1,
   GitHubInstallationRepositoriesPayloadV1,
 } from "#contracts/github_installation_payload.v1.js";
+import { RefreshSemanticDocsInputV1 } from "#contracts/refresh_semantic_docs.v1.js";
 import { RepairInstallationRepositoriesPayloadV1 } from "#contracts/repair_installation_repositories.v1.js";
+import { SyncCodeOwnersPayloadV1 } from "#contracts/sync_code_owners_payload.v1.js";
 
 import type { HandlerRegistry } from "../handler_registry.js";
 
-// Phase 3d W3d.1: job_type → handler ADAPTERS for the 3 reconcile/repair EVENT-DRIVEN workflows
-// migrated off Temporal — the auto-registration journey's thin proxy workflows
-// (reconcile.workflow.ts: reconcileInstallation / reconcileRepositories /
-// repairInstallationRepositories, each a pure pass-through over ONE activity). Each adapter parses
-// the verified job payload with the ACTIVITY'S OWN input contract and dispatches the EXISTING,
-// tested activity body — the activity logic is NOT rewritten; the Temporal workflows stay in place
-// until Phase 4 deletes them. The producers (webhook emitters + the repair dispatcher) keep stamping
-// outbox rows with the Temporal workflow_type strings; the NEXT wave's outbox
-// temporal_workflow_start cutover translates those through ../workflow_job_map.ts into these
-// job_types.
+// Phase 3d W3d.1 + W3d.2: job_type → handler ADAPTERS for the 5 EVENT-DRIVEN workflows migrated off
+// Temporal — the 3 auto-registration thin proxies (reconcile.workflow.ts: reconcileInstallation /
+// reconcileRepositories / repairInstallationRepositories, each a pure pass-through over ONE
+// activity) plus the 2 knowledge producers (sync_code_owners.workflow.ts: a single-activity
+// pass-through; refresh_semantic_docs.workflow.ts: the 2-step clone → refresh sequence reproduced
+// in-process). Each adapter parses the verified job payload with the ACTIVITY'S OWN input contract
+// and dispatches the EXISTING, tested activity body — the activity logic is NOT rewritten; the
+// Temporal workflows stay in place until Phase 4 deletes them. The producers (webhook emitters +
+// the repair dispatcher) keep stamping outbox rows with the Temporal workflow_type strings; the
+// NEXT wave's outbox temporal_workflow_start cutover translates those through
+// ../workflow_job_map.ts into these job_types.
 //
 // ## Input contracts (handler-owned parsing — the W2b opaque-payload posture)
 // The Temporal workflows pass the bare webhook payload dict through WITHOUT validating (the activity
@@ -50,23 +68,65 @@ import type { HandlerRegistry } from "../handler_registry.js";
 // by nobody but observability on the Temporal side). Each dispatch's tally is logged.
 //
 // ## Cancellation (`signal`) posture
-// All three activities are single-batch idempotent upserts (INSERT … ON CONFLICT DO UPDATE) with no
-// internal await seam worth aborting between — the adapters deliberately do not thread `signal`,
-// matching the cron adapters' posture. A lease-lost duplicate dispatch re-upserting is harmless.
+// The 3 reconcile/repair activities are single-batch idempotent upserts (INSERT … ON CONFLICT DO
+// UPDATE) with no internal await seam worth aborting between — the adapters deliberately do not
+// thread `signal`, matching the cron adapters' posture. A lease-lost duplicate dispatch
+// re-upserting is harmless. The 2 knowledge producers carry NO AbortSignal seam either
+// (CacheGitCloner.clone enforces its OWN subprocess timeout — DEFAULT_TIMEOUT_SECONDS=300 — and
+// the refresh body is bounded by the runner's hard runtime ceiling); both are idempotent by
+// construction (the clone wipes a stale target before re-cloning; the refresh upsert is
+// content-addressed UUIDv5 + natural-key ON CONFLICT), so a lease-lost duplicate re-run converges.
+//
+// ## W3d.2 retry semantics vs the Temporal per-step curves
+// The Temporal sync_code_owners proxy retried 5× (non-retryable GitHubAppUnauthorized /
+// GitHubNotFoundError); the refresh proxy retried clone 3× (same non-retryables) and refresh 3×
+// (non-retryable WrongVectorDimensionError). The platform has ONE retry curve (module doc above):
+// a permanently-bad fault burns its bounded attempts and dead-letters with the error persisted —
+// the same accepted trade as the reconcile adapters' ZodError note. Embed-service degradation is
+// NOT a throw: the refresh activity returns `retrieval_degraded=true` and the job settles done
+// with the degradation logged (1:1 with the Temporal workflow surfacing the result verbatim).
+//
+// ## W3d.2 workspace lifecycle (1:1 with the Temporal workflow body)
+// Neither the Temporal refresh workflow nor this adapter tears the clone-cache dir down after the
+// refresh: performClone WIPES a stale `<cacheRoot>/<iid>/<rid>` target at the NEXT clone for the
+// same repo, and the Wave-2 workspace retention sweeps own leftover reaping.
 
 /**
  * Composition-root collaborators the event adapters close over (the buildActivities idiom).
  */
 export type EventHandlersDeps = {
-  /** OPTIONAL DSN override for the repair handler's hydrate DB port (integration tests inject the
-   *  disposable :5434 DSN explicitly). Omitted in prod — resolves `CODEMASTER_PG_CORE_DSN`, exactly
-   *  as the registered Temporal activity does. (The two reconcile activities have NO dsn seam — they
+  /** OPTIONAL DSN override for the handlers' DB ports (integration tests inject the disposable
+   *  :5434 DSN explicitly). Omitted in prod — resolves `CODEMASTER_PG_CORE_DSN`, exactly as the
+   *  registered Temporal activities do. (The two reconcile activities have NO dsn seam — they
    *  self-resolve the env DSN internally, 1:1 with their Temporal dispatch.) */
   readonly dsn?: string;
   /** OPTIONAL GitHub list-repos port for the repair handler (integration tests inject a fake).
    *  Omitted in prod — the handler builds the deferred-Vault lazy client on first use, the same
    *  client wiring the registered `hydrate_installation_repositories_activity` constructs. */
   readonly hydrateGithub?: GitHubListReposPort;
+  /** OPTIONAL CODEOWNERS file port for the sync_code_owners handler (integration tests inject a
+   *  stub). Omitted in prod — the handler builds the deferred-Vault lazy 3-path getContents port
+   *  ({@link makeLazyCodeOwnersFilePort}), 1:1 with build_activities' `makeCodeOwnersFilePort`. */
+  readonly codeOwnersGithub?: CodeOwnersFilePort;
+  /** OPTIONAL `code_owners_v1` flag check for the sync_code_owners handler. Omitted in prod —
+   *  DEFAULT-OFF (`async () => false`), byte-1:1 with the Temporal composition root's wiring
+   *  (build_activities.ts; the `core.flags` reader is unported —
+   *  FOLLOW-UP-code-owners-v1-flag-reader). The webhook emit is UNCONDITIONAL; this is the gate. */
+  readonly codeOwnersIsEnabled?: IsEnabled;
+  /** OPTIONAL embeddings port for the refresh_semantic_docs handler (integration tests inject the
+   *  deterministic RecordingEmbeddingsClient). Omitted in prod — the handler resolves the SAME
+   *  env-selected platform embedder the Temporal worker constructs (resolveEmbeddingsConsumer,
+   *  ADR-0059), deferred to first dispatch + memoized so a runner without embedder env vars still
+   *  BOOTS (fail-loud surfaces on the first refresh job, persisted in last_error). */
+  readonly refreshEmbeddings?: EmbeddingsPort;
+  /** OPTIONAL git-driver seam for the refresh handler's Step-1 clone (integration tests inject a
+   *  recording stub). Omitted in prod — the activity's REAL default (defaultCacheCloner over
+   *  GitSubprocessCloner), exactly as the registered `clone_repository_activity` wires. */
+  readonly refreshCloner?: CacheGitCloner;
+  /** OPTIONAL GitHub-App installation token provider for the Step-1 clone (integration tests
+   *  inject a stub). Omitted in prod — the deferred-Vault lazy GitHubAppTokenProvider
+   *  ({@link makeLazyCloneTokenProvider}), the SAME mint the Temporal composition root wires. */
+  readonly refreshGetToken?: TokenProvider;
 };
 
 /**
@@ -106,9 +166,115 @@ function makeLazyHydrateGithubPort(): GitHubListReposPort {
   };
 }
 
+/** The three conventional CODEOWNERS paths, tried in order (1:1 with build_activities'
+ *  `CODEOWNERS_LOOKUP_PATHS` / the Python `_CODEOWNERS_LOOKUP_PATHS`). */
+const CODEOWNERS_LOOKUP_PATHS = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"] as const;
+
+/** The platform embed model name the refresh holder is constructed with — byte-1:1 with the
+ *  Temporal composition root (build_activities.ts wires the SAME "qwen3-embed-0.6b" the confluence
+ *  chunk_and_embed / embed_query path uses). */
+const REFRESH_EMBED_MODEL_NAME = "qwen3-embed-0.6b";
+
 /**
- * Register the W3d.1 event-driven handlers on the runner's registry. Called ONCE at the composition
- * root ({@link import("../background_runner_main.js").buildBackgroundRunner});
+ * A {@link CodeOwnersFilePort} that builds the REAL Vault-token-backed GitHubApiClient on first
+ * `fetchCodeowners` call and memoizes it (the deferred-Vault pattern — dynamic imports keep the
+ * Vault/GitHub wiring off this module's static import graph), then runs the 3-path CODEOWNERS
+ * lookup over `getContents` — 1:1 with build_activities' `makeCodeOwnersFilePort` (the Python
+ * `_SpineCodeOwnersAdapter`). Returns the first path that exists (base64-ASCII bytes + blob SHA),
+ * or null when none of the conventional paths host a CODEOWNERS file (the activity no-ops to 0).
+ */
+function makeLazyCodeOwnersFilePort(): CodeOwnersFilePort {
+  let memo: Promise<GitHubApiClient> | undefined;
+  const lazy = (): Promise<GitHubApiClient> => {
+    if (memo === undefined) {
+      memo = (async () => {
+        const { FetchGitHubHttpClient, GitHubApiClient: RealGitHubApiClient } = await import(
+          "#backend/integrations/github/api_client.js"
+        );
+        const { GitHubAppTokenProvider } = await import(
+          "#backend/integrations/github/token_provider.js"
+        );
+        const { VaultHttpPort } = await import("#backend/adapters/vault_http.js");
+        const clock = new WallClock();
+        const githubHttp = new FetchGitHubHttpClient({});
+        const vault = VaultHttpPort.fromEnv();
+        const tokenProvider = await GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
+        return new RealGitHubApiClient({
+          tokenProvider: tokenProvider.getToken.bind(tokenProvider),
+          http: githubHttp,
+          clock,
+        });
+      })();
+    }
+    return memo;
+  };
+  return {
+    fetchCodeowners: async (args): Promise<readonly [Uint8Array, string] | null> => {
+      const contents = await lazy();
+      for (const path of CODEOWNERS_LOOKUP_PATHS) {
+        const result = await contents.getContents({
+          installationId: args.installationId,
+          // Telemetry-only param the GitHub `_request` does not consume; the port carries only the
+          // numeric id, so the stringified numeric id stands in for the unused UUID telemetry slot
+          // (1:1 with build_activities' makeCodeOwnersFilePort).
+          installationUuid: String(args.installationId),
+          owner: args.owner,
+          repo: args.repo,
+          path,
+          ref: args.ref,
+        });
+        if (result !== null) {
+          return result;
+        }
+      }
+      // None of the conventional paths host a CODEOWNERS file — no-op (the activity returns 0).
+      return null;
+    },
+  };
+}
+
+/**
+ * A {@link TokenProvider} that builds the real GitHubAppTokenProvider on first call (the
+ * deferred-Vault pattern) and memoizes it, then mints the installation token for the per-call
+ * NUMERIC installation id — the SAME token seam the Temporal composition root wires the registered
+ * `clone_repository_activity` with (build_activities' `makeLazyTokenProvider`). The internal
+ * WallClock is composition wiring for token-expiry math, same as the hydrate port above.
+ */
+function makeLazyCloneTokenProvider(): TokenProvider {
+  let memo: Promise<GitHubAppTokenProvider> | undefined;
+  const lazy = (): Promise<GitHubAppTokenProvider> => {
+    if (memo === undefined) {
+      memo = (async () => {
+        const { FetchGitHubHttpClient } = await import("#backend/integrations/github/api_client.js");
+        const { GitHubAppTokenProvider } = await import(
+          "#backend/integrations/github/token_provider.js"
+        );
+        const { VaultHttpPort } = await import("#backend/adapters/vault_http.js");
+        const clock = new WallClock();
+        const githubHttp = new FetchGitHubHttpClient({});
+        const vault = VaultHttpPort.fromEnv();
+        return GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
+      })();
+    }
+    return memo;
+  };
+  return async (installationId: number): Promise<string> => (await lazy()).getToken(installationId);
+}
+
+/** Resolve the core DSN for a handler's per-dispatch DB ports: injected override or the env var the
+ *  registered Temporal activities self-resolve. Fail-loud INSIDE the handler (not at registration)
+ *  so registry composition stays env-free and the failure is persisted in the job's last_error. */
+function requireDsn(deps: EventHandlersDeps, jobType: string): string {
+  const dsn = deps.dsn ?? process.env.CODEMASTER_PG_CORE_DSN;
+  if (dsn === undefined || dsn === "") {
+    throw new Error(`CODEMASTER_PG_CORE_DSN is not set; cannot run the ${jobType} handler`);
+  }
+  return dsn;
+}
+
+/**
+ * Register the W3d.1 + W3d.2 event-driven handlers on the runner's registry. Called ONCE at the
+ * composition root ({@link import("../background_runner_main.js").buildBackgroundRunner});
  * HandlerRegistry.register throws on duplicates, so double-wiring fails loud at boot.
  *
  * Each adapter: parse the verified payload with the activity's OWN contract → run the existing
@@ -145,12 +311,7 @@ export function registerEventHandlers(registry: HandlerRegistry, deps: EventHand
   const hydrateGithub = deps.hydrateGithub ?? makeLazyHydrateGithubPort();
   registry.register("repair_installation_repositories", async (payload, _signal, handlerDeps) => {
     const parsed = RepairInstallationRepositoriesPayloadV1.parse(payload);
-    const dsn = deps.dsn ?? process.env.CODEMASTER_PG_CORE_DSN;
-    if (dsn === undefined || dsn === "") {
-      throw new Error(
-        "CODEMASTER_PG_CORE_DSN is not set; cannot run the repair_installation_repositories handler",
-      );
-    }
+    const dsn = requireDsn(deps, "repair_installation_repositories");
     const result = await doHydrateInstallationRepositories(parsed, {
       github: hydrateGithub,
       db: hydrateDbPortFromKysely(tenantKysely<unknown>(dsn)),
@@ -161,6 +322,95 @@ export function registerEventHandlers(registry: HandlerRegistry, deps: EventHand
       `repair_installation_repositories applied: blocked=${result.blocked} ` +
         `blocked_reason=${result.blocked_reason ?? "none"} newly_created=${result.newly_created} ` +
         `refreshed=${result.refreshed} job_id=${handlerDeps.job.job_id}`,
+    );
+  });
+
+  // ── W3d.2: the 2 knowledge-producer handlers ──
+
+  // sync_code_owners — the Temporal syncCodeOwners workflow body is a pure single-activity
+  // pass-through (sync_code_owners.workflow.ts); the adapter parses the producer payload
+  // (_push_emitters.ts stamps the SyncCodeOwnersPayloadV1 keys verbatim) and dispatches the
+  // EXISTING holder's syncCodeOwners. The holder is constructed PER DISPATCH — cheap object wiring;
+  // the Postgres pool underneath is the memoized ADR-0062 shared pool (tenantKysely), so no
+  // per-dispatch pool churn — with the composition-root CODEOWNERS port (injected stub under test;
+  // deferred-Vault 3-path lookup otherwise), the flag gate (DEFAULT-OFF — module doc), and the
+  // runner's Clock seam.
+  const codeOwnersGithub = deps.codeOwnersGithub ?? makeLazyCodeOwnersFilePort();
+  const codeOwnersIsEnabled: IsEnabled = deps.codeOwnersIsEnabled ?? (async (): Promise<boolean> => false);
+  registry.register("sync_code_owners", async (payload, _signal, handlerDeps) => {
+    const parsed = SyncCodeOwnersPayloadV1.parse(payload);
+    const dsn = requireDsn(deps, "sync_code_owners");
+    const holder = new SyncCodeOwnersActivity({
+      github: codeOwnersGithub,
+      repo: PostgresCodeOwnersRepo.fromDsn(dsn),
+      isEnabled: codeOwnersIsEnabled,
+      clock: handlerDeps.clock,
+    });
+    const written = await holder.syncCodeOwners(parsed);
+    console.info(
+      `sync_code_owners applied: rules_written=${written} repository_id=${parsed.repository_id} ` +
+        `job_id=${handlerDeps.job.job_id}`,
+    );
+  });
+
+  // refresh_semantic_docs — reproduces the Temporal refreshSemanticDocs workflow body's 2-step
+  // sequence IN-PROCESS (refresh_semantic_docs.workflow.ts): Step 1 `clone_repository_activity`
+  // produces the cloned-workspace path (single typed CloneRepositoryInputV1 built from the parsed
+  // input — the invariant-11 shape the TS workflow already dispatches), THEN Step 2
+  // `refreshSemanticDocs` discovers + chunks + embeds that workspace into core.knowledge_chunks.
+  // customKnowledgePaths stays [] (v1 — the workflow body's literal). The production embedder is
+  // resolved LAZILY on the first refresh dispatch + memoized (the same env-selected
+  // resolveEmbeddingsConsumer the Temporal worker constructs; dynamic import keeps the Qwen/OpenAI
+  // adapter graph off this module's static imports) so a runner without embedder env vars still
+  // boots — the fail-loud env error settles the attempt failed with last_error persisted.
+  const refreshGetToken = deps.refreshGetToken ?? makeLazyCloneTokenProvider();
+  let refreshEmbedderMemo: EmbeddingsPort | undefined;
+  const resolveRefreshEmbeddings = async (): Promise<EmbeddingsPort> => {
+    if (deps.refreshEmbeddings !== undefined) {
+      return deps.refreshEmbeddings;
+    }
+    if (refreshEmbedderMemo === undefined) {
+      const { resolveEmbeddingsConsumer } = await import("#backend/adapters/resolve_embeddings.js");
+      refreshEmbedderMemo = resolveEmbeddingsConsumer();
+    }
+    return refreshEmbedderMemo;
+  };
+  registry.register("refresh_semantic_docs", async (payload, _signal, handlerDeps) => {
+    const parsed = RefreshSemanticDocsInputV1.parse(payload);
+    const dsn = requireDsn(deps, "refresh_semantic_docs");
+
+    // Step 1: clone the repository → workspace path (1:1 with the workflow body's Step 1; the
+    // cloner/resolveRepo fall to the activity's REAL production defaults unless a test injects).
+    const workspacePath = await cloneRepositoryActivity(
+      {
+        schema_version: 1,
+        installation_id: parsed.installation_id,
+        repository_id: parsed.repository_id,
+        head_sha: parsed.head_sha,
+      },
+      {
+        getToken: refreshGetToken,
+        ...(deps.refreshCloner !== undefined ? { cloner: deps.refreshCloner } : {}),
+      },
+    );
+
+    // Step 2: discover + chunk + embed + upsert (1:1 with the workflow body's Step 2).
+    const holder = new RefreshSemanticDocsActivity({
+      embeddings: await resolveRefreshEmbeddings(),
+      chunkRepo: PostgresKnowledgeChunkRepo.fromDsn(dsn),
+      modelName: REFRESH_EMBED_MODEL_NAME,
+      clock: handlerDeps.clock,
+    });
+    const result = await holder.refreshSemanticDocs({
+      input: parsed,
+      workspacePath,
+      customKnowledgePaths: [],
+    });
+    console.info(
+      `refresh_semantic_docs applied: docs_discovered=${result.docs_discovered} ` +
+        `chunks_persisted=${result.chunks_persisted} retrieval_degraded=${result.retrieval_degraded} ` +
+        `degradation_reason=${result.degradation_reason ?? "none"} ` +
+        `repository_id=${parsed.repository_id} job_id=${handlerDeps.job.job_id}`,
     );
   });
 }
