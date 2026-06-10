@@ -55,6 +55,63 @@ function sha256hex(s: string): string {
   return createHash("sha256").update(Buffer.from(s, "utf-8")).digest("hex");
 }
 
+/**
+ * F2 (review): assert the parsed payload's identity equals the enqueue ENVELOPE's identity columns BEFORE the
+ * INSERT — payload.run_id===a.runId, payload.review_id===a.reviewId, payload.installation_id===a.installationId,
+ * and (when the envelope supplies a non-null delivery_id) payload.delivery_id===a.deliveryId. A mismatch throws
+ * {@link PayloadIntegrityError} so the row is never written and the two identity sources can never diverge.
+ */
+function assertPayloadIdentityMatchesEnvelope(payload: ReviewPullRequestPayloadV1, a: EnqueueArgs): void {
+  const mismatches: Array<string> = [];
+  if (payload.run_id !== a.runId) {
+    mismatches.push(`run_id(payload=${payload.run_id} envelope=${a.runId})`);
+  }
+  if (payload.review_id !== a.reviewId) {
+    mismatches.push(`review_id(payload=${payload.review_id} envelope=${a.reviewId})`);
+  }
+  if (payload.installation_id !== a.installationId) {
+    mismatches.push(`installation_id(payload=${payload.installation_id} envelope=${a.installationId})`);
+  }
+  if (a.deliveryId != null && payload.delivery_id !== a.deliveryId) {
+    mismatches.push(`delivery_id(payload=${payload.delivery_id} envelope=${a.deliveryId})`);
+  }
+  if (mismatches.length > 0) {
+    throw new PayloadIntegrityError(
+      a.runId,
+      `enqueue refused: payload identity diverges from job envelope: ${mismatches.join(", ")}`,
+    );
+  }
+}
+
+/**
+ * F2 (review): assert a STORED job row's identity columns equal the payload's identity (after the hash check),
+ * so an already-stored divergent row is caught at read time. delivery_id is compared against `job.delivery_id`
+ * only when the column is non-null (a null column means the envelope opted out of carrying one — the payload's
+ * value is then authoritative and trivially matches). A mismatch throws {@link PayloadIntegrityError}.
+ */
+function assertPayloadIdentityMatchesJobRow(payload: ReviewPullRequestPayloadV1, job: ReviewJobV1): void {
+  const expectedDeliveryId = job.delivery_id ?? payload.delivery_id;
+  const mismatches: Array<string> = [];
+  if (payload.run_id !== job.run_id) {
+    mismatches.push(`run_id(payload=${payload.run_id} job=${job.run_id})`);
+  }
+  if (payload.review_id !== job.review_id) {
+    mismatches.push(`review_id(payload=${payload.review_id} job=${job.review_id})`);
+  }
+  if (payload.installation_id !== job.installation_id) {
+    mismatches.push(`installation_id(payload=${payload.installation_id} job=${job.installation_id})`);
+  }
+  if (payload.delivery_id !== expectedDeliveryId) {
+    mismatches.push(`delivery_id(payload=${payload.delivery_id} job=${String(job.delivery_id)})`);
+  }
+  if (mismatches.length > 0) {
+    throw new PayloadIntegrityError(
+      job.job_id,
+      `payload identity diverges from stored job row ${job.job_id}: ${mismatches.join(", ")}`,
+    );
+  }
+}
+
 export class ReviewJobsRepo {
   /**
    * @param db          Kysely over the (shared, ADR-0062) pool — drives every fenced single-statement op.
@@ -74,6 +131,11 @@ export class ReviewJobsRepo {
     // (schema_version MUST be 2 — review_pull_request.v1.ts); an invalid payload throws here, BEFORE any
     // INSERT, so nothing is written. (2) canonicalize + (3) hash; (4) store payload + envelope version + sha.
     const payload = ReviewPullRequestPayloadV1.parse(a.payload);
+    // F2 (review): the job envelope's identity columns (run_id/review_id/installation_id/delivery_id) and the
+    // payload's identity are stored INDEPENDENTLY, so a divergent payload would let the shell mix identities
+    // (orchestrate on job.run_id; lifecycle on payload.run_id). Assert equality BEFORE the INSERT so nothing is
+    // written on a mismatch. delivery_id is cross-checked only when the envelope supplies one (non-null).
+    assertPayloadIdentityMatchesEnvelope(payload, a);
     const canonical = canonicalJson(payload);
     const payloadSha256 = sha256hex(canonical);
     const jobId = uuid4();
@@ -107,6 +169,12 @@ export class ReviewJobsRepo {
         `payload hash mismatch for job ${job.job_id}: stored=${String(stored)} recomputed=${recomputed}`,
       );
     }
+    // F2 (review): the hash proves the payload bytes are intact, NOT that the job-row identity columns agree
+    // with the payload's identity. Cross-check the stored job-row identity against the payload so an
+    // already-stored divergent row (an out-of-band write that slipped past enqueue) is caught at READ time
+    // BEFORE the shell mixes identities. delivery_id: the job column is nullable, so compare against the
+    // payload's delivery_id when the column is null (the envelope opted out of carrying one).
+    assertPayloadIdentityMatchesJobRow(payload, job);
     return payload;
   }
 

@@ -1,9 +1,10 @@
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import { Pool } from "pg";
-import { createHash } from "node:crypto"; // test/ is OUT of the clock/random gate's scope
+import { createHash, randomUUID } from "node:crypto"; // test/ is OUT of the clock/random gate's scope
 import { describeDb, INTEGRATION_DSN } from "../_db.js";
 import { PayloadIntegrityError, ReviewJobsRepo } from "#backend/runner/review_jobs_repo.js";
+import { type ReviewJobV1 } from "#contracts/review_jobs.v1.js";
 import { minimalReviewPayload, readRun, seedRun, seedRunWithState } from "./_fixtures.js";
 
 let db: Kysely<unknown>; let pool: Pool;
@@ -67,6 +68,86 @@ describeDb("ReviewJobsRepo.enqueue — durable payload (D1)", () => {
   });
 });
 
+// ─── F2: job-envelope identity ↔ payload identity must be cross-checked (review finding) ───────────
+//
+// enqueue stores a.runId/a.reviewId/a.installationId/a.deliveryId as the job's identity COLUMNS and stores
+// the payload INDEPENDENTLY; verifyPayload used to check ONLY the hash. So payload.run_id could diverge from
+// job.run_id and the shell would MIX identities (orchestrate runs job.run_id; lifecycle records
+// payload.run_id). Both halves of the fix are asserted: enqueue refuses a mismatched payload BEFORE the
+// INSERT, and verifyPayload refuses an already-stored divergent row at READ time.
+describeDb("ReviewJobsRepo — F2 payload↔job identity equality", () => {
+  it("enqueue REJECTS a payload whose run_id != a.runId and inserts nothing", async () => {
+    const repo = new ReviewJobsRepo(db); const s = await seedRun(db);
+    // The payload is internally VALID (parses cleanly) but its run_id is a DIFFERENT uuid than the envelope's.
+    const diverged = { ...minimalReviewPayload(s), run_id: randomUUID() } as unknown;
+    await expect(repo.enqueue({ ...s, payload: diverged })).rejects.toThrow(PayloadIntegrityError);
+    // The identity assert runs BEFORE the INSERT → nothing is written.
+    const r = await sql<{ n: number }>`SELECT count(*)::int AS n FROM core.review_jobs`.execute(db);
+    expect(r.rows[0]!.n).toBe(0);
+  });
+
+  it("enqueue REJECTS a payload whose review_id != a.reviewId and inserts nothing", async () => {
+    const repo = new ReviewJobsRepo(db); const s = await seedRun(db);
+    const diverged = { ...minimalReviewPayload(s), review_id: randomUUID() } as unknown;
+    await expect(repo.enqueue({ ...s, payload: diverged })).rejects.toThrow(PayloadIntegrityError);
+    const r = await sql<{ n: number }>`SELECT count(*)::int AS n FROM core.review_jobs`.execute(db);
+    expect(r.rows[0]!.n).toBe(0);
+  });
+
+  it("enqueue REJECTS a payload whose installation_id != a.installationId and inserts nothing", async () => {
+    const repo = new ReviewJobsRepo(db); const s = await seedRun(db);
+    const diverged = { ...minimalReviewPayload(s), installation_id: randomUUID() } as unknown;
+    await expect(repo.enqueue({ ...s, payload: diverged })).rejects.toThrow(PayloadIntegrityError);
+    const r = await sql<{ n: number }>`SELECT count(*)::int AS n FROM core.review_jobs`.execute(db);
+    expect(r.rows[0]!.n).toBe(0);
+  });
+
+  it("enqueue REJECTS a payload whose delivery_id != the supplied a.deliveryId and inserts nothing", async () => {
+    const repo = new ReviewJobsRepo(db); const s = await seedRun(db);
+    const payload = minimalReviewPayload(s); // payload.delivery_id = `dlv-${s.reviewId}`
+    // Supply a NON-NULL envelope delivery_id that disagrees with the payload's.
+    await expect(repo.enqueue({ ...s, deliveryId: "dlv-MISMATCH", payload })).rejects.toThrow(PayloadIntegrityError);
+    const r = await sql<{ n: number }>`SELECT count(*)::int AS n FROM core.review_jobs`.execute(db);
+    expect(r.rows[0]!.n).toBe(0);
+  });
+
+  it("enqueue does NOT cross-check delivery_id when a.deliveryId is null (envelope opted out)", async () => {
+    const repo = new ReviewJobsRepo(db); const s = await seedRun(db);
+    // a.deliveryId omitted (null) → the payload's delivery_id is free to be anything; no identity throw.
+    const id = await repo.enqueue({ ...s, payload: minimalReviewPayload(s) });
+    expect((await repo.getById(id))?.state).toBe("ready");
+  });
+
+  it("verifyPayload throws PayloadIntegrityError on a hand-built job row whose payload.run_id != job.run_id", () => {
+    const repo = new ReviewJobsRepo(db); const s = { runId: randomUUID(), reviewId: randomUUID(), installationId: randomUUID() };
+    // A hand-built divergent row (an out-of-band write that slipped past enqueue): the job's run_id COLUMN
+    // disagrees with the stored payload's run_id, while the stored sha256 STILL matches the payload — so ONLY
+    // the new identity cross-check (not the hash check) can catch it. No DB round-trip → no FK on run_id.
+    const job = makeJobRowFor({ ...s, runId: randomUUID() }, minimalReviewPayload(s));
+    expect(() => repo.verifyPayload(job)).toThrow(PayloadIntegrityError);
+  });
+
+  it("verifyPayload throws PayloadIntegrityError on a hand-built job row whose payload.installation_id != job.installation_id", () => {
+    const repo = new ReviewJobsRepo(db); const s = { runId: randomUUID(), reviewId: randomUUID(), installationId: randomUUID() };
+    const job = makeJobRowFor({ ...s, installationId: randomUUID() }, minimalReviewPayload(s));
+    expect(() => repo.verifyPayload(job)).toThrow(PayloadIntegrityError);
+  });
+
+  it("the happy path (matching ids) still enqueues + verifyPayload returns the payload", async () => {
+    const repo = new ReviewJobsRepo(db); const s = await seedRun(db);
+    const payload = minimalReviewPayload(s);
+    // Supply the matching delivery_id so the non-null branch of the cross-check is exercised on the happy path.
+    const id = await repo.enqueue({ ...s, deliveryId: payload.delivery_id, payload });
+    const job = await repo.getById(id);
+    expect(job).not.toBeNull();
+    const verified = repo.verifyPayload(job!);
+    expect(verified.run_id).toBe(s.runId);
+    expect(verified.review_id).toBe(s.reviewId);
+    expect(verified.installation_id).toBe(s.installationId);
+    expect(verified.delivery_id).toBe(payload.delivery_id);
+  });
+});
+
 /** Local mirror of the repo's stable key-ordered canonicalizer — keeps the test independent of the impl import. */
 function sortKeysForTest(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortKeysForTest);
@@ -83,6 +164,26 @@ function sortKeysForTest(value: unknown): unknown {
 }
 // `describe` is imported so the helper block above does not get flagged as unused when DSN is absent.
 void describe;
+
+/**
+ * Build an in-memory {@link ReviewJobV1} row for the F2 verifyPayload tests WITHOUT touching the DB (so the
+ * run_id FK does not block the divergent-identity fixtures). The job's identity COLUMNS come from `ids`; the
+ * stored `payload` is hashed with the SAME canonical encoding the repo uses, so the row's `payload_sha256`
+ * MATCHES — only the new identity cross-check (not the hash check) can reject a job whose identity columns
+ * disagree with the payload's.
+ */
+function makeJobRowFor(
+  ids: { runId: string; reviewId: string; installationId: string; deliveryId?: string | null },
+  payload: { delivery_id: string } & Record<string, unknown>,
+): ReviewJobV1 {
+  const sha = createHash("sha256").update(Buffer.from(JSON.stringify(sortKeysForTest(payload)), "utf-8")).digest("hex");
+  return {
+    job_id: randomUUID(), run_id: ids.runId, review_id: ids.reviewId, installation_id: ids.installationId,
+    delivery_id: ids.deliveryId ?? null, state: "leased", priority: 0, attempts: 1, max_attempts: 3,
+    attempt_token: null, job_payload_schema_version: 1, payload_sha256: sha, mutex_id: null,
+    payload,
+  } as unknown as ReviewJobV1;
+}
 
 describeDb("ReviewJobsRepo.claim", () => {
   it("claims, mints a token, sets timeout_at; a 2nd claimer gets nothing", async () => {

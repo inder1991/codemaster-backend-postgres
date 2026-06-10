@@ -452,8 +452,10 @@ export function runReviewJob(deps: RunReviewJobDeps): JobHandler {
 
       result = await orchestrate(ctx);
 
-      // lifecycle bookkeeping (the workflow body's runLifecycleBookkeeping, fail-open per setter)
-      await runLifecycleBookkeeping(payload, state, result, lifecycle, logger);
+      // lifecycle bookkeeping (the workflow body's runLifecycleBookkeeping, fail-open per setter). `runId`
+      // (= job.run_id) is threaded so the bookkeeping records against the SAME run orchestrate ran on — F2:
+      // verifyPayload now guarantees payload.run_id===job.run_id, so this removes the dual-source smell.
+      await runLifecycleBookkeeping(runId, payload, state, result, lifecycle, logger);
 
       // ANALYZED + finalize COMPLETED
       await lifecycle.recordReviewLifecycleEvent({
@@ -529,6 +531,7 @@ function toIso(job: ReviewJobV1): string {
  * fails the job (the review is already posted).
  */
 async function runLifecycleBookkeeping(
+  runId: string,
   payload: ReviewPullRequestPayloadV1,
   state: ReviewWorkflowState,
   pipelineResult: ReviewPipelineResult,
@@ -565,13 +568,13 @@ async function runLifecycleBookkeeping(
     if (keptRfids.length !== capture.commentIds.length) {
       logger.warning(
         `lifecycle finalize skipped (rfid/comment_id length mismatch): kept=${keptRfids.length} ` +
-          `comments=${capture.commentIds.length} pr_id=${payload.pr_id} run_id=${payload.run_id}`,
+          `comments=${capture.commentIds.length} pr_id=${payload.pr_id} run_id=${runId}`,
       );
       recordLifecycleSetterFailed({ setter: "finalized_len_mismatch", retryable: false });
     } else {
       try {
         await lifecycle.recordDeliveryFinalized({
-          schema_version: 1, installation_id: payload.installation_id, run_id: payload.run_id,
+          schema_version: 1, installation_id: payload.installation_id, run_id: runId,
           review_id: payload.review_id, rfids: [...keptRfids], comment_ids: [...capture.commentIds],
           posted_review_pr_id: postedReviewPrId,
         });
@@ -586,7 +589,7 @@ async function runLifecycleBookkeeping(
   if (skippedRfids.length > 0 && postedReviewPrId !== null) {
     try {
       await lifecycle.recordDeliverySkipped({
-        schema_version: 1, installation_id: payload.installation_id, run_id: payload.run_id,
+        schema_version: 1, installation_id: payload.installation_id, run_id: runId,
         review_id: payload.review_id, rfids: [...skippedRfids], reasons: [...skippedReasons],
         posted_review_pr_id: postedReviewPrId,
       });
@@ -601,7 +604,7 @@ async function runLifecycleBookkeeping(
   if (degraded.rfidsToFlip.length > 0 && degraded.outcomeValue !== null && postedReviewPrId !== null) {
     try {
       await lifecycle.recordDeliveryDegraded({
-        schema_version: 1, installation_id: payload.installation_id, run_id: payload.run_id,
+        schema_version: 1, installation_id: payload.installation_id, run_id: runId,
         review_id: payload.review_id, rfids: [...degraded.rfidsToFlip], outcome: degraded.outcomeValue,
         posted_review_pr_id: postedReviewPrId,
       });
