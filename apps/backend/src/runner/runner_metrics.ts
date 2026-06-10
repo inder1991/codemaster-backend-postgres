@@ -29,9 +29,25 @@
  *                                                  OBSERVED + swallowed here so it never becomes an unhandled
  *                                                  rejection. `phase=after_hard_timeout`.
  *
+ * Phase 3a W2b — the GENERIC background runner (background_runner.ts) REUSES the shared instruments
+ * above for the phenomena both runners share (claim latency, lease steals, heartbeat failures, stale
+ * token writes, retries, handler duration, orphan settles, crash-loop reaps — existing Grafana panels
+ * stay intact), and adds two background-specific ones:
+ *   * codemaster_runner_background_jobs_total{outcome}
+ *                                                — counter: one per settled runOneBackgroundJob, outcome ∈
+ *                                                  {idle, done, failed, lease_lost, no_handler}. ('cancelled'
+ *                                                  is review-pipeline-specific and does not exist here.)
+ *   * codemaster_runner_background_no_handler_total
+ *                                                — counter: a claimed background job whose job_type has NO
+ *                                                  registered handler — DEAD-LETTERED by the runner, never
+ *                                                  retried. NO job_type label: an unknown type is by
+ *                                                  definition outside the registry's bounded vocabulary
+ *                                                  (unbounded-cardinality risk); the dead row's dead_reason
+ *                                                  carries the type for diagnosis.
+ *
  * ## Cardinality discipline
- * Bounded-enum labels ONLY: `op` ∈ {markDone, markFailed}; `outcome` ∈ {idle, done, failed, lease_lost, cancelled};
- * `phase` ∈ {after_hard_timeout}.
+ * Bounded-enum labels ONLY: `op` ∈ {markDone, markFailed}; `outcome` ∈ {idle, done, failed, lease_lost, cancelled}
+ * (review) / {idle, done, failed, lease_lost, no_handler} (background); `phase` ∈ {after_hard_timeout}.
  * NEVER per-tenant / per-installation / per-PR / per-job labels — same discipline the sibling modules enforce.
  *
  * Fail-safe: every emit swallows meter errors so telemetry never perturbs the runner loop.
@@ -49,6 +65,8 @@ export const HANDLER_DURATION_MS_NAME = "codemaster_runner_handler_duration_ms";
 export const RETRY_ATTEMPTS_NAME = "codemaster_runner_retry_attempts_total";
 export const CRASH_LOOP_REAPED_NAME = "codemaster_runner_crash_loop_reaped_total";
 export const HANDLER_ORPHAN_SETTLED_NAME = "codemaster_runner_handler_orphan_settled_total";
+export const BACKGROUND_JOBS_TOTAL_NAME = "codemaster_runner_background_jobs_total";
+export const BACKGROUND_NO_HANDLER_NAME = "codemaster_runner_background_no_handler_total";
 
 // Meter + instruments cached at MODULE scope (created once at import).
 const METER = getMeter("codemaster.runner");
@@ -100,6 +118,19 @@ const HANDLER_ORPHAN_SETTLED_COUNTER: Counter = METER.createCounter(HANDLER_ORPH
     "never escapes as an unhandled rejection. A sustained non-zero rate signals handlers that do not honor " +
     "cooperative cancellation. Bounded label phase ∈ {after_hard_timeout}.",
 });
+const BACKGROUND_JOBS_TOTAL_COUNTER: Counter = METER.createCounter(BACKGROUND_JOBS_TOTAL_NAME, {
+  description:
+    "Count of settled runOneBackgroundJob invocations (the GENERIC core.background_jobs runner), labeled by " +
+    "outcome ∈ {idle, done, failed, lease_lost, no_handler}. The canonical background-platform throughput + " +
+    "error-rate surface; separate from codemaster_runner_jobs_total so review-runner panels stay intact.",
+});
+const BACKGROUND_NO_HANDLER_COUNTER: Counter = METER.createCounter(BACKGROUND_NO_HANDLER_NAME, {
+  description:
+    "Count of claimed background jobs whose job_type had NO registered handler — dead-lettered (terminalSettle, " +
+    "dead_reason 'no handler for <job_type>'), never retried. A non-zero rate signals an enqueue/registry wiring " +
+    "drift (a producer enqueues a type the composition root never registered). NO job_type label by design: an " +
+    "unknown type is outside the bounded registry vocabulary; read the dead row's dead_reason for the type.",
+});
 
 /** Record one claim() round-trip latency (ms). Fail-safe. */
 export function recordClaimLatencyMs(ms: number): void {
@@ -148,4 +179,16 @@ export function recordCrashLoopReaped(count: number): void {
  */
 export function recordHandlerOrphanSettled(args: { phase: "after_hard_timeout" }): void {
   try { HANDLER_ORPHAN_SETTLED_COUNTER.add(1, { phase: args.phase }); } catch { /* telemetry never perturbs the runner */ }
+}
+
+/** Record one settled runOneBackgroundJob outcome ∈ {idle, done, failed, lease_lost, no_handler}. Fail-safe. */
+export function recordBackgroundJobOutcome(
+  args: { outcome: "idle" | "done" | "failed" | "lease_lost" | "no_handler" },
+): void {
+  try { BACKGROUND_JOBS_TOTAL_COUNTER.add(1, { outcome: args.outcome }); } catch { /* telemetry never perturbs the runner */ }
+}
+
+/** Record one no-handler dead-letter (claimed job_type absent from the registry). Fail-safe. */
+export function recordNoHandlerDeadLetter(): void {
+  try { BACKGROUND_NO_HANDLER_COUNTER.add(1); } catch { /* telemetry never perturbs the runner */ }
 }
