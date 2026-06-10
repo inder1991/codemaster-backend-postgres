@@ -543,7 +543,79 @@ export async function purgeLedgerScenarioRows(db: Kysely<unknown>, installationI
   await sql`DELETE FROM telemetry.cost_daily WHERE scope = 'per_org' AND scope_id = ${installationId}::uuid`.execute(db);
 }
 
-// NOTE on G2/G4 seeds (seedStuckJob / seedHeldMutex): deferred to their owning gate files per Step 1.5 —
-// G1 needs only seedTenant + the counting-ledger purge above. The Pool import is re-exported here so the
-// later gates can thread the shared ADR-0062 pool through the harness without re-deriving it.
+// ─── seedHeldMutex / seedStuckJob — the G4 reaper-unification seeds ────────────────────────────────
+//
+// G4 is REPO-LEVEL: it exercises reapStuckRuns + the Temporal age-sweep + acquireOrReuseMutex directly,
+// so it needs to author the precise on-disk shapes those three primitives read — a LIVE held mutex row
+// (keyed to a {@link seedTenant} Seed's PR identity, so acquireOrReuseMutex's ownership check matches it)
+// and a STUCK / RECLAIMABLE core.review_jobs row (leased, with a controllable lease-expiry + attempts vs
+// max_attempts so the reaper's exhaustion gate or claim()'s reclaim predicate selects it). Both mirror the
+// sibling W6.1 / W6.2 integration-test seeds (reap_stuck_runs / review_run_reaper.activity) so the columns
+// stay 1:1 with what the production SQL reads.
+
+/**
+ * Insert a LIVE held PR-mutex row for a {@link seedTenant} Seed (released_at NULL, lease 1h in the FUTURE),
+ * keyed on the SEED's (installation_id, repository_id, pr_number) so it satisfies
+ * `acquireOrReuseMutex`'s ownership check (installation/repository/pr_number MATCH + released_at IS NULL)
+ * AND is the row `reapStuckRuns` releases via the job's `mutex_id`. Returns the minted mutex_id. Column set
+ * (mutex_id, installation_id, repository_id, pr_number, holder_workflow_id, acquired_at, lease_expires_at)
+ * is verbatim from reap_stuck_runs.integration.test.ts::seedHeldMutex.
+ */
+export async function seedHeldMutex(db: Kysely<unknown>, seed: Seed): Promise<string> {
+  const mutexId = randomUUID();
+  await sql`INSERT INTO core.pr_review_mutex
+      (mutex_id, installation_id, repository_id, pr_number, holder_workflow_id, acquired_at, lease_expires_at)
+    VALUES (${mutexId}, ${seed.installationId}, ${seed.repositoryId}, ${seed.prNumber}, 'wf-holder',
+            now(), now() + interval '1 hour')`.execute(db);
+  return mutexId;
+}
+
+/**
+ * Insert ONE core.review_jobs row for a {@link seedTenant} Seed's run, in an explicit lease/attempts shape
+ * so the G4 reaper / claim predicates select it deterministically. Inserts the row DIRECTLY (not via
+ * enqueue→claim) so the test owns every load-bearing column without the real claim's attempt-token churn:
+ *
+ *   - `state` (default 'leased'), `attempts` / `maxAttempts` — the reaper's exhaustion gate is
+ *     `state='leased' AND leased_until < now() AND attempts >= max_attempts`; G4(b) seeds attempts ==
+ *     max_attempts (exhausted → reaped), G4(c) seeds attempts < max_attempts (remaining → claim() reclaims).
+ *   - `leasedUntilSql` (default `now() - interval '1 minute'`) — an EXPIRED lease (the crash signature).
+ *   - `mutexId` — stamped onto `review_jobs.mutex_id` so reapStuckRuns releases it (b) / acquireOrReuseMutex
+ *     reuses it (c). The FK `review_jobs.mutex_id → pr_review_mutex(mutex_id)` requires the row to EXIST, so
+ *     seed the mutex (via {@link seedHeldMutex}) FIRST.
+ *
+ * NOT NULL columns payload / payload_sha256 (migration 0037, no DB default) carry inert placeholders — the
+ * reaper + claim predicates read neither; only run_id / review_id / installation_id / state / leased_until /
+ * attempts / max_attempts / mutex_id are load-bearing here (1:1 with review_run_reaper.activity's seedReviewJob,
+ * extended with the attempts/mutex columns reapStuckRuns + acquireOrReuseMutex read). Returns the job_id.
+ */
+export async function seedStuckJob(
+  db: Kysely<unknown>,
+  seed: Seed,
+  opts?: {
+    state?: string;
+    attempts?: number;
+    maxAttempts?: number;
+    leasedUntilSql?: ReturnType<typeof sql>;
+    mutexId?: string | null;
+    leaseOwner?: string;
+  },
+): Promise<string> {
+  const jobId = randomUUID();
+  const state = opts?.state ?? "leased";
+  const attempts = opts?.attempts ?? 1;
+  const maxAttempts = opts?.maxAttempts ?? 1;
+  const leasedUntil = opts?.leasedUntilSql ?? sql`now() - interval '1 minute'`;
+  const mutexId = opts?.mutexId ?? null;
+  const leaseOwner = opts?.leaseOwner ?? "g4-worker";
+  await sql`INSERT INTO core.review_jobs
+      (job_id, run_id, review_id, installation_id, state, lease_owner, attempt_token,
+       attempts, max_attempts, leased_until, mutex_id, payload, payload_sha256)
+    VALUES (${jobId}, ${seed.runId}, ${seed.reviewId}, ${seed.installationId}, ${state}, ${leaseOwner},
+            gen_random_uuid(), ${attempts}, ${maxAttempts}, ${leasedUntil}, ${mutexId},
+            '{}'::jsonb, '')`.execute(db);
+  return jobId;
+}
+
+// The Pool import is re-exported here so the later gates can thread the shared ADR-0062 pool through the
+// harness without re-deriving it.
 export type { Pool };

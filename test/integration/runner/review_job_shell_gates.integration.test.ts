@@ -15,7 +15,7 @@
 // DB-gated (describeDb) against the DISPOSABLE :5434 Postgres only — NEVER the cluster. --no-file-parallelism.
 // test/ is OUT of the clock/random gate scope (Date.now / randomUUID are fine here).
 
-import { afterAll, beforeEach, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import { Pool } from "pg";
 
@@ -23,6 +23,13 @@ import { describeDb, INTEGRATION_DSN } from "../_db.js";
 import { ReviewJobsRepo } from "#backend/runner/review_jobs_repo.js";
 import { runOneJob } from "#backend/runner/review_job_runner.js";
 import { runReviewJob } from "#backend/runner/review_job_shell.js";
+import { reviewRunReaperActivity } from "#backend/activities/review_run_reaper.activity.js";
+import { acquireOrReuseMutex } from "#backend/runner/shell_mutex.js";
+import {
+  resetAuditKeyRegistryForTesting,
+  setAuditKeyRegistry,
+} from "#backend/security/audit_field_codec.js";
+import { KeyRegistry, makeKeySet } from "#platform/crypto/key_registry.js";
 import { doPost } from "#backend/activities/post_review_results.activity.js";
 import {
   FixPromptActivities,
@@ -34,7 +41,7 @@ import { allocateRun } from "#backend/ingest/_review_run_allocator.js";
 import { REVIEW_TOOL_SCHEMA_VERSION } from "#backend/review/review_activity.js";
 import { WALKTHROUGH_TOOL_SCHEMA_VERSION } from "#backend/review/walkthrough_activity.js";
 import { purposeChunkId } from "#backend/integrations/llm/invocation_ledger.js";
-import { disposeAllPools, tenantKysely } from "#platform/db/database.js";
+import { disposeAllPools, getPool, tenantKysely } from "#platform/db/database.js";
 import { WallClock } from "#platform/clock.js";
 
 import { type PostReviewInputV1 } from "#contracts/post_review_input.v1.js";
@@ -59,6 +66,8 @@ import {
   makeCountingSdk,
   makeCountingLedgerClient,
   purgeLedgerScenarioRows,
+  seedHeldMutex,
+  seedStuckJob,
   type CountingSdk,
   type CountingSdkCall,
   type Seed,
@@ -73,7 +82,18 @@ if (INTEGRATION_DSN) {
   db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) });
 }
 
+// G4's reapStuckRuns emits a `review_run.reaped` audit event whose before/after are encrypted via the
+// local AES-256-GCM codec, which throws if no KeyRegistry is installed. Install a deterministic dev key
+// (no Vault) for the whole file — 1:1 with the sibling reap_stuck_runs / review_run_reaper integration
+// suites; harmless for G1-G3 (none assert on encrypted audit rows).
+beforeAll(() => {
+  const reg = new KeyRegistry();
+  reg.set(makeKeySet({ currentVersion: "1", keys: new Map([["1", new Uint8Array(32).fill(0x42)]]) }));
+  setAuditKeyRegistry(reg);
+});
+
 afterAll(async () => {
+  resetAuditKeyRegistryForTesting();
   await db?.destroy();
   // G1.3's strict-ledger client opens the ADR-0062 shared pool for INTEGRATION_DSN; end it so no socket leaks.
   await disposeAllPools();
@@ -1127,6 +1147,238 @@ describeDb("G3 (b) — supersede: E4 fail-close → cancelled (job+run atomic), 
         await sql`DELETE FROM core.review_runs WHERE run_id = ${r2RunId}`.execute(db);
       }
       await cleanup(db, seed, { prId: payload.pr_id });
+    }
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+// G4 — reaper unification ④ (D3). REPO-LEVEL (does NOT drive the full shell) — exercises the three
+// liveness primitives DIRECTLY: the Temporal age-sweep `reviewRunReaperActivity` (W6.2, with the
+// NOT EXISTS live-job shield), the runner's unified `reapStuckRuns` (W6.1 — one txn: stuck job→dead,
+// run→CANCELLED/timeout/cancelled_at, mutex via job.mutex_id→released, ONE audit event), and
+// `acquireOrReuseMutex` (W5.1) — proving the two reapers do NOT fight a live job, the crash path reaps
+// in ONE txn with NO residual blocking window, and an attempts-remaining job is left for claim() to re-run.
+//
+//   (a)  live-lease shield: a RUNNING run aged 2× the stale threshold + a LIVE leased job (future lease) →
+//        the age-sweep reaper leaves the run RUNNING (the NOT EXISTS shield). Remove the predicate → the
+//        live run gets CANCELLED → the gate fails.
+//   (b)  crash → unified reap + NO blocking window: expired lease + attempts exhausted + a held mutex → ONE
+//        reapStuckRuns() → job→dead, run→CANCELLED(timeout, cancelled_at set), mutex released_at set, ONE
+//        audit row; THEN an immediate fresh acquireOrReuseMutex for the SAME PR returns `acquired` (NOT
+//        `busy`) — proving no 30/60-min blocking window remains.
+//   (c)  re-run path (not reaped): expired lease but attempts REMAINING → reapStuckRuns leaves it untouched,
+//        claim() reclaims (new attempt_token, SAME run_id), and acquireOrReuseMutex REUSES the job's mutex
+//        (returns `reused` with the SAME live mutex id, not a fresh acquire).
+//
+// The reaper resolves the SHARED ADR-0062 pool from CODEMASTER_PG_CORE_DSN via getPool; acquireOrReuseMutex
+// runs its mutex txn on that same shared pool, so all three primitives + the gate's Kysely see one DB.
+// DB-gated (:5434 only). --no-file-parallelism.
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+
+/** Count the `review_run.reaped` audit rows for a reaped run (the unified-reap audit witness). */
+async function reapedAuditCount(installationId: string, runId: string): Promise<number> {
+  const r = await sql<{ n: number }>`SELECT count(*)::int AS n FROM audit.audit_events
+      WHERE installation_id = ${installationId} AND action = 'review_run.reaped' AND target_id = ${runId}`
+    .execute(db);
+  return r.rows[0]!.n;
+}
+
+/** Read a run's lifecycle + cancel columns for the reaper assertions. */
+async function readRunReapState(
+  runId: string,
+): Promise<{ lifecycle_state: string; cancel_reason: string | null; cancelled_at: string | null }> {
+  const r = await sql<{ lifecycle_state: string; cancel_reason: string | null; cancelled_at: string | null }>`
+    SELECT lifecycle_state, cancel_reason, cancelled_at::text AS cancelled_at
+      FROM core.review_runs WHERE run_id = ${runId}`.execute(db);
+  return r.rows[0]!;
+}
+
+/** Read a mutex row's released_at (NULL ⇒ still live). */
+async function readMutexReleasedAt(mutexId: string): Promise<string | null> {
+  const r = await sql<{ released_at: string | null }>`
+    SELECT released_at::text AS released_at FROM core.pr_review_mutex WHERE mutex_id = ${mutexId}`.execute(db);
+  return r.rows[0]!.released_at;
+}
+
+/** Read a job's state + mutex_id for the reaper / reclaim assertions. */
+async function readJobState(jobId: string): Promise<{ state: string; mutex_id: string | null }> {
+  // tenant:exempt reason=test-read-job-by-pk follow_up=FOLLOW-UP-gf3-error-mode
+  const r = await sql<{ state: string; mutex_id: string | null }>`
+    SELECT state, mutex_id FROM core.review_jobs WHERE job_id = ${jobId}`.execute(db);
+  return r.rows[0]!;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// G4 (a) — live-lease shield: the age-sweep reaper must NOT cancel a run a live runner job is driving.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describeDb("G4 (a) — live-lease shield: age-sweep reaper does NOT cancel a run with a LIVE leased job", () => {
+  it("RUNNING run aged 2× the stale threshold + a future-leased job → run stays RUNNING (NOT EXISTS shield)", async () => {
+    const STALE_S = 300; // the operator-safe floor (MIN_STALE_AFTER_SECONDS); the run is aged WELL past it.
+    const seed = await seedTenant(db, 401);
+    try {
+      // Age the seeded RUNNING run to 2× the stale threshold so age ALONE would reap it.
+      await sql`UPDATE core.review_runs SET started_at = now() - make_interval(secs => ${2 * STALE_S})
+                 WHERE run_id = ${seed.runId}`.execute(db);
+      // A LIVE leased job for that run (future lease) — the shield: state='leased' is in the NOT EXISTS set.
+      const jobId = await seedStuckJob(db, seed, {
+        state: "leased",
+        attempts: 1,
+        maxAttempts: 3,
+        leasedUntilSql: sql`now() + interval '1 hour'`,
+      });
+
+      // Run the REAL Temporal age-sweep reaper directly (shared pool via the DSN).
+      const result = await reviewRunReaperActivity({ dsn: INTEGRATION_DSN!, staleAfterSeconds: STALE_S });
+
+      // (a) MEANINGFUL — the run is SHIELDED: still RUNNING, no cancel columns, no audit. The age-sweep
+      // matched the run on age but the NOT EXISTS (live job) predicate excluded it. Delete the
+      // `AND NOT EXISTS (... j.state IN ('ready','leased'))` predicate from the CTE and this aged run gets
+      // CANCELLED here → the three assertions below go red.
+      const run = await readRunReapState(seed.runId);
+      expect(run.lifecycle_state).toBe("RUNNING");
+      expect(run.cancel_reason).toBeNull();
+      expect(run.cancelled_at).toBeNull();
+      expect(await reapedAuditCount(seed.installationId, seed.runId)).toBe(0);
+      // The job that shielded it is untouched (the age-sweep never reads jobs except via the shield).
+      expect((await readJobState(jobId)).state).toBe("leased");
+      // The reaper's own counters: scanned===reaped (whatever cross-tenant rows it swept, ours wasn't one).
+      expect(result.scanned).toBe(result.reaped);
+    } finally {
+      await sql`DELETE FROM audit.audit_events WHERE installation_id = ${seed.installationId}`.execute(db);
+      await cleanup(db, seed);
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// G4 (b) — crash → unified reap + NO residual blocking window.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describeDb("G4 (b) — crash → unified reapStuckRuns (job+run+mutex+audit) + immediate re-acquire (no blocking window)", () => {
+  it("ONE reapStuckRuns txn: job→dead, run→CANCELLED/timeout, mutex released, ONE audit; then re-acquire for the SAME PR succeeds", async () => {
+    // reaperDeps.dsn so reapStuckRuns resolves the SHARED ADR-0062 pool (NOT a fresh one) for the same DSN.
+    const repo = new ReviewJobsRepo(db, { dsn: INTEGRATION_DSN! });
+    const seed = await seedTenant(db, 402);
+    const payload = payloadFor(seed);
+    try {
+      // The crash signature: a LIVE held mutex + a STUCK job (expired lease, attempts EXHAUSTED) holding it.
+      const mutexId = await seedHeldMutex(db, seed);
+      const jobId = await seedStuckJob(db, seed, {
+        state: "leased",
+        attempts: 1,
+        maxAttempts: 1, // attempts >= max_attempts → the reaper's exhaustion gate selects it
+        leasedUntilSql: sql`now() - interval '1 minute'`,
+        mutexId,
+      });
+
+      // ── ONE reapStuckRuns() transaction does the whole unified sweep. ──
+      const reaped = await repo.reapStuckRuns();
+      expect(reaped).toBeGreaterThanOrEqual(1);
+
+      // (b) MEANINGFUL — BOTH the job and the run flipped together. Remove the run-flip half of reapStuckRuns
+      // (the per-row UPDATE core.review_runs … CANCELLED) and the lifecycle/cancel_reason/cancelled_at trio
+      // goes red; remove the job-flip half and the state assertion goes red.
+      expect((await readJobState(jobId)).state).toBe("dead");
+      const run = await readRunReapState(seed.runId);
+      expect(run.lifecycle_state).toBe("CANCELLED");
+      expect(run.cancel_reason).toBe("timeout");
+      expect(run.cancelled_at).not.toBeNull();
+
+      // (b) MEANINGFUL — the held mutex was RELEASED in the same txn (released_at set). Remove the
+      // step-(3) mutex release and released_at stays NULL → this assertion goes red AND the re-acquire below
+      // would return `busy` (the second proof).
+      expect(await readMutexReleasedAt(mutexId)).not.toBeNull();
+
+      // (b) MEANINGFUL — EXACTLY ONE audit row for the reaped run (step (4), single emit per reaped run).
+      expect(await reapedAuditCount(seed.installationId, seed.runId)).toBe(1);
+
+      // (b) MEANINGFUL — NO blocking window: an IMMEDIATE fresh acquireOrReuseMutex for the SAME PR succeeds
+      // (`acquired`, a brand-new live mutex), NOT `busy`. A fresh job row (no persisted mutex_id) forces the
+      // acquire branch; it succeeds ONLY because the crashed holder's mutex was released by the reap above —
+      // had reapStuckRuns NOT released it, the partial-unique live row would make this acquire return `busy`.
+      const freshJobId = await seedStuckJob(db, seed, {
+        state: "leased",
+        attempts: 1,
+        maxAttempts: 3,
+        leasedUntilSql: sql`now() + interval '1 hour'`,
+        mutexId: null,
+      });
+      const freshJob = (await repo.getById(freshJobId))!;
+      const acq = await acquireOrReuseMutex({
+        payload, job: freshJob, repo, pool: getPool(INTEGRATION_DSN!), clock,
+      });
+      expect(acq.status).toBe("acquired");
+      expect(acq.status === "acquired" ? acq.mutexId : null).not.toBeNull();
+      // It is a DIFFERENT (fresh) mutex than the released one — proving a new live claim, not a reuse.
+      expect(acq.status === "acquired" ? acq.mutexId : null).not.toBe(mutexId);
+
+      // Release the freshly-acquired mutex so the finally's installation cascade leaves no live row lingering.
+      if (acq.status === "acquired") {
+        await sql`UPDATE core.pr_review_mutex SET released_at = now() WHERE mutex_id = ${acq.mutexId}`.execute(db);
+      }
+    } finally {
+      await sql`DELETE FROM audit.audit_events WHERE installation_id = ${seed.installationId}`.execute(db);
+      await cleanup(db, seed);
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// G4 (c) — re-run path (NOT reaped): attempts-remaining job is reclaimed + the mutex is REUSED.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describeDb("G4 (c) — attempts-remaining job is NOT reaped; claim() reclaims (same run_id) + mutex REUSED", () => {
+  it("reapStuckRuns leaves it untouched; claim() re-leases (new token, SAME run_id); acquireOrReuseMutex returns `reused` with the SAME mutex", async () => {
+    const repo = new ReviewJobsRepo(db, { dsn: INTEGRATION_DSN! });
+    const seed = await seedTenant(db, 403);
+    const payload = payloadFor(seed);
+    try {
+      // A held mutex + a job with an EXPIRED lease but attempts REMAINING (attempts < max_attempts).
+      const mutexId = await seedHeldMutex(db, seed);
+      const jobId = await seedStuckJob(db, seed, {
+        state: "leased",
+        attempts: 1,
+        maxAttempts: 3, // attempts < max_attempts → NOT exhausted → the reaper must LEAVE it; claim() reclaims it
+        leasedUntilSql: sql`now() - interval '1 minute'`,
+        mutexId,
+      });
+      const beforeToken = (await repo.getById(jobId))!.attempt_token;
+
+      // (c) MEANINGFUL — reapStuckRuns leaves the attempts-remaining job UNTOUCHED (the exhaustion gate
+      // `attempts >= max_attempts` excludes it). Drop that predicate from the reaper and this job would be
+      // dead + the run CANCELLED here → the assertions below go red and claim() would find nothing.
+      await repo.reapStuckRuns();
+      expect((await readJobState(jobId)).state).toBe("leased");
+      const stillRunning = await readRunReapState(seed.runId);
+      expect(stillRunning.lifecycle_state).toBe("RUNNING");
+      expect(stillRunning.cancelled_at).toBeNull();
+      expect(await readMutexReleasedAt(mutexId)).toBeNull(); // mutex untouched (still live)
+
+      // (c) claim() re-leases the SAME run_id (expired lease + attempts remaining → reclaimable). The new
+      // attempt_token proves a fresh attempt; the run_id is unchanged (re-run, not a new run).
+      const reclaimed = await repo.claim({ owner: "g4c-worker", leaseMs: 60_000, maxRuntimeMs: 600_000 });
+      expect(reclaimed).not.toBeNull();
+      expect(reclaimed!.job_id).toBe(jobId);
+      expect(reclaimed!.run_id).toBe(seed.runId); // SAME run_id (the re-run reuses the durable run identity)
+      expect(reclaimed!.attempt_token).not.toBe(beforeToken); // a fresh attempt token (real re-claim)
+      expect(reclaimed!.mutex_id).toBe(mutexId); // the reclaimed job still carries the persisted mutex_id
+
+      // (c) MEANINGFUL — acquireOrReuseMutex REUSES the job's mutex (ownership matches + still live + renewable)
+      // → returns `reused` with the SAME mutex id, NOT a fresh acquire (which would mint a new row). Remove the
+      // reuse branch / its ownership-validate-then-renew and it would fall through to a fresh acquire — but a
+      // live row for the SAME PR would make that acquire `busy` (self-deadlock against its own corpse), so
+      // `reused` here is the load-bearing proof the re-run does NOT self-skip.
+      const acq = await acquireOrReuseMutex({
+        payload, job: reclaimed!, repo, pool: getPool(INTEGRATION_DSN!), clock,
+      });
+      expect(acq.status).toBe("reused");
+      expect(acq.status === "reused" ? acq.mutexId : null).toBe(mutexId);
+      // No NEW live mutex row was minted for this PR — exactly one live row (the reused one) exists.
+      const liveCount = await sql<{ n: number }>`SELECT count(*)::int AS n FROM core.pr_review_mutex
+          WHERE installation_id = ${seed.installationId} AND repository_id = ${seed.repositoryId}
+            AND pr_number = ${seed.prNumber} AND released_at IS NULL`.execute(db);
+      expect(liveCount.rows[0]!.n).toBe(1);
+    } finally {
+      await sql`DELETE FROM audit.audit_events WHERE installation_id = ${seed.installationId}`.execute(db);
+      await cleanup(db, seed);
     }
   });
 });
