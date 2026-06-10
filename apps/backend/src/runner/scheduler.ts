@@ -3,6 +3,7 @@ import type { Clock } from "#platform/clock.js";
 import { CadenceKind } from "#contracts/scheduled_job.v1.js";
 import type { EnqueueArgs } from "./background_jobs_repo.js";
 import { cancellableSleep } from "./clock_async.js";
+import { recordSchedulerScheduleError } from "./runner_metrics.js";
 
 // Phase 3a W3: the Postgres scheduler/poller replacing Temporal Schedules (de-Temporal full-removal
 // program). One pass ({@link pollAndEnqueue}) reads the due core.scheduled_jobs rows (migration 0040)
@@ -32,10 +33,17 @@ import { cancellableSleep } from "./clock_async.js";
 //     owned platform cadences, not tenant data), so no tenancy filter applies to its queries.
 //   * The repo's enqueue runs on its OWN pool connection while the poll transaction holds another —
 //     the shared pool must allow ≥ 2 concurrent connections per poller.
-//   * A row whose cadence_spec cannot be computed ({@link computeNextRun} throws) REJECTS the whole
-//     pass: the transaction rolls back (enqueues already made stay, absorbed by dedup) and the error
-//     propagates out of {@link SchedulerLoop.run} — fail-loud, same posture as RunnerLoop.run, where
-//     a claim() DB error also propagates. Supervision/restart is the composition root's job.
+//   * PER-SCHEDULE ISOLATION (Phase 4a W4a.2): a row whose cadence_spec cannot be computed
+//     ({@link computeNextRun} throws — e.g. an operator-inserted "*/5 * * * *") is SKIPPED, not
+//     pass-fatal: pollAndEnqueue WARN-logs the schedule_id + error, bumps the bounded counter
+//     codemaster_runner_scheduler_schedule_errors_total, leaves the row UNADVANCED (it stays due —
+//     re-attempted next poll, still isolated), and continues to the next schedule. A permanently-bad
+//     spec therefore logs on EVERY poll until an operator fixes or disables it, but can never halt
+//     the healthy schedules (pre-W4a.2 it rejected the whole pass and ALL schedules stopped firing).
+//     The spec is validated BEFORE the enqueue side effect, so a poison schedule enqueues NOTHING.
+//     Pass-LEVEL errors (the due-SELECT / txn machinery) still propagate out of
+//     {@link SchedulerLoop.run} — fail-loud, same posture as RunnerLoop.run, where a claim() DB
+//     error also propagates. Supervision/restart is the composition root's job.
 
 /**
  * Compute the next scheduled instant STRICTLY after `after`. PURE — no clock read happens here; the
@@ -96,8 +104,18 @@ type DueScheduleRow = {
  * `FOR UPDATE SKIP LOCKED`; for each, enqueue a background job (`payload` = the schedule's `input`,
  * `dedup_key` = the schedule_id → overlap=SKIP, see module doc) and advance `next_run_at` via
  * {@link computeNextRun} + stamp `last_enqueued_at` (and the app-maintained `updated_at` — 0040
- * ships no touch-trigger, mirroring the 0039 repo's discipline). Returns the number of due schedules
- * processed (a dedup'd enqueue still counts — the tick happened; it landed on the existing active job).
+ * ships no touch-trigger, mirroring the 0039 repo's discipline). Returns the number of SUCCESSFULLY
+ * enqueued schedules (a dedup'd enqueue still counts — the tick happened; it landed on the existing
+ * active job; an ISOLATED failure does not — module doc "PER-SCHEDULE ISOLATION").
+ *
+ * Per-schedule isolation (W4a.2): ONE schedule's failure (poison cadence_spec, enqueue error, UPDATE
+ * error) is caught, WARN-logged with its schedule_id, counted on the bounded
+ * `codemaster_runner_scheduler_schedule_errors_total`, and SKIPPED — its `next_run_at` stays
+ * unadvanced (re-attempted next poll, still isolated) while the pass continues over the rest. The
+ * dominant poison class ({@link computeNextRun} throwing on a bad spec) is pure JS, so it cannot
+ * abort the surrounding Postgres transaction; a failed UPDATE statement DOES poison the txn (later
+ * advances roll back at commit), but the enqueues already landed on the repo's own connection and the
+ * next pass's re-enqueues dedup onto them — at-least-once, exactly-one-ACTIVE, never a halted pass.
  */
 export async function pollAndEnqueue(
   o: { repo: SchedulerEnqueuePort; db: Kysely<unknown>; clock: Clock },
@@ -112,16 +130,29 @@ export async function pollAndEnqueue(
          FOR UPDATE SKIP LOCKED`.execute(trx);
     let enqueued = 0;
     for (const row of due.rows) {
-      // Enqueue FIRST (on the repo's own connection — autocommits independently of this txn), then
-      // advance the cadence: a crash between the two leaves the row due, and the retrying pass's
-      // enqueue dedups onto the active job (at-least-once + exactly-one-ACTIVE; module doc §3).
-      await o.repo.enqueue({ jobType: row.job_type, payload: row.input, dedupKey: row.schedule_id });
-      const enqueuedAt = o.clock.now();
-      const nextRunAt = computeNextRun(CadenceKind.parse(row.cadence_kind), row.cadence_spec, enqueuedAt);
-      await sql`UPDATE core.scheduled_jobs
-          SET next_run_at = ${nextRunAt}, last_enqueued_at = ${enqueuedAt}, updated_at = ${enqueuedAt}
-        WHERE schedule_id = ${row.schedule_id}`.execute(trx);
-      enqueued += 1;
+      try {
+        // Validate the cadence FIRST ({@link computeNextRun} is pure — throws on a poison spec
+        // BEFORE any side effect, so a bad schedule enqueues NOTHING), then enqueue (on the repo's
+        // own connection — autocommits independently of this txn), then advance the cadence: a crash
+        // between enqueue and advance leaves the row due, and the retrying pass's enqueue dedups
+        // onto the active job (at-least-once + exactly-one-ACTIVE; module doc §3).
+        const enqueuedAt = o.clock.now();
+        const nextRunAt = computeNextRun(CadenceKind.parse(row.cadence_kind), row.cadence_spec, enqueuedAt);
+        await o.repo.enqueue({ jobType: row.job_type, payload: row.input, dedupKey: row.schedule_id });
+        await sql`UPDATE core.scheduled_jobs
+            SET next_run_at = ${nextRunAt}, last_enqueued_at = ${enqueuedAt}, updated_at = ${enqueuedAt}
+          WHERE schedule_id = ${row.schedule_id}`.execute(trx);
+        enqueued += 1;
+      } catch (e) {
+        // PER-SCHEDULE ISOLATION (W4a.2): skip THIS schedule, never the pass. Left unadvanced → it
+        // stays due and is re-attempted (and re-isolated) next poll; a permanently-bad spec logs on
+        // every poll until an operator fixes/disables it, but never blocks the healthy schedules.
+        recordSchedulerScheduleError();
+        console.warn(
+          `scheduler: schedule ${row.schedule_id} failed and was skipped (left unadvanced; ` +
+            `re-attempted next poll): ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
     }
     return enqueued;
   });
@@ -132,8 +163,10 @@ export async function pollAndEnqueue(
  * `pollIntervalS`; {@link stop} interrupts the sleep immediately (wire to
  * `process.on('SIGTERM', () => loop.stop())`). Concurrent pollers are SAFE (FOR UPDATE SKIP LOCKED +
  * the in-txn next_run_at advance + the enqueue dedup — module doc) so deployments need NO singleton
- * election; extra replicas just partition the due set. A rejected poll (DB error / unsupported
- * cadence_spec) propagates out of {@link run} — fail-loud; the composition root owns supervision.
+ * election; extra replicas just partition the due set. A rejected poll (a PASS-level DB error — the
+ * due-SELECT / txn machinery) propagates out of {@link run} — fail-loud; the composition root owns
+ * supervision. Per-SCHEDULE failures (poison cadence_spec etc.) are isolated inside the pass and do
+ * NOT reach here (W4a.2 — module doc "PER-SCHEDULE ISOLATION").
  */
 export class SchedulerLoop {
   #stopped = false;

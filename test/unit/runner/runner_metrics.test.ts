@@ -19,6 +19,7 @@ import {
   JOBS_TOTAL_NAME,
   LEASE_STEALS_NAME,
   RETRY_ATTEMPTS_NAME,
+  SCHEDULER_SCHEDULE_ERRORS_NAME,
   STALE_TOKEN_WRITES_NAME,
   recordClaimLatencyMs,
   recordCrashLoopReaped,
@@ -28,6 +29,7 @@ import {
   recordJobOutcome,
   recordLeaseSteal,
   recordRetryAttempt,
+  recordSchedulerScheduleError,
   recordStaleTokenWrite,
 } from "#backend/runner/runner_metrics.js";
 
@@ -42,6 +44,7 @@ describe("runner_metrics — metric names (Grafana-stable)", () => {
     expect(RETRY_ATTEMPTS_NAME).toBe("codemaster_runner_retry_attempts_total");
     expect(CRASH_LOOP_REAPED_NAME).toBe("codemaster_runner_crash_loop_reaped_total");
     expect(HANDLER_ORPHAN_SETTLED_NAME).toBe("codemaster_runner_handler_orphan_settled_total");
+    expect(SCHEDULER_SCHEDULE_ERRORS_NAME).toBe("codemaster_runner_scheduler_schedule_errors_total");
   });
 });
 
@@ -64,5 +67,6 @@ describe("runner_metrics — emit functions are no-throw before exporter wiring"
     expect(() => recordCrashLoopReaped(0)).not.toThrow();
     expect(() => recordCrashLoopReaped(3)).not.toThrow();
     expect(() => recordHandlerOrphanSettled({ phase: "after_hard_timeout" })).not.toThrow();
+    expect(() => recordSchedulerScheduleError()).not.toThrow();
   });
 });

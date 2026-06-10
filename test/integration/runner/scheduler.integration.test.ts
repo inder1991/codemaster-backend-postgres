@@ -7,11 +7,15 @@
 //       SAME background_jobs row (uq_background_jobs_dedup_active) — still ONE active job;
 //   (4) enabled=false → never enqueued, schedule row untouched;
 //   (5) a not-yet-due schedule → never enqueued, schedule row untouched;
-//   (6) SchedulerLoop polls immediately on run() and stop() interrupts the poll-interval sleep.
+//   (6) SchedulerLoop polls immediately on run() and stop() interrupts the poll-interval sleep;
+//   (7) Phase 4a W4a.2 per-schedule isolation: ONE poisoned cadence_spec (computeNextRun throws)
+//       cannot halt the pass — the healthy schedule still enqueues + advances; the bad one enqueues
+//       NOTHING, stays unadvanced (re-attempted next poll, still isolated), and fires the bounded
+//       error metric + a WARN naming its schedule_id.
 //
 // Runs ONLY against an explicitly-set CODEMASTER_PG_CORE_DSN (the disposable :5434 DB) — never a
 // shared cluster (test skips when the DSN is absent, per test/integration/_db.ts).
-import { afterAll, beforeEach, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import { randomUUID } from "node:crypto"; // test/ is OUT of the clock/random gate's scope
 import { Pool } from "pg";
@@ -19,6 +23,15 @@ import { FakeClock, WallClock } from "#platform/clock.js";
 import { describeDb, INTEGRATION_DSN } from "../_db.js";
 import { BackgroundJobsRepo } from "#backend/runner/background_jobs_repo.js";
 import { SchedulerLoop, pollAndEnqueue } from "#backend/runner/scheduler.js";
+
+// ── Metric spy (vi.mock is hoisted; the scheduler imports by name, so overriding the module export
+// lets test (7) PROVE the per-schedule error counter fired — same idiom as
+// background_runner.integration.test.ts). ──
+const { schedErrSpy } = vi.hoisted(() => ({ schedErrSpy: vi.fn() }));
+vi.mock("#backend/runner/runner_metrics.js", async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>(); // pass-through; only the one spy is overridden
+  return { ...actual, recordSchedulerScheduleError: schedErrSpy };
+});
 
 let db: Kysely<unknown>; let pool: Pool;
 if (INTEGRATION_DSN) { pool = new Pool({ connectionString: INTEGRATION_DSN, max: 4 });
@@ -36,7 +49,9 @@ beforeEach(async () => {
     await sql`DELETE FROM core.background_jobs`.execute(db);
     await sql`DELETE FROM core.scheduled_jobs`.execute(db);
   }
+  schedErrSpy.mockClear();
 });
+afterEach(() => { vi.restoreAllMocks(); }); // un-spies console.warn from test (7)
 
 /** Per-test-unique ids so assertions are traceable to the test that minted the rows. */
 function mintIds(): { scheduleId: string; jobType: string } {
@@ -190,4 +205,45 @@ describeDb("Postgres scheduler — pollAndEnqueue (Phase 3a W3)", () => {
     await run;
     expect(await jobsFor(scheduleId)).toHaveLength(1);
   }, 10_000);
+
+  it("(7) per-schedule isolation: a poisoned cadence_spec cannot halt the healthy schedules (W4a.2)", async () => {
+    const clock = new FakeClock({ now: new Date("2026-06-10T12:00:00.000Z") });
+    const repo = new BackgroundJobsRepo(db);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const bad = mintIds();
+    const good = mintIds();
+    // The BAD row is seeded FIRST (heap order = iteration order on a wiped table) — under the
+    // pre-W4a.2 code its computeNextRun throw rejected the WHOLE pass before the valid row ran.
+    // "*/5 * * * *" is the exact operator-plausible step syntax computeNextRun refuses (3a W3).
+    await seedSchedule({ scheduleId: bad.scheduleId, jobType: bad.jobType, cadenceKind: "cron",
+      cadenceSpec: "*/5 * * * *", nextRunAt: new Date("2026-06-10T11:58:00.000Z") });
+    await seedSchedule({ scheduleId: good.scheduleId, jobType: good.jobType, cadenceKind: "interval",
+      cadenceSpec: "300", nextRunAt: new Date("2026-06-10T11:59:00.000Z") });
+
+    // The pass MUST NOT reject — and counts ONLY the successfully enqueued schedule.
+    expect(await pollAndEnqueue({ repo, db, clock })).toBe(1);
+
+    // The healthy schedule fired: job enqueued + cadence advanced.
+    expect(await jobsFor(good.scheduleId)).toHaveLength(1);
+    const g = await readSchedule(good.scheduleId);
+    expect(g.next_run_at).toEqual(new Date("2026-06-10T12:05:00.000Z"));      // clock.now() + 300s
+    expect(g.last_enqueued_at).toEqual(new Date("2026-06-10T12:00:00.000Z"));
+
+    // The poisoned schedule enqueued NOTHING and was left unadvanced (re-attempted next poll).
+    expect(await jobsFor(bad.scheduleId)).toHaveLength(0);
+    const b = await readSchedule(bad.scheduleId);
+    expect(b.next_run_at).toEqual(new Date("2026-06-10T11:58:00.000Z"));      // NOT advanced
+    expect(b.last_enqueued_at).toBeNull();
+
+    // Observability: the bounded error metric fired once + the WARN names the schedule_id.
+    expect(schedErrSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(String(warnSpy.mock.calls[0]![0])).toContain(bad.scheduleId);
+
+    // Still due next poll → re-attempted AND re-isolated (a permanently-bad spec logs every poll
+    // until an operator fixes/disables it, but never blocks the healthy schedules).
+    expect(await pollAndEnqueue({ repo, db, clock })).toBe(0); // good is no longer due; bad still fails
+    expect(await jobsFor(bad.scheduleId)).toHaveLength(0);
+    expect(schedErrSpy).toHaveBeenCalledTimes(2);
+  });
 });

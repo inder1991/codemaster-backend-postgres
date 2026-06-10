@@ -45,6 +45,16 @@
  *                                                  (unbounded-cardinality risk); the dead row's dead_reason
  *                                                  carries the type for diagnosis.
  *
+ * Phase 4a W4a.2 — the SCHEDULER (scheduler.ts) adds one:
+ *   * codemaster_runner_scheduler_schedule_errors_total
+ *                                                — counter: ONE schedule failed inside a pollAndEnqueue pass
+ *                                                  (poison cadence_spec → computeNextRun threw, or its
+ *                                                  enqueue/UPDATE errored) and was ISOLATED — skipped, left
+ *                                                  unadvanced, the pass continued. NO schedule_id label
+ *                                                  (operator-minted ids are unbounded); the paired WARN log
+ *                                                  carries the id. A sustained non-zero rate = a permanently
+ *                                                  bad schedule an operator must fix or disable.
+ *
  * ## Cardinality discipline
  * Bounded-enum labels ONLY: `op` ∈ {markDone, markFailed}; `outcome` ∈ {idle, done, failed, lease_lost, cancelled}
  * (review) / {idle, done, failed, lease_lost, no_handler} (background); `phase` ∈ {after_hard_timeout}.
@@ -67,6 +77,7 @@ export const CRASH_LOOP_REAPED_NAME = "codemaster_runner_crash_loop_reaped_total
 export const HANDLER_ORPHAN_SETTLED_NAME = "codemaster_runner_handler_orphan_settled_total";
 export const BACKGROUND_JOBS_TOTAL_NAME = "codemaster_runner_background_jobs_total";
 export const BACKGROUND_NO_HANDLER_NAME = "codemaster_runner_background_no_handler_total";
+export const SCHEDULER_SCHEDULE_ERRORS_NAME = "codemaster_runner_scheduler_schedule_errors_total";
 
 // Meter + instruments cached at MODULE scope (created once at import).
 const METER = getMeter("codemaster.runner");
@@ -123,6 +134,13 @@ const BACKGROUND_JOBS_TOTAL_COUNTER: Counter = METER.createCounter(BACKGROUND_JO
     "Count of settled runOneBackgroundJob invocations (the GENERIC core.background_jobs runner), labeled by " +
     "outcome ∈ {idle, done, failed, lease_lost, no_handler}. The canonical background-platform throughput + " +
     "error-rate surface; separate from codemaster_runner_jobs_total so review-runner panels stay intact.",
+});
+const SCHEDULER_SCHEDULE_ERRORS_COUNTER: Counter = METER.createCounter(SCHEDULER_SCHEDULE_ERRORS_NAME, {
+  description:
+    "Count of schedules that FAILED inside a pollAndEnqueue pass (poison cadence_spec / enqueue / UPDATE error) " +
+    "and were isolated — skipped + left unadvanced while the pass continued over the healthy schedules. NO " +
+    "schedule_id label (operator-minted ids are unbounded-cardinality); the paired WARN log carries the id. A " +
+    "sustained non-zero rate signals a permanently-bad schedule an operator must fix or disable.",
 });
 const BACKGROUND_NO_HANDLER_COUNTER: Counter = METER.createCounter(BACKGROUND_NO_HANDLER_NAME, {
   description:
@@ -191,4 +209,9 @@ export function recordBackgroundJobOutcome(
 /** Record one no-handler dead-letter (claimed job_type absent from the registry). Fail-safe. */
 export function recordNoHandlerDeadLetter(): void {
   try { BACKGROUND_NO_HANDLER_COUNTER.add(1); } catch { /* telemetry never perturbs the runner */ }
+}
+
+/** Record one schedule isolated (skipped + unadvanced) inside a pollAndEnqueue pass. Fail-safe. */
+export function recordSchedulerScheduleError(): void {
+  try { SCHEDULER_SCHEDULE_ERRORS_COUNTER.add(1); } catch { /* telemetry never perturbs the scheduler */ }
 }
