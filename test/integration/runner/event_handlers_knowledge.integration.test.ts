@@ -385,7 +385,7 @@ describeDb("event_handlers — sync_code_owners + refresh_semantic_docs (Phase 3
 
 // ─── registry + WORKFLOW_TYPE_TO_JOB_TYPE (pure — no DB) ─────────────────────────────────────────
 describe("event registry + workflow_job_map (Phase 3d W3d.2 widening)", () => {
-  it("registerEventHandlers registers ALL 5 event job_types (3 reconcile/repair + 2 knowledge producers)", () => {
+  it("registerEventHandlers registers ALL 6 event job_types (3 reconcile/repair + 2 knowledge producers + the 3e.3 page resync)", () => {
     const registry = new HandlerRegistry();
     registerEventHandlers(registry, {});
     expect([...registry.registeredTypes()].sort()).toEqual([
@@ -394,6 +394,7 @@ describe("event registry + workflow_job_map (Phase 3d W3d.2 widening)", () => {
       "refresh_semantic_docs",
       "repair_installation_repositories",
       "sync_code_owners",
+      "trigger_page_resync",
     ]);
   });
 

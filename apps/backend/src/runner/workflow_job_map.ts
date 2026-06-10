@@ -19,13 +19,23 @@
 //   - "syncCodeOwners" / "refreshSemanticDocs"
 //       ingest/_push_emitters.ts (SYNC_CODE_OWNERS_WORKFLOW_TYPE /
 //       REFRESH_SEMANTIC_DOCS_WORKFLOW_TYPE)
+//   - "triggerPageResyncWorkflow"
+//       the registered TS workflow TYPE string — the EXPORTED function name
+//       (workflows/trigger_page_resync.workflow.ts) RealTemporalClient.startWorkflow dispatches by.
+//       UNLIKE the 5 keys above there is NO live producer constant to copy: the admin
+//       DELETE-approval emitter (api/admin/confluence_pages_write.ts::PageResyncDispatcherPort) is
+//       an OPTIONAL seam server.ts does not wire yet (1:1 with the frozen Python, whose dispatcher
+//       was a recording stub "for the eventual integration with workflow.start_workflow"). The
+//       registered type IS therefore the canonical identity; a future concrete dispatcher MUST
+//       stamp this string (not the vestigial PascalCase TRIGGER_PAGE_RESYNC_WORKFLOW_TYPE — that
+//       const preserves the Python class name for parity only).
 //
 // ## VALUES are registered job_types
 // Every value MUST have a matching registration (handlers/event_handlers.ts — and, as later Phase 3d
 // waves widen this map to the remaining workflow_types, whichever handler module carries them).
 //
 // Started with the 3 reconcile/repair entries (W3d.1); W3d.2 appended the 2 knowledge producers;
-// later Phase 3d waves append as their workflow migrations land.
+// Phase 3e.3 appended trigger_page_resync — the LAST non-review event-driven workflow.
 
 /** Temporal workflow_type → platform job_type. Readonly — the cutover reads, never mutates. */
 export const WORKFLOW_TYPE_TO_JOB_TYPE: Readonly<Record<string, string>> = {
@@ -34,4 +44,5 @@ export const WORKFLOW_TYPE_TO_JOB_TYPE: Readonly<Record<string, string>> = {
   repairInstallationRepositories: "repair_installation_repositories",
   syncCodeOwners: "sync_code_owners",
   refreshSemanticDocs: "refresh_semantic_docs",
+  triggerPageResyncWorkflow: "trigger_page_resync",
 };

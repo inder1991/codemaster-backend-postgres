@@ -91,13 +91,13 @@ describeDb("background_runner_main — buildBackgroundRunner composition (Phase 
     // W3b.1 + W3b.2: the 2 interval + 2 daily crons; W3d.1: the run_id_retention daily cron + the
     // 3 reconcile EVENT-DRIVEN handlers; W3d.2: the 2 knowledge-producer EVENT-DRIVEN handlers
     // (sync_code_owners / refresh_semantic_docs); W3e.1: the workspace_retention multi-step interval
-    // cron; W3e.2: the confluence_ingest multi-step fan-out interval cron. Later Phase 3e waves
-    // append here.
+    // cron; W3e.2: the confluence_ingest multi-step fan-out interval cron; 3e.3: the
+    // trigger_page_resync single-page EVENT-DRIVEN handler — the LAST non-review workflow.
     expect([...handles.registry.registeredTypes()].sort()).toEqual([
       "confluence_ingest", "mark_stale_chunks", "mutex_janitor", "partition_maintenance",
       "reconcile_installation", "reconcile_repositories", "refresh_semantic_docs",
       "repair_installation_repositories", "review_run_reaper", "run_id_retention",
-      "sync_code_owners", "workspace_retention",
+      "sync_code_owners", "trigger_page_resync", "workspace_retention",
     ]);
   });
 

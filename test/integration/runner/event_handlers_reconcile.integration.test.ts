@@ -321,11 +321,14 @@ describeDb("event_handlers — reconcile×3 on the background-jobs platform (Pha
 
 // ─── WORKFLOW_TYPE_TO_JOB_TYPE (pure — no DB) ──────────────────────────────────────────────────────
 describe("WORKFLOW_TYPE_TO_JOB_TYPE (Phase 3d W3d.1 registry start + W3d.2 widening)", () => {
-  it("maps the 5 event-driven Temporal workflow_type strings to the registered job_types, byte-exact", () => {
+  it("maps the 6 event-driven Temporal workflow_type strings to the registered job_types, byte-exact", () => {
     // Keys are the EXACT workflow_type strings the producers stamp on outbox rows:
     // github_webhook_persistence.ts (reconcileInstallation / reconcileRepositories),
     // _repair_dispatcher.ts (repairInstallationRepositories), and _push_emitters.ts
-    // (syncCodeOwners / refreshSemanticDocs — W3d.2). The next wave's outbox
+    // (syncCodeOwners / refreshSemanticDocs — W3d.2) — plus the Phase 3e.3
+    // triggerPageResyncWorkflow, whose key is the REGISTERED workflow type (the exported function
+    // name; the admin PageResyncDispatcherPort producer is unwired in production today, so the
+    // registered type is the canonical identity a future dispatcher must stamp). The outbox
     // temporal_workflow_start cutover reads this map — a drifted key strands the outbox row.
     expect(WORKFLOW_TYPE_TO_JOB_TYPE).toEqual({
       reconcileInstallation: "reconcile_installation",
@@ -333,6 +336,7 @@ describe("WORKFLOW_TYPE_TO_JOB_TYPE (Phase 3d W3d.1 registry start + W3d.2 widen
       repairInstallationRepositories: "repair_installation_repositories",
       syncCodeOwners: "sync_code_owners",
       refreshSemanticDocs: "refresh_semantic_docs",
+      triggerPageResyncWorkflow: "trigger_page_resync",
     });
   });
 

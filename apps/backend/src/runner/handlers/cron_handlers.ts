@@ -1,9 +1,8 @@
 import { z } from "zod";
 
 import {
-  ConfluenceSyncActivities,
-  PoolExistingChunkRowsReader,
   type ConfluenceChunkClient,
+  type ConfluenceSyncActivities,
 } from "#backend/activities/confluence_sync.activity.js";
 import { ListActiveConfluenceSpacesActivity } from "#backend/activities/list_active_confluence_spaces.activity.js";
 import { MarkStaleChunksActivity } from "#backend/activities/mark_stale_chunks.activity.js";
@@ -25,19 +24,21 @@ import {
   runWorkspaceReleasedRetentionActivity,
 } from "#backend/activities/workspace_retention.activity.js";
 
-import { makeLazyEmbedderCache } from "#backend/adapters/embedder_cache.js";
 import type { EmbeddingsPort } from "#backend/adapters/embeddings_port.js";
-import { PostgresConfluenceChunksRepo } from "#backend/domain/repos/confluence_chunks_repo.js";
-import { PostgresConfluencePageApprovalsRepo } from "#backend/domain/repos/confluence_page_approvals_repo.js";
 import type { GitHubApiClient } from "#backend/integrations/github/api_client.js";
 
 import { WallClock } from "#platform/clock.js";
-import { tenantKysely } from "#platform/db/database.js";
 
 import { RefreshConfluenceInputV1 } from "#contracts/confluence_sync.v1.js";
 import { MarkStaleChunksInputV1 } from "#contracts/confluence_sync_stale.v1.js";
 
 import type { HandlerRegistry } from "../handler_registry.js";
+import {
+  buildConfluenceSyncActivities,
+  makeLazyConfluenceChunkClient,
+  makeLazyConfluenceEmbeddings,
+  syncOneConfluencePage,
+} from "./_confluence_page_sync.js";
 
 // Phase 3b W3b.1 + W3b.2 + Phase 3d W3d.1 + Phase 3e W3e.1 + W3e.2: job_type → handler ADAPTERS for
 // the 7 crons migrated off Temporal Schedules — the 2 INTERVAL crons (mutex_janitor every 5min +
@@ -154,81 +155,14 @@ function makeLazyRetentionGithubClient(): GitHubApiClient {
 }
 
 // ── W3e.2 confluence_ingest collaborators ──────────────────────────────────────────────────────────
-
-/** The model name every confluence chunk embed routes through — byte-identical with the Temporal
- *  composition root's wiring (build_activities.ts) and the event_handlers REFRESH_EMBED_MODEL_NAME. */
-const CONFLUENCE_EMBED_MODEL_NAME = "qwen3-embed-0.6b";
+// The per-page chain + holder construction + lazy deferred-Vault client/embedder builders moved to
+// ./_confluence_page_sync.ts (Phase 3e.3) — ONE source of truth shared with the event_handlers
+// 'trigger_page_resync' single-page handler so the two dispatch paths can never drift.
 
 /** confluence_ingest scheduled input — the REAL `RefreshConfluenceInputV1` (the ADR-0047
  *  single-typed-input marker — `.strict()` with only the defaulted `schema_version`), exactly what the
  *  Temporal Schedule dispatches into confluenceIngestWorkflow (the mark_stale_chunks parse posture). */
 const ConfluenceIngestCronInput = RefreshConfluenceInputV1;
-
-/**
- * A {@link ConfluenceChunkClient} (the narrow listPages/getPage slice) that builds the REAL
- * Vault-token-backed ConfluenceClient on first use and memoizes it — 1:1 with the Temporal composition
- * root's `makeLazyConfluenceClient` (build_activities.ts). The Confluence Vault token is ABSENT in dev
- * (ADR-0075) and `ConfluenceTokenProvider.fromVault` is fail-HARD, so construction is deferred to the
- * FIRST `listPages`/`getPage` call: in dev, `list_active_confluence_spaces_activity` returns ZERO
- * spaces → the per-space loop never runs → the client is NEVER built → the absent token cannot fail
- * the 6h cycle. Dynamic imports (the hydrate-activity idiom) keep the Vault/Confluence wiring off this
- * module's static import graph.
- */
-function makeLazyConfluenceChunkClient(): ConfluenceChunkClient {
-  let memo: Promise<ConfluenceChunkClient> | undefined;
-  const lazy = (): Promise<ConfluenceChunkClient> => {
-    if (memo === undefined) {
-      memo = (async (): Promise<ConfluenceChunkClient> => {
-        const { ConfluenceClient } = await import("#backend/integrations/confluence/client.js");
-        const { ConfluenceTokenProvider } = await import(
-          "#backend/integrations/confluence/token_provider.js"
-        );
-        const { VaultHttpPort } = await import("#backend/adapters/vault_http.js");
-        const clock = new WallClock();
-        const vault = VaultHttpPort.fromEnv();
-        const tokenProvider = await ConfluenceTokenProvider.fromVault({ vault, clock });
-        tokenProvider.startRefreshLoop();
-        // `authEmail` selects HTTP-Basic (Atlassian Cloud) vs Bearer (Server/DC PAT); OMITTED (not
-        // set to undefined) when absent, per exactOptionalPropertyTypes.
-        const authEmail = tokenProvider.authEmail;
-        return new ConfluenceClient({
-          baseUrl: tokenProvider.baseUrl,
-          tokenProvider: tokenProvider.getToken.bind(tokenProvider),
-          ...(authEmail !== null ? { authEmail } : {}),
-          clock,
-        });
-      })();
-    }
-    return memo;
-  };
-  return {
-    listPages: async (args) => (await lazy()).listPages(args),
-    getPage: async (args) => (await lazy()).getPage(args),
-  };
-}
-
-/**
- * An {@link EmbeddingsPort} that resolves the REAL env-selected platform embedder
- * (resolveEmbeddingsConsumer, ADR-0059 — fail-loud on missing env) on the FIRST `embed` call and
- * memoizes it (the event_handlers `resolveRefreshEmbeddings` idiom, pushed one seam deeper). Deferring
- * to the first EMBED (not the first dispatch) keeps the dev posture intact: a cycle over zero
- * spaces/pages never embeds → never resolves → a runner without embedder env vars both BOOTS and runs
- * empty 6h cycles green; the fail-loud env error surfaces on the first real chunk embed, settling the
- * attempt failed with last_error persisted.
- */
-function makeLazyConfluenceEmbeddings(): EmbeddingsPort {
-  let memo: EmbeddingsPort | undefined;
-  return {
-    embed: async (req) => {
-      if (memo === undefined) {
-        // Dynamic import keeps the Qwen/OpenAI adapter graph off this module's static imports.
-        const { resolveEmbeddingsConsumer } = await import("#backend/adapters/resolve_embeddings.js");
-        memo = resolveEmbeddingsConsumer();
-      }
-      return memo.embed(req);
-    },
-  };
-}
 
 /** Per-space accumulator (1:1 with the workflow body's SpaceStats, including the F-40 `pages_failed`
  *  counter — observability-only, never aggregated into the cross-space tally). */
@@ -273,35 +207,12 @@ async function syncOneConfluenceSpace(
     // silently flushing chunks would hide that.
     livePageIds.push(pageRef.page_id);
     try {
-      const bodyOut = await acts.fetchPageBody({
-        schema_version: 1,
-        page_id: pageRef.page_id,
-        space_key: spaceKey,
-      });
-
-      const sanitizedOut = await acts.sanitizePage({
-        schema_version: 1,
-        page: bodyOut.page,
-        last_modified_at: cycleStartedAt,
-      });
-
-      const chunkedOut = await acts.chunkAndEmbed({
-        schema_version: 1,
-        sanitized: sanitizedOut.sanitized,
-      });
-
-      const upsertOut = await acts.upsertChunks({
-        schema_version: 1,
-        space_key: spaceKey,
-        page_id: bodyOut.page.page_id,
-        page_title: bodyOut.page.title,
-        // F-37: pass page_version from the fetched body.
-        page_version: bodyOut.page.version,
-        page_status: bodyOut.page.status,
-        last_modified_at: cycleStartedAt,
-        raw_labels: bodyOut.page.labels,
-        injection_flags: sanitizedOut.sanitized.injection_flags,
-        chunks: chunkedOut.chunks,
+      // The shared 4-step per-page chain (fetch_body → sanitize → chunk_and_embed → upsert,
+      // F-37 page_version threading included) — _confluence_page_sync.ts, Phase 3e.3 extraction.
+      const upsertOut = await syncOneConfluencePage(acts, {
+        spaceKey,
+        pageId: pageRef.page_id,
+        cycleStartedAt,
       });
 
       // Page survived all 4 activities.
@@ -545,22 +456,14 @@ export function registerCronHandlers(registry: HandlerRegistry, deps: CronHandle
     if (dsn === undefined || dsn === "") {
       throw new Error("CODEMASTER_PG_CORE_DSN is not set; cannot run the confluence_ingest handler");
     }
-    const db = tenantKysely<unknown>(dsn);
     // The SAME collaborator set the Temporal composition root wires into ConfluenceSyncActivities
-    // (build_activities.ts): the chunks repo satisfies BOTH the idempotency-lookup and writer slices;
-    // the approvals repo the reader slice; the pool reader the hard-limit candidate fetch; the lazy
-    // DSN-memoized EmbedderCache the SCOPE-A dual-write (refresh() builds the singleton on the first
-    // upsert — an empty cycle never touches it). Clock = the runner's seam (prod IS a WallClock).
-    const chunksRepo = new PostgresConfluenceChunksRepo({ db, clock: handlerDeps.clock });
-    const acts = new ConfluenceSyncActivities({
+    // (build_activities.ts) — the shared construction in _confluence_page_sync.ts. Clock = the
+    // runner's seam (prod IS a WallClock).
+    const acts = buildConfluenceSyncActivities({
+      dsn,
+      clock: handlerDeps.clock,
       client: confluenceClient,
       embeddings: confluenceEmbeddings,
-      modelName: CONFLUENCE_EMBED_MODEL_NAME,
-      chunkEmbeddingLookup: chunksRepo,
-      chunksWriter: chunksRepo,
-      approvalsReader: new PostgresConfluencePageApprovalsRepo({ db }),
-      existingChunkRowsReader: new PoolExistingChunkRowsReader({ dsn }),
-      embedderCache: makeLazyEmbedderCache(dsn, { clock: handlerDeps.clock }),
     });
     const listActivity = new ListActiveConfluenceSpacesActivity({ dsn });
 

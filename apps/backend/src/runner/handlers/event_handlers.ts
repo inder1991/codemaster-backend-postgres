@@ -2,6 +2,7 @@ import {
   type CacheGitCloner,
   cloneRepositoryActivity,
 } from "#backend/activities/clone_repository.activity.js";
+import type { ConfluenceChunkClient } from "#backend/activities/confluence_sync.activity.js";
 import {
   type GitHubListReposPort,
   doHydrateInstallationRepositories,
@@ -32,15 +33,24 @@ import {
 import { RefreshSemanticDocsInputV1 } from "#contracts/refresh_semantic_docs.v1.js";
 import { RepairInstallationRepositoriesPayloadV1 } from "#contracts/repair_installation_repositories.v1.js";
 import { SyncCodeOwnersPayloadV1 } from "#contracts/sync_code_owners_payload.v1.js";
+import { TriggerPageResyncInputV1 } from "#contracts/trigger_page_resync.v1.js";
 
 import type { HandlerRegistry } from "../handler_registry.js";
+import {
+  buildConfluenceSyncActivities,
+  makeLazyConfluenceChunkClient,
+  makeLazyConfluenceEmbeddings,
+  syncOneConfluencePage,
+} from "./_confluence_page_sync.js";
 
-// Phase 3d W3d.1 + W3d.2: job_type → handler ADAPTERS for the 5 EVENT-DRIVEN workflows migrated off
-// Temporal — the 3 auto-registration thin proxies (reconcile.workflow.ts: reconcileInstallation /
-// reconcileRepositories / repairInstallationRepositories, each a pure pass-through over ONE
-// activity) plus the 2 knowledge producers (sync_code_owners.workflow.ts: a single-activity
-// pass-through; refresh_semantic_docs.workflow.ts: the 2-step clone → refresh sequence reproduced
-// in-process). Each adapter parses the verified job payload with the ACTIVITY'S OWN input contract
+// Phase 3d W3d.1 + W3d.2 + Phase 3e.3: job_type → handler ADAPTERS for the 6 EVENT-DRIVEN workflows
+// migrated off Temporal — the 3 auto-registration thin proxies (reconcile.workflow.ts:
+// reconcileInstallation / reconcileRepositories / repairInstallationRepositories, each a pure
+// pass-through over ONE activity), the 2 knowledge producers (sync_code_owners.workflow.ts: a
+// single-activity pass-through; refresh_semantic_docs.workflow.ts: the 2-step clone → refresh
+// sequence reproduced in-process), plus the Phase 3e.3 trigger_page_resync single-page Confluence
+// resync (trigger_page_resync.workflow.ts: the 4-step per-page chain via _confluence_page_sync.ts —
+// the LAST non-review workflow). Each adapter parses the verified job payload with its OWN input contract
 // and dispatches the EXISTING, tested activity body — the activity logic is NOT rewritten; the
 // Temporal workflows stay in place until Phase 4 deletes them. The producers (webhook emitters +
 // the repair dispatcher) keep stamping outbox rows with the Temporal workflow_type strings; the
@@ -127,6 +137,18 @@ export type EventHandlersDeps = {
    *  inject a stub). Omitted in prod — the deferred-Vault lazy GitHubAppTokenProvider
    *  ({@link makeLazyCloneTokenProvider}), the SAME mint the Temporal composition root wires. */
   readonly refreshGetToken?: TokenProvider;
+  /** OPTIONAL Confluence listPages/getPage slice for the trigger_page_resync single-page chain
+   *  (integration tests inject a scripted fake). Omitted in prod — the deferred-Vault lazy
+   *  ConfluenceClient (_confluence_page_sync.ts::makeLazyConfluenceChunkClient, the SAME builder
+   *  the confluence_ingest cron closes over), so a runner without the Confluence Vault token still
+   *  BOOTS (ADR-0075 dev posture) — the fail-loud error surfaces on the first resync job's fetch,
+   *  persisted in last_error. */
+  readonly confluenceClient?: ConfluenceChunkClient;
+  /** OPTIONAL embeddings port for the trigger_page_resync chunk embeds (integration tests inject
+   *  the deterministic RecordingEmbeddingsClient). Omitted in prod — the env-selected platform
+   *  embedder resolved LAZILY on the FIRST embed call + memoized
+   *  (_confluence_page_sync.ts::makeLazyConfluenceEmbeddings, ADR-0059). */
+  readonly confluenceEmbeddings?: EmbeddingsPort;
 };
 
 /**
@@ -411,6 +433,66 @@ export function registerEventHandlers(registry: HandlerRegistry, deps: EventHand
         `chunks_persisted=${result.chunks_persisted} retrieval_degraded=${result.retrieval_degraded} ` +
         `degradation_reason=${result.degradation_reason ?? "none"} ` +
         `repository_id=${parsed.repository_id} job_id=${handlerDeps.job.job_id}`,
+    );
+  });
+
+  // ── Phase 3e.3: trigger_page_resync — the LAST non-review event-driven workflow ──
+  //
+  // The admin-triggered single-page Confluence resync (trigger_page_resync.workflow.ts / the frozen
+  // Python TriggerPageResyncWorkflow.run): on page-approval revocation, the DELETE-approval endpoint
+  // (api/admin/confluence_pages_write.ts::revokePageApproval, via PageResyncDispatcherPort) enqueues
+  // a resync so the revoked page's default-tagged chunks are flushed within minutes instead of
+  // waiting for the next 6h confluence_ingest tick (spec §3.7 approval-drift bound). The handler
+  // runs the SAME 4 per-page activities the ingest fan-out runs — fetch_page_body → sanitize_page →
+  // chunk_and_embed → upsert_chunks — for exactly ONE (space_key, page_id), via the SHARED chain in
+  // _confluence_page_sync.ts (no space listing, no reconcile — the workflow body's exact scope).
+  // The upsert's approval LEFT JOIN sees the now-revoked approval and rejects the default-tagged
+  // chunks (or persists them if the operator re-approved between enqueue and here).
+  //
+  // ## DIVERGENCE from the Temporal resync_complete contract (deliberate)
+  // The TS Temporal workflow body fail-softs: it catches a transient downstream failure (after its
+  // _PAGE_RETRY budget) and returns TriggerPageResyncOutputV1.resync_complete=false so "the caller
+  // retries / escalates" — but no caller ever consumed that output (the dispatch is fire-and-forget
+  // from the DELETE-approval endpoint). On the platform the handler THROWS instead: the runner's
+  // markFailed retry/backoff redrives the attempt and dead-letters at max_attempts with last_error
+  // persisted — the platform retry IS the retry the resync_complete=false contract asked the absent
+  // caller to perform. A malformed payload (ZodError) burns its bounded attempts and deads with the
+  // error persisted (the module-doc retry-semantics trade, same as every event handler above).
+  //
+  // ## Result handling + cancellation
+  // Returns void (the platform persists job OUTCOME, not TriggerPageResyncOutputV1 — consumed by
+  // nobody but observability on the Temporal side); the upsert tally is logged. No `signal`
+  // threading: the chain is a bounded 4-step sequence over idempotent activities (the upsert is
+  // content-addressed ON CONFLICT), so a lease-lost duplicate re-run converges — the cron adapters'
+  // posture.
+  const resyncConfluenceClient = deps.confluenceClient ?? makeLazyConfluenceChunkClient();
+  const resyncConfluenceEmbeddings = deps.confluenceEmbeddings ?? makeLazyConfluenceEmbeddings();
+  registry.register("trigger_page_resync", async (payload, _signal, handlerDeps) => {
+    const parsed = TriggerPageResyncInputV1.parse(payload);
+    const dsn = requireDsn(deps, "trigger_page_resync");
+    const acts = buildConfluenceSyncActivities({
+      dsn,
+      clock: handlerDeps.clock,
+      client: resyncConfluenceClient,
+      embeddings: resyncConfluenceEmbeddings,
+    });
+    // The deterministic cycle timestamp threaded as last_modified_at into sanitize + upsert — the
+    // job-dispatch instant off the runner's Clock seam (the handler analogue of the workflow-start
+    // instant the TS workflow pins via workflowInfo().startTime; `.toISOString()` yields the
+    // tz-aware Z-suffixed RFC3339 string the offset:true constraint requires).
+    const cycleStartedAt = handlerDeps.clock.now().toISOString();
+    const upsertOut = await syncOneConfluencePage(acts, {
+      spaceKey: parsed.space_key,
+      pageId: parsed.page_id,
+      cycleStartedAt,
+    });
+    console.info(
+      `trigger_page_resync applied: space_key=${parsed.space_key} page_id=${parsed.page_id} ` +
+        `upserted=${upsertOut.upserted} rejected_no_approval=${upsertOut.rejected_no_approval} ` +
+        `rejected_default_cap=${upsertOut.rejected_default_cap} ` +
+        `quarantined=${upsertOut.quarantined} ` +
+        `triggered_by_user_id=${parsed.triggered_by_user_id ?? "none"} ` +
+        `job_id=${handlerDeps.job.job_id}`,
     );
   });
 }
