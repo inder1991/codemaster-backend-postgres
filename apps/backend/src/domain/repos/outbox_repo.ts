@@ -37,6 +37,13 @@ export const OUTBOX_SINK_INSTALLATION_RECONCILE = "installation_reconcile";
 export const OUTBOX_PAYLOAD_SCHEMA_VERSION = 2;
 export const RECONCILE_PAYLOAD_SCHEMA_VERSION = 1;
 
+/** Retry-backoff curve for {@link PostgresOutboxRepo.markAttemptFailed}'s non-terminal path (Phase
+ *  3c.1): `leased_until = now + LEAST(BASE * 2^attempts, CAP)` seconds — 2s, 4s, 8s, …, 300s. Paces
+ *  the Postgres drain loop's retries of a failing sink (the role Temporal's per-call retry policy
+ *  played before the de-Temporal lift). */
+export const OUTBOX_RETRY_BACKOFF_BASE_SECONDS = 2;
+export const OUTBOX_RETRY_BACKOFF_CAP_SECONDS = 300;
+
 /** Review workflow types — dispatching one of these via {@link PostgresOutboxRepo.appendNonReviewDispatch}
  *  is producer drift. The TS review workflow type is `reviewPullRequest` (the registered Temporal type). */
 export const REVIEW_WORKFLOW_TYPES: ReadonlySet<string> = new Set(["reviewPullRequest"]);
@@ -256,6 +263,17 @@ export class PostgresOutboxRepo {
    * expectedAttempts` guard (R-6) makes a Temporal redrive a rowcount-0 no-op rather than a double-
    * increment → spurious dead-letter. RETURNING `{state, sink}` lets the activity emit the canonical
    * dead-letter signal exactly once. Returns `null` when the guard rejected the write (redrive).
+   *
+   * ## Retry backoff (Phase 3c.1)
+   * On the NON-terminal path the lease is NOT released — it is DEFERRED: `leased_until = now +
+   * LEAST(BASE * 2^attempts, CAP)` seconds (exponential on the PRIOR attempt count — in PG a SET
+   * expression reads the pre-UPDATE `attempts`: 2s, 4s, 8s, … capped at 300s). The claim predicate
+   * (`leased_until IS NULL OR leased_until < now`) then keeps the row out of re-claim until the
+   * backoff elapses. Under Temporal a per-call retry policy paced failing dispatches; the plain
+   * drain loop (outbox_dispatcher_loop.ts) busy-loops on a non-empty claim, so a NULL-release here
+   * would hammer a failing sink and burn every attempt in milliseconds. The terminal ('dead') path
+   * sets `leased_until = NULL` — no re-claim ever. Both branches compute "now" from the injected
+   * {@link Clock} (consistent with `last_attempted_at` on the same statement; never SQL `now()`).
    */
   public async markAttemptFailed(args: {
     db: Executor;
@@ -269,7 +287,12 @@ export class PostgresOutboxRepo {
          SET attempts = attempts + 1,
              last_error = ${args.error.slice(0, 1024)},
              last_attempted_at = ${this.#clock.now()},
-             leased_until = NULL,
+             leased_until = CASE
+               WHEN attempts + 1 >= ${args.maxAttempts} THEN NULL
+               ELSE ${this.#clock.now()}::timestamptz
+                    + LEAST(${OUTBOX_RETRY_BACKOFF_BASE_SECONDS} * power(2, attempts),
+                            ${OUTBOX_RETRY_BACKOFF_CAP_SECONDS}) * interval '1 second'
+             END,
              state = CASE WHEN attempts + 1 >= ${args.maxAttempts} THEN 'dead' ELSE state END
        WHERE id = ${args.id} AND attempts = ${args.expectedAttempts}
        RETURNING state, sink

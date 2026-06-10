@@ -166,15 +166,49 @@ describeDb("OutboxDispatcherLoop — Postgres leased drain loop (Phase 3c)", () 
     expect(await loop.drainOnce()).toBe(2); // both rows were claimed; the failure is per-row, not per-pass
 
     const failed = await rowOf(failing);
-    expect(failed.state).toBe("pending");          // NOT dispatched — back to claimable
+    expect(failed.state).toBe("pending");          // NOT dispatched — claimable again AFTER the backoff
     expect(failed.attempts).toBe(1);                // the REAL markAttemptFailed recorded the attempt
     expect(failed.dispatched_at).toBeNull();
     expect(failed.last_error).toBe("sink exploded");
-    expect(failed.leased_until).toBeNull();         // lease released → a later pass retries it
+    // The lease is NOT released — markAttemptFailed defers the re-claim by the exponential backoff
+    // (BASE 2s * 2^0 prior attempts), so a failing sink is paced instead of hammered.
+    expect(failed.leased_until).not.toBeNull();
+    expect(failed.leased_until!.getTime()).toBe(new Date("2026-06-10T12:00:02.000Z").getTime());
 
     // Per-row try/catch isolation (1:1 with the workflow body): the batch survivor still dispatched.
     expect(dispatched.map((d) => d.row_id)).toEqual([failing, ok]);
     expect((await rowOf(ok)).state).toBe("dispatched");
+  });
+
+  it("(2b) a persistently-failing row is NOT re-claimable until the backoff elapses — no busy-loop", async () => {
+    const clock = new FakeClock({ now: new Date("2026-06-10T12:00:00.000Z") });
+    const failing = await seedReconcileRow({ tag: "always-fail", createdAt: new Date("2026-06-10T11:00:00.000Z") });
+    const { activities, dispatched } = makeActivities({
+      clock,
+      dispatchImpl: async () => { throw new Error("sink down"); },
+    });
+    const loop = new OutboxDispatcherLoop({ activities, clock, batchSize: 10, idleS: 2 });
+
+    expect(await loop.drainOnce()).toBe(1);          // claimed + dispatch failed → attempt recorded
+    expect(dispatched).toHaveLength(1);
+    const afterFail = await rowOf(failing);
+    expect(afterFail.state).toBe("pending");
+    expect(afterFail.attempts).toBe(1);
+    expect(afterFail.leased_until!.getTime()).toBe(new Date("2026-06-10T12:00:02.000Z").getTime());
+
+    // SAME instant (the drain loop busy-loops on a non-empty claim): the failed row's deferred
+    // lease keeps it OUT of the next claim — without the backoff this re-dispatches immediately
+    // and the row burns all attempts in milliseconds against a down sink.
+    expect(await loop.drainOnce()).toBe(0);
+    expect(dispatched).toHaveLength(1);              // NOT re-dispatched within the backoff window
+
+    clock.advance({ seconds: 3 });                   // past the 2s first-failure backoff
+    expect(await loop.drainOnce()).toBe(1);          // backoff elapsed → re-claimed + retried
+    expect(dispatched).toHaveLength(2);
+    const afterRetry = await rowOf(failing);
+    expect(afterRetry.attempts).toBe(2);
+    // Exponential growth: second failure (prior attempts = 1) defers by 2 * 2^1 = 4s from 12:00:03.
+    expect(afterRetry.leased_until!.getTime()).toBe(new Date("2026-06-10T12:00:07.000Z").getTime());
   });
 
   it("(3) an empty outbox → drainOnce claims nothing and never dispatches", async () => {

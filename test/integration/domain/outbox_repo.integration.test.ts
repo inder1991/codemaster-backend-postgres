@@ -165,7 +165,8 @@ describeDb("PostgresOutboxRepo (integration, disposable PG)", () => {
       await cRepo.markDispatched({ db, id });
     });
 
-    it("markAttemptFailed below maxAttempts → stays pending, attempts+1, lease released, returns {state,sink}", async () => {
+    it("markAttemptFailed below maxAttempts → stays pending, attempts+1, leased_until deferred by backoff, returns {state,sink}", async () => {
+      fakeClock.set({ now: new Date("2026-06-06T12:00:00.000Z") });
       const db = tenantKysely(INTEGRATION_DSN!);
       const id = await seedPending("fail-retry");
       await cRepo.claimPending({ db, leaseSeconds: 60 }); // lease it
@@ -175,17 +176,42 @@ describeDb("PostgresOutboxRepo (integration, disposable PG)", () => {
       const row = await rowOf(id);
       expect(row.attempts).toBe(1);
       expect(row.state).toBe("pending");
-      expect(row.leasedUntil).toBeNull(); // released → immediate retry
+      // NOT released (a NULL lease would make the row IMMEDIATELY re-claimable → busy-loop on a
+      // persistently-failing sink). Deferred: leased_until = now + BASE(2s) * 2^0 prior attempts.
+      expect(row.leasedUntil).not.toBeNull();
+      expect(row.leasedUntil!.getTime()).toBe(new Date("2026-06-06T12:00:02.000Z").getTime());
     });
 
-    it("markAttemptFailed at maxAttempts → atomic dead-transition, returns {state:'dead',sink}", async () => {
+    it("markAttemptFailed backoff grows exponentially with prior attempts and caps at 300s", async () => {
+      fakeClock.set({ now: new Date("2026-06-06T12:00:00.000Z") });
+      const db = tenantKysely(INTEGRATION_DSN!);
+      const id = await seedPending("fail-backoff-curve");
+
+      // Second failure (prior attempts = 1) → 2 * 2^1 = 4s.
+      await cRepo.markAttemptFailed({ db, id, error: "e1", maxAttempts: 50, expectedAttempts: 0 });
+      await cRepo.markAttemptFailed({ db, id, error: "e2", maxAttempts: 50, expectedAttempts: 1 });
+      expect((await rowOf(id)).leasedUntil!.getTime()).toBe(
+        new Date("2026-06-06T12:00:04.000Z").getTime(),
+      );
+
+      // Deep-attempt failure (prior attempts = 20 → 2 * 2^20 s uncapped) → capped at 300s.
+      await pool.query(`UPDATE core.outbox SET attempts = 20 WHERE id = $1`, [id]);
+      await cRepo.markAttemptFailed({ db, id, error: "e21", maxAttempts: 50, expectedAttempts: 20 });
+      expect((await rowOf(id)).leasedUntil!.getTime()).toBe(
+        new Date("2026-06-06T12:05:00.000Z").getTime(),
+      );
+    });
+
+    it("markAttemptFailed at maxAttempts → atomic dead-transition (leased_until NULL), returns {state:'dead',sink}", async () => {
       const db = tenantKysely(INTEGRATION_DSN!);
       const id = await seedPending("fail-dead");
 
       const r = await cRepo.markAttemptFailed({ db, id, error: "give up", maxAttempts: 1, expectedAttempts: 0 });
       expect(r?.state).toBe("dead");
       expect(r?.sink).toBe("temporal_workflow_start");
-      expect((await rowOf(id)).state).toBe("dead");
+      const row = await rowOf(id);
+      expect(row.state).toBe("dead");
+      expect(row.leasedUntil).toBeNull(); // terminal — no backoff, never re-claimed
     });
 
     it("markAttemptFailed is a redrive no-op when expectedAttempts mismatches (R-6 idempotency)", async () => {
