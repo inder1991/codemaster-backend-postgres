@@ -14,6 +14,7 @@ import {
   CLAIM_LATENCY_MS_NAME,
   CRASH_LOOP_REAPED_NAME,
   HANDLER_DURATION_MS_NAME,
+  HANDLER_ORPHAN_SETTLED_NAME,
   HEARTBEAT_FAILURES_NAME,
   JOBS_TOTAL_NAME,
   LEASE_STEALS_NAME,
@@ -22,6 +23,7 @@ import {
   recordClaimLatencyMs,
   recordCrashLoopReaped,
   recordHandlerDurationMs,
+  recordHandlerOrphanSettled,
   recordHeartbeatFailure,
   recordJobOutcome,
   recordLeaseSteal,
@@ -39,6 +41,7 @@ describe("runner_metrics — metric names (Grafana-stable)", () => {
     expect(HANDLER_DURATION_MS_NAME).toBe("codemaster_runner_handler_duration_ms");
     expect(RETRY_ATTEMPTS_NAME).toBe("codemaster_runner_retry_attempts_total");
     expect(CRASH_LOOP_REAPED_NAME).toBe("codemaster_runner_crash_loop_reaped_total");
+    expect(HANDLER_ORPHAN_SETTLED_NAME).toBe("codemaster_runner_handler_orphan_settled_total");
   });
 });
 
@@ -60,5 +63,6 @@ describe("runner_metrics — emit functions are no-throw before exporter wiring"
     expect(() => recordRetryAttempt()).not.toThrow();
     expect(() => recordCrashLoopReaped(0)).not.toThrow();
     expect(() => recordCrashLoopReaped(3)).not.toThrow();
+    expect(() => recordHandlerOrphanSettled({ phase: "after_hard_timeout" })).not.toThrow();
   });
 });

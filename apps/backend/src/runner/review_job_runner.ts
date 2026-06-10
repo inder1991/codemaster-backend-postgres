@@ -7,6 +7,7 @@ import {
   recordClaimLatencyMs,
   recordCrashLoopReaped,
   recordHandlerDurationMs,
+  recordHandlerOrphanSettled,
   recordHeartbeatFailure,
   recordJobOutcome,
   recordLeaseSteal,
@@ -121,11 +122,19 @@ export async function runOneJob(o: { repo: ReviewJobsRepo; clock: Clock; owner: 
 
   let outcome: RunOutcome;
   try {
-    const handlerDone: Promise<undefined> = o.handler(job, work.signal).then(() => undefined);
+    const handlerPromise: Promise<void> = o.handler(job, work.signal);
+    const handlerDone: Promise<undefined> = handlerPromise.then(() => undefined);
     const raced = await Promise.race([handlerDone, hardTimeout]);
     if (raced === HARD_TIMEOUT) {
       // Handler overran the ceiling (and may still be running, orphaned — it violated the honor-`signal`
-      // contract). Settle as failed; the fence guards against any late completion write.
+      // contract). `work.signal` was already aborted by the hardTimeout helper (line above) as the
+      // cooperative nudge; we additionally OBSERVE the orphaned handler so a LATE settlement (it keeps
+      // running and resolves/throws AFTER this race already settled) is swallowed here and can NEVER
+      // surface as an unhandled rejection — and meter it (F4). The .catch is attached BEFORE settlement
+      // returns so the observer is wired no matter how the orphan eventually completes.
+      recordHandlerOrphanSettled({ phase: "after_hard_timeout" });
+      handlerPromise.catch(() => undefined); // observe + swallow any late orphan rejection (no unhandled)
+      // Settle as failed; the fence guards against any late completion write.
       outcome = await settleFailure(`max runtime ${o.maxRuntimeS}s exceeded`);
     } else {
       const done = await o.repo.markDone({ jobId: job.job_id, owner: o.owner, token });

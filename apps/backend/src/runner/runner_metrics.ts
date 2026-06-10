@@ -22,9 +22,16 @@
  *   * codemaster_runner_retry_attempts_total    — counter: a job re-enqueued for another attempt (markFailed
  *                                                  non-terminal).
  *   * codemaster_runner_crash_loop_reaped_total — counter: stuck runs reaped by `reapStuckRuns()`.
+ *   * codemaster_runner_handler_orphan_settled_total{phase}
+ *                                                — counter: a handler kept running / rejected AFTER the
+ *                                                  hard-runtime ceiling already SETTLED the job (it ignored
+ *                                                  `work.signal`). The orphan promise's late settlement is
+ *                                                  OBSERVED + swallowed here so it never becomes an unhandled
+ *                                                  rejection. `phase=after_hard_timeout`.
  *
  * ## Cardinality discipline
- * Bounded-enum labels ONLY: `op` ∈ {markDone, markFailed}; `outcome` ∈ {idle, done, failed, lease_lost, cancelled}.
+ * Bounded-enum labels ONLY: `op` ∈ {markDone, markFailed}; `outcome` ∈ {idle, done, failed, lease_lost, cancelled};
+ * `phase` ∈ {after_hard_timeout}.
  * NEVER per-tenant / per-installation / per-PR / per-job labels — same discipline the sibling modules enforce.
  *
  * Fail-safe: every emit swallows meter errors so telemetry never perturbs the runner loop.
@@ -41,6 +48,7 @@ export const JOBS_TOTAL_NAME = "codemaster_runner_jobs_total";
 export const HANDLER_DURATION_MS_NAME = "codemaster_runner_handler_duration_ms";
 export const RETRY_ATTEMPTS_NAME = "codemaster_runner_retry_attempts_total";
 export const CRASH_LOOP_REAPED_NAME = "codemaster_runner_crash_loop_reaped_total";
+export const HANDLER_ORPHAN_SETTLED_NAME = "codemaster_runner_handler_orphan_settled_total";
 
 // Meter + instruments cached at MODULE scope (created once at import).
 const METER = getMeter("codemaster.runner");
@@ -85,6 +93,13 @@ const CRASH_LOOP_REAPED_COUNTER: Counter = METER.createCounter(CRASH_LOOP_REAPED
     "Count of stuck runs reaped by reapStuckRuns() (expired leases whose attempts are exhausted). " +
     "Each reaped run had its job dead-lettered, its run CANCELLED, and its PR-mutex released in one txn.",
 });
+const HANDLER_ORPHAN_SETTLED_COUNTER: Counter = METER.createCounter(HANDLER_ORPHAN_SETTLED_NAME, {
+  description:
+    "Count of handler promises that CONTINUED or REJECTED after the hard-runtime ceiling already settled " +
+    "the job (the handler ignored work.signal). The orphan's late settlement is OBSERVED + swallowed so it " +
+    "never escapes as an unhandled rejection. A sustained non-zero rate signals handlers that do not honor " +
+    "cooperative cancellation. Bounded label phase ∈ {after_hard_timeout}.",
+});
 
 /** Record one claim() round-trip latency (ms). Fail-safe. */
 export function recordClaimLatencyMs(ms: number): void {
@@ -125,4 +140,12 @@ export function recordRetryAttempt(): void {
 export function recordCrashLoopReaped(count: number): void {
   if (count <= 0) return;
   try { CRASH_LOOP_REAPED_COUNTER.add(count); } catch { /* telemetry never perturbs the runner */ }
+}
+
+/**
+ * Record one orphaned handler whose promise continued/threw AFTER the hard-timeout already settled the
+ * job. `phase` ∈ {after_hard_timeout}. Fail-safe.
+ */
+export function recordHandlerOrphanSettled(args: { phase: "after_hard_timeout" }): void {
+  try { HANDLER_ORPHAN_SETTLED_COUNTER.add(1, { phase: args.phase }); } catch { /* telemetry never perturbs the runner */ }
 }
