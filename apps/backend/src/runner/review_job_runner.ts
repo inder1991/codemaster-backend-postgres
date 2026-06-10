@@ -2,6 +2,7 @@ import type { Clock } from "#platform/clock.js";
 import type { ReviewJobsRepo } from "./review_jobs_repo.js";
 import type { ReviewJobV1 } from "#contracts/review_jobs.v1.js";
 import { cancellableSleep } from "./clock_async.js";
+import { DEFAULT_LEDGER_RETENTION_DAYS } from "#backend/integrations/llm/invocation_ledger.js";
 import {
   recordClaimLatencyMs,
   recordCrashLoopReaped,
@@ -12,6 +13,31 @@ import {
   recordRetryAttempt,
   recordStaleTokenWrite,
 } from "./runner_metrics.js";
+
+/**
+ * The narrow ledger-pruner seam the {@link RunnerLoop} idle cycle depends on (W6.4 / D2). The concrete
+ * {@link import("#backend/integrations/llm/invocation_ledger.js").LlmInvocationLedger} satisfies it
+ * structurally; typing the loop's dep to this PORT (not the concrete class) keeps the runner free of a
+ * Postgres-pool dependency in tests — a counting/in-memory stub can stand in.
+ */
+export type LedgerPrunerPort = {
+  /** DELETE every ledger row older than `days` days; returns how many rows were deleted (cross-tenant). */
+  pruneOlderThan(days: number): Promise<number>;
+};
+
+/**
+ * The retention sweep is throttled to AT MOST ONCE per this many seconds (default 21600 = 6h), read once
+ * from `CODEMASTER_LLM_LEDGER_PRUNE_INTERVAL_S`. A non-positive or non-numeric value falls back to the
+ * default so a misconfiguration can never make the runner prune on EVERY idle cycle (which would hammer
+ * the cross-tenant DELETE). The throttle is measured on `clock.monotonic()` (clock_random gate — no raw
+ * wall-clock read, no raw timer).
+ */
+export const DEFAULT_LEDGER_PRUNE_INTERVAL_S: number = (() => {
+  const raw = process.env["CODEMASTER_LLM_LEDGER_PRUNE_INTERVAL_S"];
+  if (raw === undefined) return 21600;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 21600;
+})();
 export type JobHandler = (job: ReviewJobV1, signal: AbortSignal) => Promise<void>;
 export type RunOutcome = "idle" | "done" | "failed" | "lease_lost" | "cancelled";
 
@@ -128,14 +154,35 @@ export async function runOneJob(o: { repo: ReviewJobsRepo; clock: Clock; owner: 
 export class RunnerLoop {
   #stopped = false;
   readonly #stop = new AbortController();                  // wakes the idle sleep immediately on stop()
-  constructor(private o: { repo: ReviewJobsRepo; clock: Clock; owner: string; leaseS: number; heartbeatS: number;
-    maxRuntimeS: number; idleS: number; handler: JobHandler }) {}
+  // Monotonic marker of the last ledger prune (W6.4 / D2). Sentinel `-Infinity` so the FIRST idle cycle
+  // always clears the throttle (no wall-clock read; the gap is measured on `clock.monotonic()`).
+  #lastPruneMonotonic = Number.NEGATIVE_INFINITY;
+  constructor(private o: { repo: ReviewJobsRepo; clock: Clock; ledger: LedgerPrunerPort; owner: string;
+    leaseS: number; heartbeatS: number; maxRuntimeS: number; idleS: number; handler: JobHandler }) {}
   stop() { this.#stopped = true; this.#stop.abort(); }     // wire to process.on('SIGTERM', () => loop.stop())
+
+  /**
+   * The idle-cycle maintenance sweep (W6.1 reaper + W6.4 throttled ledger prune), run between job claims
+   * when the queue is empty. Factored out so it is independently exercisable (the throttle is deterministic
+   * under a {@link FakeClock}). Always: run the UNIFIED reaper (job+run+mutex+audit, D3 gate ④). Then, AT
+   * MOST ONCE per {@link DEFAULT_LEDGER_PRUNE_INTERVAL_S}, prune the LLM-invocation ledger of rows older
+   * than {@link DEFAULT_LEDGER_RETENTION_DAYS} days — throttled on `clock.monotonic()` (clock_random gate:
+   * no wall-clock read, no raw timer).
+   */
+  async runIdleMaintenance(): Promise<void> {
+    recordCrashLoopReaped(await this.o.repo.reapStuckRuns()); // unified reaper: job+run+mutex+audit (D3, gate ④)
+    const nowMonotonic = this.o.clock.monotonic();
+    if (nowMonotonic - this.#lastPruneMonotonic >= DEFAULT_LEDGER_PRUNE_INTERVAL_S) {
+      await this.o.ledger.pruneOlderThan(DEFAULT_LEDGER_RETENTION_DAYS);
+      this.#lastPruneMonotonic = nowMonotonic;              // reset the throttle marker after the sweep
+    }
+  }
+
   async run(): Promise<void> {
     while (!this.#stopped) {
       const { outcome } = await runOneJob(this.o);          // an in-flight job ALWAYS runs to completion (drain)
       if (outcome === "idle" && !this.#stopped) {
-        recordCrashLoopReaped(await this.o.repo.reapStuckRuns()); // unified reaper: job+run+mutex+audit (D3, gate ④)
+        await this.runIdleMaintenance();                    // reaper (W6.1) + throttled ledger prune (W6.4)
         await cancellableSleep(this.o.clock, this.o.idleS, this.#stop.signal); // stop() interrupts this wait (v3 #6)
       }
     }
