@@ -152,17 +152,13 @@ describe("LlmClient strictLedger mode (F4) — paid calls must be ledgered in th
     expect(sdk.calls()).toBe(0);
   });
 
-  it("THROWS even when no ledger is wired (strict mode forbids un-ledgered paid calls outright)", async () => {
+  it("THROWS AT CONSTRUCTION when no ledger is wired (F5 fail-fast: strict mode requires a ledger)", () => {
+    // F5 remediation moved this rejection EARLIER than the paid edge: a `strictLedger:true` client with no
+    // ledger is a MISCONFIGURATION rejected at construction — fail-fast — so it can never reach the wire (the
+    // pre-F5 behavior deferred the throw to the first paid invokeModel; strictly weaker). The SDK is
+    // unreachable because the client is never built.
     const sdk = countingSdk(REPLAYABLE_RESPONSE);
-    const client = strictClient({ sdk: sdk.sdk });
-    await expect(
-      client.invokeModel({
-        role: "primary",
-        model: "claude-sonnet-4-6",
-        messages: MESSAGES,
-        installationId: TEST_INSTALLATION_ID,
-      }),
-    ).rejects.toBeInstanceOf(LedgerRequiredError);
+    expect(() => strictClient({ sdk: sdk.sdk })).toThrow(LedgerRequiredError);
     expect(sdk.calls()).toBe(0);
   });
 

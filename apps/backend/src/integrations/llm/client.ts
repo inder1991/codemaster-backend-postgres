@@ -374,6 +374,17 @@ export class LlmClient {
     this.random = new SystemRandom();
     this.ledger = args.ledger;
     this.strictLedger = args.strictLedger ?? false;
+    // F5 (review remediation) — CONSTRUCTOR fail-fast guard. Strict-ledger mode is meaningless without a
+    // ledger to store into: a `strictLedger:true` client with NO `ledger` would mint a null idempotencyKey
+    // even when handed an idempotency context, so the paid call could PROCEED + PAY while storing nothing.
+    // Reject the misconfiguration AT CONSTRUCTION — before any paid path can run — so it can never reach the
+    // wire. The shell factory always wires `ledger` alongside `strictLedger:true`, so production is unaffected.
+    if (this.strictLedger && this.ledger === undefined) {
+      throw new LedgerRequiredError(
+        "strict-ledger mode requires a ledger: LlmClient was constructed with strictLedger:true but no " +
+          "ledger — an un-ledgered paid Bedrock call is unrepresentable in the de-Temporal shell path",
+      );
+    }
   }
 
   /**
@@ -515,11 +526,14 @@ export class LlmClient {
       // (default `AbortError`), matching the W4.1 GitHub-client / cloner convention. `signal` is OPTIONAL;
       // absent → a no-op and the path is byte-identical to the pre-W4.2 client.
       args.signal?.throwIfAborted();
-      // F4 (strict-ledger mode) — in the shell path a paid call MUST carry an idempotency context. A MISS
-      // with NO context here means an un-ledgered paid Bedrock call is about to happen: forbid it BEFORE
-      // the cost-cap reservation and the SDK call (gate ②). A replay HIT never reaches this branch, and a
-      // MISS WITH a context (idempotencyKey !== null) pays + stores normally.
-      if (this.strictLedger && args.idempotency === undefined) {
+      // F4 / F5 (strict-ledger mode) — in the shell path a paid call MUST be ledgered. The guard keys off
+      // `idempotencyKey === null` (NOT `args.idempotency === undefined`): a null key means NO key was minted,
+      // which covers BOTH a missing idempotency context AND an un-ledgered client (F5: ledger undefined →
+      // null key even WITH a context). Either way an un-ledgered paid Bedrock call is about to happen: forbid
+      // it BEFORE the cost-cap reservation and the SDK call (gate ②). A replay HIT never reaches this branch,
+      // and a MISS WITH a minted key (idempotencyKey !== null) pays + stores normally. The constructor guard
+      // already makes the ledger-undefined case unrepresentable; this is the defense-in-depth backstop.
+      if (this.strictLedger && idempotencyKey === null) {
         throw new LedgerRequiredError();
       }
       // Cost-cap pre-call check (FAIL-CLOSED). Retry ONCE on lock-timeout (S14.D
