@@ -124,7 +124,7 @@ describe("GitHubApiClient — AbortSignal threading (W4.1, gate ①)", () => {
     const controller = new AbortController();
     const http: GitHubHttpClient = {
       calls: 0,
-      async request(_args: GitHubHttpRequestArgs): Promise<GitHubHttpResponse> {
+      async request(): Promise<GitHubHttpResponse> {
         (this as { calls: number }).calls += 1;
         controller.abort(new Error("aborted-mid-retry"));
         await Promise.resolve();
