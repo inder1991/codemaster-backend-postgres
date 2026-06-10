@@ -167,6 +167,13 @@ export type GitHubHttpRequestArgs = {
   headers?: Record<string, string>;
   json_body?: unknown;
   text_body?: string | null;
+  /**
+   * OPTIONAL external abort signal (W4.1 / de-Temporal gate ①). When present the production transport
+   * COMBINES it with its own timeout via `AbortSignal.any` so an in-flight request RECEIVES the abort;
+   * when absent the transport's behaviour is byte-identical to the pre-W4.1 client (timeout-only).
+   * The cassette double ignores it (replay is local + instantaneous).
+   */
+  signal?: AbortSignal;
 };
 
 /**
@@ -199,12 +206,19 @@ export class FetchGitHubHttpClient implements GitHubHttpClient {
       args.json_body !== undefined && args.json_body !== null
         ? JSON.stringify(args.json_body)
         : (args.text_body ?? undefined);
+    // Transport timeout via the sanctioned seam — the timer is owned by the signal (no manual
+    // AbortController / clearTimeout bookkeeping). A fired timeout rejects fetch with an AbortError.
+    const timeoutSignal = transportAbortSignal(this.timeoutMs);
+    // W4.1 / gate ①: when the caller passes an external abort signal, COMBINE it with the transport
+    // timeout via `AbortSignal.any` so the in-flight fetch aborts on EITHER (external cancel OR
+    // timeout). When absent, `signal` is the timeout-only signal — byte-identical to the pre-W4.1
+    // transport. `AbortSignal.any` is available on Node >= 20.3 (we run 22); no polyfill.
+    const signal: AbortSignal =
+      args.signal !== undefined ? AbortSignal.any([args.signal, timeoutSignal]) : timeoutSignal;
     const init: RequestInit = {
       method: args.method,
       headers: args.headers ?? {},
-      // Transport timeout via the sanctioned seam — the timer is owned by the signal (no manual
-      // AbortController / clearTimeout bookkeeping). A fired timeout rejects fetch with an AbortError.
-      signal: transportAbortSignal(this.timeoutMs),
+      signal,
     };
     // Omit `body` entirely (rather than set it to undefined) so it satisfies
     // exactOptionalPropertyTypes — a GET/DELETE must carry no request body.
@@ -391,13 +405,22 @@ export class GitHubApiClient {
       installationId,
       accept = DEFAULT_ACCEPT,
       jsonBody = null,
-    }: { installationId: number; accept?: string; jsonBody?: unknown },
+      signal,
+    }: { installationId: number; accept?: string; jsonBody?: unknown; signal?: AbortSignal },
   ): Promise<GitHubHttpResponse> {
+    // W4.1 / gate ①: an already-aborted signal rejects BEFORE any transport call (token fetch + the
+    // http.request) — no NEW external call STARTS after abort. `signal` is OPTIONAL; when absent this
+    // is a no-op and the loop is byte-identical to the pre-W4.1 client.
+    signal?.throwIfAborted();
     let token = await this.tokenProvider(installationId);
     let attempt401 = false;
     let backoff = INITIAL_BACKOFF_SECONDS;
 
     for (let attempt = 0; attempt < MAX_5XX_RETRIES; attempt += 1) {
+      // Re-check at the top of EACH attempt: a 401-refresh / 5xx-backoff loop must NOT start a fresh
+      // http.request once the signal aborts mid-flight (gate ①). The in-flight call already received
+      // `signal` (forwarded below); this stops the NEXT one.
+      signal?.throwIfAborted();
       const url = `${this.baseUrl}${path}`;
       const resp = await this.http.request({
         method,
@@ -408,6 +431,7 @@ export class GitHubApiClient {
           "X-GitHub-Api-Version": GITHUB_API_VERSION,
         },
         json_body: jsonBody,
+        ...(signal !== undefined ? { signal } : {}),
       });
 
       // 401 → refresh the token once (the `attempt_401` latch), then retry.
@@ -503,14 +527,17 @@ export class GitHubApiClient {
     owner,
     repo,
     prNumber,
+    signal,
   }: {
     installationId: number;
     owner: string;
     repo: string;
     prNumber: number;
+    signal?: AbortSignal;
   }): Promise<PullRequestEnvelopeV1> {
     const resp = await this._request("GET", `/repos/${owner}/${repo}/pulls/${prNumber}`, {
       installationId,
+      ...(signal !== undefined ? { signal } : {}),
     });
     const body = GitHubApiClient.jsonOf(resp, "get_pull_request") as Record<string, unknown>;
     // Normalize the head SHA + base ref into the contract's expected fields (mirrors the Python
@@ -688,37 +715,72 @@ export class GitHubApiClient {
 
   public async get(
     path: string,
-    { installationId, accept = DEFAULT_ACCEPT }: { installationId: number; accept?: string },
+    {
+      installationId,
+      accept = DEFAULT_ACCEPT,
+      signal,
+    }: { installationId: number; accept?: string; signal?: AbortSignal },
   ): Promise<GitHubHttpResponse> {
-    return this._request("GET", path, { installationId, accept });
+    return this._request("GET", path, {
+      installationId,
+      accept,
+      ...(signal !== undefined ? { signal } : {}),
+    });
   }
 
   public async post(
     path: string,
-    { installationId, jsonBody = null }: { installationId: number; jsonBody?: unknown },
+    {
+      installationId,
+      jsonBody = null,
+      signal,
+    }: { installationId: number; jsonBody?: unknown; signal?: AbortSignal },
   ): Promise<GitHubHttpResponse> {
-    return this._request("POST", path, { installationId, jsonBody });
+    return this._request("POST", path, {
+      installationId,
+      jsonBody,
+      ...(signal !== undefined ? { signal } : {}),
+    });
   }
 
   public async put(
     path: string,
-    { installationId, jsonBody = null }: { installationId: number; jsonBody?: unknown },
+    {
+      installationId,
+      jsonBody = null,
+      signal,
+    }: { installationId: number; jsonBody?: unknown; signal?: AbortSignal },
   ): Promise<GitHubHttpResponse> {
-    return this._request("PUT", path, { installationId, jsonBody });
+    return this._request("PUT", path, {
+      installationId,
+      jsonBody,
+      ...(signal !== undefined ? { signal } : {}),
+    });
   }
 
   public async patch(
     path: string,
-    { installationId, jsonBody = null }: { installationId: number; jsonBody?: unknown },
+    {
+      installationId,
+      jsonBody = null,
+      signal,
+    }: { installationId: number; jsonBody?: unknown; signal?: AbortSignal },
   ): Promise<GitHubHttpResponse> {
-    return this._request("PATCH", path, { installationId, jsonBody });
+    return this._request("PATCH", path, {
+      installationId,
+      jsonBody,
+      ...(signal !== undefined ? { signal } : {}),
+    });
   }
 
   public async delete(
     path: string,
-    { installationId }: { installationId: number },
+    { installationId, signal }: { installationId: number; signal?: AbortSignal },
   ): Promise<GitHubHttpResponse> {
-    return this._request("DELETE", path, { installationId });
+    return this._request("DELETE", path, {
+      installationId,
+      ...(signal !== undefined ? { signal } : {}),
+    });
   }
 
   /** Whether a status is in the 2xx success band (exposed for callers building on `get`/`post`). */
