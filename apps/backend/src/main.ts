@@ -89,6 +89,20 @@ async function main(): Promise<void> {
       : {}),
   };
 
+  // CS5: schema-revision preflight for the Postgres runtime — BEFORE the HTTP bind and BEFORE any
+  // boot task starts a loop. A DB behind (or diverged from) the image's compiled-in migration
+  // sequence rejects here → the fail-loud handler below exits 1; the pod never serves traffic or
+  // claims jobs against a schema it was not built for (XH7's silent-drift class). Temporal mode is
+  // exempt (that runtime predates the preflight and retires in Phase 6); a DSN-less boot has no DB
+  // to preflight.
+  if (mode !== "temporal" && dsn !== undefined && dsn !== "") {
+    const { Kysely, PostgresDialect } = await import("kysely");
+    const { assertSchemaRevision } = await import("#backend/schema_preflight.js");
+    // A Kysely facade over the SHARED ADR-0062 pool — never destroyed here (destroy would end the
+    // pool the API + runner share for the process lifetime).
+    await assertSchemaRevision(new Kysely({ dialect: new PostgresDialect({ pool: getPool(dsn) }) }));
+  }
+
   // HTTP API first — app.listen() returns once bound; the server keeps serving on the event loop.
   await runServer(serverDeps);
   console.info(

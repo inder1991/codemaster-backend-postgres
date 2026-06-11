@@ -43,7 +43,7 @@ describeDb("assertSchemaRevision — boot preflight (CS5)", () => {
   it("(3) DRIFT: a sequence mismatch (same length, different content) fails LOUD even when the head matches", async () => {
     // Same head, but an interior revision differs — the fingerprint catches what a head-only
     // check would miss (e.g. a cherry-picked migration applied out of band).
-    const drifted = [...EXPECTED_MIGRATIONS];
+    const drifted: Array<string> = [...EXPECTED_MIGRATIONS];
     drifted[1] = "0002_seed_TAMPERED";
     const err = await assertSchemaRevision(db, drifted).then(
       () => null,

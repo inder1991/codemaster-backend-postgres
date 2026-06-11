@@ -1,6 +1,19 @@
 -- 0042_background_jobs_state_and_indexes.sql — Phase 4c W4c.1 (de-Temporal full-removal program):
 -- three data-layer review fixes on core.background_jobs (#7 state vocabulary, #8 claim indexes).
 --
+-- COLD-ONLY GUARD (CS5 — cutover-safety; audit XH7/L16/RT6): every change below assumes
+-- core.background_jobs is EMPTY (the #7 rationale says so explicitly — "cold/dev-phase ... no
+-- production rows": the CHECK swap is metadata-only and the index builds are non-CONCURRENT only
+-- under that assumption). The guard makes the assumption executable: replayed against a POPULATED
+-- table (a stale environment migrated late, a restored snapshot) the migration aborts loudly here
+-- instead of taking blocking locks and swapping constraints under live rows.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM core.background_jobs) THEN
+    RAISE EXCEPTION '0042 requires a COLD core.background_jobs (it swaps the state CHECK and builds indexes non-concurrently): the table has rows. Drain/clear core.background_jobs or apply the expand-contract variant of this change instead.';
+  END IF;
+END $$;
+
 -- (#7) DROP 'failed' from the state vocabulary. 0039 reserved 'failed' as a persisted resting state
 --      ("operators can distinguish retry-scheduled from exhausted by state"), but the W2a repo
 --      shipped review_jobs semantics instead: BackgroundJobsRepo.markFailed settles a failed attempt
