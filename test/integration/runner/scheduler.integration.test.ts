@@ -22,6 +22,8 @@ import { Pool } from "pg";
 import { FakeClock, WallClock } from "#platform/clock.js";
 import { describeDb, INTEGRATION_DSN } from "../_db.js";
 import { BackgroundJobsRepo } from "#backend/runner/background_jobs_repo.js";
+import { buildBackgroundRunner } from "#backend/runner/background_runner_main.js";
+import { SCHEDULED_JOB_INPUT_CONTRACTS } from "#backend/runner/scheduled_input_contracts.js";
 import { SchedulerLoop, pollAndEnqueue } from "#backend/runner/scheduler.js";
 
 // ── Metric spy (vi.mock is hoisted; the scheduler imports by name, so overriding the module export
@@ -246,6 +248,72 @@ describeDb("Postgres scheduler — pollAndEnqueue (Phase 3a W3)", () => {
     expect(await pollAndEnqueue({ repo, db, clock })).toBe(0); // good is no longer due; bad still fails
     expect(await jobsFor(bad.scheduleId)).toHaveLength(0);
     expect(schedErrSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ─── W3.8 (RM7): schedule-input contract validation AT ENQUEUE — core.scheduled_jobs.input is ────
+// operator-writable platform config the scheduler must treat as untrusted. With an injected
+// job_type→Zod registry (the SAME contracts the handlers parse at dispatch), the boundary is
+// default-deny: an unknown job_type or malformed input is rejected BEFORE the enqueue side effect,
+// isolated to its own row (the W4a.2 posture: WARN naming the schedule_id + bounded metric + left
+// unadvanced), never dead-lettered three layers deeper after burning a job slot.
+describeDb("Postgres scheduler — RM7 input-contract validation at enqueue (W3.8)", () => {
+  it("(9) malformed input + unknown job_type are REJECTED at the boundary; the valid sibling still fires in the SAME pass", async () => {
+    const clock = new FakeClock({ now: new Date("2026-06-10T12:00:00.000Z") });
+    const repo = new BackgroundJobsRepo(db);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const badInput = { scheduleId: `w3-sched-badinput-${randomUUID()}`, jobType: "mutex_janitor" };
+    const unknown = mintIds(); // a job_type with NO registered scheduled contract → default-deny
+    const valid = { scheduleId: `w3-sched-valid-${randomUUID()}`, jobType: "mutex_janitor" };
+    await seedSchedule({ scheduleId: badInput.scheduleId, jobType: badInput.jobType, cadenceKind: "interval",
+      cadenceSpec: "300", input: { junk: 1 }, nextRunAt: new Date("2026-06-10T11:57:00.000Z") });
+    await seedSchedule({ scheduleId: unknown.scheduleId, jobType: unknown.jobType, cadenceKind: "interval",
+      cadenceSpec: "300", nextRunAt: new Date("2026-06-10T11:58:00.000Z") });
+    await seedSchedule({ scheduleId: valid.scheduleId, jobType: valid.jobType, cadenceKind: "interval",
+      cadenceSpec: "300", nextRunAt: new Date("2026-06-10T11:59:00.000Z") });
+
+    expect(await pollAndEnqueue({ repo, db, clock, inputContracts: SCHEDULED_JOB_INPUT_CONTRACTS })).toBe(1);
+
+    // The malformed-input schedule enqueued NOTHING — rejected BEFORE the side effect, not at
+    // handler dispatch (the pre-RM7 path burned a job slot + dead-lettered on every tick).
+    expect(await jobsFor(badInput.scheduleId)).toHaveLength(0);
+    const b = await readSchedule(badInput.scheduleId);
+    expect(b.next_run_at).toEqual(new Date("2026-06-10T11:57:00.000Z")); // left unadvanced (isolated)
+    expect(b.last_enqueued_at).toBeNull();
+
+    // The unknown job_type is default-denied — scheduled_jobs cannot drive arbitrary job_types.
+    expect(await jobsFor(unknown.scheduleId)).toHaveLength(0);
+    expect((await readSchedule(unknown.scheduleId)).last_enqueued_at).toBeNull();
+
+    // The valid sibling fired with the payload intact (the W4a.2 isolation, not a pass rejection).
+    expect(await jobsFor(valid.scheduleId)).toHaveLength(1);
+    expect((await readSchedule(valid.scheduleId)).next_run_at).toEqual(new Date("2026-06-10T12:05:00.000Z"));
+
+    // Observability: BOTH rejects metered + WARNed naming their schedule_ids.
+    expect(schedErrSpy).toHaveBeenCalledTimes(2);
+    const warned = warnSpy.mock.calls.map((c) => String(c[0]));
+    expect(warned.some((m) => m.includes(badInput.scheduleId))).toBe(true);
+    expect(warned.some((m) => m.includes(unknown.scheduleId))).toBe(true);
+  });
+
+  it("(10) the PRODUCTION composition threads the registry: buildBackgroundRunner's pollOnce default-denies a junk-input schedule", async () => {
+    const clock = new FakeClock({ now: new Date("2026-06-10T12:00:00.000Z") });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const handles = buildBackgroundRunner({
+      db, clock,
+      config: { owner: "rm7-it", leaseS: 60, heartbeatS: 15, maxRuntimeS: 900, idleS: 5,
+        pollIntervalS: 30, outboxIdleS: 2, outboxMaxAttempts: 5 },
+    });
+    const poisoned = { scheduleId: `w3-sched-prod-${randomUUID()}`, jobType: "mutex_janitor" };
+    await seedSchedule({ scheduleId: poisoned.scheduleId, jobType: poisoned.jobType, cadenceKind: "interval",
+      cadenceSpec: "300", input: { junk: true }, nextRunAt: new Date("2026-06-10T11:59:00.000Z") });
+
+    expect(await handles.pollOnce()).toBe(0); // rejected at the boundary by the WIRED registry
+
+    expect(await jobsFor(poisoned.scheduleId)).toHaveLength(0);
+    expect((await readSchedule(poisoned.scheduleId)).last_enqueued_at).toBeNull();
+    expect(warnSpy.mock.calls.map((c) => String(c[0])).some((m) => m.includes(poisoned.scheduleId))).toBe(true);
+    await handles.disposables.disposeAll(); // release any lazily-registered handler resources
   });
 });
 
