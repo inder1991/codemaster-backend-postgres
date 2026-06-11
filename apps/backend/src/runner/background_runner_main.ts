@@ -29,6 +29,7 @@ import { DisposableRegistry } from "./disposables.js";
 import { HandlerRegistry } from "./handler_registry.js";
 import { registerCronHandlers } from "./handlers/cron_handlers.js";
 import { registerEventHandlers } from "./handlers/event_handlers.js";
+import { LoopHealthRegistry } from "./loop_health.js";
 import { OutboxDispatcherLoop } from "./outbox_dispatcher_loop.js";
 import { RunnerLoop, runOneJob, type JobHandler, type RunOutcome } from "./review_job_runner.js";
 import { runReviewJob } from "./review_job_shell.js";
@@ -80,7 +81,10 @@ import { SchedulerLoop, pollAndEnqueue } from "./scheduler.js";
 //     stops THAT loop alone (logged + codemaster_runner_loop_crashed_total{loop}) while the others
 //     KEEP RUNNING. Pre-W4b.2 the composition tied the three run() promises into a fail-fast race
 //     (any crash fired stopAll()) — a scheduler fault stopped background-job execution AND outbox
-//     draining.
+//     draining. CS3.1 (cutover-safety CS3): the supervisor additionally feeds a LoopHealthRegistry
+//     (loop_health.ts) — every supervised loop registered REQUIRED before start, a crashed loop
+//     marked down with its reason — so a dead required loop is a QUERYABLE readiness signal, not
+//     only a counter on a possibly no-op Meter (the CS3 follow-up wires it into /readyz).
 //   * {@link runBackgroundRunner} — the process entrypoint: build, run ALL loops concurrently under
 //     runSupervisedLoops, wire SIGINT/SIGTERM → stop() all + drain (an in-flight job/poll/drain
 //     always completes; the loops' cancellableSleep wakes immediately), then dispose the shared
@@ -498,18 +502,29 @@ type RunnableLoop = { run(): Promise<void> };
 
 /**
  * Supervise ONE loop: await its run() behind a catch boundary so an escaped error CANNOT reach the
- * composition's Promise machinery as a rejection. On a crash: meter the bounded
+ * composition's Promise machinery as a rejection. On a crash: mark the loop DOWN on the threaded
+ * {@link LoopHealthRegistry} (CS3.1 — the queryable readiness signal), meter the bounded
  * `codemaster_runner_loop_crashed_total{loop}` counter, ERROR-log which loop + the error, and
  * resolve with the {@link LoopCrash} — the crashed loop has stopped ON ITS OWN (its run() exited);
- * nothing here touches the sibling loops. NEVER rejects (the catch body is metric-fail-safe +
+ * nothing here touches the sibling loops. NEVER rejects (markDown is safe by construction — the
+ * caller registered `loop` before starting supervision; the metric is fail-safe; the rest is
  * console only), so the caller's Promise.all cannot fail-fast.
  */
-async function superviseLoop(loop: SupervisedLoopName, runnable: RunnableLoop): Promise<LoopCrash | undefined> {
+async function superviseLoop(
+  loop: SupervisedLoopName,
+  runnable: RunnableLoop,
+  health: LoopHealthRegistry,
+): Promise<LoopCrash | undefined> {
   try {
     await runnable.run();
-    return undefined; // graceful: stop() ended the loop
+    return undefined; // graceful: stop() ended the loop — it stays "up" (a stop is not a degradation)
   } catch (e) {
     const error = e instanceof Error ? e : new Error(String(e));
+    // CS3.1: feed the liveness registry FIRST (synchronously, before the metric/log) so any
+    // observer that saw the crash metric also sees the loop down. Pre-CS3.1 the counter was the
+    // only signal — a no-op Meter in an unwired pod made a dead required loop invisible, and the
+    // hardcoded-ready /readyz could never trigger self-healing (audit C5/H7/XH11/RT2).
+    health.markDown(loop, error);
     recordRunnerLoopCrashed({ loop });
     console.error(
       `background runner: ${loop} loop CRASHED and stopped — the other loops KEEP RUNNING ` +
@@ -532,20 +547,38 @@ async function superviseLoop(loop: SupervisedLoopName, runnable: RunnableLoop): 
  *
  * `reviewLoop` (CS2.1) is OPTIONAL: present in non-shadow (the review-jobs RunnerLoop joins the
  * supervised set as `loop=review`); absent in shadow (the composition omitted it entirely).
+ *
+ * `health` (CS3.1 — cutover-safety finding CS3): EVERY supervised loop is registered as a REQUIRED
+ * loop on the {@link LoopHealthRegistry} BEFORE any loop starts (initially "up"; review only when
+ * composed, so shadow never declares it required), and a loop's escaped crash marks THAT loop down
+ * with the crash reason — in ADDITION to the existing metric + log. A dead required loop is thereby
+ * a queryable in-process fact (`allRequiredUp() === false`) instead of only a counter on a possibly
+ * no-op Meter; the CS3 follow-up wires this into /readyz so the platform can self-heal the pod.
  */
 export async function runSupervisedLoops(loops: {
   runnerLoop: RunnableLoop;
   schedulerLoop: RunnableLoop;
   outboxLoop: RunnableLoop;
   reviewLoop?: RunnableLoop;
+  health: LoopHealthRegistry;
 }): Promise<Array<LoopCrash>> {
+  // Register the EXACT supervised set as required BEFORE starting any loop (register throws on
+  // duplicates — reusing one registry across two supervised sets fails loud here, never silently
+  // hides one set's crash behind the other's health). This also makes superviseLoop's markDown
+  // safe by construction: every name it can mark was registered on this line.
+  loops.health.register("runner");
+  loops.health.register("scheduler");
+  loops.health.register("outbox");
+  if (loops.reviewLoop !== undefined) {
+    loops.health.register("review");
+  }
   const supervised = [
-    superviseLoop("runner", loops.runnerLoop),
-    superviseLoop("scheduler", loops.schedulerLoop),
-    superviseLoop("outbox", loops.outboxLoop),
+    superviseLoop("runner", loops.runnerLoop, loops.health),
+    superviseLoop("scheduler", loops.schedulerLoop, loops.health),
+    superviseLoop("outbox", loops.outboxLoop, loops.health),
   ];
   if (loops.reviewLoop !== undefined) {
-    supervised.push(superviseLoop("review", loops.reviewLoop));
+    supervised.push(superviseLoop("review", loops.reviewLoop, loops.health));
   }
   const outcomes = await Promise.all(supervised);
   return outcomes.filter((o): o is LoopCrash => o !== undefined);
@@ -653,7 +686,14 @@ export async function runBackgroundRunner(mode: BackgroundRunnerMode): Promise<v
   // alive (and the survivors keep working) past any single loop's crash; if EVERY loop crashes,
   // nothing is left running, this await completes, and the fail-loud throw below exits the process
   // so the platform restarts it.
-  const crashes = await runSupervisedLoops(handles);
+  //
+  // CS3.1: the supervisor registers every composed loop on `loopHealth` as REQUIRED before start
+  // and marks a crashed loop down with its reason — a dead required loop is a queryable in-process
+  // fact, not just a counter on a possibly no-op Meter. The CS3 follow-up threads this registry
+  // into the /readyz handler (today hardcoded ready — audit C5/H7/XH11/RT2) so the platform
+  // restarts a degraded pod instead of routing to it forever.
+  const loopHealth = new LoopHealthRegistry({ clock });
+  const crashes = await runSupervisedLoops({ ...handles, health: loopHealth });
 
   process.removeListener("SIGINT", stopAll);
   process.removeListener("SIGTERM", stopAll);
