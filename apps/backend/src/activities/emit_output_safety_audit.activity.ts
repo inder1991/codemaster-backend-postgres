@@ -27,14 +27,17 @@
  * would observe the pre-INSERT SELECT MISS (the prior row's id was random, not our derived uuid5) and
  * write a duplicate. So this activity composes the same INSERT shape directly.
  *
- * ## `before` is stored UNENCRYPTED (ADR-0070 — project-owner decision 2026-06-06)
+ * ## `before` is stored ENCRYPTED (CS6/RC1 — supersedes ADR-0070's plaintext decision)
  *
- * The `before` payload is written via the `plain:v1:` codec ({@link encodeAuditJsonPlaintext}), NOT the
- * AAD-bound encrypted codec — a DELIBERATE deviation from the encrypt-at-rest invariant, scoped to THIS
- * audit emit only. Consequence: this emit needs NO field-encryption key / Vault and therefore never
- * fails closed mid-review, but the pre-redaction `original_text` (which CONTAINS the detected secret) is
- * stored in CLEARTEXT in `audit.audit_events.before`. The read path ({@link decryptAuditJsonBytea})
- * detects the `plain:v1:` prefix and parses it with no key. All OTHER audit columns keep AES-256-GCM.
+ * ADR-0070 (2026-06-06) deliberately wrote this payload via the keyless `plain:v1:` codec so the emit
+ * could never fail closed mid-review — at the cost of storing the pre-redaction `original_text` (which
+ * CONTAINS the detected secret) in CLEARTEXT. CS6 (audit RC1) reverses that trade: the `before` payload
+ * now goes through the AAD-bound AES-256-GCM codec ({@link encryptAuditJsonBytea} under
+ * AUDIT_BEFORE_AAD), FAIL-CLOSED — the row that exists to record a leaked secret no longer re-leaks it
+ * at rest. The key-availability concern ADR-0070 weighed is closed by CS6.1: every boot surface installs
+ * the field-encryption key registry (boot_field_keys.ts; production refuses boot without keys), so a
+ * keyless emit indicates a misconfigured pod, not a routine review. Historical `plain:v1:` rows stay
+ * readable — decryptAuditJsonBytea keeps its dual-format shim.
  *
  * ## Runtime context
  *
@@ -50,7 +53,7 @@ import { WallClock } from "#platform/clock.js";
 
 import { EmitOutputSafetyAuditEventInput } from "#contracts/emit_output_safety_audit.v1.js";
 
-import { encodeAuditJsonPlaintext } from "#backend/security/audit_field_codec.js";
+import { AUDIT_BEFORE_AAD, encryptAuditJsonBytea } from "#backend/security/audit_field_codec.js";
 
 /**
  * Stable namespace for the deterministic `audit_event_id` derivation. FROZEN: changing it would break
@@ -133,12 +136,11 @@ export async function emitOutputSafetyAuditEvent(input: unknown): Promise<void> 
       stage: event.stage,
       audit_event_id_basis: auditEventId,
     };
-    // ADR-0070 (project-owner decision 2026-06-06): store the `before` payload UNENCRYPTED via the
-    // `plain:v1:` codec — NO key / Vault needed, so this emit never fails closed mid-review. The
-    // pre-redaction `original_text` (which CONTAINS the detected secret) is therefore written in
-    // CLEARTEXT into audit.audit_events.before. Deliberate deviation from the encrypt-at-rest invariant,
-    // scoped to THIS audit emit only; the read path detects `plain:v1:` and parses it with no key.
-    const encBefore = encodeAuditJsonPlaintext(beforePayload);
+    // CS6/RC1 (supersedes ADR-0070's plaintext decision — module doc): the payload that EXISTS to
+    // record a detected secret must not re-leak it at rest. AES-256-GCM under the column-bound AAD,
+    // FAIL-CLOSED — no registry ⇒ LocalKeyEncryptionError ⇒ no row (CS6.1's boot install makes a
+    // keyless pod a refused boot in production, not a mid-review surprise).
+    const encBefore = encryptAuditJsonBytea(beforePayload, AUDIT_BEFORE_AAD);
 
     await client.query(
       "INSERT INTO audit.audit_events " +
