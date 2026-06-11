@@ -140,12 +140,35 @@ describe("runOneJob — orphaned handler that overruns the hard timeout (F4)", (
 
     // NOW the orphaned handler — which the runner already abandoned — rejects late. The runner's `.catch`
     // must swallow it so it never escapes as an unhandled rejection.
-    rejectHandler(new Error("orphaned handler exploded AFTER the hard-timeout settlement"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    class OrphanBoomError extends Error {
+      public constructor() {
+        super("orphaned handler exploded AFTER the hard-timeout settlement");
+        this.name = "OrphanBoomError";
+      }
+    }
+    rejectHandler(new OrphanBoomError());
 
     // Give the late rejection enough macrotask turns to surface as an unhandledRejection if it were NOT
     // observed (Node fires the event a few ticks after a handler-less promise rejects; ~80ms is ample).
     await new Promise((r) => setTimeout(r, 80));
 
     expect(unhandled).toEqual([]); // F4: NO unhandled rejection escapes — the orphan promise is observed
+
+    // L13 (W4.6): swallowed-but-not-silent — the late rejection's error_class must be WARN-logged so
+    // a recurring post-timeout fault is diagnosable, not just counted.
+    const records = warn.mock.calls
+      .map((c) => c[0])
+      .filter((x): x is string => typeof x === "string")
+      .flatMap((x) => {
+        try {
+          const parsed = JSON.parse(x) as Record<string, unknown>;
+          return parsed["event"] === "runner.orphan_handler_late_rejection" ? [parsed] : [];
+        } catch {
+          return [];
+        }
+      });
+    expect(records).toHaveLength(1);
+    expect(records[0]!["error_class"]).toBe("OrphanBoomError");
   });
 });
