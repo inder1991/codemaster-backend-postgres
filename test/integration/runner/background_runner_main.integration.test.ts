@@ -94,10 +94,10 @@ describeDb("background_runner_main — buildBackgroundRunner composition (Phase 
     // cron; W3e.2: the confluence_ingest multi-step fan-out interval cron; 3e.3: the
     // trigger_page_resync single-page EVENT-DRIVEN handler — the LAST non-review workflow.
     expect([...handles.registry.registeredTypes()].sort()).toEqual([
-      "confluence_ingest", "mark_stale_chunks", "mutex_janitor", "partition_maintenance",
-      "reconcile_installation", "reconcile_repositories", "refresh_semantic_docs",
-      "repair_installation_repositories", "review_run_reaper", "run_id_retention",
-      "sync_code_owners", "trigger_page_resync", "workspace_retention",
+      "confluence_ingest", "job_retention", "mark_stale_chunks", "mutex_janitor",
+      "partition_maintenance", "reconcile_installation", "reconcile_repositories",
+      "refresh_semantic_docs", "repair_installation_repositories", "review_run_reaper",
+      "run_id_retention", "sync_code_owners", "trigger_page_resync", "workspace_retention",
     ]);
   });
 
