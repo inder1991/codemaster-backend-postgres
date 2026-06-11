@@ -142,18 +142,31 @@ type StubOverrides = {
   walkthroughThrows?: boolean;
   /** cleanup activity throws (must be SWALLOWED by the finally's stageOutcome). */
   cleanupThrows?: boolean;
+  // ── W1.9a (M2) fail-open overrides — classify / dedup / aggregate stageOutcome wraps ──
+  /** the classify ACTIVITY throws → fallback: treat ALL changed files as review_files + note. */
+  classifyThrows?: boolean;
+  /** the dedupFindings ACTIVITY throws → fallback: pass the raw LLM findings unchanged + note. */
+  dedupThrows?: boolean;
+  /** the aggregate ACTIVITY throws → fallback: minimal AggregatedFindingsV1 from deduped + note. */
+  aggregateThrows?: boolean;
 };
 
 type RecordingStub = {
   ports: ReviewActivityPorts;
   calls: Array<string>;
   reviewChunkInputs: Array<ReviewContextV1>;
+  /** The `files` each chunkAndRedact dispatch received (asserts the M2 classify fallback set). */
+  chunkAndRedactFiles: Array<ReadonlyArray<string>>;
+  /** The `sandbox_files` each staticAnalysis dispatch received (asserts the M2 fallback routing). */
+  staticAnalysisFiles: Array<ReadonlyArray<string>>;
   cleanupCalled: () => boolean;
 };
 
 function makeStub(o: StubOverrides = {}): RecordingStub {
   const calls: Array<string> = [];
   const reviewChunkInputs: Array<ReviewContextV1> = [];
+  const chunkAndRedactFiles: Array<ReadonlyArray<string>> = [];
+  const staticAnalysisFiles: Array<ReadonlyArray<string>> = [];
   let cleanupCalled = false;
 
   const reviewFiles = o.reviewFiles ?? ["src/a.ts", "src/b.ts"];
@@ -186,6 +199,9 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
     },
     classify: async () => {
       calls.push("classify");
+      if (o.classifyThrows) {
+        throw new Error("classify boom");
+      }
       return FileRoutingV1.parse({
         review_files: [...reviewFiles],
         sandbox_files: [...sandboxFiles],
@@ -193,12 +209,14 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
         classifier_failures: [...(o.classifierFailures ?? [])],
       });
     },
-    chunkAndRedact: async () => {
+    chunkAndRedact: async (input) => {
       calls.push("chunkAndRedact");
+      chunkAndRedactFiles.push([...input.files]);
       return chunks;
     },
-    staticAnalysis: async () => {
+    staticAnalysis: async (input) => {
       calls.push("staticAnalysis");
+      staticAnalysisFiles.push([...input.sandbox_files]);
       if (o.staticAnalysisThrows) {
         throw new Error("static-analysis boom");
       }
@@ -257,6 +275,9 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
     },
     dedupFindings: async (input) => {
       calls.push("dedupFindings");
+      if (o.dedupThrows) {
+        throw new Error("dedup boom");
+      }
       return DedupedFindingsV1.parse({
         findings: [...input.llm_findings],
         semantic_skipped: false,
@@ -264,6 +285,9 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
     },
     aggregate: async (input) => {
       calls.push("aggregate");
+      if (o.aggregateThrows) {
+        throw new Error("aggregate boom");
+      }
       return AggregatedFindingsV1.parse({
         findings: [...input.findings],
         dedupe_stats: {
@@ -335,6 +359,8 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
     ports,
     calls,
     reviewChunkInputs,
+    chunkAndRedactFiles,
+    staticAnalysisFiles,
     cleanupCalled: () => cleanupCalled,
   };
 }
@@ -440,6 +466,73 @@ describe("orchestrate — CLASSIFY partial failure (> 10%) degrades but continue
     expect(result.degradationNotes.some((n) => n.startsWith("file classification failed"))).toBe(
       false,
     );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// W1.9a (M2) — classify / dedup / aggregate stageOutcome fail-open wraps.
+//
+// OLD (pre-W1.9a): these three stages were bare awaits — a throw AFTER the expensive chunk fan-out
+// (dedup/aggregate) discarded every chunk's completed (paid-for) LLM findings, and a classify throw
+// killed the review before it started. NEW contract (the M2 fix): each stage is wrapped in a
+// fail-open stageOutcome with a typed fallback —
+//   * classify  → treat ALL changed files as review_files (empty sandbox set) + `classify_failed`.
+//   * dedup     → pass `deduped = llmFindings` unchanged + `dedup_failed`.
+//   * aggregate → build a minimal AggregatedFindingsV1 from the deduped findings (no ranking/cap)
+//                 + `aggregate_failed`.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describe("orchestrate — CLASSIFY activity failure falls open to 'review every changed file' (W1.9a/M2)", () => {
+  it("continues end-to-end with review_files = ALL changed paths + the classify_failed marker", async () => {
+    const stub = makeStub({ chunkCount: 1, classifyThrows: true });
+    const result = await orchestrate(makeCtx(stub));
+    expect(result.status).toBe("accepted");
+    expect(result.degradationNotes).toContain("classify_failed");
+    // The fallback treats EVERY changed path as a review file — chunkAndRedact receives them all.
+    expect(stub.chunkAndRedactFiles[0]).toEqual(["src/a.ts", "src/b.ts"]);
+    expect(result.fileRouting?.review_files).toEqual(["src/a.ts", "src/b.ts"]);
+    expect(stub.calls).toContain("reviewChunk");
+    expect(stub.calls).toContain("postReview");
+    expect(stub.cleanupCalled()).toBe(true);
+  });
+
+  it("routes NO files to static analysis on classify failure (conservative empty sandbox set)", async () => {
+    const stub = makeStub({ chunkCount: 1, classifyThrows: true });
+    const result = await orchestrate(makeCtx(stub));
+    expect(result.fileRouting?.sandbox_files).toEqual([]);
+    expect(stub.staticAnalysisFiles[0]).toEqual([]);
+    // No per-file classifier_failures are synthesized — the stage-level marker is the signal.
+    expect(result.fileRouting?.classifier_failures).toEqual([]);
+  });
+});
+
+describe("orchestrate — DEDUP activity failure falls open to the raw LLM findings (W1.9a/M2)", () => {
+  it("aggregates the un-deduped LLM findings + dedup_failed marker; review still posts", async () => {
+    const stub = makeStub({ chunkCount: 2, dedupThrows: true });
+    const result = await orchestrate(makeCtx(stub));
+    expect(result.status).toBe("accepted");
+    expect(result.degradationNotes).toContain("dedup_failed");
+    // Both chunks' findings flowed UNCHANGED into aggregate despite the dedup failure.
+    expect(result.findingsCount).toBe(2);
+    expect(stub.calls).toContain("aggregate");
+    expect(stub.calls).toContain("persistReviewFindings");
+    expect(stub.calls).toContain("postReview");
+    expect(stub.cleanupCalled()).toBe(true);
+  });
+});
+
+describe("orchestrate — AGGREGATE activity failure falls open to a minimal envelope (W1.9a/M2)", () => {
+  it("posts the deduped findings via the minimal envelope + aggregate_failed marker", async () => {
+    const stub = makeStub({ chunkCount: 2, aggregateThrows: true });
+    const result = await orchestrate(makeCtx(stub));
+    expect(result.status).toBe("accepted");
+    expect(result.degradationNotes).toContain("aggregate_failed");
+    // The minimal envelope carries the deduped findings (no ranking/cap) + the real policy revision.
+    expect(result.findingsCount).toBe(2);
+    expect(result.aggregated?.policy_revision).toBe(3);
+    expect(stub.calls).toContain("persistReviewFindings");
+    expect(stub.calls).toContain("generateWalkthrough");
+    expect(stub.calls).toContain("postReview");
+    expect(stub.cleanupCalled()).toBe(true);
   });
 });
 

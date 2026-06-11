@@ -201,15 +201,19 @@ describe("recordStage shim — outcome allowlist guard (Stage 0 no-op emit)", ()
 });
 
 describe("STAGE_NAMES registry — pipeline_metrics.STAGE_NAMES + TS-enhancement stages", () => {
-  it("contains 33 stage names (30 from Python + 3 TS-enhancement)", () => {
-    expect(STAGE_NAMES.size).toBe(33);
+  it("contains 34 stage names (30 from Python + 4 TS-enhancement)", () => {
+    expect(STAGE_NAMES.size).toBe(34);
   });
 
-  it("contains the TS-enhancement stages (#4 manifest fetch/parse + #6 carry-forward)", () => {
+  it("contains the TS-enhancement stages (#4 manifest fetch/parse + #6 carry-forward + W1.9a dedup)", () => {
     for (const s of [
       "fetch_manifest_snapshots",
       "parse_manifest_dependencies",
       "load_parent_review_findings",
+      // W1.9a (M2): the dedupFindings ACTIVITY dispatch is stageOutcome-wrapped in the TS port (the
+      // Python ran dedup inline in the aggregate path and has no such stage), so the TS registry
+      // carries the extra stage name.
+      "dedup",
     ]) {
       expect(STAGE_NAMES.has(s)).toBe(true);
     }
@@ -223,6 +227,7 @@ describe("STAGE_NAMES registry — pipeline_metrics.STAGE_NAMES + TS-enhancement
       "static_analysis",
       "select_carry_forward",
       "review_chunk",
+      "dedup",
       "aggregate",
       "walkthrough",
       "post_review",
