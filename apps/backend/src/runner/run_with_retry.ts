@@ -27,6 +27,12 @@ export async function runWithRetry<T>(clock: Clock, random: Random, policy: Retr
     outerSignal?.addEventListener("abort", forward, { once: true });
     const timeout = clock.sleep(policy.startToCloseS).then(() => "__timeout__" as const);
     let res: T | "__timeout__";
+    // The retry primitive's catch IS the retry contract: every caught error is either rethrown
+    // immediately (nonRetryable / last attempt / outer abort) or retried and rethrown at exhaustion
+    // (`throw lastErr` after the loop) — no swallow path exists, but the rethrow is conditional,
+    // which the gate's strict top-level rule refuses by design (the same false-positive class as
+    // the registry entry this marker supersedes — the W1.9c signal threading moved the try line).
+    // silent-degradation:exempt reason=retry-helper-conditional-rethrow follow_up=PERMANENT-EXEMPTION-retry-helper-conditional-rethrow
     try { res = await Promise.race([fn(ac.signal), timeout]); }
     catch (e) {
       lastErr = e;
