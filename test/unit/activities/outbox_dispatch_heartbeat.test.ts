@@ -156,6 +156,45 @@ describe("OutboxDispatchActivities lease-heartbeat", () => {
     sleepSpy.mockRestore();
   });
 
+  it("RM3/W3.2: caps total heartbeat lifetime at 60s — past the cap it STOPS extending, WARNs once, and the dispatch still completes", async () => {
+    // Pre-RM3 the heartbeat re-extended `leased_until` for the ENTIRE life of the handler — a
+    // live-but-stuck sink kept its row un-reclaimable forever, defeating the lease safety net for
+    // exactly the most common stall (slow/hung, not crashed). The cap: after
+    // HEARTBEAT_MAX_TOTAL_SECONDS (60 — the old Temporal start-to-close, paired with the loop's
+    // RM1 dispatch bound) of monotonic lifetime, the loop stops heartbeating and lets the lease
+    // expire on its own, WITHOUT touching the still-running handler.
+    const handlerGate = deferred();
+    registerSink("sync_code_owners", async () => {
+      await handlerGate.promise;
+    });
+    const extendLease = vi.fn(async () => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const acts = makeActs({ extendLease } as unknown as Partial<PostgresOutboxRepo>);
+
+    const dispatchPromise = acts.dispatchRow(baseInput);
+    await flush(10); // FakeClock.sleep resolves instantly → the loop free-runs some pre-cap beats
+    expect(extendLease.mock.calls.length).toBeGreaterThan(0); // the heartbeat IS alive before the cap
+
+    clock.advance({ seconds: 61 }); // monotonic sails past the 60s max total lease lifetime
+    await flush(10); // the loop's next wake observes the cap → ONE warn → exits
+
+    const atCap = extendLease.mock.calls.length;
+    await flush(20); // pump hard — a still-running loop would keep recording extends here
+    expect(extendLease.mock.calls.length).toBe(atCap); // NO further extensions: the lease now expires
+
+    const capWarns = warnSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((m) => m.includes("outbox.lease_heartbeat_capped"));
+    expect(capWarns).toHaveLength(1); // the cap is logged exactly ONCE (structured, with the row id)
+    expect(capWarns[0]).toContain(ROW);
+
+    // The handler is NOT killed by the cap (that is the loop-side RM1 watchdog's job): releasing it
+    // still completes the dispatch cleanly.
+    handlerGate.resolve();
+    await expect(dispatchPromise).resolves.toBeUndefined();
+    warnSpy.mockRestore();
+  });
+
   it("swallows an extendLease rejection (WARN, loop continues, dispatch still succeeds) — fail-open", async () => {
     const handlerGate = deferred();
     registerSink("sync_code_owners", async () => {
