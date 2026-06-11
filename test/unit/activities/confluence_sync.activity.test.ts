@@ -12,7 +12,9 @@
 //   - reconcile_deletions: delegates to the repo soft-delete.
 //   - sanitize_page / fetch_space_pages / fetch_page_body: happy paths.
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import * as confluenceIngestMetrics from "#backend/observability/confluence_ingest_metrics.js";
 
 import {
   ConfluenceSyncActivities,
@@ -47,10 +49,16 @@ function vec1024(seed: number): Array<number> {
 class StubEmbeddings implements EmbeddingsPort {
   public readonly calls: Array<EmbedRequest> = [];
   public failValidationOnce = false;
+  /** RM9: when true, EVERY embed call rejects with EmbeddingsValidationError — drives the batch
+   *  fallback AND defeats the per-text truncating retry (every chunk ends up skipped). */
+  public alwaysFailValidation = false;
   /** When >0, return this many MORE vectors than texts requested — trips the strict length check. */
   public extraVectors = 0;
   public async embed(req: EmbedRequest): Promise<EmbedResult> {
     this.calls.push(req);
+    if (this.alwaysFailValidation) {
+      throw new EmbeddingsValidationError("simulated persistent context-window rejection");
+    }
     if (this.failValidationOnce) {
       this.failValidationOnce = false;
       throw new EmbeddingsValidationError("simulated context-window overflow");
@@ -292,6 +300,44 @@ describe("ConfluenceSyncActivities.chunkAndEmbed", () => {
     const out = await acts.chunkAndEmbed(sanitizedInput(""));
     expect(out.chunks).toEqual([]);
     expect(embeddings.calls.length).toBe(0);
+  });
+
+  // W4.4 [RM9] — the resilient-batch fallback can SKIP chunks (embedOneTruncating returns null below
+  // the 256-char floor); before this fix the skipped chunks were silently omitted from the upsert
+  // with NO counter and NO log — silent partial-page indexing. The DECISION (documented in the
+  // activity): the page still upserts the survivors (availability over completeness for corpus
+  // ingest — a retry cannot fix an embedder context-window rejection), but every skip is COUNTED
+  // (codemaster_confluence_chunk_embed_skipped_total) and LOGGED with page_id + chunk_index.
+  it("COUNTS + LOGS chunks skipped by the per-text fallback; survivors still returned (RM9)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const skipSpy = vi.spyOn(confluenceIngestMetrics, "recordChunkEmbedSkipped");
+    try {
+      const embeddings = new StubEmbeddings();
+      embeddings.alwaysFailValidation = true; // batch fails → per-text fails → every chunk skipped
+      const { acts } = buildActivities({ embeddings });
+      const out = await acts.chunkAndEmbed(sanitizedInput("Hello world. This is a doc."));
+      expect(out.chunks).toEqual([]); // every chunk was skipped (none invented, none half-embedded)
+
+      const skippedTotal = skipSpy.mock.calls.reduce((acc, c) => acc + (c[0] as number), 0);
+      expect(skippedTotal).toBeGreaterThanOrEqual(1);
+
+      const records = warn.mock.calls
+        .map((c) => c[0])
+        .filter((x): x is string => typeof x === "string")
+        .flatMap((x) => {
+          try {
+            const parsed = JSON.parse(x) as Record<string, unknown>;
+            return parsed["event"] === "confluence.chunk_embed_skipped" ? [parsed] : [];
+          } catch {
+            return [];
+          }
+        });
+      expect(records.length).toBe(skippedTotal);
+      expect(records[0]!["page_id"]).toBe("p1");
+      expect(typeof records[0]!["chunk_index"]).toBe("number");
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it("throws when the embedder returns a vector count != text count (Python zip(strict=True))", async () => {
