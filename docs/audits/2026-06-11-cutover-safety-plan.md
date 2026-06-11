@@ -170,7 +170,7 @@ Separately, **stop storing the pre-redaction `original_text` (a detected secret)
 | CS4 | delivery_id + idempotent enqueue + classification + one retry/backoff | RT3, H9, RC7, T2, H3, RC6, XH2 | M | ✅ |
 | CS5 | DB schema-revision boot preflight + 0042 cold-only guard | XH7, L16, RT6 | S | ✅ |
 | CS6 | Key registry fail-loud (PROD) + dev/test source + no cleartext secrets | EC5, RC1 | M | ☐ |
-| CS7 | Scheduler per-schedule txn isolation | RT4, M13 | S | ☐ |
+| CS7 | Scheduler per-schedule txn isolation | RT4, M13 | S | ✅ |
 | CS8 | Structured logging for degraded reviews | C4, L12, XM14 (logs slice) | S | ☐ |
 
 When CS1–CS8 are all green, `CODEMASTER_RUNTIME_MODE=postgres` may be flipped in dev/stage (with explicit Postgres-SPOF acceptance per W0.8). **Production go-live additionally requires W0.8 (HA/DR), the deferred OTel metrics (W0.4 / W0.5b), and the broader master-plan quality/scale tiers.**
