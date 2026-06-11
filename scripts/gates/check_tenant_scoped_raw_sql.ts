@@ -2,7 +2,7 @@
 //
 // Walks every `sql`...`` tagged template (Kysely raw SQL — the TS equivalent of SQLAlchemy
 // `session.execute(text(...))`). For each FROM/JOIN/INTO/UPDATE reference to a TENANT_SCOPED table,
-// requires one of three escape hatches, else emits a WARN finding:
+// requires one of three escape hatches, else emits a finding:
 //   (a) the SQL contains an `installation_id` token (the tenancy filter), OR
 //   (b) the enclosing method/class carries an `@privileged_path` decorator, OR
 //   (c) a same-line or preceding-line `// tenant:exempt reason=<...> follow_up=<...>` marker.
@@ -12,8 +12,17 @@
 // Integration-test teardown legitimately deletes across tenants (it owns its fixture rows), so test/
 // (and tools/, scripts/, migrations/) are NOT scanned.
 //
-// WARN-mode in v1 (per CLAUDE.md GF-3): reports to stderr, always exits 0. ERROR-mode is the tracked
-// follow-up FOLLOW-UP-gf3-error-mode — do NOT silently promote it.
+// ## ERROR-mode (W4.2 / RH1 — the tracked FOLLOW-UP-gf3-error-mode promotion, CLOSED 2026-06-11)
+//
+// The de-Temporal runner data plane is raw-SQL-only, INVISIBLE to the runtime Kysely TenancyPlugin
+// (it sees only query-builder ASTs) — so this gate is the ONLY automated tenancy backstop there.
+// Findings on the runner data plane + review pipeline + platform libs (everything
+// {@link isErrorModePath} matches) are BLOCKING: `[ERROR]` + exit 1. ONLY the admin/auth HTTP
+// surface (`apps/backend/src/api/**`) stays WARN — it is session/role-gated at the route layer and
+// is hardened by its own wave (W4.7); promote it there. Every pre-existing finding was triaged in
+// W4.2 (2 real fixes + per-site by-design markers — see the triage commit), so a NEW finding in an
+// ERROR path is a regression, not backlog: add the installation_id filter, or justify a
+// `// tenant:exempt reason=<honest-reason> follow_up=<story-or-PERMANENT-EXEMPTION-*>` marker.
 import { type Node, Project, SyntaxKind } from "ts-morph";
 
 import { TENANT_SCOPED_TABLES } from "./_registry.js";
@@ -35,6 +44,21 @@ export function isProductionSource(absPath: string): boolean {
   const posix = absPath.split("\\").join("/");
   if (posix.endsWith(".test.ts")) return false;
   return /(?:^|\/)(?:libs|apps)\/[^/]+\/src\//.test(posix);
+}
+
+/**
+ * ERROR-mode scope (W4.2 / RH1): the runner data plane + review pipeline + platform libs — every
+ * production path EXCEPT the admin/auth HTTP surface (`apps/backend/src/api/**`), which stays WARN
+ * until its own hardening wave (W4.7). A finding here exits 1.
+ */
+export function isErrorModePath(absPath: string): boolean {
+  const posix = absPath.split("\\").join("/");
+  return !/(?:^|\/)apps\/[^/]+\/src\/api\//.test(posix);
+}
+
+/** Pure exit-code policy: 1 iff ANY finding sits on an ERROR-mode path (else 0 — WARN-only). */
+export function exitCodeFor(violations: ReadonlyArray<Violation>): number {
+  return violations.some((v) => isErrorModePath(v.file)) ? 1 : 0;
 }
 
 export function findTenancyViolations(project: Project): Array<Violation> {
@@ -74,19 +98,25 @@ function hasExemptMarker(node: Node, lines: Array<string>): boolean {
   return MARKER_RE.test(sameLine) || MARKER_RE.test(prevLine);
 }
 
-/** CLI entry: emit H-16-format WARN lines; always exit 0 (WARN-mode v1). */
+/** CLI entry: H-16-format lines — `[ERROR]` (blocking) on the runner/review data plane + libs,
+ *  `[WARN]` on the api surface. Exit per {@link exitCodeFor}. */
 export function main(): number {
   const project = new Project({ tsConfigFilePath: "tsconfig.json" });
   const violations = findTenancyViolations(project);
+  let errors = 0;
   for (const v of violations) {
+    const blocking = isErrorModePath(v.file);
+    if (blocking) errors += 1;
     process.stderr.write(
-      `[WARN] file=${v.file}:${v.line} rule=tenant.raw_sql.unfiltered ` +
+      `[${blocking ? "ERROR" : "WARN"}] file=${v.file}:${v.line} rule=tenant.raw_sql.unfiltered ` +
         `message="tenant-scoped table ${v.table} referenced in raw SQL without an installation_id filter" ` +
         `suggestion="add WHERE installation_id = \${iid}, @privileged_path, or a // tenant:exempt marker"\n`,
     );
   }
+  const rc = exitCodeFor(violations);
   process.stderr.write(
-    `[INFO] tenant-scoped raw-SQL gate (WARN-mode): ${violations.length} finding(s). Exit 0.\n`,
+    `[INFO] tenant-scoped raw-SQL gate (ERROR-mode on runner/review surfaces): ` +
+      `${errors} blocking + ${violations.length - errors} warn finding(s). Exit ${rc}.\n`,
   );
-  return 0; // WARN-mode: never block (matches the frozen Python gate's v1 behavior)
+  return rc;
 }
