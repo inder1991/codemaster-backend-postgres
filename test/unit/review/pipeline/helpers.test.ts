@@ -13,7 +13,9 @@ import {
   buildAnalyzedPayload,
   buildPolicyCitationContext,
   configChangeNoticeFinding,
+  malformedConfigNoticeFinding,
   maybeAppendConfigNotice,
+  maybeAppendMalformedConfigNotice,
 } from "#backend/review/pipeline/helpers.js";
 import { makePostReviewCapture } from "#backend/review/pipeline/state.js";
 import { ResolvedGuidanceBundleV1 } from "#contracts/resolved_guidance.v1.js";
@@ -146,6 +148,50 @@ describe("maybeAppendConfigNotice — spec §7 (.codemaster.yaml) config-change 
     const after = maybeAppendConfigNotice(before, [".codemaster.yaml"]);
     expect(after.findings.length).toBe(1);
     expect(after.findings[0]!.file).toBe(".codemaster.yaml");
+  });
+});
+
+// ─── maybeAppendMalformedConfigNotice — W4.4 [M6] the malformed-config NOTICE ──────────────────────
+// A customer whose `.codemaster.yaml` was rejected whole-doc (typo'd opt-out, out-of-range field)
+// silently lost their settings; the SEED contract is "fail-open to defaults + a NOTICE". The notice
+// is appended IFF config_status === 'malformed' — absent/valid stay notice-free (no spurious noise).
+
+describe("maybeAppendMalformedConfigNotice — W4.4 (M6) malformed .codemaster.yaml notice", () => {
+  it("appends the malformed notice when config_status is 'malformed'", () => {
+    const before = aggregatedOf([ordinaryFinding(1)]);
+    const after = maybeAppendMalformedConfigNotice(before, "malformed");
+    expect(after.findings.length).toBe(2);
+    const notice = after.findings[after.findings.length - 1]!;
+    expect(notice).toEqual(malformedConfigNoticeFinding());
+    expect(notice.file).toBe(".codemaster.yaml");
+    expect(notice.category).toBe("config");
+    expect(notice.severity).toBe("suggestion");
+    expect(notice.title).toContain("malformed");
+    expect(notice.body).toContain("defaults");
+    expect(after.dedupe_stats).toEqual(before.dedupe_stats);
+    expect(after.policy_revision).toBe(before.policy_revision);
+  });
+
+  it("returns the SAME object for 'valid' and 'absent' (no spurious notice)", () => {
+    const before = aggregatedOf([ordinaryFinding(1)]);
+    expect(maybeAppendMalformedConfigNotice(before, "valid")).toBe(before);
+    expect(maybeAppendMalformedConfigNotice(before, "absent")).toBe(before);
+  });
+
+  it("is idempotent — a second call never double-appends", () => {
+    const before = aggregatedOf([]);
+    const once = maybeAppendMalformedConfigNotice(before, "malformed");
+    const twice = maybeAppendMalformedConfigNotice(once, "malformed");
+    expect(twice.findings.filter((f) => f.title === malformedConfigNoticeFinding().title)).toHaveLength(1);
+    expect(twice).toBe(once);
+  });
+
+  it("is DISTINCT from the config-change notice (both can coexist on one PR)", () => {
+    const before = aggregatedOf([]);
+    const withChange = maybeAppendConfigNotice(before, [".codemaster.yaml"]);
+    const withBoth = maybeAppendMalformedConfigNotice(withChange, "malformed");
+    expect(withBoth.findings).toHaveLength(2);
+    expect(new Set(withBoth.findings.map((f) => f.title)).size).toBe(2);
   });
 });
 
