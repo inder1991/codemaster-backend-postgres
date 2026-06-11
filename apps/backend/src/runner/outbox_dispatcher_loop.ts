@@ -34,7 +34,11 @@
 // (`ORDER BY o.created_at`), 1:1 with the workflow body's `for (const row of rows)`.
 
 import type { OutboxRow } from "#backend/domain/repos/outbox_repo.js";
-import { PermanentSinkError, UnknownSinkError } from "#backend/outbox/sink_registry.js";
+import {
+  PermanentSinkError,
+  RetryableSinkError,
+  UnknownSinkError,
+} from "#backend/outbox/sink_registry.js";
 import type {
   ClaimPendingRowsInputV1,
   DispatchRowInputV1,
@@ -67,6 +71,26 @@ export type OutboxActivityFns = {
 export const DEFAULT_OUTBOX_BATCH_SIZE = 100;
 export const DEFAULT_OUTBOX_LEASE_SECONDS = 10;
 export const DEFAULT_OUTBOX_DRAIN_INTERVAL_SECONDS = 2;
+/** W3.2 (RM1): the per-dispatch hard bound — the old Temporal `startToCloseTimeout: '1 minute'`
+ *  the plain loop dropped. A dispatch that has not settled within this bound is abandoned
+ *  (classified RETRYABLE → markAttemptFailed → the CS3c.1 backoff/lease machinery), so a single
+ *  black-holed sink can no longer wedge the serial drainer — and every webhook/review/knowledge
+ *  event behind it — forever. */
+export const DEFAULT_OUTBOX_DISPATCH_TIMEOUT_SECONDS = 60;
+/** The watchdog re-checks its monotonic deadline at most every this-many seconds, so an abandoned
+ *  WallClock sleep timer lingers ≤1s after the dispatch settles (never a full 60s timer per row). */
+const DISPATCH_WATCHDOG_TICK_SECONDS = 1;
+
+/** A dispatch overran the per-dispatch bound (RM1). Subclasses {@link RetryableSinkError} so the
+ *  drain loop's RC7 taxonomy classifies it TRANSIENT: the row is released to the durable
+ *  attempts/backoff path and re-claimed after the lease defers — exactly how the old Temporal
+ *  start-to-close force-failure re-entered the retry policy. */
+export class DispatchTimeoutError extends RetryableSinkError {
+  public constructor(message: string) {
+    super(message);
+    this.name = "DispatchTimeoutError";
+  }
+}
 
 /**
  * The dispatcher loop — mirrors BackgroundRunnerLoop/SchedulerLoop: drain, then `cancellableSleep`
@@ -81,6 +105,8 @@ export class OutboxDispatcherLoop {
   readonly #batchSize: number;
   readonly #leaseSeconds: number;
   readonly #idleS: number;
+  /** W3.2 (RM1): the per-dispatch hard bound (seconds) — see {@link #dispatchBounded}. */
+  readonly #dispatchTimeoutS: number;
   /** CS1.2 SHADOW posture — see {@link drainOnce}'s top guard. */
   readonly #shadow: boolean;
   /** The shadow suppression is logged ONCE per loop instance (run() re-enters drainOnce every
@@ -94,6 +120,9 @@ export class OutboxDispatcherLoop {
       batchSize?: number;
       leaseSeconds?: number;
       idleS?: number;
+      /** W3.2 (RM1): per-dispatch hard bound (seconds). Default
+       *  {@link DEFAULT_OUTBOX_DISPATCH_TIMEOUT_SECONDS} (60 — the old Temporal start-to-close). */
+      dispatchTimeoutS?: number;
       /** CS1.2 SHADOW posture: true → every drain pass is suppressed BEFORE the claim (see
        *  {@link drainOnce}). Default false (the production behavior). */
       shadow?: boolean;
@@ -102,6 +131,7 @@ export class OutboxDispatcherLoop {
     this.#batchSize = o.batchSize ?? DEFAULT_OUTBOX_BATCH_SIZE;
     this.#leaseSeconds = o.leaseSeconds ?? DEFAULT_OUTBOX_LEASE_SECONDS;
     this.#idleS = o.idleS ?? DEFAULT_OUTBOX_DRAIN_INTERVAL_SECONDS;
+    this.#dispatchTimeoutS = o.dispatchTimeoutS ?? DEFAULT_OUTBOX_DISPATCH_TIMEOUT_SECONDS;
     this.#shadow = o.shadow ?? false;
   }
 
@@ -141,7 +171,7 @@ export class OutboxDispatcherLoop {
 
     for (const row of rows) {
       try {
-        await this.o.activities.dispatchRow({
+        await this.#dispatchBounded({
           schema_version: 2,
           row_id: row.id,
           sink: row.sink,
@@ -208,6 +238,69 @@ export class OutboxDispatcherLoop {
       }
     }
     return rows.length;
+  }
+
+  /**
+   * W3.2 (RM1): dispatch ONE row under the per-dispatch hard bound. `Promise.race` between the
+   * activity call and a Clock-driven watchdog ({@link #dispatchWatchdog}); on overrun the watchdog
+   * throws {@link DispatchTimeoutError} into drainOnce's per-row catch, which routes it down the
+   * EXISTING retryable path (markAttemptFailed → attempts+1, backoff-deferred lease, R-6 fence) —
+   * the same recovery the old Temporal start-to-close force-failure produced. The loop then moves
+   * on: a hung sink costs at most `dispatchTimeoutS` of drainer time, never the whole drainer.
+   *
+   * JS cannot kill the abandoned dispatch promise — it may settle later. A late SUCCESS is the
+   * documented at-least-once posture (the row re-dispatches after backoff; destinations must be
+   * idempotent — RM2); a late REJECTION is observed here (one structured WARN) so it can never
+   * surface as an unhandled rejection, and the activity-side heartbeat cap (RM3) guarantees the
+   * zombie stops refreshing the row's lease.
+   */
+  async #dispatchBounded(input: DispatchRowInputV1): Promise<void> {
+    const standDown = new AbortController(); // settles the watchdog once the race is decided
+    const dispatch = this.o.activities.dispatchRow(input);
+    try {
+      await Promise.race([dispatch, this.#dispatchWatchdog(input.row_id, input.sink, standDown.signal)]);
+    } catch (e) {
+      if (e instanceof DispatchTimeoutError) {
+        // The hung dispatch is ABANDONED: attach a settle-observer so its eventual rejection is a
+        // WARN with correlation keys, never an unhandled-rejection process crash. (Its row was
+        // already settled by the caller's markAttemptFailed; the R-6 expected_attempts fence makes
+        // any late duplicate settlement a rowcount-0 no-op.)
+        dispatch.catch((late: unknown) => {
+          console.warn(
+            JSON.stringify({
+              event: "outbox.dispatch_settled_after_timeout",
+              row_id: input.row_id,
+              sink: input.sink,
+              error: (late instanceof Error ? `${late.name}: ${late.message}` : String(late)).slice(0, 1024),
+            }),
+          );
+        });
+      }
+      throw e;
+    } finally {
+      standDown.abort();
+    }
+  }
+
+  /** The RM1 watchdog: sleeps on the injected Clock in ≤{@link DISPATCH_WATCHDOG_TICK_SECONDS}
+   *  ticks until the monotonic deadline, then THROWS {@link DispatchTimeoutError}; resolves quietly
+   *  when stood down (the dispatch settled first — the race is already decided). */
+  async #dispatchWatchdog(rowId: string, sink: string, signal: AbortSignal): Promise<void> {
+    const deadline = this.o.clock.monotonic() + this.#dispatchTimeoutS;
+    for (;;) {
+      if (signal.aborted) {
+        return;
+      }
+      const remainingS = deadline - this.o.clock.monotonic();
+      if (remainingS <= 0) {
+        throw new DispatchTimeoutError(
+          `dispatch of outbox row ${rowId} (sink ${sink}) exceeded the ${this.#dispatchTimeoutS}s ` +
+            `per-dispatch bound (RM1 — the old Temporal start-to-close); the row is released to the ` +
+            `attempts/backoff machinery and the drain loop moves on`,
+        );
+      }
+      await cancellableSleep(this.o.clock, Math.min(remainingS, DISPATCH_WATCHDOG_TICK_SECONDS), signal);
+    }
   }
 
   public async run(): Promise<void> {
