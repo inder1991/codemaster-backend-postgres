@@ -150,11 +150,21 @@ export class StageOutcomeHandle {
   }
 }
 
+/** Structured companions to the WARN message (CS8): emitted by {@link stageOutcome}'s failure path
+ *  so a field-aware sink (the runner's structured stage logger) never regex-mines the string. */
+export type StageWarningFields = {
+  stage: StageName;
+  outcome: "degraded";
+  error_class: string;
+};
+
 /** Anything satisfying `.warning(msg)` — the Temporal workflow logger + a plain console both qualify.
- *  Kept minimal (no `extra` second arg) so the Stage-0 shim can log to any sink; the Python's structured
- *  `extra` dict is folded into the message string (as the Python itself does for plain-stdout consumers). */
+ *  The message string remains the complete signal (the Python posture: the structured `extra` dict is
+ *  folded into the message for plain-stdout consumers); the OPTIONAL second argument (CS8) carries the
+ *  same facts as fields for structured sinks. Implementations may ignore it — a one-param
+ *  `{ warning(msg) }` object still satisfies this type structurally. */
 export type StageLogger = {
-  warning(msg: string): void;
+  warning(msg: string, fields?: StageWarningFields): void;
 };
 
 export type StageOutcomeOptions = {
@@ -219,6 +229,9 @@ export async function stageOutcome<T>(
         `error_msg=${JSON.stringify(errorMsg)} ` +
         `head_sha=${options.headSha ?? null} run_id=${options.runId ?? null}\n` +
         `traceback:\n${stack}`,
+      // CS8: the same facts as structured fields — field-aware sinks (the runner's structured
+      // stage logger) emit them as record properties instead of mining the message string.
+      { stage, outcome: "degraded", error_class: errorClass },
     );
     recordStage({ stage, outcome: "error" });
     if (options.degradationNotes !== undefined) {

@@ -38,6 +38,11 @@ import { CHUNK_CONCURRENCY_DEFAULT } from "#backend/review/pipeline/parallelism.
 import { stageOutcome, type StageLogger } from "#backend/review/pipeline/degradation.js";
 import { buildAnalyzedPayload, resolveDegradedPayload } from "#backend/review/pipeline/helpers.js";
 import {
+  makePinoStageLogSink,
+  makeStructuredStageLogger,
+  type StageLogSink,
+} from "./stage_log_sink.js";
+import {
   recordLifecycleSetterSucceeded,
   recordLifecycleSetterFailed,
 } from "#backend/observability/finding_lifecycle_metrics.js";
@@ -169,6 +174,14 @@ export type RunReviewJobDeps = {
    * production (and the happy path) → the real GitHub client is built as before.
    */
   readonly postReviewGhClient?: GhReviewClient;
+  /**
+   * CS8 (C4/L12): where the per-job structured degradation records go. Default
+   * {@link makePinoStageLogSink} (one pino WARN JSON line per degradation — the production sink);
+   * tests inject a recording sink. The shell binds the job's correlation context
+   * (run_id / installation_id / head_sha / repo / trace_id) into a {@link makeStructuredStageLogger}
+   * over this sink — replacing the pre-CS8 DISCARD logger that dropped every degradation warning.
+   */
+  readonly logSink?: StageLogSink;
 };
 
 /**
@@ -288,9 +301,24 @@ export function runReviewJob(deps: RunReviewJobDeps): JobHandler {
       }
     })();
 
-    const logger: StageLogger = { warning: (msg: string): void => { /* plain-Node sink (no workflow log) */ void msg; } };
     const headSha = payload.head_sha;
     const runId = job.run_id;
+    // CS8 (C4/L12): the structured stage logger — every degradation warning (the shell's
+    // stageOutcome wraps, orchestrate's ctx.logger sites, the lifecycle bookkeeping) lands as ONE
+    // structured record on the sink, correlation-keyed. Replaces the discard `void msg` logger
+    // that made a degraded review invisible in this runtime (recordStage no-ops outside a Temporal
+    // workflow context, so the WARN was the only signal — and it went nowhere). trace_id is null
+    // until OTel capture is un-deferred (stage_log_sink.ts module doc).
+    const logger: StageLogger = makeStructuredStageLogger(
+      {
+        run_id: runId,
+        installation_id: payload.installation_id,
+        head_sha: headSha,
+        repo: `${payload.gh_owner}/${payload.gh_repo_name}`,
+        trace_id: null,
+      },
+      deps.logSink ?? makePinoStageLogSink(),
+    );
 
     // ── outer scope (mirrors the workflow body's FIX #1) — the finally releases mutex + workspace on EVERY
     //    exit path (E6, abort-EXEMPT). `workspaceHandle` is hoisted so the finally reads it after any failure.

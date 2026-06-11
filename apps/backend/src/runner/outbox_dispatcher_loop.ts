@@ -174,10 +174,28 @@ export class OutboxDispatcherLoop {
         // snapshot from claimPendingRows) makes a duplicate settlement a rowcount-0 no-op, and the
         // lease semantics are the repo's (terminal → lease released; retry → lease DEFERRED by the
         // backoff so a failing sink is paced, not hammered).
-        if (e instanceof PermanentSinkError || e instanceof UnknownSinkError) {
+        const permanent = e instanceof PermanentSinkError || e instanceof UnknownSinkError;
+        // CS8: ONE structured WARN per failed row — pre-CS8 the error landed ONLY in the row's
+        // last_error column (visible only by querying core.outbox); now the failure is in the pod
+        // logs with the correlation keys + the RC7 classification. Same console-JSON idiom as the
+        // activity's canonical outbox.dead_letter emit.
+        console.warn(
+          JSON.stringify({
+            event: "outbox.dispatch_failed",
+            row_id: row.id,
+            sink: row.sink,
+            run_id: row.runId,
+            review_id: row.reviewId,
+            installation_id: row.installationId,
+            attempts: row.attempts,
+            classification: permanent ? "permanent" : "retryable",
+            error: (e instanceof Error ? `${e.name}: ${e.message}` : String(e)).slice(0, 1024),
+          }),
+        );
+        if (permanent) {
           await this.o.activities.markPermanentlyFailed({
             row_id: row.id,
-            error: `${e.name}: ${e.message}`.slice(0, 1024),
+            error: `${(e as Error).name}: ${(e as Error).message}`.slice(0, 1024),
             expected_attempts: row.attempts,
           });
         } else {
