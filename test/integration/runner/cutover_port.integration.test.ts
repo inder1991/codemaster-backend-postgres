@@ -199,10 +199,10 @@ function startCall(o: {
 
 type JobRow = {
   job_id: string; job_type: string; payload: Record<string, unknown>;
-  dedup_key: string | null; state: string; installation_id: string | null;
+  dedup_key: string | null; state: string; installation_id: string | null; max_attempts: number;
 };
 async function allJobs(): Promise<Array<JobRow>> {
-  const r = await sql<JobRow>`SELECT job_id, job_type, payload, dedup_key, state, installation_id
+  const r = await sql<JobRow>`SELECT job_id, job_type, payload, dedup_key, state, installation_id, max_attempts
     FROM core.background_jobs ORDER BY created_at`.execute(db);
   return r.rows;
 }
@@ -315,6 +315,28 @@ describeDb("BackgroundJobsTemporalPort + the runner's always-Postgres sink wirin
     const byKey = new Map(jobs.map((j) => [j.dedup_key, j]));
     expect(byKey.get("wf-tenant")!.installation_id).toBe(tenantUuid);   // tenant identity SURVIVES
     expect(byKey.get("wf-platform")!.installation_id).toBeNull();       // platform-scoped by design
+  });
+
+  it("(1d) per-workflow-type retry budgets survive the cutover (RC5 / W1.9d): each mapped job_type keeps its Temporal attempt budget", async () => {
+    // The Temporal proxies carried tuned per-workflow curves; the platform must enqueue each
+    // job_type with ITS budget on max_attempts, not the repo default (3) — otherwise an
+    // out-of-order `installation_repositories` webhook (H4) dead-letters in ~3s instead of
+    // redriving across the Temporal-parity window. Parity sources pinned in
+    // test/unit/runner/workflow_job_map.test.ts.
+    const port = makeCutoverPort();
+    for (const workflowType of Object.keys(WORKFLOW_TYPE_TO_JOB_TYPE)) {
+      await port.startWorkflow(
+        startCall({ workflowType, workflowId: `budget-${workflowType}`, args: [{ probe: 1 }] }),
+      );
+    }
+
+    const byType = new Map((await allJobs()).map((j) => [j.job_type, j.max_attempts]));
+    expect(byType.get("reconcile_installation")).toBe(5);
+    expect(byType.get("reconcile_repositories")).toBe(10); // the H4 out-of-order absorption window
+    expect(byType.get("repair_installation_repositories")).toBe(12); // the GitHub-outage hydrate window
+    expect(byType.get("sync_code_owners")).toBe(5);
+    expect(byType.get("refresh_semantic_docs")).toBe(3);
+    expect(byType.get("trigger_page_resync")).toBe(3);
   });
 
   it("(2) an UNMAPPED workflowType throws PermanentSinkError naming it; nothing is enqueued", async () => {
