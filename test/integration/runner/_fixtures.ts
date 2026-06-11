@@ -124,6 +124,7 @@ import { sharedClientCollaborators } from "#backend/integrations/llm/client_cach
 
 import { ClonedRepoV1 } from "#contracts/cloned_repo.v1.js";
 import { CodemasterConfigV1 } from "#contracts/codemaster_config.v1.js";
+import { LoadRepoConfigResultV1 } from "#contracts/load_repo_config.v1.js";
 import { ComputedPolicyRulesV1 } from "#contracts/policy_compute.v1.js";
 import { FileRoutingV1 } from "#contracts/file_routing.v1.js";
 import { CarryForwardSelectionV1 } from "#contracts/carry_forward.v1.js";
@@ -238,7 +239,10 @@ export function makeStubPorts(
     },
     loadRepoConfig: async () => {
       calls.push("loadRepoConfig");
-      return CodemasterConfigV1.parse({ path_filters: [], path_instructions: [] });
+      return LoadRepoConfigResultV1.parse({
+        config: CodemasterConfigV1.parse({ path_filters: [], path_instructions: [] }),
+        config_status: "valid",
+      });
     },
     computePolicyRules: async () => {
       calls.push("computePolicyRules");

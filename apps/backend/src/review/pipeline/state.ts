@@ -195,6 +195,10 @@ export class ReviewWorkflowState {
    *  Python `[CodemasterConfigV1()]` 1-element box. */
   repoConfig: CodemasterConfigV1 = CodemasterConfigV1Schema.parse({});
 
+  /** W4.4 [M6]: which fail-open branch produced {@link repoConfig} — drives the malformed-config
+   *  NOTICE. Default 'valid' (defaults-in-effect with no doc rejected ⇒ nothing to notice). */
+  repoConfigStatus: "absent" | "valid" | "malformed" = "valid";
+
   /** inline_post_filter_metadata (~1199) — R-23 precomputed per-finding policy metadata. Undefined until
    *  the relocated post-filter populates it (Stage 5); kept optional to honour exactOptionalPropertyTypes. */
   inlinePostFilterMetadata?: InlinePostFilterMetadata;

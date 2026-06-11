@@ -12,7 +12,7 @@
 //   - reconcile_deletions: delegates to the repo soft-delete.
 //   - sanitize_page / fetch_space_pages / fetch_page_body: happy paths.
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import * as confluenceIngestMetrics from "#backend/observability/confluence_ingest_metrics.js";
 
