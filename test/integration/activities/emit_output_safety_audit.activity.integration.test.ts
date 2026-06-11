@@ -9,9 +9,11 @@
  *     actor_kind='system', target_kind='llm_completion', target_id=request_id, after IS NULL.
  *   - the audit_event_id is the DETERMINISTIC uuid5 of (request_id|kinds_sorted|spans|stage).
  *   - a second invocation for the SAME event is an idempotent no-op (still exactly one row).
- *   - the `before` column is stored UNENCRYPTED as a `plain:v1:` payload (ADR-0070 — owner decision):
- *     it round-trips via decryptAuditJsonBytea (plaintext fallback) AND the raw bytes carry the cleartext
- *     secret, written even though a key IS installed (C is unconditional, not a fallback).
+ *   - the `before` column is stored ENCRYPTED (kms2 AES-GCM-AAD under AUDIT_BEFORE_AAD — CS6/RC1,
+ *     superseding ADR-0070's plaintext decision): the raw bytes NEVER carry the cleartext secret; the
+ *     payload round-trips via decryptAuditJsonBytea under the installed registry. With NO registry the
+ *     emit fails CLOSED (no row) — never a silent unencrypted write. Historical plain:v1: rows remain
+ *     readable through the codec's dual-format read shim.
  *   - detector_kinds order does NOT change the id (the derivation sorts them).
  */
 import { createHash, randomInt } from "node:crypto";
@@ -121,7 +123,7 @@ function buildEvent(installationId: string, requestId: string, kinds: ReadonlyAr
 }
 
 describeDb("emitOutputSafetyAuditEvent (integration, disposable PG)", () => {
-  it("writes ONE audit row; before is stored UNENCRYPTED (plain:v1: cleartext) per ADR-0070", async () => {
+  it("writes ONE audit row; before is stored ENCRYPTED (kms2) — the detected secret never lands in cleartext (CS6/RC1)", async () => {
     const installationId = newUuid();
     const requestId = newUuid();
     await seedInstallation(installationId);
@@ -139,13 +141,13 @@ describeDb("emitOutputSafetyAuditEvent (integration, disposable PG)", () => {
       expect(row.target_id).toBe(requestId);
       expect(row.after).toBeNull(); // sanitization is a one-way transform
 
-      // ADR-0070: `before` is stored UNENCRYPTED. A key IS installed (beforeAll), yet the row is still
-      // plain:v1: cleartext — proving C is unconditional, and the detected secret sits in cleartext.
+      // CS6/RC1 (supersedes ADR-0070's plaintext decision): `before` is stored ENCRYPTED under the
+      // AES-GCM-AAD codec — the raw bytea NEVER carries the detected secret in cleartext.
       const rawBefore = Buffer.from(row.before!).toString("ascii");
-      expect(rawBefore.startsWith("plain:v1:")).toBe(true);
-      expect(rawBefore).toContain("sk-SECRET-leaked");
+      expect(rawBefore.startsWith("kms2:")).toBe(true);
+      expect(rawBefore).not.toContain("sk-SECRET-leaked");
 
-      // The `before` payload round-trips via the plaintext fallback in decryptAuditJsonBytea.
+      // The `before` payload round-trips through the codec under the installed registry.
       const before = decryptAuditJsonBytea(row.before, AUDIT_BEFORE_AAD) as Record<string, unknown>;
       expect(before.original_text).toBe("sk-SECRET-leaked in the model preamble café 😀");
       expect(before.redacted_text).toBe("sk-[REDACTED] in the model preamble café 😀");
@@ -223,4 +225,28 @@ describeDb("emitOutputSafetyAuditEvent (integration, disposable PG)", () => {
     }
   });
 
+});
+
+// ─── CS6/RC1: the encrypt is FAIL-CLOSED — no registry ⇒ no row, never a cleartext fallback ──────
+describeDb("emitOutputSafetyAuditEvent — fail-closed without keys (CS6/RC1)", () => {
+  it("with NO key registry installed the emit THROWS and writes NO row (never silent-unencrypted)", async () => {
+    const installationId = newUuid();
+    const requestId = newUuid();
+    await seedInstallation(installationId);
+    try {
+      resetAuditKeyRegistryForTesting();
+      await expect(
+        emitOutputSafetyAuditEvent({
+          event: buildEvent(installationId, requestId, ["secret_leaked"]),
+        }),
+      ).rejects.toThrow(/keys not loaded/);
+      expect((await fetchRows(installationId)).length).toBe(0);
+    } finally {
+      // Reinstall the suite's registry for any later test in this file.
+      const reg = new KeyRegistry();
+      reg.set(makeKeySet({ currentVersion: "1", keys: new Map([["1", new Uint8Array(32).fill(0x42)]]) }));
+      setAuditKeyRegistry(reg);
+      await cleanup(installationId);
+    }
+  });
 });
