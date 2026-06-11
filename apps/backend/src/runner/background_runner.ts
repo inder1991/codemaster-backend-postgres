@@ -166,6 +166,19 @@ export async function runOneBackgroundJob(o: { repo: BackgroundJobsRepo; registr
     // OPPOSITE pole: deferRetry re-enqueues at the Retry-After/resetAt hint WITHOUT consuming the
     // attempt, so a routine rate-limit window can never dead-letter the job (CS4.4 — H3/RC6/XH2).
     // Everything else is presumed transient → the markFailed retry/backoff curve.
+    // Attempt-failure observability (2026-06-11 smoke finding; mirrors review_job_runner): the
+    // settle paths persist only the truncated MESSAGE — the THROW SITE must reach pod logs.
+    console.error(
+      JSON.stringify({
+        event: "background_job.attempt_failed",
+        job_id: job.job_id,
+        job_type: job.job_type,
+        attempts: job.attempts,
+        error_class: e instanceof Error ? e.constructor.name : typeof e,
+        error_msg: (e instanceof Error ? e.message : String(e)).slice(0, 500),
+        stack: (e instanceof Error && e.stack !== undefined ? e.stack : "").slice(0, 4000),
+      }),
+    );
     const msg = e instanceof Error ? e.message : String(e);
     const retryAt = extractRetryAtHint(e, o.clock);
     if (e instanceof PermanentJobError || e instanceof ZodError) {

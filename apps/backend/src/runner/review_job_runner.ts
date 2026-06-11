@@ -143,6 +143,22 @@ export async function runOneJob(o: { repo: ReviewJobsRepo; clock: Clock; owner: 
       outcome = done.applied ? "done" : "lease_lost";
     }
   } catch (e) {
+    // Attempt-failure observability (2026-06-11 smoke finding): the settle paths persist only the
+    // truncated MESSAGE into last_error/dead_reason — without this record the THROW SITE of a live
+    // failure is undiagnosable from pod logs (the `base(...)[name]` incident took DB spelunking).
+    // ONE structured record per caught handler error, before classification, covering every settle
+    // path (cancel/throttle-defer/poison/transient alike). Same console-JSON idiom as the outbox.
+    console.error(
+      JSON.stringify({
+        event: "review_job.attempt_failed",
+        job_id: job.job_id,
+        run_id: job.run_id,
+        attempts: job.attempts,
+        error_class: e instanceof Error ? e.constructor.name : typeof e,
+        error_msg: (e instanceof Error ? e.message : String(e)).slice(0, 500),
+        stack: (e instanceof Error && e.stack !== undefined ? e.stack : "").slice(0, 4000),
+      }),
+    );
     if (e instanceof TerminalCancelError) {
       // Supersede/abort loser (E3): settle 'cancelled' — terminal, NEVER re-enqueued (markFailed would
       // bounce it back to 'ready' while attempts remain). ATOMIC (F4): the job AND its run move together via
