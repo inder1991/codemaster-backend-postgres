@@ -71,7 +71,12 @@ import {
   type ReviewPipelineResult,
   makeReviewPipelineResult,
 } from "./pipeline_result.js";
-import { fanOutReview, type ChunkThreadingV1, type InvokeChunkFn } from "./parallelism.js";
+import {
+  fanOutReview,
+  type ChunkDispatchFailure,
+  type ChunkThreadingV1,
+  type InvokeChunkFn,
+} from "./parallelism.js";
 import {
   inferPrTopologyKind,
   pathFiltersExcludedAllFinding,
@@ -300,6 +305,15 @@ function toMutableRanges(ranges: ChangedLineRanges): Record<string, Array<[numbe
 
 /** _CLASSIFIER_FAILURE_THRESHOLD (review_pipeline_orchestrator.py:292). > this ratio → a degradation note. */
 const CLASSIFIER_FAILURE_THRESHOLD = 0.1;
+
+/** W1.9a (C2) — the failed-chunk ratio at/above which the fail-soft fan-out degradation becomes a
+ *  whole-review FAILURE instead of a degradation note. Mirrors the CLASSIFIER_FAILURE_THRESHOLD
+ *  ratio idiom. 1.0 = ONLY a review where EVERY chunk failed aborts: with zero successful chunks
+ *  there is nothing worth posting, and settling 'done' with zero findings would be a silent total
+ *  loss (the C2 guard: "a review where ALL chunks fail must not settle as a healthy done"). Any
+ *  partial failure (ratio < 1.0) degrades — the surviving chunks' findings still post (the C2 fix:
+ *  reserve hard-abort for the nothing-succeeded case; post the chunks that succeeded). */
+const CHUNK_FAILURE_ABORT_THRESHOLD = 1.0;
 
 /** The query-text cap the per-chunk closure applies (`[:8000]`, review_pull_request.py:1636). The
  *  RetrieveKnowledgeInputV1 query field is bounded max(8000); the embed query field is bounded max(8000)
@@ -603,11 +617,21 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
     const invokeChunk: InvokeChunkFn = async (chunk, chunkThreading) => {
       const context = await buildChunkContext(ctx, chunk, chunkThreading);
       // Step 5b — the bedrock_review_chunk dispatch is wrapped in a stage_outcome with raiseAfterLog so a
-      // dispatch failure logs `review_chunk` outcome=error then re-raises (the Python `_log_stage(...,
-      // outcome="error"); raise` bridge). fanOutReview surfaces the first rejection.
+      // dispatch failure logs the CS8 structured WARN + record_stage(`review_chunk`, error) + appends the
+      // `review_chunk_failed` marker, then re-raises (the Python `_log_stage(..., outcome="error"); raise`
+      // bridge). W1.9a (C2): the re-raise lands in fanOutReview's failure-isolation slot below — the failed
+      // chunk DEGRADES (zero findings + the N-of-M note after fan-in) while its peers complete; only
+      // cancellation (which stageOutcome re-raises unlogged and the slot refuses to record) and the
+      // all-chunks-failed threshold still abort the review.
       const result = await stageOutcome(
         "review_chunk",
-        { logger: ctx.logger ?? NULL_LOGGER, headSha, runId, raiseAfterLog: true },
+        {
+          logger: ctx.logger ?? NULL_LOGGER,
+          degradationNotes: degradationAdapter(state),
+          headSha,
+          runId,
+          raiseAfterLog: true,
+        },
         async (): Promise<ReviewChunkResponseV1> => ports.reviewChunk(context),
       );
       // raiseAfterLog=true: on success `result` is the envelope; on failure stageOutcome re-raised, so this
@@ -627,10 +651,37 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
       return result;
     };
 
+    // W1.9a (C2) — fail-soft fan-out: the failure-isolation slot collects failed chunks (in chunk-
+    // INPUT order) while their peers complete, instead of the legacy first-error-wins abort that
+    // discarded every peer's completed (paid-for) findings. Cancellation still propagates out of
+    // fanOutReview unrecorded (the isCancellation discipline).
+    const chunkFailures: Array<ChunkDispatchFailure> = [];
     const [newFindings, arbitrationIntents] = await fanOutReview(toReview, invokeChunk, {
       concurrency: ctx.limits.chunkConcurrency,
       threading,
+      failureSlot: {
+        recordFailure: (failure: ChunkDispatchFailure): void => {
+          chunkFailures.push(failure);
+        },
+      },
     });
+    if (chunkFailures.length > 0) {
+      // Surface "N of M chunks failed review" in the walkthrough (the C2 fix). The per-chunk CS8
+      // WARN + record_stage(review_chunk, error) + `review_chunk_failed` marker already fired inside
+      // the Step-5b stageOutcome for each failure.
+      state.degradation.add(
+        `${chunkFailures.length} of ${toReview.length} chunks failed review; ` +
+          `findings may be incomplete`,
+      );
+      // Mirror the classifier-failure-ratio idiom: at/above the abort threshold (1.0 — EVERY chunk
+      // failed) the review must NOT settle as a healthy zero-finding 'done'. Re-raise the FIRST
+      // (chunk-input-order — replay-deterministic) failure verbatim so the typed retryable/
+      // non-retryable classification survives to the shell/workflow terminal-transition path.
+      const chunkFailureRatio = chunkFailures.length / Math.max(1, toReview.length);
+      if (chunkFailureRatio >= CHUNK_FAILURE_ABORT_THRESHOLD) {
+        throw chunkFailures[0]!.error;
+      }
+    }
 
     // Carried findings bypass the active-fan-out evidence validation by design (they were minted against a
     // prior PR snapshot; the selection layer owns their staleness gating). Concat carried FIRST so they keep

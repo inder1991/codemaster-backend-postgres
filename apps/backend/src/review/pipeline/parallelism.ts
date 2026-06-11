@@ -40,6 +40,11 @@ import type { ReviewChunkResponseV1 } from "#contracts/review_chunk_response.v1.
 import type { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
 import type { ArbitrationIntentV1 } from "#contracts/arbitration_intent.v1.js";
 
+// W1.9a (C2): the ONE cancellation predicate (degradation.ts) — the fail-soft slot must NEVER record
+// a cancellation as a chunk failure (a lost-lease/supersede abort or a workflow cancel propagates).
+// Sandbox-safe: degradation.ts is already part of the workflow bundle (no new runtime edges).
+import { isCancellation } from "./degradation.js";
+
 /** Default per-PR chunk-review concurrency. Matches the Sprint-6 routing-policy slot
  *  (CHUNK_CONCURRENCY_DEFAULT in parallelism.py:43). */
 export const CHUNK_CONCURRENCY_DEFAULT = 4;
@@ -73,6 +78,24 @@ export type FanOutResult = readonly [
   ReadonlyArray<ReviewFindingV1>,
   ReadonlyArray<ArbitrationIntentV1>,
 ];
+
+/** W1.9a (C2): one failed chunk dispatch, as recorded by the failure-isolation slot. `error` is the
+ *  verbatim rejection (the orchestrator re-raises it on the all-chunks-failed path so the typed
+ *  retryable/non-retryable classification survives). */
+export type ChunkDispatchFailure = {
+  readonly chunkIndex: number;
+  readonly chunkId: string;
+  readonly path: string;
+  readonly error: unknown;
+};
+
+/** W1.9a (C2): the caller-provided failure-isolation slot. When supplied, a rejecting dispatch is
+ *  recorded here (in chunk-INPUT order — replay-deterministic regardless of completion order) and
+ *  its peers COMPLETE instead of the legacy first-error-wins abort. Cancellation is NEVER recorded —
+ *  it propagates (the degradation.ts isCancellation discipline). */
+export type ChunkFailureSlot = {
+  recordFailure(failure: ChunkDispatchFailure): void;
+};
 
 /** Per-chunk normalized result: `(findings, intents)`. */
 type CoercedChunkResult = readonly [
@@ -121,6 +144,19 @@ export function coerceChunkResult(raw: ReviewChunkResponseV1): CoercedChunkResul
 // dispatches on a path that was already going to throw, so the success path (and its deterministic
 // slot-ordered fan-in) is byte-for-byte unchanged. The first rejection still propagates: each worker
 // rethrows after setting the flag, so `Promise.all` surfaces the first-observed error verbatim.
+//
+// W1.9a (C2) — FAILURE-ISOLATION SLOT (fail-soft mode; owner-requested hardening DIVERGENCE from the
+// frozen Python first-error-wins task-group).
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+// With `options.failureSlot` supplied, a rejecting dispatch DEGRADES instead of aborting the fan-out:
+// the failure is recorded into an index-keyed slot (mirroring the result-slot idiom) and the worker
+// CONTINUES pulling chunks — peers are NOT cancelled, and the failed chunk simply contributes zero
+// findings at fan-in. After the pool settles, the recorded failures are replayed onto the caller's
+// slot in chunk-INPUT order (replay-deterministic regardless of completion order; the same
+// determinism guarantee as the result fan-in). EXCEPTIONS THAT STILL ABORT: cancellation
+// (isCancellation — Temporal CancelledFailure / the abort-shaped lost-lease supersede) is NEVER
+// recorded as a chunk failure; it sets the abort flag and propagates verbatim, exactly as in the
+// legacy mode. Without `failureSlot` the legacy first-error-wins contract above is unchanged.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 export async function fanOutReview(
   chunks: ReadonlyArray<DiffChunkV1>,
@@ -128,6 +164,7 @@ export async function fanOutReview(
   options: {
     readonly concurrency?: number;
     readonly threading?: ChunkThreadingV1;
+    readonly failureSlot?: ChunkFailureSlot;
   } = {},
 ): Promise<FanOutResult> {
   const concurrency = options.concurrency ?? CHUNK_CONCURRENCY_DEFAULT;
@@ -167,6 +204,13 @@ export async function fanOutReview(
   // pulling/dispatching its next chunk and stops. Plain boolean → replay-safe, no non-determinism.
   let aborted = false;
 
+  // W1.9a (C2): index-keyed failure slots (fail-soft mode only). A failed dispatch records here and
+  // peers continue; the recorded failures are replayed onto options.failureSlot in INPUT order after
+  // the pool settles. Plain data writes → replay-safe, no new non-determinism.
+  const failureSlots: Array<ChunkDispatchFailure | undefined> = new Array<
+    ChunkDispatchFailure | undefined
+  >(chunks.length).fill(undefined);
+
   const worker = async (): Promise<void> => {
     for (let idx = next(); idx < chunks.length; idx = next()) {
       // Stop scheduling the moment a peer has failed — do NOT pull/dispatch this (or any further)
@@ -180,10 +224,19 @@ export async function fanOutReview(
         // eslint-disable-next-line security/detect-object-injection -- `idx` is a bounded numeric cursor into a local array, not user input
         slots[idx] = coerceChunkResult(raw);
       } catch (err) {
-        // Signal peers to stop before re-raising. The first-observed error still propagates through
-        // `Promise.all` (each worker rethrows verbatim), preserving the first-error-wins contract.
-        aborted = true;
-        throw err;
+        // Cancellation ALWAYS aborts the fan-out (never a degradation record): signal peers to stop,
+        // then re-raise verbatim. Without a failureSlot every failure takes this path — the legacy
+        // first-error-wins contract (the first-observed error propagates through `Promise.all`).
+        if (options.failureSlot === undefined || isCancellation(err)) {
+          aborted = true;
+          throw err;
+        }
+        // W1.9a (C2) fail-soft: record the failure into its index-keyed slot and CONTINUE — peers
+        // are not cancelled; this chunk contributes zero findings at fan-in. (The per-chunk
+        // stageOutcome in the orchestrator already logged the CS8 WARN + record_stage(error) before
+        // re-raising into this catch.)
+        // eslint-disable-next-line security/detect-object-injection -- `idx` is a bounded numeric cursor into a local array, not user input
+        recordFailureSlot(failureSlots, idx, chunks[idx]!, err);
       }
     }
   };
@@ -195,13 +248,30 @@ export async function fanOutReview(
   }
   await Promise.all(workers);
 
+  // W1.9a (C2): replay the recorded failures onto the caller's slot in chunk-INPUT order — the
+  // replay-deterministic order (completion order is not deterministic across replays).
+  if (options.failureSlot !== undefined) {
+    for (const failure of failureSlots) {
+      if (failure !== undefined) {
+        options.failureSlot.recordFailure(failure);
+      }
+    }
+  }
+
   // Fan-in in INPUT order. Slots are all filled on the success path; a rejected dispatch would have
-  // propagated through Promise.all above before reaching here.
+  // propagated through Promise.all above before reaching here — except in fail-soft mode, where a
+  // recorded-failure index legitimately holds no result (the chunk contributes zero findings).
   const outFindings: Array<ReviewFindingV1> = [];
   const outIntents: Array<ArbitrationIntentV1> = [];
-  for (const slot of slots) {
-    // istanbul ignore next — defensive: unreachable on the success path (mirrors the Python asserts).
+  for (let idx = 0; idx < slots.length; idx += 1) {
+    // eslint-disable-next-line security/detect-object-injection -- `idx` is a bounded numeric cursor into local arrays, not user input
+    const slot = slots[idx];
     if (slot === undefined) {
+      // eslint-disable-next-line security/detect-object-injection -- `idx` is a bounded numeric cursor into a local array, not user input
+      if (failureSlots[idx] !== undefined) {
+        continue; // fail-soft: the failed chunk contributes zero findings + zero intents.
+      }
+      // istanbul ignore next — defensive: unreachable on the success path (mirrors the Python asserts).
       throw new Error("fanOutReview: result slot unexpectedly empty after fan-in");
     }
     const [findings, intents] = slot;
@@ -209,4 +279,23 @@ export async function fanOutReview(
     outIntents.push(...intents);
   }
   return [outFindings, outIntents];
+}
+
+/** W1.9a (C2): record one failed dispatch into its index-keyed slot (fail-soft mode). Factored out
+ *  so the worker's catch routes through a named record* call — the degradation IS recorded here (the
+ *  silent-degradation gate's rule-3 record discipline), then surfaced by the orchestrator as the
+ *  "N of M chunks failed review" note after fan-in. */
+function recordFailureSlot(
+  failureSlots: Array<ChunkDispatchFailure | undefined>,
+  idx: number,
+  chunk: DiffChunkV1,
+  error: unknown,
+): void {
+  // eslint-disable-next-line security/detect-object-injection -- `idx` is a bounded numeric cursor into a local array, not user input
+  failureSlots[idx] = {
+    chunkIndex: idx,
+    chunkId: chunk.chunk_id,
+    path: chunk.path,
+    error,
+  };
 }

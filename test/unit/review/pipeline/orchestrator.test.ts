@@ -762,8 +762,9 @@ describe("orchestrate — path_filters excluded-all early exit", () => {
 
 describe("orchestrate — cleanup is finally-guaranteed", () => {
   it("runs cleanup even when a mid-pipeline stage throws fatally", async () => {
-    // reviewChunk throws and is dispatched under stageOutcome(raiseAfterLog) → propagates out of fanOut →
-    // out of orchestrate. The finally MUST still release the workspace.
+    // 1 chunk, and it throws → ALL chunks failed → the W1.9a (C2) all-chunks-failed threshold
+    // re-raises the failure out of orchestrate (a zero-survivor review must not settle 'done').
+    // The finally MUST still release the workspace.
     const stub = makeStub({ chunkCount: 1, reviewChunkThrows: true });
     await expect(orchestrate(makeCtx(stub))).rejects.toThrow(/review-chunk boom/);
     expect(stub.cleanupCalled()).toBe(true);

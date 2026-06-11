@@ -579,7 +579,7 @@ describe("orchestrate — LLM single-chunk failure DEGRADES; surviving chunks st
     // zero-finding 'done' — the first failure (input order; chunk_id suffix 100) re-raises.
     const stub = makeStub({ chunkCount: 2, reviewChunkThrowsAllChunks: true });
     const ctx = makeCtx(stub);
-    await expect(orchestrate(ctx)).rejects.toThrow(new RegExp(uuidFor(100)));
+    await expect(orchestrate(ctx)).rejects.toThrow(uuidFor(100));
     expect(stub.calls).not.toContain("dedupFindings");
     expect(stub.calls).not.toContain("postReview");
     // The N-of-M note still lands on the live collector (operator pivot) before the re-raise.

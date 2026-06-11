@@ -260,8 +260,13 @@ export async function stageOutcome<T>(
 /** True iff `exc` is a Temporal cancellation that MUST propagate (analogue of Python's
  *  asyncio.CancelledError / KeyboardInterrupt). Temporal TS surfaces workflow cancellation as a
  *  CancelledFailure; we also treat a DOM-style AbortError as cancellation (belt-and-suspenders for the
- *  test harness, which raises an abort-shaped error). */
-function isCancellation(exc: unknown): boolean {
+ *  test harness, which raises an abort-shaped error).
+ *
+ *  EXPORTED (W1.9a / C2): the fan-out failure-isolation slot (parallelism.ts) applies the SAME
+ *  discipline — a cancellation observed mid-fan-out (lost-lease/supersede abort, workflow cancel) is
+ *  NEVER recorded as a chunk degradation; it re-raises so the workflow body's cancellation handler
+ *  observes it. One predicate, two seams — the discipline cannot drift. */
+export function isCancellation(exc: unknown): boolean {
   if (exc instanceof CancelledFailure) {
     return true;
   }
