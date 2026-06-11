@@ -60,14 +60,17 @@
  *                                                  error and was stopped ALONE — the sibling loops KEEP RUNNING
  *                                                  (review blocker #3: pre-W4b.2 any loop's crash fired stopAll()
  *                                                  and tore down the whole process). loop ∈ {runner, scheduler,
- *                                                  outbox}. ANY non-zero value = a DEGRADED runner pod: that
- *                                                  loop's work (job execution / schedule polling / outbox
- *                                                  draining) has stopped until the pod restarts — alert on it.
+ *                                                  outbox, review} (CS2.1 added `review` — the review-jobs
+ *                                                  RunnerLoop; supervised in non-shadow only). ANY non-zero
+ *                                                  value = a DEGRADED runner pod: that loop's work (job
+ *                                                  execution / schedule polling / outbox draining / review
+ *                                                  draining+reaping) has stopped until the pod restarts —
+ *                                                  alert on it.
  *
  * ## Cardinality discipline
  * Bounded-enum labels ONLY: `op` ∈ {markDone, markFailed}; `outcome` ∈ {idle, done, failed, lease_lost, cancelled}
  * (review) / {idle, done, failed, lease_lost, no_handler} (background); `phase` ∈ {after_hard_timeout};
- * `loop` ∈ {runner, scheduler, outbox}.
+ * `loop` ∈ {runner, scheduler, outbox, review}.
  * NEVER per-tenant / per-installation / per-PR / per-job labels — same discipline the sibling modules enforce.
  *
  * Fail-safe: every emit swallows meter errors so telemetry never perturbs the runner loop.
@@ -157,8 +160,9 @@ const LOOP_CRASHED_COUNTER: Counter = METER.createCounter(LOOP_CRASHED_NAME, {
   description:
     "Count of supervised runtime loops whose run() ended with an ESCAPED error — the loop was stopped ALONE " +
     "(logged + metered) while its sibling loops kept running (W4b.2 per-loop supervision; pre-W4b.2 any loop's " +
-    "crash fired stopAll() and tore down the whole process). Bounded label loop ∈ {runner, scheduler, outbox}. " +
-    "ANY non-zero value = a degraded runner pod: that loop's work has stopped until the pod restarts — alert on it.",
+    "crash fired stopAll() and tore down the whole process). Bounded label loop ∈ {runner, scheduler, outbox, " +
+    "review}. ANY non-zero value = a degraded runner pod: that loop's work has stopped until the pod restarts — " +
+    "alert on it.",
 });
 const BACKGROUND_NO_HANDLER_COUNTER: Counter = METER.createCounter(BACKGROUND_NO_HANDLER_NAME, {
   description:
@@ -235,7 +239,7 @@ export function recordSchedulerScheduleError(): void {
 }
 
 /** Record one supervised loop crash (its run() ended with an escaped error; the loop stopped ALONE
- *  while its siblings kept running — W4b.2). `loop` ∈ {runner, scheduler, outbox}. Fail-safe. */
-export function recordRunnerLoopCrashed(args: { loop: "runner" | "scheduler" | "outbox" }): void {
+ *  while its siblings kept running — W4b.2). `loop` ∈ {runner, scheduler, outbox, review}. Fail-safe. */
+export function recordRunnerLoopCrashed(args: { loop: "runner" | "scheduler" | "outbox" | "review" }): void {
   try { LOOP_CRASHED_COUNTER.add(1, { loop: args.loop }); } catch { /* telemetry never perturbs the runner */ }
 }

@@ -9,12 +9,13 @@ import {
   type BackgroundRunnerMode,
 } from "#backend/boot_tasks.js";
 import { PostgresOutboxRepo } from "#backend/domain/repos/outbox_repo.js";
+import { LlmInvocationLedger } from "#backend/integrations/llm/invocation_ledger.js";
 import { registerInstallationReconcileSink } from "#backend/outbox/sinks/installation_reconcile.js";
 import { registerTemporalWorkflowStartSink } from "#backend/outbox/sinks/temporal_workflow_start.js";
 
 import type { Clock } from "#platform/clock.js";
 import { WallClock } from "#platform/clock.js";
-import { disposePool, tenantKysely } from "#platform/db/database.js";
+import { disposePool, getPool, tenantKysely } from "#platform/db/database.js";
 
 import { BackgroundJobsRepo } from "./background_jobs_repo.js";
 import { makeOutboxBackgroundJobsPort } from "./background_jobs_temporal_port.js";
@@ -29,6 +30,8 @@ import { HandlerRegistry } from "./handler_registry.js";
 import { registerCronHandlers } from "./handlers/cron_handlers.js";
 import { registerEventHandlers } from "./handlers/event_handlers.js";
 import { OutboxDispatcherLoop } from "./outbox_dispatcher_loop.js";
+import { RunnerLoop, runOneJob, type JobHandler, type RunOutcome } from "./review_job_runner.js";
+import { runReviewJob } from "./review_job_shell.js";
 import { ReviewJobsRepo } from "./review_jobs_repo.js";
 import { recordRunnerLoopCrashed } from "./runner_metrics.js";
 import { SchedulerLoop, pollAndEnqueue } from "./scheduler.js";
@@ -38,7 +41,10 @@ import { SchedulerLoop, pollAndEnqueue } from "./scheduler.js";
 // replacing Temporal Schedules) + the W2b HandlerRegistry into ONE Temporal-free runtime process.
 // Closes the F6 review finding's composition gap: the three pieces existed but nothing wired them
 // into a bootable process. Phase 3c adds the OutboxDispatcherLoop (the Postgres leased drain loop
-// replacing the OutboxDispatcherWorkflow singleton) over the SAME shared pool/clock. CS1.1: this
+// replacing the OutboxDispatcherWorkflow singleton) over the SAME shared pool/clock. CS2.1 (closes
+// audit C6/OC4) composes the REVIEW-JOBS RunnerLoop (review_job_runner.ts over core.review_jobs —
+// the table wireOutboxSinks routes `reviewPullRequest` onto; handler = the REAL runReviewJob; idle
+// cycles run the unified reapStuckRuns) into the same process, in NON-SHADOW modes only. CS1.1: this
 // runtime boots ONLY under CODEMASTER_RUNTIME_MODE=postgres|shadow (boot_tasks.ts — Temporal and
 // the Postgres runtime are mutually exclusive by construction), so {@link wireOutboxSinks} ALWAYS
 // binds the temporal_workflow_start / installation_reconcile sinks to the Postgres-enqueue port
@@ -115,10 +121,24 @@ export type BackgroundRunnerDeps = {
    *  side-effect seam — the scheduler (no enqueue, no next_run_at advance), the outbox drain loop
    *  (no claim/lease, no dispatch, no markDispatched), the runner loop (no claim, no idle reap),
    *  and HandlerDeps (the HandlerRegistry wrapper suppresses every handler body, so no external
-   *  GitHub/LLM/embed/clone call can start). Default false (the production behavior); the single
+   *  GitHub/LLM/embed/clone call can start). CS2.1: shadow additionally OMITS the review-jobs
+   *  RunnerLoop ENTIRELY (no `reviewLoop` handle is composed — see
+   *  {@link BackgroundRunnerHandles.reviewLoop}). Default false (the production behavior); the single
    *  prod composition root ({@link runBackgroundRunner}) ALWAYS passes the mode-resolved value
    *  explicitly. */
   shadow?: boolean;
+  /** CS2.1: the core Postgres DSN the REVIEW loop's pieces need — the default {@link runReviewJob}
+   *  handler (in-process ports + the E4 supersede read run over `getPool(dsn)`) and the
+   *  ReviewJobsRepo's unified reaper (`reapStuckRuns` resolves its raw-`pg` transaction pool from it).
+   *  Production ({@link runBackgroundRunner}) ALWAYS passes it; when omitted both fall back to
+   *  `CODEMASTER_PG_CORE_DSN` at FIRST USE (fail-loud there), keeping buildBackgroundRunner pure +
+   *  bootable in DSN-less unit contexts (the dispose test's never-connected pool). */
+  dsn?: string;
+  /** CS2.1 TEST SEAM: the review-job handler the REVIEW RunnerLoop drives. Default = the REAL
+   *  {@link runReviewJob} over the shared ADR-0062 pool — REAL makeInProcessPorts + the real lifecycle
+   *  bundle (NO overrides in production: the full GitHub/LLM/workspace surface). Tests inject a
+   *  recording stub so the composed loop can be driven without real GitHub/LLM side effects. */
+  reviewHandler?: JobHandler;
 };
 
 /** The composed runtime pieces + single-shot drive seams (tests / operator diagnostics). */
@@ -132,6 +152,14 @@ export type BackgroundRunnerHandles = {
    *  singleton). Run ONE per deployment — the rows are leased (SKIP LOCKED) so extra drainers are
    *  SAFE, but the original singleton intent (global created_at-ordered draining) wants one. */
   outboxLoop: OutboxDispatcherLoop;
+  /** CS2.1 (audit C6/OC4): the REVIEW-JOBS RunnerLoop — the consumer of `core.review_jobs` (the table
+   *  the cutover routes `reviewPullRequest` onto). Drains jobs through the {@link JobHandler} (default:
+   *  the REAL {@link runReviewJob}); its idle cycles run the UNIFIED reaper (`reapStuckRuns`: stuck
+   *  job → dead + run CANCELLED + mutex released + audit, ONE txn) and the throttled LLM-ledger prune.
+   *  Composed ONLY when NOT shadow: the review pipeline performs heavy GitHub/LLM side effects, so the
+   *  cleanest shadow posture is to OMIT the loop entirely — shadow observes background/scheduler/outbox
+   *  + the would-enqueue, never the review pipeline (no handle exists, so nothing can start it). */
+  reviewLoop?: RunnerLoop;
   /** W4c.2 #10: the shared dispose registry the handler modules registered their lazily-built
    *  background resources on (the Confluence token-refresh loops). runBackgroundRunner's DISPOSE
    *  PHASE drains it once ALL loops have ended so the process exits promptly after SIGTERM. */
@@ -142,12 +170,48 @@ export type BackgroundRunnerHandles = {
   pollOnce(): Promise<number>;
   /** Drive exactly ONE outbox drain pass over the SAME pieces `outboxLoop` owns. */
   drainOutboxOnce(): Promise<number>;
+  /** CS2.1: drive exactly ONE review claim → handler → settle cycle over the SAME pieces `reviewLoop`
+   *  owns; an IDLE cycle runs the loop's idle maintenance (the unified `reapStuckRuns` + the throttled
+   *  ledger prune), mirroring `RunnerLoop.run()` minus the sleep. Present iff `reviewLoop` is
+   *  (non-shadow). */
+  runReviewCycleOnce?(): Promise<{ outcome: RunOutcome; jobId?: string }>;
 };
 
 /**
+ * The PRODUCTION review-job handler (CS2.1): the REAL {@link runReviewJob} over the shared ADR-0062
+ * pool — REAL makeInProcessPorts + the real lifecycle bundle (NO port/lifecycle overrides: the full
+ * GitHub/LLM/workspace surface). Constructed LAZILY on the FIRST claimed job (then memoized) so
+ * {@link buildBackgroundRunner} stays pure and bootable in DSN-less contexts (the unit dispose test's
+ * never-connected pool); the DSN resolves `deps.dsn ?? CODEMASTER_PG_CORE_DSN` and fail-louds HERE
+ * when neither is set — a claimed review job must NEVER run against a half-configured surface
+ * (production always passes `deps.dsn`, so this throw is unreachable there).
+ */
+function makeDefaultReviewHandler(args: {
+  repo: ReviewJobsRepo;
+  dsn: string | undefined;
+  clock: Clock;
+}): JobHandler {
+  let real: JobHandler | undefined;
+  return async (job, signal) => {
+    if (real === undefined) {
+      const dsn = args.dsn ?? process.env["CODEMASTER_PG_CORE_DSN"];
+      if (dsn === undefined || dsn === "") {
+        throw new Error(
+          "review runner: cannot build the default runReviewJob handler — no DSN. Pass " +
+            "BackgroundRunnerDeps.dsn (production does) or set CODEMASTER_PG_CORE_DSN.",
+        );
+      }
+      real = runReviewJob({ repo: args.repo, pool: getPool(dsn), dsn, clock: args.clock });
+    }
+    return real(job, signal);
+  };
+}
+
+/**
  * The PURE composition seam: construct the HandlerRegistry + BackgroundRunnerLoop + SchedulerLoop
- * sharing ONE BackgroundJobsRepo over the injected db/clock. No I/O happens here (the pg pool is
- * lazy); callers own when the loops actually start.
+ * sharing ONE BackgroundJobsRepo over the injected db/clock, plus (CS2.1, non-shadow) the REVIEW-JOBS
+ * RunnerLoop over a ReviewJobsRepo on the SAME db/clock. No I/O happens here (the pg pool is lazy);
+ * callers own when the loops actually start.
  */
 export function buildBackgroundRunner(deps: BackgroundRunnerDeps): BackgroundRunnerHandles {
   const { db, clock, config } = deps;
@@ -216,11 +280,56 @@ export function buildBackgroundRunner(deps: BackgroundRunnerDeps): BackgroundRun
     shadow,
   });
 
+  // CS2.1 (cutover-safety CS2; closes audit C6/OC4): the REVIEW-JOBS RunnerLoop — the consumer of
+  // core.review_jobs (the table the cutover's outbox sink routes `reviewPullRequest` onto via
+  // wireOutboxSinks below). Without it the routed jobs sit 'ready' forever and stuck rows are never
+  // reaped. Composed ONLY when NOT shadow — the review pipeline performs heavy GitHub/LLM side
+  // effects; shadow OMITS the loop entirely rather than threading a suppression flag through the
+  // shell (no handle exists, so nothing can start it). The loop shares the SAME db/clock (ADR-0062);
+  // the same lease tunables as the background loop apply; the idle cycle runs the UNIFIED reaper
+  // (ReviewJobsRepo.reapStuckRuns) + the throttled LLM-ledger prune over the REAL ledger.
+  let reviewLoop: RunnerLoop | undefined;
+  let runReviewCycleOnce: BackgroundRunnerHandles["runReviewCycleOnce"];
+  if (!shadow) {
+    const reviewRepo = new ReviewJobsRepo(db, {
+      clock,
+      ...(deps.dsn !== undefined ? { dsn: deps.dsn } : {}),
+    });
+    const reviewArgs = {
+      repo: reviewRepo,
+      clock,
+      owner: config.owner,
+      leaseS: config.leaseS,
+      heartbeatS: config.heartbeatS,
+      maxRuntimeS: config.maxRuntimeS,
+      handler: deps.reviewHandler ?? makeDefaultReviewHandler({ repo: reviewRepo, dsn: deps.dsn, clock }),
+    };
+    const loop = new RunnerLoop({
+      ...reviewArgs,
+      ledger: new LlmInvocationLedger({ db }),
+      idleS: config.idleS,
+    });
+    reviewLoop = loop;
+    // ONE cycle over the SAME pieces the loop owns; an IDLE cycle runs the loop's idle maintenance
+    // (the unified reaper + the throttled ledger prune — sharing the loop's throttle marker), exactly
+    // mirroring RunnerLoop.run() minus the idle sleep.
+    runReviewCycleOnce = async () => {
+      const res = await runOneJob(reviewArgs);
+      if (res.outcome === "idle") {
+        await loop.runIdleMaintenance();
+      }
+      return res;
+    };
+  }
+
   return {
     registry,
     runnerLoop: new BackgroundRunnerLoop({ ...runnerArgs, idleS: config.idleS }),
     schedulerLoop: new SchedulerLoop({ ...schedulerArgs, pollIntervalS: config.pollIntervalS }),
     outboxLoop,
+    ...(reviewLoop !== undefined && runReviewCycleOnce !== undefined
+      ? { reviewLoop, runReviewCycleOnce }
+      : {}),
     disposables,
     runOneCycle: async () => runOneBackgroundJob(runnerArgs),
     pollOnce: async () => pollAndEnqueue(schedulerArgs),
@@ -376,8 +485,9 @@ export function resolveBackgroundRunnerConfig(
 }
 
 /** Bounded loop-name vocabulary of the supervision seam — doubles as the
- *  `codemaster_runner_loop_crashed_total{loop}` counter label (cardinality discipline). */
-export type SupervisedLoopName = "runner" | "scheduler" | "outbox";
+ *  `codemaster_runner_loop_crashed_total{loop}` counter label (cardinality discipline).
+ *  CS2.1 added `review` (the review-jobs RunnerLoop; supervised only in non-shadow). */
+export type SupervisedLoopName = "runner" | "scheduler" | "outbox" | "review";
 
 /** One crashed loop, as observed (caught + logged + metered) by {@link runSupervisedLoops}. */
 export type LoopCrash = { loop: SupervisedLoopName; error: Error };
@@ -409,32 +519,41 @@ async function superviseLoop(loop: SupervisedLoopName, runnable: RunnableLoop): 
 }
 
 /**
- * Run ALL THREE loops concurrently under PER-LOOP SUPERVISION (Phase 4b W4b.2, review blocker #3):
+ * Run ALL composed loops concurrently under PER-LOOP SUPERVISION (Phase 4b W4b.2, review blocker #3):
  * one loop's escaped error (a pass-level DB fault in the scheduler, a claim error in the runner /
- * outbox drainer — the loops' documented fail-loud run() contract) is caught at ITS OWN boundary,
- * logged + metered, and stops THAT loop alone; the other loops KEEP RUNNING. Resolves only when
- * EVERY loop has ended — graceful stop() or crash — with the list of observed crashes (empty on a
- * clean shutdown). The composition deliberately does NOT tie the run() promises into a fail-fast
- * race: superviseLoop never rejects, so this Promise.all cannot reject either. Calling the loops'
- * stop() is the CALLER's job (the SIGINT/SIGTERM path in {@link runBackgroundRunner}) — never a
- * side effect of one loop's failure.
+ * outbox drainer / review runner — the loops' documented fail-loud run() contract) is caught at ITS
+ * OWN boundary, logged + metered, and stops THAT loop alone; the other loops KEEP RUNNING. Resolves
+ * only when EVERY loop has ended — graceful stop() or crash — with the list of observed crashes
+ * (empty on a clean shutdown). The composition deliberately does NOT tie the run() promises into a
+ * fail-fast race: superviseLoop never rejects, so this Promise.all cannot reject either. Calling the
+ * loops' stop() is the CALLER's job (the SIGINT/SIGTERM path in {@link runBackgroundRunner}) — never
+ * a side effect of one loop's failure.
+ *
+ * `reviewLoop` (CS2.1) is OPTIONAL: present in non-shadow (the review-jobs RunnerLoop joins the
+ * supervised set as `loop=review`); absent in shadow (the composition omitted it entirely).
  */
 export async function runSupervisedLoops(loops: {
   runnerLoop: RunnableLoop;
   schedulerLoop: RunnableLoop;
   outboxLoop: RunnableLoop;
+  reviewLoop?: RunnableLoop;
 }): Promise<Array<LoopCrash>> {
-  const outcomes = await Promise.all([
+  const supervised = [
     superviseLoop("runner", loops.runnerLoop),
     superviseLoop("scheduler", loops.schedulerLoop),
     superviseLoop("outbox", loops.outboxLoop),
-  ]);
+  ];
+  if (loops.reviewLoop !== undefined) {
+    supervised.push(superviseLoop("review", loops.reviewLoop));
+  }
+  const outcomes = await Promise.all(supervised);
   return outcomes.filter((o): o is LoopCrash => o !== undefined);
 }
 
 /**
- * The process entrypoint: build over the ADR-0062 shared pool + WallClock, run ALL THREE loops
- * (runner + scheduler + outbox drain) concurrently under {@link runSupervisedLoops}, and shut down
+ * The process entrypoint: build over the ADR-0062 shared pool + WallClock, run ALL composed loops
+ * (runner + scheduler + outbox drain, + the CS2.1 review-jobs loop in non-shadow — the consumer of
+ * core.review_jobs that closes audit C6/OC4) concurrently under {@link runSupervisedLoops}, and shut down
  * gracefully — SIGINT/SIGTERM stop() every loop, which DRAIN (an in-flight job/poll/drain pass
  * always completes; the idle/poll cancellableSleep wakes immediately). A crash in ONE loop stops
  * that loop ALONE (logged + metered; W4b.2 — pre-fix it fired stopAll() and tore down job
@@ -469,7 +588,10 @@ export async function runBackgroundRunner(mode: BackgroundRunnerMode): Promise<v
   const { dsn, config } = resolveBackgroundRunnerConfig(process.env);
   const db = tenantKysely<unknown>(dsn); // THE shared ADR-0062 pool for this DSN
   const clock = new WallClock();
-  const handles = buildBackgroundRunner({ db, clock, config, shadow });
+  // `dsn` threads into the CS2.1 review loop's pieces (the default runReviewJob handler's in-process
+  // ports + supersede read over getPool(dsn); the ReviewJobsRepo reaper's raw-pg transaction pool) —
+  // the SAME shared ADR-0062 pool `db` rides on, never a second pool.
+  const handles = buildBackgroundRunner({ db, clock, config, shadow, dsn });
 
   // Wire the event-driven outbox sinks onto the Postgres-enqueue port BEFORE the drain loop starts
   // (see wireOutboxSinks — CS1.1: always the BackgroundJobsTemporalPort; Temporal is absent in
@@ -498,19 +620,21 @@ export async function runBackgroundRunner(mode: BackgroundRunnerMode): Promise<v
     handles.runnerLoop.stop();
     handles.schedulerLoop.stop();
     handles.outboxLoop.stop();
+    handles.reviewLoop?.stop(); // CS2.1: composed only in non-shadow; an in-flight review job DRAINS
   };
   process.once("SIGINT", stopAll);
   process.once("SIGTERM", stopAll);
 
   console.info(
     `background runner starting: mode=${mode} owner=${config.owner} ` +
+      `review_loop=${handles.reviewLoop !== undefined ? "composed" : "OMITTED (shadow — no review side effects)"} ` +
       `registered_job_types=[${handles.registry.registeredTypes().join(", ")}] ` +
       `(lease=${config.leaseS}s heartbeat=${config.heartbeatS}s maxRuntime=${config.maxRuntimeS}s ` +
       `idle=${config.idleS}s schedulerPoll=${config.pollIntervalS}s ` +
       `outboxIdle=${config.outboxIdleS}s outboxMaxAttempts=${config.outboxMaxAttempts})`,
   );
 
-  // Per-loop SUPERVISION (W4b.2): resolves only when ALL THREE loops have ended — graceful stop()
+  // Per-loop SUPERVISION (W4b.2): resolves only when ALL composed loops have ended — graceful stop()
   // via the signal path above, or a crash that stopped ITS loop alone. The process therefore stays
   // alive (and the survivors keep working) past any single loop's crash; if EVERY loop crashes,
   // nothing is left running, this await completes, and the fail-loud throw below exits the process
