@@ -1,18 +1,23 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { FakeClock } from "#platform/clock.js";
 
 import { AnalysisCurator } from "#backend/analysis/curator.js";
 import { CURATE_TOOL_NAME } from "#backend/analysis/curator_schema.js";
-import { BedrockBudgetExceededError, InMemoryCostCapEnforcer } from "#backend/cost/enforcer.js";
+import { InMemoryCostCapEnforcer } from "#backend/cost/enforcer.js";
 import { LlmClient, type LlmSdk } from "#backend/integrations/llm/client.js";
-import { LlmInvocationError, LlmRoleNotConfiguredError } from "#backend/integrations/llm/errors.js";
+import {
+  LlmInvocationError,
+  LlmOutputUnsafeError,
+  LlmRoleNotConfiguredError,
+} from "#backend/integrations/llm/errors.js";
 import type { LlmClientCacheLike } from "#backend/analysis/curator.js";
 
 import { InMemoryBlobStoreAdapter } from "../../support/llm/cassette_sdk.js";
 
 import type { AnalysisFindingV1 } from "#contracts/analysis_findings.v1.js";
 import { AnalysisFindingV1 as AnalysisFindingV1Schema } from "#contracts/analysis_findings.v1.js";
+import { OutputSafetyDecisionV1 } from "#contracts/output_safety.v1.js";
 import { PrMetaV1 } from "#contracts/walkthrough.v1.js";
 import type { PrMetaV1 as PrMetaV1Type } from "#contracts/walkthrough.v1.js";
 
@@ -90,6 +95,21 @@ function cacheThrowingFromSdk(err: Error): LlmClientCacheLike {
     blobStore: new InMemoryBlobStoreAdapter(),
     clock: new FakeClock(),
   });
+  return {
+    async forRole(): Promise<LlmClient> {
+      return client;
+    },
+  };
+}
+
+/** A cache whose client's invokeModel throws `err` DIRECTLY (bypasses the SDK/validator wiring —
+ *  the seam for typed errors the real client raises itself, e.g. LlmOutputUnsafeError). */
+function cacheWithClientThrowing(err: Error): LlmClientCacheLike {
+  const client = {
+    invokeModel: async (): Promise<never> => {
+      throw err;
+    },
+  } as unknown as LlmClient;
   return {
     async forRole(): Promise<LlmClient> {
       return client;
@@ -294,18 +314,67 @@ describe("AnalysisCurator — fail-open on unexpected error", () => {
   });
 });
 
-describe("AnalysisCurator — typed errors re-raise (NOT swallowed by fail-open)", () => {
-  it("budget exceeded → re-raises BedrockBudgetExceededError", async () => {
-    const curator = new AnalysisCurator({ cache: cacheWithBudgetDeny() });
-    await expect(
-      curator.curate([finding()], { prMeta: prMeta() }),
-    ).rejects.toBeInstanceOf(BedrockBudgetExceededError);
+// W1.9b (C1): the curator is an OPTIMIZATION layer for Tier-2 quality, not a correctness dependency.
+// A BedrockBudgetExceededError is a NORMAL steady-state condition at per-org cost caps, and the
+// retryable LlmInvocationError family (throttle / 5xx / timeout) is routine under load — neither may
+// kill the static-analysis envelope (let alone the review). Both FAIL OPEN to the always-promote
+// findings + curator_skipped, with a WARN log. ONLY LlmOutputUnsafeError still re-raises (the
+// output-safety contract is not negotiable; the orchestrator's static_analysis stageOutcome wrap
+// degrades it review-side).
+describe("AnalysisCurator — budget / invocation errors FAIL OPEN (W1.9b/C1)", () => {
+  it("budget exceeded → fails open to always-promote findings + curator_skipped (never review-fatal)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const curator = new AnalysisCurator({ cache: cacheWithBudgetDeny() });
+      const result = await curator.curate(
+        [finding({ tool: "gitleaks", rule_id: "aws-key" }), finding({ tool: "eslint" })],
+        { prMeta: prMeta() },
+      );
+      // The always-promote (gitleaks) finding survives; the curatable one is dropped with the LLM.
+      expect(result.findings).toHaveLength(1);
+      expect(result.findings[0]!.title).toBe("gitleaks: aws-key");
+      expect(result.curator_skipped).toBe(true);
+      // The fail-open is operator-visible: a WARN carrying the error class.
+      expect(
+        warnSpy.mock.calls.some((c) => String(c[0]).includes("BedrockBudgetExceededError")),
+      ).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
-  it("invocation error → re-raises LlmInvocationError", async () => {
-    const curator = new AnalysisCurator({ cache: cacheThrowingFromSdk(new LlmInvocationError("flake")) });
+  it("invocation error (throttle/5xx/timeout family) → fails open likewise", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const curator = new AnalysisCurator({
+        cache: cacheThrowingFromSdk(new LlmInvocationError("flake")),
+      });
+      const result = await curator.curate(
+        [finding({ tool: "trivy", rule_id: "cve" }), finding({ tool: "ruff" })],
+        { prMeta: prMeta() },
+      );
+      expect(result.findings).toHaveLength(1);
+      expect(result.findings[0]!.title).toBe("trivy: cve");
+      expect(result.curator_skipped).toBe(true);
+      expect(warnSpy.mock.calls.some((c) => String(c[0]).includes("LlmInvocationError"))).toBe(
+        true,
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("output-unsafe → STILL re-raises LlmOutputUnsafeError (safety is not fail-open)", async () => {
+    const unsafe = new LlmOutputUnsafeError({
+      decision: OutputSafetyDecisionV1.parse({
+        decision: "block",
+        reasons: ["privileged_tag_emitted"],
+        detail: "privileged tag in curator output",
+      }),
+    });
+    const curator = new AnalysisCurator({ cache: cacheWithClientThrowing(unsafe) });
     await expect(
       curator.curate([finding()], { prMeta: prMeta() }),
-    ).rejects.toBeInstanceOf(LlmInvocationError);
+    ).rejects.toBeInstanceOf(LlmOutputUnsafeError);
   });
 });

@@ -20,8 +20,9 @@
 //   * CLONE failure → propagates (HARD fail, no degrade; clone is OUTSIDE the try → cleanup NOT armed).
 //   * CLASSIFY partial failure (> 10%) → degradation note AND the review still posts (end-to-end).
 //   * STATIC-ANALYSIS tool failures (per_tool_errors / truncated_per_tool, reported as DATA) →
-//     degradation note(s), review continues. PLUS: the static-analysis ACTIVITY raising → HARD fail
-//     (Promise.all branch propagates), cleanup still runs.
+//     degradation note(s), review continues. PLUS: the static-analysis ACTIVITY raising → W1.9b (C1)
+//     FAIL-OPEN: the empty-valid envelope is substituted + `static_analysis_failed` note; only
+//     chunkAndRedact can be fatal in the Step-3 parallel pair.
 //   * LLM single-chunk failure (one of N reviewChunk dispatches throws) → W1.9a (C2) fail-soft:
 //     the failed chunk contributes ZERO findings + a degradation note, the OTHER chunks complete
 //     and the review still posts. ALL chunks failing re-raises (no healthy zero-finding 'done');
@@ -125,8 +126,10 @@ type StubOverrides = {
   perToolErrors?: Record<string, string>;
   /** staticAnalysis returns these truncated_per_tool counts (reported as DATA → degradation note). */
   truncatedPerTool?: Record<string, number>;
-  /** the staticAnalysis ACTIVITY itself throws (HARD fail via the Promise.all branch). */
+  /** the staticAnalysis ACTIVITY itself throws (W1.9b/C1: must FAIL OPEN to the empty envelope). */
   staticAnalysisThrows?: boolean;
+  /** the chunkAndRedact ACTIVITY throws (control: the ONLY fatal member of the Step-3 pair). */
+  chunkAndRedactThrows?: boolean;
   /** the chunk_id suffix whose reviewChunk dispatch throws (LLM single-chunk failure). */
   reviewChunkThrowsForChunkIndex?: number;
   /** W1.9a (C2): EVERY reviewChunk dispatch throws (drives the all-chunks-failed abort threshold).
@@ -212,6 +215,9 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
     chunkAndRedact: async (input) => {
       calls.push("chunkAndRedact");
       chunkAndRedactFiles.push([...input.files]);
+      if (o.chunkAndRedactThrows) {
+        throw new Error("chunk-and-redact boom");
+      }
       return chunks;
     },
     staticAnalysis: async (input) => {
@@ -590,16 +596,50 @@ describe("orchestrate — STATIC-ANALYSIS tool failures degrade but continue", (
   });
 });
 
-describe("orchestrate — STATIC-ANALYSIS activity raising is a HARD fail", () => {
-  it("propagates when the static-analysis activity throws, but cleanup still runs", async () => {
-    // staticAnalysis runs in the Promise.all branch (alongside chunkAndRedact); a throw propagates out
-    // of orchestrate. The throw happens INSIDE the try → the finally-block cleanup still releases.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// W1.9b (C1) — the static-analysis ACTIVITY raising FAILS OPEN.
+//
+// OLD (pre-W1.9b): Step 3 was a bare `Promise.all([chunkAndRedact, staticAnalysis])` — the only
+// unwrapped orchestrate stage. The staticAnalysis activity re-raised the curator's typed LLM errors
+// (BedrockBudgetExceededError is a NORMAL steady-state condition at per-org cost caps), so a Tier-1
+// hiccup killed the entire review BEFORE the expensive Tier-2 fan-out ran — a priority inversion
+// against the documented contract ("Tier 1 is an optimization layer for Tier 2 quality, not a
+// correctness dependency"). NEW contract: the staticAnalysis dispatch is wrapped in a fail-open
+// stageOutcome that substitutes the EMPTY-VALID StaticAnalysisResultV1 (the same envelope the
+// activity returns for empty routing) + the `static_analysis_failed` note; only chunkAndRedact can
+// be fatal in the Step-3 parallel pair.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describe("orchestrate — STATIC-ANALYSIS activity raising FAILS OPEN (W1.9b/C1)", () => {
+  it("continues to post with the empty-valid substitute + static_analysis_failed note", async () => {
     const stub = makeStub({ chunkCount: 1, staticAnalysisThrows: true });
-    await expect(orchestrate(makeCtx(stub))).rejects.toThrow(/static-analysis boom/);
-    // We never reached the post stages.
+    const result = await orchestrate(makeCtx(stub));
+    expect(result.status).toBe("accepted");
+    expect(result.degradationNotes).toContain("static_analysis_failed");
+    // The empty-valid substitute (the activity's own empty-routing envelope: parse({}) defaults).
+    expect(result.staticAnalysis?.findings).toEqual([]);
+    expect(result.staticAnalysis?.tier1_findings).toEqual([]);
+    expect(result.staticAnalysis?.tool_statuses).toEqual([]);
+    expect(result.staticAnalysis?.curator_skipped).toBe(true);
+    // Tier 2 still ran — with EMPTY Tier-1 threading — and the review posted end-to-end.
+    expect(stub.calls).toContain("reviewChunk");
+    expect(stub.reviewChunkInputs[0]!.tier1_findings).toEqual([]);
+    expect(stub.reviewChunkInputs[0]!.tool_statuses).toEqual([]);
+    expect(stub.calls).toContain("postReview");
+    expect(stub.cleanupCalled()).toBe(true);
+  });
+
+  it("appends NO per-tool notes on the fail-open substitute (empty per_tool_errors)", async () => {
+    const stub = makeStub({ chunkCount: 1, staticAnalysisThrows: true });
+    const result = await orchestrate(makeCtx(stub));
+    expect(result.degradationNotes.some((n) => n.startsWith("static-analysis"))).toBe(false);
+  });
+
+  it("still HARD-fails when chunkAndRedact throws (the only fatal member of the Step-3 pair)", async () => {
+    const stub = makeStub({ chunkCount: 1, chunkAndRedactThrows: true });
+    await expect(orchestrate(makeCtx(stub))).rejects.toThrow(/chunk-and-redact boom/);
     expect(stub.calls).not.toContain("reviewChunk");
     expect(stub.calls).not.toContain("postReview");
-    // …but cleanup ran (the throw was inside the try → finally armed).
+    // cleanup still ran (the throw was inside the try → finally armed).
     expect(stub.cleanupCalled()).toBe(true);
   });
 });
