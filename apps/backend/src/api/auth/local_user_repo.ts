@@ -229,6 +229,7 @@ export class PostgresLocalUserRepo implements LocalUserRepo {
   }
 
   public async getByUsername(args: { username: string }): Promise<LocalUser | null> {
+    // tenant:exempt reason=local_users-platform-super-admin-table-no-installation_id-column follow_up=PERMANENT-EXEMPTION-platform-super-admin-users
     const r = await sql<LocalUserRow>`
       SELECT user_id, username, email_ciphertext, full_name, password_hash, role, state,
              last_password_change, last_login_at, failed_attempts, locked_until,
@@ -240,6 +241,7 @@ export class PostgresLocalUserRepo implements LocalUserRepo {
   }
 
   public async getById(args: { userId: string }): Promise<LocalUser | null> {
+    // tenant:exempt reason=local_users-platform-super-admin-table-no-installation_id-column follow_up=PERMANENT-EXEMPTION-platform-super-admin-users
     const r = await sql<LocalUserRow>`
       SELECT user_id, username, email_ciphertext, full_name, password_hash, role, state,
              last_password_change, last_login_at, failed_attempts, locked_until,
@@ -251,6 +253,7 @@ export class PostgresLocalUserRepo implements LocalUserRepo {
   }
 
   public async insert(user: LocalUser): Promise<void> {
+    // tenant:exempt reason=local_users-platform-super-admin-table-no-installation_id-column follow_up=PERMANENT-EXEMPTION-platform-super-admin-users
     await sql`
       INSERT INTO core.local_users
         (user_id, username, email_ciphertext, email_fingerprint, full_name, password_hash, role, state,
@@ -268,6 +271,7 @@ export class PostgresLocalUserRepo implements LocalUserRepo {
     newHash: string;
     now: Date;
   }): Promise<void> {
+    // tenant:exempt reason=local_users-platform-super-admin-table-no-installation_id-column follow_up=PERMANENT-EXEMPTION-platform-super-admin-users
     const r = await sql`
       UPDATE core.local_users SET password_hash = ${args.newHash}, last_password_change = ${args.now}
       WHERE user_id = ${args.userId}
@@ -288,6 +292,7 @@ export class PostgresLocalUserRepo implements LocalUserRepo {
     return this.#db.transaction().execute(async (tx) => {
       let row: { failed_attempts: number } | undefined;
       if (args.success) {
+        // tenant:exempt reason=local_users-platform-super-admin-table-no-installation_id-column follow_up=PERMANENT-EXEMPTION-platform-super-admin-users
         const r = await sql<{ failed_attempts: number; locked_until: Date | null }>`
           UPDATE core.local_users
           SET failed_attempts = 0, locked_until = NULL, last_login_at = ${args.now}
@@ -299,6 +304,7 @@ export class PostgresLocalUserRepo implements LocalUserRepo {
         // Lockout window kicks in ONLY on the exact transition to threshold (= not >=) so a spammer
         // can't keep re-extending locked_until forever.
         const lockoutAt = new Date(args.now.getTime() + LOCKOUT_DURATION_MS);
+        // tenant:exempt reason=local_users-platform-super-admin-table-no-installation_id-column follow_up=PERMANENT-EXEMPTION-platform-super-admin-users
         const r = await sql<{ failed_attempts: number; locked_until: Date | null }>`
           UPDATE core.local_users
           SET failed_attempts = failed_attempts + 1,
@@ -322,6 +328,7 @@ export class PostgresLocalUserRepo implements LocalUserRepo {
   public async disable(args: { userId: string; by: string }): Promise<void> {
     void args.by; // audit symmetry; not stored at this layer (audit emit lives on the calling route).
     await this.#db.transaction().execute(async (tx) => {
+      // tenant:exempt reason=local_users-platform-super-admin-table-no-installation_id-column follow_up=PERMANENT-EXEMPTION-platform-super-admin-users
       const target = await sql<{ state: "active" | "disabled" }>`
         SELECT state FROM core.local_users WHERE user_id = ${args.userId}
       `.execute(tx);
@@ -329,6 +336,7 @@ export class PostgresLocalUserRepo implements LocalUserRepo {
       if (targetRow === undefined) {
         throw new LocalUserNotFoundError(args.userId);
       }
+      // tenant:exempt reason=local_users-platform-super-admin-table-no-installation_id-column follow_up=PERMANENT-EXEMPTION-platform-super-admin-users
       const countRes = await sql<{ n: string }>`
         SELECT COUNT(*) AS n FROM core.local_users WHERE state = 'active' AND role = 'super_admin'
       `.execute(tx);
@@ -336,6 +344,7 @@ export class PostgresLocalUserRepo implements LocalUserRepo {
       if (targetRow.state === "active" && activeCount <= 1) {
         throw new LastSuperAdminError();
       }
+      // tenant:exempt reason=local_users-platform-super-admin-table-no-installation_id-column follow_up=PERMANENT-EXEMPTION-platform-super-admin-users
       await sql`
         UPDATE core.local_users SET state = 'disabled' WHERE user_id = ${args.userId}
       `.execute(tx);
@@ -343,6 +352,7 @@ export class PostgresLocalUserRepo implements LocalUserRepo {
   }
 
   public async listActiveSuperAdmins(): Promise<ReadonlyArray<LocalUser>> {
+    // tenant:exempt reason=local_users-platform-super-admin-table-no-installation_id-column follow_up=PERMANENT-EXEMPTION-platform-super-admin-users
     const r = await sql<LocalUserRow>`
       SELECT user_id, username, email_ciphertext, full_name, password_hash, role, state,
              last_password_change, last_login_at, failed_attempts, locked_until,

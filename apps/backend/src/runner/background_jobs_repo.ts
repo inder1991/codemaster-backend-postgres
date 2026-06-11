@@ -117,7 +117,7 @@ export class BackgroundJobsRepo {
       const jobId = uuid4();
       // The INSERT lists installation_id (tenancy-gate escape hatch (a)) — NULL marks a deliberately
       // platform-scoped (tenant-agnostic) job, hence the marker for the NULL case:
-      // tenant:exempt reason=tenant-agnostic-background-job follow_up=FOLLOW-UP-gf3-error-mode
+      // tenant:exempt reason=tenant-agnostic-background-job follow_up=PERMANENT-EXEMPTION-platform-scoped-jobs
       const r = await sql<{ job_id: string }>`INSERT INTO core.background_jobs
           (job_id, job_type, installation_id, payload, payload_sha256, priority, max_attempts, run_after, dedup_key)
         VALUES (${jobId}, ${a.jobType}, ${a.installationId ?? null}, CAST(${canonical} AS jsonb), ${payloadSha256},
@@ -127,7 +127,7 @@ export class BackgroundJobsRepo {
         RETURNING job_id`.execute(this.db);
       if (r.rows[0]) return r.rows[0].job_id;
       // overlap=SKIP honored at enqueue: surface the ACTIVE holder's job_id so the caller tracks it.
-      // tenant:exempt reason=dedup-key-lookup-platform-scoped follow_up=FOLLOW-UP-gf3-error-mode
+      // tenant:exempt reason=dedup-key-lookup-platform-scoped follow_up=PERMANENT-EXEMPTION-platform-scoped-jobs
       const existing = await sql<{ job_id: string }>`SELECT job_id FROM core.background_jobs
         WHERE dedup_key = ${a.dedupKey ?? null} AND state IN ('ready','leased')
         LIMIT 1`.execute(this.db);
@@ -158,13 +158,13 @@ export class BackgroundJobsRepo {
   }
 
   async getById(jobId: string): Promise<BackgroundJobV1 | null> {
-    // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
+    // tenant:exempt reason=PK-lookup-by-job_id follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
     const r = await sql<BackgroundJobV1>`SELECT * FROM core.background_jobs WHERE job_id = ${jobId}`.execute(this.db);
     return r.rows[0] ? BackgroundJobV1.parse(r.rows[0]) : null;
   }
 
   async claim(a: { owner: string; leaseMs: number; maxRuntimeMs: number }): Promise<BackgroundJobV1 | null> {
-    // tenant:exempt reason=worker-pool-claim-across-tenants follow_up=FOLLOW-UP-gf3-error-mode
+    // tenant:exempt reason=worker-pool-claim-across-tenants follow_up=PERMANENT-EXEMPTION-worker-pool-claim
     const r = await sql<BackgroundJobV1>`
       UPDATE core.background_jobs SET state = 'leased', lease_owner = ${a.owner}, attempt_token = gen_random_uuid(),
              leased_until = now() + (${a.leaseMs}::double precision / 1000) * interval '1 second',
@@ -185,7 +185,7 @@ export class BackgroundJobsRepo {
   }
 
   async heartbeat(a: { jobId: string; owner: string; token: string; leaseMs: number }): Promise<boolean> {
-    // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
+    // tenant:exempt reason=PK-lookup-by-job_id follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
     const r = await sql`UPDATE core.background_jobs
         SET leased_until = now() + (${a.leaseMs}::double precision / 1000) * interval '1 second',
             heartbeat_at = now(), updated_at = now()
@@ -195,7 +195,7 @@ export class BackgroundJobsRepo {
   }
 
   async markDone(a: { jobId: string; owner: string; token: string }): Promise<FencedResult> {
-    // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
+    // tenant:exempt reason=PK-lookup-by-job_id follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
     const r = await sql`UPDATE core.background_jobs
         SET state = 'done', finished_at = now(), updated_at = now(),
             leased_until = NULL, lease_owner = NULL, attempt_token = NULL, timeout_at = NULL, heartbeat_at = NULL
@@ -213,7 +213,7 @@ export class BackgroundJobsRepo {
    */
   async markFailed(a: { jobId: string; owner: string; token: string; error: string; baseBackoffMs: number }):
     Promise<{ applied: boolean; terminal: boolean }> {
-    // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
+    // tenant:exempt reason=PK-lookup-by-job_id follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
     const r = await sql<{ terminal: boolean }>`UPDATE core.background_jobs SET
         last_error  = left(${a.error}, 2000),
         state       = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'ready' END,
@@ -239,7 +239,7 @@ export class BackgroundJobsRepo {
    */
   async deferRetry(a: { jobId: string; owner: string; token: string; error: string; runAfter: Date }):
     Promise<FencedResult> {
-    // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
+    // tenant:exempt reason=PK-lookup-by-job_id follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
     const r = await sql`UPDATE core.background_jobs SET
         last_error  = left(${a.error}, 2000),
         state       = 'ready',
@@ -260,7 +260,7 @@ export class BackgroundJobsRepo {
    * (W2a.1 / migration 0041): `reason` lands on dead_reason and finished_at is stamped.
    */
   async terminalSettle(a: { jobId: string; owner: string; token: string; reason: string }): Promise<FencedResult> {
-    // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
+    // tenant:exempt reason=PK-lookup-by-job_id follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
     const r = await sql`UPDATE core.background_jobs
         SET state = 'dead', dead_reason = left(${a.reason}, 2000), finished_at = now(), updated_at = now(),
             leased_until = NULL, lease_owner = NULL, attempt_token = NULL, timeout_at = NULL, heartbeat_at = NULL
@@ -279,7 +279,7 @@ export class BackgroundJobsRepo {
    * (it MUST see every tenant's stuck jobs). Returns the count.
    */
   async reapStuckRuns(): Promise<number> {
-    // tenant:exempt reason=worker-pool-claim-across-tenants follow_up=FOLLOW-UP-gf3-error-mode
+    // tenant:exempt reason=worker-pool-claim-across-tenants follow_up=PERMANENT-EXEMPTION-worker-pool-claim
     const r = await sql<{ job_id: string }>`UPDATE core.background_jobs
         SET state = 'dead',
             dead_reason = COALESCE(dead_reason, 'lease expired with attempts exhausted (stuck run)'),

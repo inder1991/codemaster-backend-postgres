@@ -34,6 +34,7 @@ function mapRepo(r: RepoSqlRow): RepositoryV1 {
 }
 
 async function getByGithubId(db: Kysely<unknown>, githubRepoId: number): Promise<RepositoryV1 | null> {
+  // tenant:exempt reason=PK-lookup-on-globally-unique-github-repo-id follow_up=PERMANENT-EXEMPTION-global-github-keys
   const r = await sql<RepoSqlRow>`
     SELECT ${REPO_COLS} FROM core.repositories WHERE github_repo_id = ${githubRepoId}
   `.execute(db);
@@ -48,6 +49,7 @@ export async function setEnabled(
   args: { githubRepoId: number; enabled: boolean; now: Date },
 ): Promise<{ repo: RepositoryV1 | null; changed: boolean }> {
   return db.transaction().execute(async (tx) => {
+    // tenant:exempt reason=CAS-update-on-globally-unique-github-repo-id follow_up=PERMANENT-EXEMPTION-global-github-keys
     const cas = await sql<RepoSqlRow>`
       UPDATE core.repositories
       SET enabled = ${args.enabled}, updated_at = ${args.now}

@@ -73,6 +73,7 @@ async function listMembers(
     ? sql`rg.scope = 'platform' AND rg.subject_kind = 'user'`
     : sql`( (rg.installation_id = ${installationId} AND rg.scope = 'installation') OR rg.scope = 'platform' )
           AND rg.subject_kind = 'user'`;
+  // tenant:exempt reason=tier-scoped-role_grants-installation-predicate-composed-in-where-fragment follow_up=PERMANENT-EXEMPTION-tier-scoped-role-grants
   const r = await sql<MemberSqlRow>`
     SELECT rg.subject_id, rg.role, rg.scope, rg.granted_at,
            u.email, COALESCE(u.display_name, '') AS display_name

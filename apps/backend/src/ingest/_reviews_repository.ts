@@ -45,6 +45,7 @@ export async function upsertReview(
     branch: string | null;
   },
 ): Promise<string> {
+  // tenant:exempt reason=pull_request_reviews-has-no-installation_id-column-keyed-on-globally-unique-github-repo-id follow_up=PERMANENT-EXEMPTION-global-github-keys
   const r = await sql<{ review_id: string }>`
     INSERT INTO core.pull_request_reviews
       (review_id, provider, repo_id, pr_number, provider_pr_id, pr_node_id, branch)
@@ -105,6 +106,7 @@ export async function flipCurrentRun(
     }
   }
 
+  // tenant:exempt reason=AD-4-flip-by-review_id-fenced-by-BF-9-installation-check-above follow_up=PERMANENT-EXEMPTION-bf9-fenced-review-runs
   const r = await sql<{ old_run_id: string | null }>`
     WITH prev AS (
       SELECT current_run_id AS old_run_id FROM core.pull_request_reviews

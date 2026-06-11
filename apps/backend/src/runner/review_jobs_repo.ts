@@ -217,13 +217,13 @@ export class ReviewJobsRepo {
   }
 
   async getById(jobId: string): Promise<ReviewJobV1 | null> {
-    // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
+    // tenant:exempt reason=PK-lookup-by-job_id follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
     const r = await sql<ReviewJobV1>`SELECT * FROM core.review_jobs WHERE job_id = ${jobId}`.execute(this.db);
     return r.rows[0] ? ReviewJobV1.parse(r.rows[0]) : null;
   }
 
   async claim(a: { owner: string; leaseMs: number; maxRuntimeMs: number }): Promise<ReviewJobV1 | null> {
-    // tenant:exempt reason=worker-pool-claim-across-tenants follow_up=FOLLOW-UP-gf3-error-mode
+    // tenant:exempt reason=worker-pool-claim-across-tenants follow_up=PERMANENT-EXEMPTION-worker-pool-claim
     const r = await sql<ReviewJobV1>`
       UPDATE core.review_jobs SET state = 'leased', lease_owner = ${a.owner}, attempt_token = gen_random_uuid(),
              leased_until = now() + (${a.leaseMs}::double precision / 1000) * interval '1 second',
@@ -239,7 +239,7 @@ export class ReviewJobsRepo {
   }
 
   async heartbeat(a: { jobId: string; owner: string; token: string; leaseMs: number }): Promise<boolean> {
-    // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
+    // tenant:exempt reason=PK-lookup-by-job_id follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
     const r = await sql`UPDATE core.review_jobs
         SET leased_until = now() + (${a.leaseMs}::double precision / 1000) * interval '1 second', heartbeat_at = now()
       WHERE job_id = ${a.jobId} AND state = 'leased' AND lease_owner = ${a.owner} AND attempt_token = ${a.token}
@@ -248,7 +248,7 @@ export class ReviewJobsRepo {
   }
 
   async markDone(a: { jobId: string; owner: string; token: string }): Promise<FencedResult> {
-    // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
+    // tenant:exempt reason=PK-lookup-by-job_id follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
     const r = await sql`UPDATE core.review_jobs
         SET state = 'done', finished_at = now(),
             leased_until = NULL, lease_owner = NULL, attempt_token = NULL, timeout_at = NULL, heartbeat_at = NULL
@@ -264,7 +264,7 @@ export class ReviewJobsRepo {
    * `cancelled` job is neither `claim`-reclaimable (not `ready`, not a live `leased`) nor a `markFailed` retry.
    */
   async markCancelled(a: { jobId: string; owner: string; token: string; reason: string }): Promise<FencedResult> {
-    // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
+    // tenant:exempt reason=PK-lookup-by-job_id follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
     const r = await sql`UPDATE core.review_jobs
         SET state = 'cancelled', cancel_reason = left(${a.reason}, 2000), finished_at = now(),
             leased_until = NULL, lease_owner = NULL, attempt_token = NULL, timeout_at = NULL, heartbeat_at = NULL
@@ -280,7 +280,7 @@ export class ReviewJobsRepo {
    * the rightful owner's. A stale token affects 0 rows → `applied:false`. Idempotent on re-write of the same id.
    */
   async persistMutexId(a: { jobId: string; owner: string; token: string; mutexId: string }): Promise<FencedResult> {
-    // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
+    // tenant:exempt reason=PK-lookup-by-job_id follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
     const r = await sql`UPDATE core.review_jobs SET mutex_id = ${a.mutexId}
       WHERE job_id = ${a.jobId} AND state = 'leased' AND lease_owner = ${a.owner} AND attempt_token = ${a.token}`
       .execute(this.db);
@@ -299,7 +299,7 @@ export class ReviewJobsRepo {
     mutex_id: string; installation_id: string; repository_id: string; pr_number: number;
     released_at: string | null;
   } | null> {
-    // tenant:exempt reason=PK-lookup-by-mutex_id-for-ownership-validation follow_up=FOLLOW-UP-gf3-error-mode
+    // tenant:exempt reason=PK-lookup-by-mutex_id-for-ownership-validation follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
     const r = await sql<{
       mutex_id: string; installation_id: string; repository_id: string; pr_number: number;
       released_at: string | null;
@@ -310,7 +310,7 @@ export class ReviewJobsRepo {
 
   async markFailed(a: { jobId: string; owner: string; token: string; error: string; baseBackoffMs: number }):
     Promise<{ applied: boolean; terminal: boolean }> {
-    // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
+    // tenant:exempt reason=PK-lookup-by-job_id follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
     const r = await sql<{ terminal: boolean }>`UPDATE core.review_jobs SET
         last_error  = left(${a.error}, 2000),
         state       = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'ready' END,
@@ -335,7 +335,7 @@ export class ReviewJobsRepo {
    */
   async deferRetry(a: { jobId: string; owner: string; token: string; error: string; runAfter: Date }):
     Promise<{ applied: boolean }> {
-    // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
+    // tenant:exempt reason=PK-lookup-by-job_id follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
     const r = await sql`UPDATE core.review_jobs SET
         last_error  = left(${a.error}, 2000),
         state       = 'ready',
@@ -380,7 +380,7 @@ export class ReviewJobsRepo {
       //     `reason` lands on cancel_reason (cancelled) or dead_reason (dead). A stale token → 0 rows.
       let jobAffected: bigint;
       if (a.jobState === "cancelled") {
-        // tenant:exempt reason=PK-update-by-job_id-fenced follow_up=FOLLOW-UP-gf3-error-mode
+        // tenant:exempt reason=PK-update-by-job_id-fenced follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
         const r = await sql`UPDATE core.review_jobs
             SET state = 'cancelled', cancel_reason = left(${a.reason}, 2000), finished_at = now(),
                 leased_until = NULL, lease_owner = NULL, attempt_token = NULL, timeout_at = NULL, heartbeat_at = NULL
@@ -388,7 +388,7 @@ export class ReviewJobsRepo {
           .execute(tx);
         jobAffected = r.numAffectedRows ?? 0n;
       } else {
-        // tenant:exempt reason=PK-update-by-job_id-fenced follow_up=FOLLOW-UP-gf3-error-mode
+        // tenant:exempt reason=PK-update-by-job_id-fenced follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
         const r = await sql`UPDATE core.review_jobs
             SET state = 'dead', dead_reason = left(${a.reason}, 2000), finished_at = now(),
                 leased_until = NULL, lease_owner = NULL, attempt_token = NULL, timeout_at = NULL, heartbeat_at = NULL
@@ -404,12 +404,12 @@ export class ReviewJobsRepo {
       // (b) The job settled → settle the RUN in lockstep. Stamp the matching terminal timestamp so the
       //     biconditional AD-7 CHECKs (CANCELLED ⇔ cancelled_at, FAILED ⇔ failed_at) hold at COMMIT.
       if (a.runState === "CANCELLED") {
-        // tenant:exempt reason=PK-update-by-run_id-lockstep-with-job follow_up=FOLLOW-UP-gf3-error-mode
+        // tenant:exempt reason=PK-update-by-run_id-lockstep-with-job follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
         await sql`UPDATE core.review_runs
             SET lifecycle_state = 'CANCELLED', cancelled_at = now(), cancel_reason = ${a.runCancelReason ?? "operator_cancelled"}
           WHERE run_id = ${a.runId}`.execute(tx);
       } else {
-        // tenant:exempt reason=PK-update-by-run_id-lockstep-with-job follow_up=FOLLOW-UP-gf3-error-mode
+        // tenant:exempt reason=PK-update-by-run_id-lockstep-with-job follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
         await sql`UPDATE core.review_runs
             SET lifecycle_state = 'FAILED', failed_at = now()
           WHERE run_id = ${a.runId}`.execute(tx);
@@ -458,7 +458,7 @@ export class ReviewJobsRepo {
       //     `attempts >= max_attempts` predicate is the exhaustion gate (an expired-but-retryable lease is
       //     NOT matched — claim() owns reclaiming those). The outer SELECT resolves installation_id for the
       //     audit fan-out via the same FK chain + LEFT JOIN as reviewRunReaperActivity (orphan → NULL).
-      // tenant:exempt reason=worker-pool-claim-across-tenants follow_up=FOLLOW-UP-gf3-error-mode
+      // tenant:exempt reason=worker-pool-claim-across-tenants follow_up=PERMANENT-EXEMPTION-worker-pool-claim
       const reapedRes = await client.query<{
         job_id: string; run_id: string; mutex_id: string | null; installation_id: string | null;
       }>(
@@ -483,7 +483,7 @@ export class ReviewJobsRepo {
 
       for (const row of reaped) {
         // (2) The run dies WITH the job: CANCELLED / timeout / cancelled_at=now() (DB clock). CHECK-safe.
-        // tenant:exempt reason=PK-update-by-run_id-lockstep-with-job follow_up=FOLLOW-UP-gf3-error-mode
+        // tenant:exempt reason=PK-update-by-run_id-lockstep-with-job follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
         await client.query(
           "UPDATE core.review_runs " +
             "   SET lifecycle_state = 'CANCELLED', cancelled_at = now(), cancel_reason = 'timeout' " +
@@ -493,7 +493,7 @@ export class ReviewJobsRepo {
 
         // (3) Release the held PR-mutex (only if still live) so the next push on this PR is unblocked.
         if (row.mutex_id !== null) {
-          // tenant:exempt reason=PK-update-by-mutex_id-release-stranded-lease follow_up=FOLLOW-UP-gf3-error-mode
+          // tenant:exempt reason=PK-update-by-mutex_id-release-stranded-lease follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
           await client.query(
             "UPDATE core.pr_review_mutex SET released_at = now() " +
               "WHERE mutex_id = $1 AND released_at IS NULL",

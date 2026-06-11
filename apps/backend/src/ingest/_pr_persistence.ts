@@ -103,6 +103,7 @@ export async function upsertGhUser(
     now: Date;
   },
 ): Promise<string> {
+  // tenant:exempt reason=gh_users-global-identity-table-keyed-on-github_user_id-no-installation_id-column follow_up=PERMANENT-EXEMPTION-global-identity-tables
   const r = await sql<{ gh_user_id: string }>`
     INSERT INTO core.gh_users
       (gh_user_id, github_user_id, login, user_type, name, avatar_url, first_seen_at, last_seen_at)

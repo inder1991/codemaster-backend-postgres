@@ -841,7 +841,7 @@ async function attemptSameRunTakeover(args: {
   // CAS-fence the racer: store the recovered/created review id + comment ids + outcome ONLY if the row is
   // still NULL. A racer that won between our lost-claim read and here makes this match 0 rows.
   const commentIdsJson = JSON.stringify([...commentIds]);
-  // tenant:exempt reason=posted-reviews-keyed-by-pr-id-pk follow_up=FOLLOW-UP-gf3-error-mode
+  // tenant:exempt reason=posted-reviews-keyed-by-pr-id-pk follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
   const cas = await sql<{ pr_id: string }>`
     UPDATE core.posted_reviews
        SET github_review_id = ${reviewId},
@@ -1170,7 +1170,7 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
     }
     await sql`RELEASE SAVEPOINT sp_post_review_claim`.execute(tx);
 
-    // tenant:exempt reason=posted-reviews-keyed-by-pr-id-pk follow_up=FOLLOW-UP-gf3-error-mode
+    // tenant:exempt reason=posted-reviews-keyed-by-pr-id-pk follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
     const claim = await sql<{ pr_id: string }>`
       INSERT INTO core.posted_reviews (pr_id, marker)
       VALUES (${prMeta.pr_id}, ${marker})
@@ -1237,7 +1237,7 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
       // so this metadata UPDATE is a no-op for invariant purposes (ownership stays with the owner).
       await db.transaction().execute(async (txTyped) => {
         const tx = txTyped as unknown as Transaction<unknown>;
-        // tenant:exempt reason=posted-reviews-keyed-by-pr-id-pk follow_up=FOLLOW-UP-gf3-error-mode
+        // tenant:exempt reason=posted-reviews-keyed-by-pr-id-pk follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
         await sql`
           UPDATE core.posted_reviews
              SET publication_outcome = ${PublicationOutcome.enum.degraded_unposted},
@@ -1296,7 +1296,7 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
     const commentIdsJson = JSON.stringify([...responseCommentIds]);
     await db.transaction().execute(async (txTyped) => {
       const tx = txTyped as unknown as Transaction<unknown>;
-      // tenant:exempt reason=posted-reviews-keyed-by-pr-id-pk follow_up=FOLLOW-UP-gf3-error-mode
+      // tenant:exempt reason=posted-reviews-keyed-by-pr-id-pk follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
       await sql`
         UPDATE core.posted_reviews
            SET github_review_id = ${created.reviewId},
@@ -1323,7 +1323,7 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
   // ── LOST the claim: read the existing github_review_id, row age, and persisted publication_outcome. ──
   // The age computation lives in the SELECT (Postgres now() − posted_at) so there is no JS clock primitive
   // to inject (Clock-and-Random Protocol — same now() the INSERT's posted_at DEFAULT used).
-  // tenant:exempt reason=posted-reviews-keyed-by-pr-id-pk follow_up=FOLLOW-UP-gf3-error-mode
+  // tenant:exempt reason=posted-reviews-keyed-by-pr-id-pk follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
   const existing = await sql<{
     github_review_id: string | number | null;
     age_seconds: string | number | null;
@@ -1419,7 +1419,7 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
     }
     // kind === "raced": a racer set github_review_id between our read and the CAS (0-row CAS). Re-read the
     // now-published row and fall through to the lost-claim UPDATE path with the racer's id + comment ids.
-    // tenant:exempt reason=posted-reviews-keyed-by-pr-id-pk follow_up=FOLLOW-UP-gf3-error-mode
+    // tenant:exempt reason=posted-reviews-keyed-by-pr-id-pk follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
     const refreshed = await sql<{
       github_review_id: string | number | null;
       publication_outcome: string | null;

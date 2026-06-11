@@ -59,6 +59,7 @@ export async function deleteIntegration(
   const removed = await db.transaction().execute(async (tx) => {
     // config_json::text — migration 0112 made the column jsonb; the str contract holds via the text cast
     // (same idiom as listIntegrationsPage). Captured for the audit before-image.
+    // tenant:exempt reason=integrations-table-platform-shared-no-installation_id-column follow_up=PERMANENT-EXEMPTION-platform-shared-integrations
     const got = await sql<IntegrationCore>`
       SELECT kind, config_json::text AS config_json
       FROM core.integrations
@@ -68,6 +69,7 @@ export async function deleteIntegration(
     if (got.rows.length === 0) {
       return null;
     }
+    // tenant:exempt reason=integrations-table-platform-shared-no-installation_id-column follow_up=PERMANENT-EXEMPTION-platform-shared-integrations
     const del = await sql<{ integration_id: string }>`
       DELETE FROM core.integrations
       WHERE integration_id = ${args.integrationId}
@@ -136,6 +138,7 @@ export async function insertConfluenceSpace(
   },
 ): Promise<IntegrationListItemV1> {
   // 1. App-level dedup (cheaper than burning a Confluence call on a duplicate). config_json is jsonb → ->>.
+  // tenant:exempt reason=integrations-table-platform-shared-no-installation_id-column follow_up=PERMANENT-EXEMPTION-platform-shared-integrations
   const dup = await sql<{ integration_id: string }>`
     SELECT integration_id FROM core.integrations
     WHERE kind = 'confluence_space' AND config_json ->> 'space_key' = ${args.spaceKey}
@@ -176,6 +179,7 @@ export async function insertConfluenceSpace(
     ["space_name", args.spaceName],
   ];
   const configJson = "{" + configEntries.map(([k, v]) => `${JSON.stringify(k)}: ${JSON.stringify(v)}`).join(", ") + "}";
+  // tenant:exempt reason=integrations-table-platform-shared-no-installation_id-column follow_up=PERMANENT-EXEMPTION-platform-shared-integrations
   const inserted = await sql<IntegrationInsertRow>`
     INSERT INTO core.integrations
       (integration_id, kind, config_json, enabled, last_validated_at, last_validation_error,

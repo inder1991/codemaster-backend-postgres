@@ -362,6 +362,7 @@ export async function listIntegrationsPage(
   size: number,
 ): Promise<{ rows: Array<IntegrationListItemV1>; nextCursor: string | null }> {
   const clamped = Math.min(Math.max(size, 1), 200);
+  // tenant:exempt reason=integrations-table-platform-shared-no-installation_id-column follow_up=PERMANENT-EXEMPTION-platform-shared-integrations
   const r = await sql<IntegrationDbRow>`
     SELECT integration_id, kind, config_json::text AS config_json, enabled, last_validated_at,
            last_validation_error, created_at, updated_at, trust_tier, default_governance_ack_at,
@@ -684,6 +685,7 @@ export async function listFindings(
   }
   const joinClause =
     args.repositoryId != null
+      // tenant:exempt reason=join-fragment-composed-into-query-whose-first-condition-is-rf.installation_id follow_up=PERMANENT-EXEMPTION-composed-tenant-filtered-fragment
       ? sql`JOIN core.pull_requests pr ON pr.pr_id = rf.pr_id AND pr.repository_id = ${args.repositoryId}`
       : sql``;
   const whereClause = sql.join(conditions, sql` AND `);
@@ -776,6 +778,7 @@ export async function listPullRequests(
   ];
   const loginByGhUserId = new Map<string, string>();
   if (authorIds.length > 0) {
+    // tenant:exempt reason=gh_users-global-identity-table-batched-login-resolve-no-installation_id-column follow_up=PERMANENT-EXEMPTION-global-identity-tables
     const lr = await sql<{ gh_user_id: string; login: string }>`
       SELECT gh_user_id, login FROM core.gh_users
       WHERE gh_user_id IN (${sql.join(

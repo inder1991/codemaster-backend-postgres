@@ -200,6 +200,7 @@ export async function buildEmbedderCoverage(db: Kysely<unknown>): Promise<Embedd
       ON ce.chunk_table = 'confluence_chunks' AND ce.chunk_id = c.chunk_id AND ce.generation_id = ${g}
     WHERE c.deleted_at IS NULL AND c.superseded_at IS NULL AND ce.chunk_id IS NULL
   `.execute(db);
+  // tenant:exempt reason=platform-wide-embedder-coverage-gap-COUNT-aggregate-by-design follow_up=PERMANENT-EXEMPTION-platform-embedder-ops
   const knowRes = await sql<{ count: string | number }>`
     SELECT COUNT(*) AS count
     FROM core.knowledge_chunks c
