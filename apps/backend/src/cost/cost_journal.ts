@@ -58,6 +58,7 @@ import { type Kysely, sql } from "kysely";
 
 import { type Clock, WallClock } from "#platform/clock.js";
 import { tenantKysely } from "#platform/db/database.js";
+import { type Counter, getMeter } from "#platform/observability/metrics.js";
 
 import {
   BedrockBudgetExceededError,
@@ -453,4 +454,34 @@ export class PostgresCostJournal implements CostJournalShadowPort {
     await sql`SET LOCAL lock_timeout = ${sql.lit(LOCK_TIMEOUT)}`.execute(trx);
     await sql`SELECT pg_advisory_xact_lock(hashtext('cost_journal'), hashtext(${today}))`.execute(trx);
   }
+}
+
+// ─── shadow-write telemetry — one bounded-cardinality counter, label `entry` only ──────────────────
+//
+// The client GUARDS every shadow journal write (a journal failure must never perturb the paid path —
+// the aggregate enforcer remains the decider), so without this counter a dead journal would silently
+// stop shadow-accounting and the dual-read comparison would report bogus divergence at cutover
+// review time. Mirrors the invocation_ledger store_failed idiom: module-scoped meter + instrument
+// cached once at import, every emit fail-safe. Cardinality discipline: the ONLY label is `entry`
+// (bounded to {reserve, settle}) — NEVER per-tenant / per-call labels.
+
+/** Grafana-query-stable counter name (renaming requires ADR). */
+export const COST_JOURNAL_SHADOW_WRITE_FAILED_TOTAL_NAME =
+  "codemaster_cost_journal_shadow_write_failed_total";
+
+const COST_JOURNAL_METER = getMeter("codemaster.cost.cost_journal");
+
+const SHADOW_WRITE_FAILED_COUNTER: Counter = COST_JOURNAL_METER.createCounter(
+  COST_JOURNAL_SHADOW_WRITE_FAILED_TOTAL_NAME,
+  {
+    description:
+      "Count of GUARDED cost-journal shadow writes that FAILED beside a successful aggregate " +
+      "cost-cap call (the swallow keeps the paid path healthy but leaves a journal gap the " +
+      "divergence seam will report). Bounded label `entry` (reserve|settle).",
+  },
+);
+
+/** Record one swallowed shadow-write failure. `entry` is the bounded label. Fail-safe. */
+export function recordCostJournalShadowWriteFailed(entry: "reserve" | "settle"): void {
+  try { SHADOW_WRITE_FAILED_COUNTER.add(1, { entry }); } catch { /* telemetry never perturbs the paid path */ }
 }
