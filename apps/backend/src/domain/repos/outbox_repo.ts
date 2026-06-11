@@ -52,7 +52,10 @@ export const REVIEW_WORKFLOW_TYPES: ReadonlySet<string> = new Set(["reviewPullRe
 type Executor = Kysely<unknown>;
 
 /** A claimed outbox row (Python `OutboxRow`) — projected by {@link PostgresOutboxRepo.claimPending} for the
- *  dispatcher (run_id/review_id/provider feed the stale-write guard + the INGESTED emit). */
+ *  dispatcher (run_id/review_id/provider feed the stale-write guard + the INGESTED emit). `deliveryId`
+ *  (W1.9e — a TS-side addition over the frozen Python projection) carries the row's webhook delivery id so
+ *  the Postgres drain loop can thread it into the SinkContext for the destination-side identity cross-check;
+ *  the parity-locked DispatchRowInputV1 wire shape stays untouched. */
 export type OutboxRow = {
   id: string;
   sink: string;
@@ -64,6 +67,7 @@ export type OutboxRow = {
   reviewId: string | null;
   provider: string | null;
   installationId: string | null;
+  deliveryId: string | null;
 };
 
 export class PostgresOutboxRepo {
@@ -199,9 +203,10 @@ export class PostgresOutboxRepo {
         review_id: string | null;
         provider: string | null;
         installation_id: string | null;
+        delivery_id: string | null;
       }>`
         SELECT o.id, o.sink, o.payload, o.schema_version, o.attempts, o.trace_context,
-               o.run_id, rr.review_id, pr.provider, o.installation_id
+               o.run_id, rr.review_id, pr.provider, o.installation_id, o.delivery_id
           FROM core.outbox AS o
           LEFT JOIN core.review_runs AS rr ON rr.run_id = o.run_id
           LEFT JOIN core.pull_request_reviews AS pr ON pr.review_id = rr.review_id
@@ -232,6 +237,7 @@ export class PostgresOutboxRepo {
         reviewId: r.review_id,
         provider: r.provider,
         installationId: r.installation_id,
+        deliveryId: r.delivery_id,
       }));
     });
   }

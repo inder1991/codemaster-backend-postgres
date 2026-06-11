@@ -450,6 +450,9 @@ export function runReviewJob(deps: RunReviewJobDeps): JobHandler {
       const inProcessPortDeps: InProcessPortDeps = {
         dsn: deps.dsn,
         pool: deps.pool,
+        // W1.9c: the shell's injected clock drives the per-port retry curves (backoff +
+        // start-to-close) — one timing seam for the whole job, FakeClock-able in tests.
+        clock: deps.clock,
         ...(deps.ports !== undefined ? { overrides: deps.ports } : {}),
         ...(deps.postReviewGhClient !== undefined ? { postReviewGhClient: deps.postReviewGhClient } : {}),
       };

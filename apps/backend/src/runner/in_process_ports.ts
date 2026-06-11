@@ -26,6 +26,16 @@
  * The remaining ports are wrapped in {@link withAbortGate} unchanged — the gate is the per-port "no NEW
  * dispatch after abort" enforcement that holds for EVERY external surface (F7's enforceable guarantee).
  *
+ * ## W1.9c (H1) — per-port in-place retry on the REAL fns
+ *
+ * Every real (non-overridden) port fn additionally routes through {@link applyInProcessRetry}
+ * (retry_policies.ts): the RETRYABLE IDEMPOTENT ports (clone / embedQuery / retrieveKnowledge /
+ * reviewChunk / staticAnalysis) run under their transcribed Temporal curves (RETRY_POLICIES), so a
+ * transient blip retries THAT port in place instead of failing the whole shell into a full
+ * re-clone + re-review + re-pay. Throttle faults escape un-retried to the runner's deferRetry
+ * (CS4.4 layering), and the composed abort flows into every per-attempt signal. Test `overrides`
+ * are NEVER retry-wrapped — an override replaces the port including its curve.
+ *
  * ## Plain-Node safety
  *
  * Everything here runs in a plain Node process (NO Temporal sandbox); the W1.1 proof
@@ -74,8 +84,10 @@ import { PostgresLlmProviderSettingsRepo } from "#backend/integrations/llm/llm_p
 
 import { buildActivities } from "#backend/worker/build_activities.js";
 
-import { WallClock } from "#platform/clock.js";
+import { type Clock, WallClock } from "#platform/clock.js";
+import { type Random, SystemRandom } from "#platform/randomness.js";
 
+import { applyInProcessRetry, type PortRetrySeams } from "./retry_policies.js";
 import { TerminalCancelError } from "./review_job_runner.js";
 
 import type { PostReviewInputV1 } from "#contracts/post_review_input.v1.js";
@@ -251,6 +263,11 @@ export type InProcessPortDeps = {
   readonly dsn: string;
   /** Shared ADR-0062 pool (the shell threads it for the mutex; the ports build their own collaborators). */
   readonly pool: Pool;
+  /** Timing seam for the W1.9c per-port retry curves (backoff + start-to-close). Default
+   *  {@link WallClock}; the shell threads its injected clock; tests inject FakeClock. */
+  readonly clock?: Clock;
+  /** Randomness seam for the W1.9c backoff jitter. Default {@link SystemRandom}. */
+  readonly random?: Random;
   /**
    * Per-port override map (test seam). Each key is a {@link ReviewActivityPorts} method; the value REPLACES
    * the real wired fn (still wrapped in the abort gate). The integration test injects counting stubs here.
@@ -362,7 +379,11 @@ export function makeInProcessPorts(deps: InProcessPortDeps, signal: AbortSignal)
     return fixPromptMemo;
   };
 
-  // clone: the real cloner deps, signal injected into cloner.clone per-call (in-flight abort, gate ①).
+  // clone: the real cloner deps, the ATTEMPT signal injected into cloner.clone per-call (in-flight
+  // abort, gate ①). W1.9c: `attemptSignal` is the retry wrapper's per-attempt controller — it fires
+  // on the FORWARDED composed abort (the pre-W1.9c behavior, W4.1 pre-spawn + mid-clone teardown)
+  // AND on the per-attempt start-to-close timeout, so a timed-out attempt's git subprocess is
+  // killed before the retry re-clones (never two clones racing one workspace dir).
   const resolveClonerDeps = (() => {
     let memo: Promise<CloneRepoIntoWorkspaceDeps> | undefined;
     return (): Promise<CloneRepoIntoWorkspaceDeps> => {
@@ -370,12 +391,11 @@ export function makeInProcessPorts(deps: InProcessPortDeps, signal: AbortSignal)
       return memo;
     };
   })();
-  const cloneWithSignal = async (req: CloneRepoIntoWorkspaceInput): Promise<ClonedRepoV1> => {
+  const cloneWithSignal = async (req: CloneRepoIntoWorkspaceInput, attemptSignal: AbortSignal): Promise<ClonedRepoV1> => {
     const cd = await resolveClonerDeps();
-    // Wrap the cloner so its clone() carries the COMPOSED signal (W4.1 pre-spawn + mid-clone teardown).
     const signalAwareDeps: CloneRepoIntoWorkspaceDeps = {
       ...cd,
-      cloner: { clone: (input) => cd.cloner.clone({ ...input, signal }) },
+      cloner: { clone: (input) => cd.cloner.clone({ ...input, signal: attemptSignal }) },
     };
     return cloneRepoIntoWorkspace(req, signalAwareDeps);
   };
@@ -399,11 +419,30 @@ export function makeInProcessPorts(deps: InProcessPortDeps, signal: AbortSignal)
     return doPost(input, { ghClient, dsn, sameRunTakeover: true, signal });
   };
 
-  // Resolve each port: an override wins; else the real wired fn. EVERY port is wrapped in the abort gate.
-  const pick = <I, O>(name: keyof ReviewActivityPorts, real: (input: I) => Promise<O>): (input: I) => Promise<O> => {
+  // W1.9c (H1) — the per-port retry seams: the injected Clock/Random pair + the COMPOSED signal.
+  // applyInProcessRetry (retry_policies.ts) wraps the RETRYABLE IDEMPOTENT real fns
+  // (IN_PROCESS_RETRY_POLICIES: clone / embedQuery / retrieveKnowledge / reviewChunk /
+  // staticAnalysis) in their transcribed Temporal curves and passes every other real fn through
+  // bound to the composed signal. Throttle faults (GitHubRateLimitExceeded / LlmRateLimitError)
+  // are non-retryable AT THAT SEAM so they still escape to the runner's deferRetry (CS4.4).
+  const retrySeams: PortRetrySeams = {
+    clock: deps.clock ?? new WallClock(),
+    random: deps.random ?? new SystemRandom(),
+    signal,
+  };
+
+  // Resolve each port: an override wins (REPLACING the real fn INCLUDING its retry curve — tests
+  // keep single-dispatch failure semantics); else the real fn runs under its W1.9c in-place retry
+  // curve. EVERY port is wrapped in the abort gate. `real`'s 2nd arg is the ATTEMPT signal
+  // (applyInProcessRetry's contract): the per-attempt controller for wrapped ports, the composed
+  // signal for pass-throughs — single-arg real fns simply ignore it.
+  const pick = <I, O>(
+    name: keyof ReviewActivityPorts,
+    real: (input: I, attemptSignal: AbortSignal) => Promise<O>,
+  ): (input: I) => Promise<O> => {
     // eslint-disable-next-line security/detect-object-injection -- `name` is a hardcoded ReviewActivityPorts key, not external input
     const o = overrides?.[name] as ((input: I) => Promise<O>) | undefined;
-    return withAbortGate<I, O>(name, o ?? real, signal);
+    return withAbortGate<I, O>(name, o ?? applyInProcessRetry<I, O>(name, real, retrySeams), signal);
   };
 
   const ports: ReviewActivityPorts = {

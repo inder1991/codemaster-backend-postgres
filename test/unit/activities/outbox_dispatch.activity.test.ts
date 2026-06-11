@@ -49,7 +49,7 @@ describe("OutboxDispatchActivities", () => {
 
   it("claimPendingRows delegates to repo.claimPending with the input's batch/lease", async () => {
     const rows: Array<OutboxRow> = [
-      { id: "r1", sink: "s", payload: {}, schemaVersion: 2, attempts: 0, traceContext: {}, runId: null, reviewId: null, provider: null, installationId: null },
+      { id: "r1", sink: "s", payload: {}, schemaVersion: 2, attempts: 0, traceContext: {}, runId: null, reviewId: null, provider: null, installationId: null, deliveryId: null },
     ];
     const claimPending = vi.fn(async () => rows);
     const acts = makeActs({ claimPending } as unknown as Partial<PostgresOutboxRepo>);
@@ -90,6 +90,41 @@ describe("OutboxDispatchActivities", () => {
       installationId: null,
       runId: null,
       outboxRowId: ROW_1,
+    });
+  });
+
+  it("dispatchRow threads the dispatcher's row delivery_id into the SinkContext (W1.9e — full delivery_id threading)", async () => {
+    // The parity-locked DispatchRowInputV1 (frozen Python shape) carries NO delivery_id, so the
+    // Postgres drain loop threads the OUTBOX ROW's delivery_id as a runtime-only 2nd argument —
+    // the sinks need it for the destination-side identity cross-check (the CS4.1 review-enqueue
+    // slice generalized). Omitted (the Temporal proxy path) → null, byte-1:1 with the frozen Python.
+    const calls: Array<{ payload: unknown; context: SinkContext }> = [];
+    registerSink("sync_code_owners", async (a) => {
+      calls.push(a);
+    });
+    const acts = makeActs({});
+
+    await acts.dispatchRow(
+      {
+        schema_version: 2,
+        row_id: ROW_1,
+        sink: "sync_code_owners",
+        payload: { x: 1 },
+        trace_context: {},
+        run_id: null,
+        review_id: null,
+        provider: null,
+        installation_id: null,
+        orphan_reason: "bootstrap_sink",
+      },
+      { deliveryId: "dlv-w19e-threaded" },
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.context).toEqual({
+      deliveryId: "dlv-w19e-threaded",
+      installationId: null,
+      runId: null,
     });
   });
 

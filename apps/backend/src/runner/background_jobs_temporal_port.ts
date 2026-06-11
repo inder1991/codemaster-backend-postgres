@@ -63,14 +63,16 @@
 // therefore throw unconditionally: a future caller routing cancel/signal through THIS port is a
 // wiring bug to surface at the first call, not a capability to emulate.
 
+import { ZodError } from "zod";
+
 import { type StartWorkflowCall, type TemporalClientPort } from "#backend/adapters/temporal_port.js";
 import { REVIEW_WORKFLOW_TYPE } from "#backend/ingest/github_webhook_persistence.js";
 import { PermanentSinkError } from "#backend/outbox/sink_registry.js";
 import { ReviewPullRequestPayloadV1 } from "#contracts/review_pull_request.v1.js";
 
 import type { BackgroundJobsRepo } from "./background_jobs_repo.js";
-import type { ReviewJobsRepo } from "./review_jobs_repo.js";
-import { WORKFLOW_TYPE_TO_JOB_TYPE } from "./workflow_job_map.js";
+import { PayloadIntegrityError, type ReviewJobsRepo } from "./review_jobs_repo.js";
+import { JOB_TYPE_MAX_ATTEMPTS, WORKFLOW_TYPE_TO_JOB_TYPE } from "./workflow_job_map.js";
 
 /** A {@link TemporalClientPort} whose startWorkflow enqueues a core.background_jobs row — or, for
  *  {@link REVIEW_WORKFLOW_TYPE}, a core.review_jobs row (module doc: the cutover hinge + the W4d.1
@@ -83,6 +85,9 @@ export class BackgroundJobsTemporalPort implements TemporalClientPort {
   /** A Map (never the raw record): a payload-controlled workflow_type like "constructor" must miss,
    *  not resolve through Object.prototype (`record["constructor"]` is a function, not undefined). */
   readonly #jobTypeByWorkflowType: ReadonlyMap<string, string>;
+  /** W1.9d (RC5): job_type → Temporal-parity max_attempts, threaded into every enqueue. A Map for
+   *  the same prototype-safety reason as the translation registry. */
+  readonly #maxAttemptsByJobType: ReadonlyMap<string, number>;
   /** CS1.2 SHADOW posture — see the {@link startWorkflow} top guard. */
   readonly #shadow: boolean;
 
@@ -92,6 +97,11 @@ export class BackgroundJobsTemporalPort implements TemporalClientPort {
     reviewJobs: ReviewJobsRepo;
     /** The translation registry — production passes {@link WORKFLOW_TYPE_TO_JOB_TYPE}. */
     workflowTypeToJobType: Readonly<Record<string, string>>;
+    /** W1.9d (RC5): per-job_type attempt budgets. DEFAULTS to the production
+     *  {@link JOB_TYPE_MAX_ATTEMPTS} table — the Temporal-parity budgets must hold wherever this
+     *  port is constructed (forgetting to thread them was exactly the RC5 collapse); tests may
+     *  override. A job_type absent from the table falls back to the repo's enqueue default. */
+    maxAttemptsByJobType?: Readonly<Record<string, number>>;
     /** CS1.2 SHADOW posture: true → startWorkflow performs NO real enqueue (no core.background_jobs
      *  row, no core.review_jobs row) — a would-enqueue log + sentinel id instead. The seam-level
      *  enforcement of the cutover-safety plan's "no real review/background enqueue" clause, behind
@@ -102,10 +112,15 @@ export class BackgroundJobsTemporalPort implements TemporalClientPort {
     this.#repo = o.repo;
     this.#reviewJobs = o.reviewJobs;
     this.#jobTypeByWorkflowType = new Map(Object.entries(o.workflowTypeToJobType));
+    this.#maxAttemptsByJobType = new Map(Object.entries(o.maxAttemptsByJobType ?? JOB_TYPE_MAX_ATTEMPTS));
     this.#shadow = o.shadow ?? false;
   }
 
-  public async startWorkflow(call: StartWorkflowCall, installationId?: string | null): Promise<string> {
+  public async startWorkflow(
+    call: StartWorkflowCall,
+    installationId?: string | null,
+    deliveryId?: string | null,
+  ): Promise<string> {
     if (this.#shadow) {
       // CS1.2 SHADOW guard — BEFORE the payload extraction and BOTH routes (review + event), so no
       // job row of either kind can land in shadow. The sentinel return satisfies the port contract
@@ -127,7 +142,7 @@ export class BackgroundJobsTemporalPort implements TemporalClientPort {
     // workflow_type→job_type map (module doc). Checked BEFORE the map lookup so a review row can
     // never be mis-translated by a future (erroneous) map entry.
     if (call.workflowType === REVIEW_WORKFLOW_TYPE) {
-      return this.#enqueueReviewJob(call, payload);
+      return this.#enqueueReviewJob(call, payload, deliveryId ?? null);
     }
 
     const jobType = this.#jobTypeByWorkflowType.get(call.workflowType);
@@ -145,12 +160,32 @@ export class BackgroundJobsTemporalPort implements TemporalClientPort {
     // port's 2nd param, and it lands as core.background_jobs.installation_id. null/omitted stays
     // NULL = platform-scoped by design (e.g. appendReconcile rows, whose outbox installation_id is
     // NULL under the ck_outbox_installation_id_required bootstrap-sink exemption).
-    return this.#repo.enqueue({
-      jobType,
-      payload,
-      dedupKey: call.workflowId,
-      installationId: installationId ?? null,
-    });
+    //
+    // W1.9d (RC5): the job_type's Temporal-parity attempt budget rides the enqueue — max_attempts
+    // on the row, NOT a claim()-side mutation. Absent from the table → the repo default (3).
+    const maxAttempts = this.#maxAttemptsByJobType.get(jobType);
+    try {
+      return await this.#repo.enqueue({
+        jobType,
+        payload,
+        dedupKey: call.workflowId,
+        installationId: installationId ?? null,
+        ...(maxAttempts !== undefined ? { maxAttempts } : {}),
+      });
+    } catch (e) {
+      // W1.9e: enqueue's strict JSON-tree validation (W4c.1 #9) rejecting a DEEP non-JSON value
+      // (nested NaN/undefined/Date — #singlePositionalPayload only guards the top-level shape) is
+      // a DETERMINISTIC poison: the same bytes fail identically on every redelivery, so it must
+      // dead-letter on attempt 1 (PermanentSinkError → the RC7 drain-loop taxonomy), never burn
+      // the outbox retry curve. Every other enqueue error (DB faults) stays retryable.
+      if (e instanceof ZodError) {
+        throw new PermanentSinkError(
+          `workflow_type '${call.workflowType}' (workflow_id '${call.workflowId}') args[0] is not ` +
+            `a strict-JSON payload (nested non-JSON value) — deterministic poison, dead-letter: ${e.message}`,
+        );
+      }
+      throw e;
+    }
   }
 
   /** Extract + validate the single positional workflow input (`args: [payload]` — every producer's
@@ -179,8 +214,18 @@ export class BackgroundJobsTemporalPort implements TemporalClientPort {
    *  review runner shell claims from. ReviewJobsRepo.enqueue re-validates, identity-asserts the
    *  envelope against the payload, canonicalizes + hashes; the returned string is the review
    *  job_id. A non-parsing payload is a drifted producer → PermanentSinkError (the row's
-   *  last_error names it; dead-letters at the threshold — never a silent drop). */
-  async #enqueueReviewJob(call: StartWorkflowCall, payload: object): Promise<string> {
+   *  last_error names it; dead-letters at the threshold — never a silent drop).
+   *
+   *  `rowDeliveryId` (W1.9e): the dispatching OUTBOX ROW's delivery_id — the INDEPENDENT identity
+   *  source for the enqueue envelope. The producer stamps ONE webhook delivery id on BOTH the row
+   *  and the payload (github_webhook_persistence.ts), so enqueue's delivery_id cross-check
+   *  (assertPayloadIdentityMatchesEnvelope) now compares two independently-carried copies instead
+   *  of the payload against itself (the CS4.1 slice's tautology). A null row delivery_id falls
+   *  back to the payload's (the row opted out; CS4.1 behavior — the column is still persisted). A
+   *  DIVERGENT pair (drifted/poisoned producer) raises PayloadIntegrityError BEFORE any INSERT →
+   *  mapped to PermanentSinkError: a deterministic identity fault dead-letters on attempt 1
+   *  (the RC7 drain-loop taxonomy), never burns the outbox retry curve. */
+  async #enqueueReviewJob(call: StartWorkflowCall, payload: object, rowDeliveryId: string | null): Promise<string> {
     let parsed: ReviewPullRequestPayloadV1;
     try {
       parsed = ReviewPullRequestPayloadV1.parse(payload);
@@ -192,17 +237,27 @@ export class BackgroundJobsTemporalPort implements TemporalClientPort {
           `${e instanceof Error ? e.message : String(e)}`,
       );
     }
-    return this.#reviewJobs.enqueue({
-      runId: parsed.run_id,
-      reviewId: parsed.review_id,
-      installationId: parsed.installation_id,
-      // CS4.1 RT3: the payload carries the webhook delivery_id (required, 1..200 chars) — persist it
-      // onto the job row so the admin/debug timeline joins hold, and so enqueue's non-null
-      // delivery_id identity cross-check (assertPayloadIdentityMatchesEnvelope) ENGAGES instead of
-      // being skipped (the pre-fix omission left the column NULL).
-      deliveryId: parsed.delivery_id,
-      payload: parsed,
-    });
+    try {
+      return await this.#reviewJobs.enqueue({
+        runId: parsed.run_id,
+        reviewId: parsed.review_id,
+        installationId: parsed.installation_id,
+        // CS4.1 RT3 + W1.9e: persist the webhook delivery_id onto the job row (the admin/debug
+        // timeline join column) AND engage enqueue's identity cross-check against the ROW's copy
+        // when the dispatch threaded one (doc above).
+        deliveryId: rowDeliveryId ?? parsed.delivery_id,
+        payload: parsed,
+      });
+    } catch (e) {
+      if (e instanceof PayloadIntegrityError) {
+        throw new PermanentSinkError(
+          `workflow_type '${call.workflowType}' (workflow_id '${call.workflowId}') payload identity ` +
+            `diverges from the dispatch envelope (row delivery_id '${String(rowDeliveryId)}') — a ` +
+            `deterministic identity fault, dead-letter on attempt 1: ${e.message}`,
+        );
+      }
+      throw e;
+    }
   }
 
   // Both rejection methods omit their parameters entirely (a TS implementation may take fewer
@@ -248,6 +303,9 @@ export function makeOutboxBackgroundJobsPort(deps: {
     repo: deps.backgroundJobs,
     reviewJobs: deps.reviewJobs,
     workflowTypeToJobType: WORKFLOW_TYPE_TO_JOB_TYPE,
+    // W1.9d (RC5): explicit even though the ctor defaults to the same table — the production
+    // composition NAMES its budget source.
+    maxAttemptsByJobType: JOB_TYPE_MAX_ATTEMPTS,
     shadow: deps.shadow ?? false,
   });
 }

@@ -18,3 +18,62 @@ describe("runWithRetry", () => {
     await expect(runWithRetry(clock, random, { ...P, maxAttempts: 1 }, () => new Promise(() => {}))).rejects.toThrow(/timeout/i);
   });
 });
+
+// W1.9c (H1) — the COMPOSED shell abort must flow into runWithRetry's signal contract: no NEW
+// attempt is dispatched after the outer abort (the in-process gate-① posture), the abort is
+// FORWARDED into every per-attempt signal (so signal-honoring work like the cloner stops), and an
+// abort observed on a failed attempt short-circuits the remaining retry budget.
+describe("runWithRetry — outer abort signal (W1.9c)", () => {
+  it("does NOT dispatch when the outer signal is already aborted (zero fn calls)", async () => {
+    const ac = new AbortController();
+    ac.abort(new Error("composed shell abort"));
+    let n = 0;
+    await expect(
+      runWithRetry(clock, random, P, async () => { n++; return "never"; }, ac.signal),
+    ).rejects.toThrow(/composed shell abort/);
+    expect(n).toBe(0);
+  });
+
+  it("an abort observed on a FAILED attempt stops retrying and rethrows that attempt's error", async () => {
+    const ac = new AbortController();
+    let n = 0;
+    const transient = new Error("transient-during-abort");
+    await expect(
+      runWithRetry(clock, random, { ...P, initialIntervalS: 60 }, async () => {
+        n++; ac.abort(new Error("shell abort")); throw transient;
+      }, ac.signal),
+    ).rejects.toThrow("transient-during-abort");
+    expect(n).toBe(1); // the 60s backoff was never entered; no second attempt fired
+  });
+
+  it("an abort DURING the between-attempt backoff wakes the sleep and stops the loop", async () => {
+    const ac = new AbortController();
+    let n = 0;
+    const started = Date.now();
+    setTimeout(() => ac.abort(new Error("late shell abort")), 20);
+    await expect(
+      runWithRetry(clock, random, { ...P, initialIntervalS: 60, maxIntervalS: 60 }, async () => {
+        n++; throw new Error("transient-pre-backoff");
+      }, ac.signal),
+    ).rejects.toThrow("transient-pre-backoff");
+    expect(n).toBe(1);
+    expect(Date.now() - started).toBeLessThan(5_000); // far below the 60s backoff — the abort woke it
+  });
+
+  it("forwards the outer abort into the per-attempt signal (in-flight work observes it)", async () => {
+    const ac = new AbortController();
+    let seen: AbortSignal | undefined;
+    const pending = runWithRetry(clock, random, { ...P, startToCloseS: 30, maxAttempts: 1 }, (signal) => {
+      seen = signal;
+      return new Promise<never>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    }, ac.signal);
+    // Let the attempt start, then fire the composed abort — the per-attempt signal must observe it.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(seen?.aborted).toBe(false);
+    ac.abort(new Error("composed mid-attempt abort"));
+    await expect(pending).rejects.toThrow(/composed mid-attempt abort/);
+    expect(seen?.aborted).toBe(true);
+  });
+});

@@ -38,6 +38,7 @@ function oneRow(): OutboxRow {
     attempts: 0,
     traceContext: {},
     runId: null,
+    deliveryId: null,
     reviewId: null,
     provider: null,
     installationId: null,
