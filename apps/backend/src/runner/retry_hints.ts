@@ -17,8 +17,14 @@
 
 import type { Clock } from "#platform/clock.js";
 
-/** Error names recognized as throttle faults (the GitHub + Bedrock rate-limit classes). */
-const THROTTLE_ERROR_NAMES = new Set(["GitHubRateLimitExceeded", "LlmRateLimitError"]);
+/** Error names recognized as throttle faults (the GitHub + Bedrock rate-limit classes). Exported
+ *  for the W1.9c in-place retry seam (retry_policies.ts), which must let EXACTLY these names
+ *  escape un-retried so the runner-level deferRetry (below) still owns them — one definition,
+ *  two layers, no drift. */
+export const THROTTLE_ERROR_NAMES: ReadonlySet<string> = new Set([
+  "GitHubRateLimitExceeded",
+  "LlmRateLimitError",
+]);
 
 /** Wait applied when a throttle fault carries NO usable hint (GitHub secondary Retry-After is
  *  commonly 60s+; Bedrock throttling is transient at the same order). */
