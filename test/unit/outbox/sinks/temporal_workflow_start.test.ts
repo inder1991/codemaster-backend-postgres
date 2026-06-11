@@ -23,7 +23,13 @@ import {
 
 import { RecordingTemporalClient } from "#backend/adapters/temporal_port.js";
 
-const ctx: SinkContext = { deliveryId: null, installationId: null, runId: null };
+// RM2/W3.2: outboxRowId is the destination-side idempotency key the dispatcher threads through.
+const ctx: SinkContext = {
+  deliveryId: null,
+  installationId: null,
+  runId: null,
+  outboxRowId: "00000000-0000-4000-8000-00000000beef",
+};
 
 afterEach(() => {
   resetRegistryForTesting();

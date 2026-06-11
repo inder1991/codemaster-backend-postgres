@@ -106,6 +106,10 @@ export class OutboxDispatchActivities {
       deliveryId: null, // DispatchRowInput carries no delivery_id field
       installationId: v.installation_id,
       runId: v.run_id,
+      // W3.2 (RM2): the destination-side idempotency key — the dispatching outbox row id. A
+      // re-dispatch of the same row (the at-least-once redrive) presents the SAME key, so a
+      // destination that dedupes on it is effectively-once even after a prior execution settled.
+      outboxRowId: v.row_id,
     };
 
     // Lease-heartbeat (S14.5.D — 1:1 with the Python dispatch_row _heartbeat closure). A background loop
