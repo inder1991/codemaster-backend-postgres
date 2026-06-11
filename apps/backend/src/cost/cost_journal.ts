@@ -112,6 +112,19 @@ type SumRow = {
   readonly cents: string;
 };
 
+/** A `cost_daily` row read by the divergence seam. */
+type CostDailyRow = {
+  readonly scope: string;
+  readonly scope_id: string;
+  readonly daily_total_cents: string;
+};
+
+/** A per-installation journal SUM group read by the divergence seam. */
+type JournalGroupRow = {
+  readonly installation_id: string;
+  readonly cents: string;
+};
+
 // ─── Ports / argument shapes ───────────────────────────────────────────────────────────────────────
 
 /** One signed journal append: the (callId, installationId, amountCents, today) event coordinates. */
@@ -134,6 +147,18 @@ export type CostJournalAppendArgs = {
 export type CostJournalShadowPort = {
   appendReserve(args: CostJournalAppendArgs): Promise<void>;
   appendSettle(args: CostJournalAppendArgs): Promise<void>;
+};
+
+/**
+ * One row of the dual-read comparison report: a (scope[, scope_id]) whose aggregate daily total
+ * differs from the journal SUM for the day. The global row carries the zero-UUID sentinel as its
+ * `scopeId`, mirroring the `cost_daily` row shape.
+ */
+export type CostJournalDivergence = {
+  readonly scope: "global" | "per_org";
+  readonly scopeId: string;
+  readonly aggregateCents: number;
+  readonly journalCents: number;
 };
 
 // ─── The journal ───────────────────────────────────────────────────────────────────────────────────
@@ -345,6 +370,78 @@ export class PostgresCostJournal implements CostJournalShadowPort {
        WHERE today = ${args.today}
     `.execute(db);
     return Number(r.rows[0]?.cents ?? 0);
+  }
+
+  /**
+   * The DUAL-READ comparison seam (checklist #4): report every (scope[, scope_id]) whose
+   * `cost_daily.daily_total_cents` differs from the journal SUM for `today`. Empty report == the
+   * two accountings agree. Keys present on only ONE side are compared against 0 (a journal-only
+   * key means the aggregate write was lost; an aggregate-only key means the guarded shadow write
+   * was swallowed — both must surface). A POST-HEAL delta (journal released an orphan the
+   * aggregate still leaks) is the BY-DESIGN divergence this seam exists to quantify before
+   * cutover. Two snapshot reads, no locks — the seam is an observability read, not a decider; a
+   * torn read across a concurrent write shows up as transient divergence that the next comparison
+   * clears. Deterministic order: global first, then per_org sorted by scopeId.
+   */
+  public async divergenceFromAggregate(args: {
+    today: string;
+  }): Promise<ReadonlyArray<CostJournalDivergence>> {
+    const { today } = args;
+    // tenant:exempt reason=scope-discriminated-cost-daily follow_up=PERMANENT-EXEMPTION-cost-daily-scope
+    const agg = await sql<CostDailyRow>`
+      SELECT scope, scope_id, daily_total_cents
+        FROM telemetry.cost_daily
+       WHERE today = ${today}
+    `.execute(this.#db);
+    // tenant:exempt reason=scope-discriminated-cost-journal follow_up=PERMANENT-EXEMPTION-cost-daily-scope
+    const jnl = await sql<JournalGroupRow>`
+      SELECT installation_id, COALESCE(SUM(amount_cents), 0) AS cents
+        FROM telemetry.cost_journal
+       WHERE today = ${today}
+       GROUP BY installation_id
+    `.execute(this.#db);
+
+    // Journal view: global = the sum of EVERY group (platform-scope zero-UUID rows included —
+    // exactly as every call lands on the aggregate's global row); per-org = the non-sentinel groups.
+    let journalGlobal = 0;
+    const journalOrg = new Map<string, number>();
+    for (const row of jnl.rows) {
+      const cents = Number(row.cents);
+      journalGlobal += cents;
+      if (row.installation_id !== ZERO_UUID) {
+        journalOrg.set(row.installation_id, cents);
+      }
+    }
+
+    // Aggregate view, keyed identically.
+    let aggregateGlobal = 0;
+    const aggregateOrg = new Map<string, number>();
+    for (const row of agg.rows) {
+      if (row.scope === "global") {
+        aggregateGlobal = Number(row.daily_total_cents);
+      } else {
+        aggregateOrg.set(row.scope_id, Number(row.daily_total_cents));
+      }
+    }
+
+    const report: Array<CostJournalDivergence> = [];
+    if (aggregateGlobal !== journalGlobal) {
+      report.push({
+        scope: "global",
+        scopeId: ZERO_UUID,
+        aggregateCents: aggregateGlobal,
+        journalCents: journalGlobal,
+      });
+    }
+    const orgIds = [...new Set([...aggregateOrg.keys(), ...journalOrg.keys()])].sort();
+    for (const scopeId of orgIds) {
+      const aggregateCents = aggregateOrg.get(scopeId) ?? 0;
+      const journalCents = journalOrg.get(scopeId) ?? 0;
+      if (aggregateCents !== journalCents) {
+        report.push({ scope: "per_org", scopeId, aggregateCents, journalCents });
+      }
+    }
+    return report;
   }
 
   /**
