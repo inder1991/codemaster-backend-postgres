@@ -95,6 +95,7 @@ function fakeDeps(jobType: string): HandlerDeps {
       updated_at: now,
     }),
     clock: new WallClock(),
+    shadow: false, // CS1.2: the production posture — the registry's shadow wrapper passes through
   };
 }
 

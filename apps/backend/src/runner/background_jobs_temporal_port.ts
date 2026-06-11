@@ -83,6 +83,8 @@ export class BackgroundJobsTemporalPort implements TemporalClientPort {
   /** A Map (never the raw record): a payload-controlled workflow_type like "constructor" must miss,
    *  not resolve through Object.prototype (`record["constructor"]` is a function, not undefined). */
   readonly #jobTypeByWorkflowType: ReadonlyMap<string, string>;
+  /** CS1.2 SHADOW posture — see the {@link startWorkflow} top guard. */
+  readonly #shadow: boolean;
 
   public constructor(o: {
     repo: BackgroundJobsRepo;
@@ -90,13 +92,32 @@ export class BackgroundJobsTemporalPort implements TemporalClientPort {
     reviewJobs: ReviewJobsRepo;
     /** The translation registry — production passes {@link WORKFLOW_TYPE_TO_JOB_TYPE}. */
     workflowTypeToJobType: Readonly<Record<string, string>>;
+    /** CS1.2 SHADOW posture: true → startWorkflow performs NO real enqueue (no core.background_jobs
+     *  row, no core.review_jobs row) — a would-enqueue log + sentinel id instead. The seam-level
+     *  enforcement of the cutover-safety plan's "no real review/background enqueue" clause, behind
+     *  the OutboxDispatcherLoop's own shadow guard (defense-in-depth: this port must be inert even
+     *  if something dispatches an outbox row in shadow). Default false. */
+    shadow?: boolean;
   }) {
     this.#repo = o.repo;
     this.#reviewJobs = o.reviewJobs;
     this.#jobTypeByWorkflowType = new Map(Object.entries(o.workflowTypeToJobType));
+    this.#shadow = o.shadow ?? false;
   }
 
   public async startWorkflow(call: StartWorkflowCall, installationId?: string | null): Promise<string> {
+    if (this.#shadow) {
+      // CS1.2 SHADOW guard — BEFORE the payload extraction and BOTH routes (review + event), so no
+      // job row of either kind can land in shadow. The sentinel return satisfies the port contract
+      // (a string "run_id") and is unambiguous in any log that records it; nothing downstream
+      // consumes it in shadow (the drain loop's markDispatched is itself suppressed).
+      console.info(
+        `outbox port shadow-mode: would-enqueue workflow_type=${call.workflowType} ` +
+          `workflow_id=${call.workflowId} — suppressed: no background/review job row ` +
+          `(CS1.2 no-side-effects contract)`,
+      );
+      return `shadow-would-enqueue:${call.workflowId}`;
+    }
     // args → payload (module doc): the producers stamp exactly ONE positional input, a plain JSON
     // object — for BOTH routes. Enforce both halves here so a drifted producer surfaces as THIS
     // clear error in the outbox row's last_error rather than a Zod throw from deep inside enqueue.
@@ -215,10 +236,13 @@ export function makeOutboxBackgroundJobsPort(deps: {
   /** The shared-pool review-jobs repo the port routes {@link REVIEW_WORKFLOW_TYPE} rows through
    *  (W4d.1 F6 — the review trigger rides the review runner platform). */
   reviewJobs: ReviewJobsRepo;
+  /** CS1.2 SHADOW posture (see the class ctor doc). Default false. */
+  shadow?: boolean;
 }): BackgroundJobsTemporalPort {
   return new BackgroundJobsTemporalPort({
     repo: deps.backgroundJobs,
     reviewJobs: deps.reviewJobs,
     workflowTypeToJobType: WORKFLOW_TYPE_TO_JOB_TYPE,
+    shadow: deps.shadow ?? false,
   });
 }

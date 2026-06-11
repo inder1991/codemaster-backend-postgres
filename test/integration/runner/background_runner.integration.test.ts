@@ -49,11 +49,19 @@ function jobType(): string { return `w2b-test-${randomUUID()}`; }
 
 // ─── HandlerRegistry semantics (pure, no DB) ─────────────────────────────────────────────────────
 describe("HandlerRegistry", () => {
-  it("register/get round-trips; an unregistered job_type yields undefined", () => {
+  it("register/get round-trips BEHAVIORALLY; an unregistered job_type yields undefined", async () => {
     const registry = new HandlerRegistry();
-    const handler = async (): Promise<void> => {};
-    registry.register("a.job", handler);
-    expect(registry.get("a.job")).toBe(handler);
+    const seen: Array<unknown> = [];
+    registry.register("a.job", async (payload) => { seen.push(payload); });
+    // CS1.2: get() returns the registry's shadow-guarded dispatch wrapper, NOT the registered
+    // function instance — assert the round-trip by INVOKING it (shadow:false = the production
+    // posture; the shadow=true suppression is proven in shadow_mode.integration.test.ts).
+    const dispatch = registry.get("a.job");
+    expect(dispatch).toBeDefined();
+    await dispatch!({ n: 1 }, new AbortController().signal, {
+      job: { job_id: randomUUID() } as never, clock, shadow: false,
+    });
+    expect(seen).toEqual([{ n: 1 }]);
     expect(registry.get("not.registered")).toBeUndefined();
   });
   it("a DUPLICATE registration for the same job_type throws (fail-loud at the composition root)", () => {

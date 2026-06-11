@@ -111,6 +111,14 @@ export type BackgroundRunnerDeps = {
   db: Kysely<unknown>;
   clock: Clock;
   config: BackgroundRunnerConfig;
+  /** CS1.2 SHADOW posture (CODEMASTER_RUNTIME_MODE=shadow): ONE flag threaded from here into every
+   *  side-effect seam — the scheduler (no enqueue, no next_run_at advance), the outbox drain loop
+   *  (no claim/lease, no dispatch, no markDispatched), the runner loop (no claim, no idle reap),
+   *  and HandlerDeps (the HandlerRegistry wrapper suppresses every handler body, so no external
+   *  GitHub/LLM/embed/clone call can start). Default false (the production behavior); the single
+   *  prod composition root ({@link runBackgroundRunner}) ALWAYS passes the mode-resolved value
+   *  explicitly. */
+  shadow?: boolean;
 };
 
 /** The composed runtime pieces + single-shot drive seams (tests / operator diagnostics). */
@@ -143,6 +151,11 @@ export type BackgroundRunnerHandles = {
  */
 export function buildBackgroundRunner(deps: BackgroundRunnerDeps): BackgroundRunnerHandles {
   const { db, clock, config } = deps;
+  // CS1.2: the ONE shadow flag every loop + the handler-dispatch deps are gated on (see
+  // BackgroundRunnerDeps.shadow). Resolved once here; threaded through runnerArgs / schedulerArgs /
+  // the outbox loop below, so the single-shot drive seams (runOneCycle / pollOnce /
+  // drainOutboxOnce) carry the SAME posture as the loops.
+  const shadow = deps.shadow ?? false;
   const repo = new BackgroundJobsRepo(db);
 
   // Phase 3b waves register job handlers HERE as the workflow migrations land (one register() per
@@ -176,8 +189,9 @@ export function buildBackgroundRunner(deps: BackgroundRunnerDeps): BackgroundRun
     leaseS: config.leaseS,
     heartbeatS: config.heartbeatS,
     maxRuntimeS: config.maxRuntimeS,
+    shadow,
   };
-  const schedulerArgs = { repo, db, clock };
+  const schedulerArgs = { repo, db, clock, shadow };
 
   // Phase 3c: the outbox drain loop — REUSES the proven Postgres-backed dispatch activities
   // (OutboxDispatchActivities, the exact 4 the Temporal worker registers via
@@ -199,6 +213,7 @@ export function buildBackgroundRunner(deps: BackgroundRunnerDeps): BackgroundRun
     },
     clock,
     idleS: config.outboxIdleS,
+    shadow,
   });
 
   return {
@@ -232,11 +247,17 @@ export function buildBackgroundRunner(deps: BackgroundRunnerDeps): BackgroundRun
  * Called once at process boot (runBackgroundRunner), BEFORE the drain loop starts — registerSink
  * throws on duplicates, so double-wiring fails loud. Exported for the cutover integration suite
  * (test/integration/runner/cutover_port.integration.test.ts), which drives the REAL boot wiring.
+ *
+ * `shadow` (CS1.2, default false): threads the no-side-effects posture into the port, whose
+ * startWorkflow then performs NO real background/review enqueue (would-enqueue log + sentinel) —
+ * the seam-level enforcement the cutover-safety plan mandates ("Enforcement is at the seam"),
+ * defense-in-depth behind the drain loop's own shadow guard.
  */
-export function wireOutboxSinks(db: Kysely<unknown>): void {
+export function wireOutboxSinks(db: Kysely<unknown>, shadow = false): void {
   const port = makeOutboxBackgroundJobsPort({
     backgroundJobs: new BackgroundJobsRepo(db),
     reviewJobs: new ReviewJobsRepo(db),
+    shadow,
   });
   registerTemporalWorkflowStartSink(port);
   registerInstallationReconcileSink(port);
@@ -439,20 +460,36 @@ export async function runBackgroundRunner(mode: BackgroundRunnerMode): Promise<v
         `and double-drains the outbox)`,
     );
   }
+  // CS1.2: the ONE shadow flag — resolved from the typed mode HERE and threaded explicitly into
+  // every seam below (buildBackgroundRunner → the three loops + HandlerDeps; wireOutboxSinks → the
+  // enqueue port). In shadow the runtime boots, polls, and observes but performs NO production
+  // side effect (no schedule advance, no enqueue, no outbox claim/dispatch/markDispatched, no
+  // handler external calls, no production-table writes).
+  const shadow = mode === "shadow";
   const { dsn, config } = resolveBackgroundRunnerConfig(process.env);
   const db = tenantKysely<unknown>(dsn); // THE shared ADR-0062 pool for this DSN
   const clock = new WallClock();
-  const handles = buildBackgroundRunner({ db, clock, config });
+  const handles = buildBackgroundRunner({ db, clock, config, shadow });
 
   // Wire the event-driven outbox sinks onto the Postgres-enqueue port BEFORE the drain loop starts
   // (see wireOutboxSinks — CS1.1: always the BackgroundJobsTemporalPort; Temporal is absent in
   // this runtime's modes by construction). registerSink throws on duplicates — fail-loud.
-  wireOutboxSinks(db);
+  wireOutboxSinks(db, shadow);
 
   // Seed the cron schedules BEFORE the loops start (W3b.1) — idempotent ON CONFLICT DO NOTHING, so
   // concurrent pods / redeploys never clobber operator-paused/edited rows. Fail-loud: a runner that
   // cannot reach core.scheduled_jobs at boot should crash-loop visibly, not run schedule-less.
-  await ensureScheduledJobs(db, clock);
+  // CS1.2 SHADOW guard: the seed INSERTs core.scheduled_jobs rows — a production-table write — so
+  // it is SUPPRESSED in shadow (the real cutover boot seeds them; until then the shadow scheduler
+  // observes whatever rows already exist and logs would-enqueue per due row).
+  if (shadow) {
+    console.info(
+      "background runner shadow-mode: schedule seeding (ensureScheduledJobs) SUPPRESSED — no " +
+        "production-table writes in shadow (CS1.2 no-side-effects contract)",
+    );
+  } else {
+    await ensureScheduledJobs(db, clock);
+  }
 
   // stopAll fires ONLY here — the SIGINT/SIGTERM shutdown path. NEVER wire it to a loop's failure
   // (W4b.2 review blocker #3: the pre-fix .catch(stopAll) tie meant one loop's crash tore down all

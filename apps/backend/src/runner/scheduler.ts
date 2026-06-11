@@ -118,7 +118,11 @@ type DueScheduleRow = {
  * next pass's re-enqueues dedup onto them — at-least-once, exactly-one-ACTIVE, never a halted pass.
  */
 export async function pollAndEnqueue(
-  o: { repo: SchedulerEnqueuePort; db: Kysely<unknown>; clock: Clock },
+  o: { repo: SchedulerEnqueuePort; db: Kysely<unknown>; clock: Clock;
+    /** CS1.2 SHADOW posture: true → the pass OBSERVES the due set (would-enqueue logs) and
+     *  performs NO side effect — no enqueue, no `next_run_at` advance, no `last_enqueued_at`
+     *  stamp. Default false (the production behavior). */
+    shadow?: boolean },
 ): Promise<number> {
   return await o.db.transaction().execute(async (trx) => {
     const now = o.clock.now();
@@ -128,6 +132,21 @@ export async function pollAndEnqueue(
         FROM core.scheduled_jobs
        WHERE enabled AND next_run_at <= ${now}
          FOR UPDATE SKIP LOCKED`.execute(trx);
+    if (o.shadow === true) {
+      // CS1.2 SHADOW guard — placed BETWEEN the due-SELECT (read-only; the row locks release at
+      // commit with zero writes) and the side-effecting loop below, so NOTHING can move in shadow:
+      // no background job is enqueued and next_run_at is NEVER advanced (the schedule stays due and
+      // is re-observed every poll — the shadow observation signal, by design). Returns 0: nothing
+      // was SUCCESSFULLY enqueued (the documented return contract).
+      for (const row of due.rows) {
+        console.info(
+          `scheduler shadow-mode: would-enqueue schedule ${row.schedule_id} ` +
+            `(job_type ${row.job_type}) — suppressed: no background job enqueued, ` +
+            `next_run_at NOT advanced (CS1.2 no-side-effects contract)`,
+        );
+      }
+      return 0;
+    }
     let enqueued = 0;
     for (const row of due.rows) {
       try {
@@ -172,7 +191,9 @@ export class SchedulerLoop {
   #stopped = false;
   readonly #stop = new AbortController();                  // wakes the poll-interval sleep immediately on stop()
   constructor(
-    private o: { repo: SchedulerEnqueuePort; db: Kysely<unknown>; clock: Clock; pollIntervalS: number },
+    private o: { repo: SchedulerEnqueuePort; db: Kysely<unknown>; clock: Clock; pollIntervalS: number;
+      /** CS1.2 SHADOW posture, threaded straight into every {@link pollAndEnqueue} pass. */
+      shadow?: boolean },
   ) {}
   stop(): void { this.#stopped = true; this.#stop.abort(); }
 

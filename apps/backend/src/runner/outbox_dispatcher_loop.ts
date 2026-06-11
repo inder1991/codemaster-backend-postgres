@@ -73,6 +73,11 @@ export class OutboxDispatcherLoop {
   readonly #batchSize: number;
   readonly #leaseSeconds: number;
   readonly #idleS: number;
+  /** CS1.2 SHADOW posture — see {@link drainOnce}'s top guard. */
+  readonly #shadow: boolean;
+  /** The shadow suppression is logged ONCE per loop instance (run() re-enters drainOnce every
+   *  idleS — an unconditional log would spam every ~2s for the process lifetime). */
+  #shadowLogged = false;
 
   public constructor(
     private o: {
@@ -81,11 +86,15 @@ export class OutboxDispatcherLoop {
       batchSize?: number;
       leaseSeconds?: number;
       idleS?: number;
+      /** CS1.2 SHADOW posture: true → every drain pass is suppressed BEFORE the claim (see
+       *  {@link drainOnce}). Default false (the production behavior). */
+      shadow?: boolean;
     },
   ) {
     this.#batchSize = o.batchSize ?? DEFAULT_OUTBOX_BATCH_SIZE;
     this.#leaseSeconds = o.leaseSeconds ?? DEFAULT_OUTBOX_LEASE_SECONDS;
     this.#idleS = o.idleS ?? DEFAULT_OUTBOX_DRAIN_INTERVAL_SECONDS;
+    this.#shadow = o.shadow ?? false;
   }
 
   public stop(): void { this.#stopped = true; this.#stop.abort(); }
@@ -98,6 +107,25 @@ export class OutboxDispatcherLoop {
    * of rows claimed (0 → the caller idles).
    */
   public async drainOnce(): Promise<number> {
+    if (this.#shadow) {
+      // CS1.2 SHADOW guard — the WHOLE pass is suppressed, including the claim: claimPendingRows
+      // stamps `leased_until` on core.outbox (a production-table mutation), and in shadow the LIVE
+      // Temporal dispatcher drains the same table — a shadow lease would delay every real dispatch
+      // by up to lease_seconds. So in shadow: no claim/lease, no dispatchRow (no sink fires — no
+      // GitHub post, no Temporal start, no background/review enqueue), no markDispatched, no
+      // markAttemptFailed. Returns 0 so run() idles (rows never settle in shadow; a >0 return
+      // would hot busy-loop). Richer would-dispatch observation (read-only peek into a dedicated
+      // shadow observation table) is the deferred full W0.1 shadow build — see CS1 in
+      // docs/audits/2026-06-11-cutover-safety-plan.md.
+      if (!this.#shadowLogged) {
+        this.#shadowLogged = true;
+        console.info(
+          "outbox dispatcher shadow-mode: drain SUPPRESSED — no claim/lease, no dispatch, no " +
+            "markDispatched/markAttemptFailed (CS1.2 no-side-effects contract; logged once)",
+        );
+      }
+      return 0;
+    }
     const rows = await this.o.activities.claimPendingRows({
       batch_size: this.#batchSize,
       lease_seconds: this.#leaseSeconds,

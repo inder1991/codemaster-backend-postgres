@@ -47,7 +47,18 @@ const HARD_TIMEOUT = Symbol("hard-timeout");
 
 export async function runOneBackgroundJob(o: { repo: BackgroundJobsRepo; registry: HandlerRegistry;
   clock: Clock; owner: string; leaseS: number; heartbeatS: number; maxRuntimeS: number;
+  /** CS1.2 SHADOW posture: true → the cycle is suppressed BEFORE the claim (see the top guard).
+   *  Default false (the production behavior). */
+  shadow?: boolean;
 }): Promise<{ outcome: BackgroundRunOutcome; jobId?: string }> {
+  if (o.shadow === true) {
+    // CS1.2 SHADOW guard — do not CLAIM: a claim stamps the lease columns on core.background_jobs
+    // (a production-table mutation) and the subsequent settle would CONSUME queued work the real
+    // cutover must still execute. Silent per cycle (BackgroundRunnerLoop.run() logs the posture
+    // once; runBackgroundRunner's boot line names the mode); the HandlerRegistry shadow wrapper +
+    // HandlerDeps.shadow stay as defense-in-depth for any path that runs a handler anyway.
+    return { outcome: "idle" };
+  }
   const leaseMs = o.leaseS * 1000;
   const claimStart = o.clock.monotonic();
   const job = await o.repo.claim({ owner: o.owner, leaseMs, maxRuntimeMs: o.maxRuntimeS * 1000 });
@@ -119,7 +130,10 @@ export async function runOneBackgroundJob(o: { repo: BackgroundJobsRepo; registr
     return r.applied ? "failed" : "lease_lost";
   };
 
-  const deps: HandlerDeps = { job, clock: o.clock };
+  // shadow is structurally false here (the top guard returned before any claim), but thread the
+  // RESOLVED flag rather than a literal so the HandlerDeps contract always carries the runner's
+  // actual posture (CS1.2 — the registry wrapper reads it).
+  const deps: HandlerDeps = { job, clock: o.clock, shadow: o.shadow ?? false };
   let outcome: BackgroundRunOutcome;
   try {
     const handlerPromise: Promise<void> = handler(payload, work.signal, deps);
@@ -162,7 +176,9 @@ export class BackgroundRunnerLoop {
   #stopped = false;
   readonly #stop = new AbortController();                  // wakes the idle sleep immediately on stop()
   constructor(private o: { repo: BackgroundJobsRepo; registry: HandlerRegistry; clock: Clock;
-    owner: string; leaseS: number; heartbeatS: number; maxRuntimeS: number; idleS: number }) {}
+    owner: string; leaseS: number; heartbeatS: number; maxRuntimeS: number; idleS: number;
+    /** CS1.2 SHADOW posture, threaded into every runOneBackgroundJob cycle + the idle reaper. */
+    shadow?: boolean }) {}
   stop() { this.#stopped = true; this.#stop.abort(); }     // wire to process.on('SIGTERM', () => loop.stop())
 
   /**
@@ -170,12 +186,26 @@ export class BackgroundRunnerLoop {
    * stuck-job reaper (expired lease + attempts exhausted → dead; the rows claim() will never
    * reclaim). Factored out so it is independently exercisable. The review runner's throttled
    * ledger prune (W6.4) is deliberately ABSENT — it is review-pipeline-specific, not platform.
+   * CS1.2 SHADOW guard: reapStuckRuns is an UPDATE on core.background_jobs (a production-table
+   * mutation) — suppressed in shadow (run() logs the posture once; per-cycle logging would spam
+   * every idleS seconds).
    */
   async runIdleMaintenance(): Promise<void> {
+    if (this.o.shadow === true) {
+      return;
+    }
     recordCrashLoopReaped(await this.o.repo.reapStuckRuns());
   }
 
   async run(): Promise<void> {
+    if (this.o.shadow === true) {
+      // CS1.2: announce the posture ONCE per run — every cycle below is claim-suppressed
+      // (runOneBackgroundJob's top guard) and the idle reaper is a no-op (runIdleMaintenance).
+      console.info(
+        "background runner loop shadow-mode: job claiming + idle maintenance SUPPRESSED " +
+          "(CS1.2 no-side-effects contract)",
+      );
+    }
     while (!this.#stopped) {
       const { outcome } = await runOneBackgroundJob(this.o); // an in-flight job ALWAYS runs to completion (drain)
       if (outcome === "idle" && !this.#stopped) {

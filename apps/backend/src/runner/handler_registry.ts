@@ -16,12 +16,18 @@ import type { BackgroundJobV1 } from "#contracts/background_job.v1.js";
  * Per-invocation runtime context the RUNNER provides to a handler. Composition-root services
  * (DB repos, API clients, …) are closed over at `register(...)` time — the buildActivities idiom —
  * NOT threaded through here; this bundle carries only what the runner itself owns per claim:
- *   * `job`   — the claimed row (job_id / installation_id / attempts / max_attempts context).
- *   * `clock` — the mandatory Clock seam (clock_random gate: handlers never read wall time raw).
+ *   * `job`    — the claimed row (job_id / installation_id / attempts / max_attempts context).
+ *   * `clock`  — the mandatory Clock seam (clock_random gate: handlers never read wall time raw).
+ *   * `shadow` — the CS1.2 no-side-effects posture (CODEMASTER_RUNTIME_MODE=shadow). When true,
+ *     the {@link HandlerRegistry.register} wrapper SUPPRESSES the handler body entirely (logged
+ *     would-run) — no external call (GitHub / LLM / embed / clone) and no production-table write
+ *     can start. REQUIRED (not optional) so every constructor of a HandlerDeps bundle decides the
+ *     posture explicitly; the runner threads its own resolved flag.
  */
 export type HandlerDeps = {
   job: BackgroundJobV1;
   clock: Clock;
+  shadow: boolean;
 };
 
 /**
@@ -41,6 +47,13 @@ export class HandlerRegistry {
    * Bind a job_type to its handler. Fail-loud at the composition root: an empty job_type or a
    * DUPLICATE registration throws immediately (a silent last-write-wins would mask a wiring bug
    * the same way a missing Temporal activity registration did — surface it at boot, not at claim).
+   *
+   * CS1.2 SHADOW guard — EVERY registered handler is wrapped at this SINGLE choke point: when the
+   * dispatch arrives with `deps.shadow === true`, the wrapper logs the would-run observation and
+   * returns WITHOUT invoking the handler body, so no handler (current or future) can perform an
+   * external call (GitHub / LLM / embed / clone) or a production-table write in shadow mode. The
+   * guard lives HERE — not copy-pasted into 13 handler bodies — so forgetting it is structurally
+   * impossible for anything that registers through this registry ([[eliminate_over_detect]]).
    */
   register(jobType: string, handler: JobHandler): void {
     if (jobType.length === 0) {
@@ -49,7 +62,17 @@ export class HandlerRegistry {
     if (this.#handlers.has(jobType)) {
       throw new Error(`HandlerRegistry.register: duplicate handler registration for job_type '${jobType}'`);
     }
-    this.#handlers.set(jobType, handler);
+    const guarded: JobHandler = async (payload, signal, deps) => {
+      if (deps.shadow) {
+        console.info(
+          `shadow-mode: would-run job_type=${jobType} job_id=${deps.job.job_id} — handler ` +
+            `SUPPRESSED (no external calls, no production writes; CS1.2 no-side-effects contract)`,
+        );
+        return;
+      }
+      await handler(payload, signal, deps);
+    };
+    this.#handlers.set(jobType, guarded);
   }
 
   /** The handler for `jobType`, or undefined — the runner dead-letters the undefined case. */
