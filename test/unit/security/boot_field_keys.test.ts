@@ -14,7 +14,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   FieldKeyBootError,
   installFieldKeyRegistryAtBoot,
@@ -32,12 +32,17 @@ const KEYSET_PAYLOAD = { current_version: "v1", keys: { v1: KEY_B64 } };
 
 afterEach(() => {
   resetAuditKeyRegistryForTesting();
+  vi.unstubAllEnvs();
 });
 
 describe("installFieldKeyRegistryAtBoot — production posture", () => {
   it("(1) PROD + Vault unavailable: throws FieldKeyBootError and installs NOTHING (fail-loud, no silent degradation)", async () => {
     // NODE_ENV=production, no CODEMASTER_FIELD_KEY_SOURCE → the default source is vault; no
     // VAULT_ADDR → the Vault client cannot even be constructed. Boot must REFUSE.
+    // (Hermeticity: VaultHttpPort.fromEnv reads the REAL process.env — scrub the host's Vault vars
+    // so a developer shell with VAULT_ADDR exported cannot turn this into a live Vault call.)
+    vi.stubEnv("VAULT_ADDR", "");
+    vi.stubEnv("VAULT_TOKEN", "");
     const err = await installFieldKeyRegistryAtBoot({ NODE_ENV: "production" }).then(
       () => null,
       (e: unknown) => e,
@@ -131,5 +136,28 @@ describe("installFieldKeyRegistryAtBoot — dev/test posture", () => {
     }).then(() => null, (e: unknown) => e);
     expect(err).toBeInstanceOf(FieldKeyBootError);
     expect((err as Error).message).toContain("vault-agent");
+  });
+});
+
+describe("installFieldKeyRegistryAtBoot — keyset file content never leaks into errors (review fix)", () => {
+  it("(9) a malformed keyset file fails with a CONTENT-FREE message — key material never reaches boot logs", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cs6-leak-"));
+    try {
+      const file = join(dir, "keyset.json");
+      // An unquoted value — the V8 SyntaxError shape that embeds an input snippet (i.e. key bytes)
+      // into e.message. The boot error must NOT carry it (FileKvReader's sterile-message rule).
+      writeFileSync(file, `{"current_version":"v1","keys":{"v1":${KEY_B64.slice(0, 16)}}}`, "utf-8");
+      const err = await installFieldKeyRegistryAtBoot({
+        NODE_ENV: "development",
+        CODEMASTER_FIELD_KEY_SOURCE: "file",
+        CODEMASTER_FIELD_KEYSET_FILE: file,
+      }).then(() => null, (e: unknown) => e);
+      expect(err).toBeInstanceOf(FieldKeyBootError);
+      expect((err as Error).message).toContain("not valid JSON");
+      expect((err as Error).message).not.toContain(KEY_B64.slice(0, 8)); // no key bytes, ever
+      expect(getAuditKeyRegistry()).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

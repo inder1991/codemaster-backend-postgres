@@ -190,3 +190,34 @@ describeDb("runOneJob (review_jobs) — Retry-After hint → run_after, NO attem
     expect((await readRun(db, s.runId)).lifecycle_state).toBe("RUNNING");
   });
 });
+
+// ─── Review fix (CS4.4 hot-loop): a NON-POSITIVE derived wait is "no usable hint" ────────────────
+// GitHub's secondary-limit raise stamps `resetAt = clock.now()` with retryAfterSeconds null when
+// the Retry-After header is absent (api_client.ts:454-458) — so flooring the resetAt-derived wait
+// at ZERO turns the defer path into an unbounded zero-backoff claim→call→defer hot loop against a
+// still-throttled GitHub (deferRetry un-burns the attempt and both loops sleep only on 'idle').
+// A non-positive wait must take the 60s default instead — never an immediate re-claim.
+describeDb("runOneBackgroundJob — non-positive throttle hint takes the 60s default, never an instant re-claim (CS4.4 review fix)", () => {
+  it("(R7) GitHubRateLimitExceeded with resetAt = NOW and no Retry-After: deferred ~60s, attempts NOT incremented", async () => {
+    const repo = new BackgroundJobsRepo(db);
+    const registry = new HandlerRegistry();
+    const jt = jobType();
+    const before = Date.now();
+    registry.register(jt, async () => {
+      // The exact shape api_client.ts emits on a header-less 403 secondary limit.
+      throw new GitHubRateLimitExceeded("secondary limit, no header", {
+        resource: "core",
+        resetAt: new Date(before - 1_000), // already past by settle time
+      });
+    });
+    const id = await repo.enqueue({ jobType: jt, payload: { x: 1 }, maxAttempts: 3 });
+    await runOneBackgroundJob({ repo, registry, ...RUN });
+
+    const job = await readBackgroundJob(id);
+    expect(job.state).toBe("ready");
+    expect(job.attempts).toBe(0);
+    const runAfterMs = new Date(job.run_after).getTime();
+    expect(runAfterMs).toBeGreaterThan(before + 45_000);   // the 60s default — NOT an instant re-claim
+    expect(runAfterMs).toBeLessThan(before + 75_000);
+  });
+});
