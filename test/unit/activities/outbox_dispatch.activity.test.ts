@@ -49,7 +49,7 @@ describe("OutboxDispatchActivities", () => {
 
   it("claimPendingRows delegates to repo.claimPending with the input's batch/lease", async () => {
     const rows: Array<OutboxRow> = [
-      { id: "r1", sink: "s", payload: {}, schemaVersion: 2, attempts: 0, traceContext: {}, runId: null, reviewId: null, provider: null, installationId: null },
+      { id: "r1", sink: "s", payload: {}, schemaVersion: 2, attempts: 0, traceContext: {}, runId: null, reviewId: null, provider: null, installationId: null, deliveryId: null },
     ];
     const claimPending = vi.fn(async () => rows);
     const acts = makeActs({ claimPending } as unknown as Partial<PostgresOutboxRepo>);

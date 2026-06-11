@@ -81,7 +81,15 @@ export class OutboxDispatchActivities {
    * transaction (a superseded run cannot drive the downstream durable mutation). Bootstrap-sink rows
    * (installation_reconcile / sync_code_owners, whose review_id is null) skip the guard block entirely.
    */
-  public readonly dispatchRow = async (input: DispatchRowInputV1): Promise<void> => {
+  public readonly dispatchRow = async (
+    input: DispatchRowInputV1,
+    // W1.9e — the dispatching OUTBOX ROW's delivery_id, threaded by the Postgres drain loop as a
+    // RUNTIME-ONLY 2nd argument: DispatchRowInputV1 is parity-locked to the frozen Python model
+    // (which carries no delivery_id field), so the wire contract stays byte-identical while the
+    // sinks gain the independent identity source for the destination-side cross-check. The
+    // Temporal proxy path never passes it → null, 1:1 with the frozen Python's SinkContext.
+    extras?: { deliveryId?: string | null },
+  ): Promise<void> => {
     // Boundary validation FIRST — restores the DispatchRowInputV1.superRefine tagged-union guard
     // (installation_id null IFF orphan_reason set) that the Python pydantic_data_converter re-runs on
     // activity-side deserialization. The TS stock JSON converter does not, so without this the BF-3
@@ -95,7 +103,7 @@ export class OutboxDispatchActivities {
     }
 
     const context: SinkContext = {
-      deliveryId: null, // DispatchRowInput carries no delivery_id field
+      deliveryId: extras?.deliveryId ?? null, // the wire contract carries no delivery_id (doc above)
       installationId: v.installation_id,
       runId: v.run_id,
     };

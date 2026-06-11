@@ -33,8 +33,16 @@ export type TemporalClientPort = {
    *  tenant-scope workflow starts (the workflow input payload already carries whatever tenant
    *  identity the handler needs) — but the cutover BackgroundJobsTemporalPort persists it onto the
    *  enqueued core.background_jobs row, so the tenancy column does not silently degrade to NULL
-   *  when the outbox sinks stop dispatching through Temporal. */
-  startWorkflow(call: StartWorkflowCall, installationId?: string | null): Promise<string>;
+   *  when the outbox sinks stop dispatching through Temporal.
+   *
+   *  `deliveryId` (W1.9e — the CS4.1 review-enqueue idempotency slice generalized): the dispatching
+   *  outbox ROW's webhook delivery id (SinkContext.deliveryId). Temporal-backed implementations
+   *  IGNORE it; the cutover BackgroundJobsTemporalPort uses it as the INDEPENDENT identity source
+   *  for the review-route enqueue cross-check (row delivery_id vs payload delivery_id — the
+   *  producer stamps one value on both, so a divergence is a drifted/poisoned producer and
+   *  dead-letters permanently). null/omitted = the row carried none (the payload's own value
+   *  remains authoritative). */
+  startWorkflow(call: StartWorkflowCall, installationId?: string | null, deliveryId?: string | null): Promise<string>;
   /** Cancel a running workflow by ID. No-op if already finished / missing. */
   cancelWorkflow(args: { workflowId: string }): Promise<void>;
   /** Send a signal to a running workflow. */

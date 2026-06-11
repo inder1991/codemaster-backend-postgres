@@ -51,10 +51,12 @@ import { cancellableSleep } from "./clock_async.js";
  *  OutboxDispatchActivities satisfy it structurally (buildBackgroundRunner wires them; tests
  *  substitute a recording dispatchRow). markPermanentlyFailed (RC7) is LOOP-ONLY — the Temporal
  *  workflow proxies just the first 4 (its generic catch predates the taxonomy and retires with it
- *  in Phase 4). */
+ *  in Phase 4). dispatchRow's `extras` (W1.9e) is equally LOOP-ONLY: the OUTBOX ROW's delivery_id,
+ *  threaded OUTSIDE the parity-locked DispatchRowInputV1 wire shape (the frozen Python model has
+ *  no delivery_id field) so the sinks can run the destination-side identity cross-check. */
 export type OutboxActivityFns = {
   claimPendingRows(input: ClaimPendingRowsInputV1): Promise<Array<OutboxRow>>;
-  dispatchRow(input: DispatchRowInputV1): Promise<void>;
+  dispatchRow(input: DispatchRowInputV1, extras?: { deliveryId?: string | null }): Promise<void>;
   markDispatched(input: MarkDispatchedInputV1): Promise<void>;
   markAttemptFailed(input: MarkAttemptFailedInputV1): Promise<void>;
   markPermanentlyFailed(input: MarkPermanentlyFailedInputV1): Promise<void>;
@@ -141,21 +143,26 @@ export class OutboxDispatcherLoop {
 
     for (const row of rows) {
       try {
-        await this.o.activities.dispatchRow({
-          schema_version: 2,
-          row_id: row.id,
-          sink: row.sink,
-          payload: row.payload,
-          trace_context: row.traceContext as Record<string, string>,
-          run_id: row.runId,
-          review_id: row.reviewId,
-          provider: row.provider,
-          installation_id: row.installationId,
-          // Tagged-union: a null installation_id MUST carry orphan_reason='bootstrap_sink' (the
-          // DispatchRow contract validator). Review-causal rows always have a UUID installation_id
-          // → orphan_reason null. (1:1 with the workflow body.)
-          orphan_reason: row.installationId === null ? "bootstrap_sink" : null,
-        });
+        await this.o.activities.dispatchRow(
+          {
+            schema_version: 2,
+            row_id: row.id,
+            sink: row.sink,
+            payload: row.payload,
+            trace_context: row.traceContext as Record<string, string>,
+            run_id: row.runId,
+            review_id: row.reviewId,
+            provider: row.provider,
+            installation_id: row.installationId,
+            // Tagged-union: a null installation_id MUST carry orphan_reason='bootstrap_sink' (the
+            // DispatchRow contract validator). Review-causal rows always have a UUID installation_id
+            // → orphan_reason null. (1:1 with the workflow body.)
+            orphan_reason: row.installationId === null ? "bootstrap_sink" : null,
+          },
+          // W1.9e: the ROW's delivery_id rides OUTSIDE the parity-locked contract (type doc above)
+          // → SinkContext.deliveryId → the destination identity cross-check.
+          { deliveryId: row.deliveryId },
+        );
         await this.o.activities.markDispatched({ row_id: row.id });
       } catch (e) {
         // RC7 — sink error taxonomy (cutover-safety CS4.2; mirrors the background runner's W4a.1

@@ -60,7 +60,10 @@ export function makeTemporalWorkflowStartHandler(port: TemporalClientPort): Sink
       // BackgroundJobsTemporalPort persists it onto the enqueued core.background_jobs row. A null
       // context installationId (the bootstrap-sink rows, e.g. installation_reconcile) stays
       // platform-scoped (NULL) by design.
-      await port.startWorkflow(call, context.installationId ?? null);
+      // W1.9e: the row's delivery_id rides as the 3rd param — the cutover port's review route
+      // cross-checks it against the payload's delivery_id (the destination-side identity check);
+      // Temporal-backed ports ignore it.
+      await port.startWorkflow(call, context.installationId ?? null, context.deliveryId ?? null);
     } catch (e) {
       if (e instanceof WorkflowAlreadyStarted) {
         throw new PermanentSinkError(`workflow already started: ${e.message}`);
