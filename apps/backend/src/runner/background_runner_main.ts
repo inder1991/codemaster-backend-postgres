@@ -33,6 +33,7 @@ import { OutboxDispatcherLoop } from "./outbox_dispatcher_loop.js";
 import { RunnerLoop, runOneJob, type JobHandler, type RunOutcome } from "./review_job_runner.js";
 import { runReviewJob } from "./review_job_shell.js";
 import { ReviewJobsRepo } from "./review_jobs_repo.js";
+import { assertRoutedWorkflowTypesHaveConsumers } from "./routed_consumers_check.js";
 import { recordRunnerLoopCrashed } from "./runner_metrics.js";
 import { SchedulerLoop, pollAndEnqueue } from "./scheduler.js";
 
@@ -592,6 +593,19 @@ export async function runBackgroundRunner(mode: BackgroundRunnerMode): Promise<v
   // ports + supersede read over getPool(dsn); the ReviewJobsRepo reaper's raw-pg transaction pool) —
   // the SAME shared ADR-0062 pool `db` rides on, never a second pool.
   const handles = buildBackgroundRunner({ db, clock, config, shadow, dsn });
+
+  // CS2.2 FAIL-LOUD boot self-check (closes audit C6/OC4: never enqueue into a table nothing
+  // drains): AFTER the runtime is built, BEFORE any loop starts / sink is wired / schedule is
+  // seeded, assert EVERY workflow_type the cutover routes has a consumer in THIS process — a
+  // registered HandlerRegistry handler for every WORKFLOW_TYPE_TO_JOB_TYPE value, and the CS2.1
+  // review loop for `reviewPullRequest` (required in postgres mode; OMITTED BY DESIGN in shadow —
+  // the documented observed-not-consumed exception, see routed_consumers_check.ts). A gap throws
+  // here naming every missing consumer, so a mis-composed runner refuses to serve.
+  assertRoutedWorkflowTypesHaveConsumers({
+    registry: handles.registry,
+    reviewLoopBooted: handles.reviewLoop !== undefined,
+    shadow,
+  });
 
   // Wire the event-driven outbox sinks onto the Postgres-enqueue port BEFORE the drain loop starts
   // (see wireOutboxSinks — CS1.1: always the BackgroundJobsTemporalPort; Temporal is absent in
