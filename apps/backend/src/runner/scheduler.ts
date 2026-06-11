@@ -148,7 +148,16 @@ export async function pollAndEnqueue(
       return 0;
     }
     let enqueued = 0;
-    for (const row of due.rows) {
+    for (const [i, row] of due.rows.entries()) {
+      // CS7 (RT4/M13): each schedule's enqueue+advance runs in its OWN SAVEPOINT. The W4a.2 catch
+      // alone contains pure-JS poisons, but a FAILED STATEMENT (a trigger/constraint rejecting the
+      // advance UPDATE) aborts the whole surrounding transaction — every other schedule's advance
+      // would roll back at commit and the entire due batch re-ticks next poll (cascade-retick).
+      // ROLLBACK TO SAVEPOINT un-aborts the transaction so the poisoned schedule rolls back ALONE
+      // and every healthy advance still commits in the same pass. (The savepoint name is derived
+      // from the loop index — never from row data.)
+      const savepoint = `cs7_schedule_${i}`;
+      await sql.raw(`SAVEPOINT ${savepoint}`).execute(trx);
       try {
         // Validate the cadence FIRST ({@link computeNextRun} is pure — throws on a poison spec
         // BEFORE any side effect, so a bad schedule enqueues NOTHING), then enqueue (on the repo's
@@ -161,11 +170,15 @@ export async function pollAndEnqueue(
         await sql`UPDATE core.scheduled_jobs
             SET next_run_at = ${nextRunAt}, last_enqueued_at = ${enqueuedAt}, updated_at = ${enqueuedAt}
           WHERE schedule_id = ${row.schedule_id}`.execute(trx);
+        await sql.raw(`RELEASE SAVEPOINT ${savepoint}`).execute(trx);
         enqueued += 1;
       } catch (e) {
-        // PER-SCHEDULE ISOLATION (W4a.2): skip THIS schedule, never the pass. Left unadvanced → it
-        // stays due and is re-attempted (and re-isolated) next poll; a permanently-bad spec logs on
-        // every poll until an operator fixes/disables it, but never blocks the healthy schedules.
+        // PER-SCHEDULE ISOLATION (W4a.2 + CS7): un-abort the transaction, then skip THIS schedule,
+        // never the pass. Left unadvanced → it stays due and is re-attempted (and re-isolated) next
+        // poll; a permanently-bad spec logs on every poll until an operator fixes/disables it, but
+        // never blocks the healthy schedules. (The enqueue landed on the repo's OWN connection, so
+        // the savepoint rollback cannot un-enqueue it — the next pass's re-enqueue dedups onto it.)
+        await sql.raw(`ROLLBACK TO SAVEPOINT ${savepoint}`).execute(trx);
         recordSchedulerScheduleError();
         console.warn(
           `scheduler: schedule ${row.schedule_id} failed and was skipped (left unadvanced; ` +
