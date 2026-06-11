@@ -119,6 +119,9 @@ import type { ApplyArbitrationInputV1, Tier2Pair } from "#contracts/apply_arbitr
 import type { DiffChunkV1 } from "#contracts/diff_chunking.v1.js";
 import type { ChangedLineRanges } from "./activity_ports.js";
 import type { AggregatedFindingsV1 } from "#contracts/aggregated_findings.v1.js";
+// TYPE-ONLY — the W1.9a (M2) classify fail-open fallback constructs a typed FileRoutingV1 literal
+// (erased at emit; no runtime zod edge into the workflow bundle).
+import type { FileRoutingV1 } from "#contracts/file_routing.v1.js";
 import type { CarryForwardSelectionV1 } from "#contracts/carry_forward.v1.js";
 import type { ReviewContextV1 } from "#contracts/review_context.v1.js";
 import type { ReviewChunkResponseV1 } from "#contracts/review_chunk_response.v1.js";
@@ -457,12 +460,34 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
       await ctx.claimCheck();
     }
 
-    // Step 2 — classify.
-    const routing = await ports.classify({
+    // Step 2 — classify. W1.9a (M2): wrapped in a fail-open stageOutcome — a classify ACTIVITY throw
+    // (FS fault, pathological input) must not kill an otherwise-deliverable review. Fallback: treat
+    // EVERY changed file as a review file (the M2 fix), with a conservative EMPTY sandbox set (no
+    // static analysis on unclassified files) and no synthesized per-file classifier_failures — the
+    // stage-level `classify_failed` marker (appended by stageOutcome) is the degradation signal.
+    const routingOutcome = await stageOutcome(
+      "classify",
+      {
+        logger: ctx.logger ?? NULL_LOGGER,
+        degradationNotes: degradationAdapter(state),
+        headSha,
+        runId,
+      },
+      async () =>
+        ports.classify({
+          schema_version: 1,
+          workspace_path: workspaceRoot,
+          files: [...repo.changedPaths],
+        }),
+    );
+    const routing: FileRoutingV1 = routingOutcome ?? {
       schema_version: 1,
-      workspace_path: workspaceRoot,
-      files: [...repo.changedPaths],
-    });
+      review_files: [...repo.changedPaths],
+      sandbox_files: [],
+      skip_files: [],
+      classifications: [],
+      classifier_failures: [],
+    };
     const failureRatio =
       routing.classifier_failures.length / Math.max(1, repo.changedPaths.length);
     if (failureRatio > CLASSIFIER_FAILURE_THRESHOLD) {
@@ -691,14 +716,34 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
     // Step 6 — dedup linter ↔ LLM. Dispatched as the dedupFindings ACTIVITY: the semantic stage embeds over
     // the network (the platform Qwen consumer), which the workflow sandbox forbids. The activity holds the
     // live EmbeddingsPort and fails open to exact-only dedup (semantic_skipped=true) on embedder outage.
+    // W1.9a (M2): the DISPATCH itself is additionally wrapped in a fail-open stageOutcome — a dedup throw
+    // AFTER the expensive fan-out must not discard every chunk's paid-for LLM findings. Fallback: pass the
+    // raw `llmFindings` through unchanged (the M2 fix: "skip dedup and post the raw findings"); the
+    // `dedup_failed` marker is the degradation signal.
     const linterFindings = sa.findings;
-    const deduped = await ports.dedupFindings({
-      schema_version: 1,
-      linter_findings: [...linterFindings],
-      llm_findings: [...llmFindings],
-    });
-    if (deduped.semantic_skipped) {
-      state.degradation.add("dedup semantic stage skipped; exact-match dedupe still applied");
+    const dedupOutcome = await stageOutcome(
+      "dedup",
+      {
+        logger: ctx.logger ?? NULL_LOGGER,
+        degradationNotes: degradationAdapter(state),
+        headSha,
+        runId,
+      },
+      async () =>
+        ports.dedupFindings({
+          schema_version: 1,
+          linter_findings: [...linterFindings],
+          llm_findings: [...llmFindings],
+        }),
+    );
+    let dedupedFindings: ReadonlyArray<ReviewFindingV1>;
+    if (dedupOutcome !== undefined) {
+      dedupedFindings = dedupOutcome.findings;
+      if (dedupOutcome.semantic_skipped) {
+        state.degradation.add("dedup semantic stage skipped; exact-match dedupe still applied");
+      }
+    } else {
+      dedupedFindings = llmFindings;
     }
 
     // Claim-check BEFORE aggregate (Python `_aggregate` boundary: `await _abort_if_claim_lost()` at the top
@@ -711,11 +756,38 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
     // Step 7 — aggregate. (`let`: the M-A3 cap + config-notice append below, Step 7.2's policy post-filter,
     // Step 7.5's citation_validate, and the Step 7.7 arbitration-result derivation reassign `aggregated` as
     // the pipeline narrows the findings.)
-    let aggregated: AggregatedFindingsV1 = await ports.aggregate({
+    // W1.9a (M2): wrapped in a fail-open stageOutcome — an aggregate throw (e.g. a ZodError on one
+    // malformed finding) after the paid-for fan-out must not post nothing. Fallback: a MINIMAL
+    // AggregatedFindingsV1 carrying the deduped findings verbatim (no ranking, no PER_REVIEW_CAP —
+    // the M-A3 MAX_INLINE_FINDINGS belt-and-suspenders cap below still bounds the GitHub post) with
+    // zeroed dedupe stats; the `aggregate_failed` marker is the degradation signal.
+    const aggregateOutcome = await stageOutcome(
+      "aggregate",
+      {
+        logger: ctx.logger ?? NULL_LOGGER,
+        degradationNotes: degradationAdapter(state),
+        headSha,
+        runId,
+      },
+      async () =>
+        ports.aggregate({
+          schema_version: 1,
+          findings: [...dedupedFindings],
+          policy_revision: pr.policyRevision,
+        }),
+    );
+    let aggregated: AggregatedFindingsV1 = aggregateOutcome ?? {
       schema_version: 1,
-      findings: [...deduped.findings],
+      findings: [...dedupedFindings],
+      dedupe_stats: {
+        input_count: dedupedFindings.length,
+        exact_dropped: 0,
+        semantic_merged: 0,
+        capped: 0,
+        semantic_skipped: false,
+      },
       policy_revision: pr.policyRevision,
-    });
+    };
 
     // M-A3 inline-findings cap (Python `_aggregate` closure, review_pull_request.py:1986). GitHub's PR
     // Review API rejects > 300 inline comments; cap `aggregated.findings` to MAX_INLINE_FINDINGS. This is the

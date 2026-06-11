@@ -74,6 +74,11 @@ export const STAGE_NAMES = new Set<string>([
   "fetch_manifest_snapshots",
   "parse_manifest_dependencies",
   "load_parent_review_findings",
+  // W1.9a (M2): the dedupFindings ACTIVITY dispatch is stageOutcome-wrapped in the TS orchestrator
+  // (fail-open: a dedup throw after the expensive fan-out degrades to "post the raw findings" instead
+  // of discarding every chunk's paid-for LLM work). The Python ran dedup inline inside the aggregate
+  // path and never dispatched it through stage_outcome, so its frozenset has no such stage.
+  "dedup",
 ]);
 
 /** A stage name guaranteed (at runtime) to be in STAGE_NAMES. The branded check happens in stageOutcome. */
