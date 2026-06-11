@@ -29,6 +29,9 @@ export const EXPECTED_MIGRATIONS = [
   "0040_scheduled_jobs",
   "0041_background_jobs_deadletter_cols",
   "0042_background_jobs_state_and_indexes",
+  // 0043 is reserved by telemetry.cost_journal (parallel feat/phase0-cost-journal branch) — at merge
+  // time it slots in here; this branch deliberately numbered its migration 0044 to avoid collision.
+  "0044_review_jobs_claim_indexes",
 ] as const satisfies ReadonlyArray<string>;
 
 /** The DB's applied migration sequence diverges from the image's compiled-in expectation — the pod
