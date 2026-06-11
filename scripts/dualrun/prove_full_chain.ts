@@ -1,22 +1,41 @@
-// "Prove the FULL chain" — the operator-gated live dual-run of the REAL review pipeline.
+// "Prove the FULL chain" — the operator-gated live smoke of the REAL review pipeline, in EITHER runtime.
 //
 // Unlike scripts/dualrun/prove_pipe.ts (which dispatches the thin `reviewSkeleton` spine and proves only
-// worker→activity→DataConverter→Postgres→stale-write-guard), this dispatches the REAL `reviewPullRequest`
-// workflow — driving the entire chain: gate → placeholder → enrich → allocate → clone → classify →
-// [chunk‖static-analysis] → carry-forward → retrieve → fan-out(review via the LLM) → dedup → aggregate →
-// post-filter → citation → persist → arbitration → walkthrough → [post‖check] → fix-prompt → lifecycle →
-// finalize → cleanup → release-mutex. See docs/runbooks/2026-06-06-orchestrator-live-dual-run.md.
+// worker→activity→DataConverter→Postgres→stale-write-guard), this drives the entire chain: gate →
+// placeholder → enrich → allocate → clone → classify → [chunk‖static-analysis] → carry-forward →
+// retrieve → fan-out(review via the LLM) → dedup → aggregate → post-filter → citation → persist →
+// arbitration → walkthrough → [post‖check] → fix-prompt → lifecycle → finalize → cleanup → release-mutex.
+// See docs/runbooks/2026-06-06-orchestrator-live-dual-run.md.
+//
+// RUNTIME MODE (CS1.1 cutover parity — the SAME smoke proves BOTH worlds):
+//   * CODEMASTER_RUNTIME_MODE unset/"temporal" — the pre-cutover path: dispatch via the Temporal
+//     Client to a polling worker (start apps/.../worker/main.ts first). @temporalio/client is loaded
+//     LAZILY in this branch only.
+//   * CODEMASTER_RUNTIME_MODE="postgres" — the TEMPORAL-FREE path: the dispatch goes through the REAL
+//     production cutover spine — PostgresOutboxRepo.appendReviewDispatch (the byte-shape the webhook
+//     emitter writes) → wireOutboxSinks → drainOutboxOnce (the AD-4 guard + PENDING→RUNNING flip +
+//     ReviewJobsRepo.enqueue with delivery_id, CS4.1) → runReviewCycleOnce (claim → the REAL
+//     runReviewJob shell → orchestrate → settle). ZERO @temporalio imports execute in this mode.
 //
 // Because the chain CLONES a real repo and REVIEWS via the LLM, the operator MUST point it at a real PR:
 // a GitHub App installation that can read the repo + a head_sha that exists. Those come from env (below).
-// The worker must already be polling the dualrun task queue (start apps/.../worker/main.ts first) with the
-// same DSN + a seeded core.llm_provider_settings (preflight #4 in the runbook).
+// Both modes additionally need the worker-grade env (Vault GitHub App creds + a seeded
+// core.llm_provider_settings + embedder vars; preflight #4 in the runbook).
 //
 // node:crypto is fine here — scripts/ is outside the clock/random gate's scope.
 import { randomInt, randomUUID } from "node:crypto";
 
-import { Client, Connection } from "@temporalio/client";
+import { Kysely, PostgresDialect } from "kysely";
 import { Pool } from "pg";
+
+import { PostgresOutboxRepo } from "#backend/domain/repos/outbox_repo.js";
+import {
+  buildBackgroundRunner,
+  wireOutboxSinks,
+} from "#backend/runner/background_runner_main.js";
+
+import { WallClock } from "#platform/clock.js";
+import { disposePool } from "#platform/db/database.js";
 
 import {
   ReviewPullRequestPayloadV1,
@@ -24,6 +43,8 @@ import {
 } from "#contracts/review_pull_request.v1.js";
 
 // ── Config ───────────────────────────────────────────────────────────────────────────────────────────
+const RUNTIME_MODE: "temporal" | "postgres" =
+  process.env.CODEMASTER_RUNTIME_MODE === "postgres" ? "postgres" : "temporal";
 const DSN = process.env.CODEMASTER_PG_CORE_DSN ?? "";
 const TEMPORAL_ADDRESS = process.env.TEMPORAL_ADDRESS ?? "localhost:7233";
 const NAMESPACE = process.env.TEMPORAL_NAMESPACE ?? "dualrun";
@@ -151,19 +172,18 @@ function buildPayload(seed: Seed): ReviewPullRequestPayloadV1 {
   });
 }
 
-async function main(): Promise<void> {
-  validateConfig();
-  const pool = new Pool({ connectionString: DSN, max: 4 });
+// ── Dispatch — temporal mode (the pre-cutover path; @temporalio loaded LAZILY, only here) ────────────
+async function runViaTemporal(
+  payload: ReviewPullRequestPayloadV1,
+  seed: Seed,
+): Promise<{ accepted: boolean; resultFindingsCount: number | null }> {
+  const { Client, Connection } = await import("@temporalio/client");
   const connection = await Connection.connect({ address: TEMPORAL_ADDRESS });
   const client = new Client({ connection, namespace: NAMESPACE });
   try {
-    const seed = await seedTenant(pool);
-    const payload = buildPayload(seed);
-
     const workflowId = `review-pr-dualrun-${seed.prId}`;
     process.stdout.write(
-      `dispatching reviewPullRequest (workflowId=${workflowId}, ns=${NAMESPACE}, tq=${TASK_QUEUE})\n` +
-        `  repo=${GH_OWNER}/${GH_REPO} pr#=${PR_NUMBER} head=${HEAD_SHA.slice(0, 12)} install=${GH_INSTALLATION_ID}\n`,
+      `dispatching reviewPullRequest (workflowId=${workflowId}, ns=${NAMESPACE}, tq=${TASK_QUEUE})\n`,
     );
     const handle = await client.workflow.start("reviewPullRequest", {
       taskQueue: TASK_QUEUE,
@@ -176,8 +196,114 @@ async function main(): Promise<void> {
       `\nworkflow result: status=${result.status} findings_count=${result.findings_count} ` +
         `publication_outcome=${result.publication_outcome ?? "none"}\n`,
     );
+    return { accepted: result.status === "accepted", resultFindingsCount: result.findings_count };
+  } finally {
+    await connection.close();
+  }
+}
 
-    // ── Verify the side effects landed ───────────────────────────────────────────────────────────────
+// ── Dispatch — postgres mode (the TEMPORAL-FREE cutover spine, byte-identical to production) ─────────
+async function runViaPostgresRunner(
+  payload: ReviewPullRequestPayloadV1,
+  seed: Seed,
+): Promise<{ accepted: boolean; resultFindingsCount: number | null }> {
+  const clock = new WallClock();
+  const kpool = new Pool({ connectionString: DSN, max: 6 });
+  const kdb = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: kpool }) });
+  try {
+    // (1) The PRODUCER's byte-shape: the same outer envelope github_webhook_persistence.ts
+    // buildOuterPayload stamps, appended through the same repo fn (sink='temporal_workflow_start',
+    // run_id-anchored so the drain's AD-4 guard + PENDING→RUNNING flip fire exactly as live).
+    const envelope = {
+      workflow_type: "reviewPullRequest",
+      workflow_id: `review/${payload.installation_id}/${payload.repository_id}/${payload.pr_number}`,
+      task_queue: "review-default",
+      args: [payload],
+      id_reuse_policy: "ALLOW_DUPLICATE",
+      id_conflict_policy: "USE_EXISTING",
+      execution_timeout_seconds: 1800,
+      run_timeout_seconds: 1800,
+    };
+    await new PostgresOutboxRepo({ clock }).appendReviewDispatch({
+      db: kdb,
+      runId: seed.runId,
+      payload: envelope,
+      schemaVersion: 2,
+      installationId: seed.installationId,
+      deliveryId: payload.delivery_id,
+      traceContext: null,
+    });
+
+    // (2) The CONSUMER: the real composed runtime — sinks wired onto the Postgres port (CS1.1),
+    // one outbox drain (dispatchRow guard → ReviewJobsRepo.enqueue with delivery_id, CS4.1), then
+    // one review cycle (claim → the REAL runReviewJob shell → orchestrate → settle). maxRuntimeS
+    // matches the Temporal run_timeout (1800s) — a real clone+LLM review takes minutes.
+    wireOutboxSinks(kdb);
+    const handles = buildBackgroundRunner({
+      db: kdb,
+      clock,
+      dsn: DSN,
+      config: {
+        owner: `prove-full-chain-${randomUUID().slice(0, 8)}`,
+        leaseS: 120,
+        heartbeatS: 15,
+        maxRuntimeS: 1800,
+        idleS: 5,
+        pollIntervalS: 600,
+        outboxIdleS: 600,
+        outboxMaxAttempts: 5,
+      },
+    });
+    const drained = await handles.drainOutboxOnce();
+    process.stdout.write(`outbox drained: ${drained} row(s) → review_jobs (Temporal-free dispatch)\n`);
+
+    // The review loop is composed in every non-shadow build (CS2.1); its absence is a wiring bug.
+    const runReviewCycleOnce = handles.runReviewCycleOnce;
+    if (runReviewCycleOnce === undefined) {
+      throw new Error("buildBackgroundRunner composed NO review loop — postgres mode requires it (CS2.1)");
+    }
+    let outcome = "idle";
+    for (let attempt = 0; attempt < 30 && outcome === "idle"; attempt++) {
+      const cycle = await runReviewCycleOnce();
+      outcome = cycle.outcome;
+      if (outcome === "idle") {
+        await new Promise((resolve) => setTimeout(resolve, 1000)); // run_after may be a beat away
+      }
+    }
+    process.stdout.write(`review cycle outcome: ${outcome}\n`);
+
+    const job = await kpool.query<{ state: string; attempts: number; delivery_id: string | null }>(
+      `SELECT state, attempts, delivery_id FROM core.review_jobs WHERE run_id = $1`,
+      [seed.runId],
+    );
+    process.stdout.write(
+      `core.review_jobs: state=${job.rows[0]?.state ?? "<missing>"} attempts=${job.rows[0]?.attempts ?? "-"} ` +
+        `delivery_id=${job.rows[0]?.delivery_id ?? "<null>"}\n`,
+    );
+    // No workflow return envelope exists in this runtime — the persisted rows ARE the result; the
+    // shared verification below reads them. Acceptance = the job settled done.
+    return { accepted: outcome === "done", resultFindingsCount: null };
+  } finally {
+    await kdb.destroy();
+    await disposePool(DSN); // the shell's in-process ports rode the shared ADR-0062 pool
+  }
+}
+
+async function main(): Promise<void> {
+  validateConfig();
+  const pool = new Pool({ connectionString: DSN, max: 4 });
+  try {
+    const seed = await seedTenant(pool);
+    const payload = buildPayload(seed);
+    process.stdout.write(
+      `mode=${RUNTIME_MODE} repo=${GH_OWNER}/${GH_REPO} pr#=${PR_NUMBER} head=${HEAD_SHA.slice(0, 12)} ` +
+        `install=${GH_INSTALLATION_ID}\n`,
+    );
+
+    const { accepted, resultFindingsCount } =
+      RUNTIME_MODE === "postgres" ? await runViaPostgresRunner(payload, seed) : await runViaTemporal(payload, seed);
+
+    // ── Verify the side effects landed (runtime-agnostic: pure DB reads) ─────────────────────────────
     const findings = await pool.query<{ n: string }>(
       `SELECT count(*) AS n FROM core.review_findings WHERE pr_id = $1 AND installation_id = $2`,
       [seed.prId, seed.installationId],
@@ -186,8 +312,8 @@ async function main(): Promise<void> {
       `SELECT count(*) AS n FROM core.review_walkthroughs WHERE review_id = $1`,
       [seed.reviewId],
     );
-    const run = await pool.query<{ status: string }>(
-      `SELECT status FROM core.review_runs WHERE run_id = $1`,
+    const run = await pool.query<{ status: string | null; lifecycle_state: string | null }>(
+      `SELECT status, lifecycle_state FROM core.review_runs WHERE run_id = $1`,
       [seed.runId],
     );
     const milestones = await pool.query<{ event_type: string }>(
@@ -197,36 +323,36 @@ async function main(): Promise<void> {
 
     const findingsCount = Number(findings.rows[0]?.n ?? 0);
     const walkthroughCount = Number(walkthrough.rows[0]?.n ?? 0);
-    const runStatus = run.rows[0]?.status ?? "<missing>";
+    // lifecycle_state is the runner-era authority (finalizeReviewRun RUNNING→COMPLETED); the legacy
+    // status column remains the temporal-era read.
+    const runStatus = run.rows[0]?.lifecycle_state ?? run.rows[0]?.status ?? "<missing>";
     const milestoneTypes = milestones.rows.map((r) => r.event_type);
 
     process.stdout.write(`core.review_findings rows:    ${findingsCount}\n`);
     process.stdout.write(`core.review_walkthroughs rows: ${walkthroughCount}\n`);
-    process.stdout.write(`core.review_runs.status:       ${runStatus}\n`);
+    process.stdout.write(`core.review_runs state:        ${runStatus}\n`);
     process.stdout.write(`audit.workflow_events:         ${milestoneTypes.join(" → ")}\n`);
 
-    // Acceptance: the workflow accepted the review, the run finished cleanly (no zombie RUNNING), and the
-    // persisted-finding count matches the result's findings_count. findings_count may legitimately be 0
-    // for a clean PR — the chain still PASSED (it composed end-to-end); we only FAIL on a non-accepted
-    // status, a non-COMPLETED run, or a persisted/result count mismatch.
-    const accepted = result.status === "accepted";
+    // Acceptance: the runtime accepted the review, the run finished cleanly (no zombie RUNNING), and —
+    // when the runtime returns a result envelope (temporal mode) — the persisted-finding count matches
+    // it. findings_count may legitimately be 0 for a clean PR; the chain still PASSED.
     const runDone = runStatus === "COMPLETED";
-    const countsMatch = findingsCount === result.findings_count;
+    const countsMatch = resultFindingsCount === null || findingsCount === resultFindingsCount;
     const ok = accepted && runDone && countsMatch;
     if (ok) {
       process.stdout.write(
-        `\nFULL-CHAIN DUAL-RUN PASS — the real reviewPullRequest workflow composed end-to-end against ` +
-          `live PG + Temporal + the LLM (${findingsCount} finding(s) persisted, run COMPLETED).\n`,
+        `\nFULL-CHAIN PASS [mode=${RUNTIME_MODE}] — the real reviewPullRequest pipeline composed ` +
+          `end-to-end against live PG + ${RUNTIME_MODE === "postgres" ? "the Postgres runner (NO Temporal)" : "Temporal"} ` +
+          `+ the LLM (${findingsCount} finding(s) persisted, run COMPLETED).\n`,
       );
     } else {
       process.stderr.write(
-        `\nFULL-CHAIN DUAL-RUN FAIL — accepted=${accepted} runDone=${runDone} ` +
-          `countsMatch=${countsMatch} (persisted=${findingsCount} result=${result.findings_count})\n`,
+        `\nFULL-CHAIN FAIL [mode=${RUNTIME_MODE}] — accepted=${accepted} runDone=${runDone} ` +
+          `countsMatch=${countsMatch} (persisted=${findingsCount} result=${resultFindingsCount ?? "n/a"})\n`,
       );
       process.exitCode = 1;
     }
   } finally {
-    await connection.close();
     await pool.end();
   }
 }
