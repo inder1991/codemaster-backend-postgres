@@ -161,6 +161,9 @@ type DueScheduleRow = {
   cadence_kind: string;
   cadence_spec: string;
   input: Record<string, unknown>;
+  /** The instant the row became due — read for the OM11 cadence-lateness signal (the tick instant
+   *  minus this is the lateness) as well as being the advance UPDATE's predecessor value. */
+  next_run_at: Date;
 };
 
 /**
@@ -202,7 +205,7 @@ export async function pollAndEnqueue(
     const now = o.clock.now();
     // core.scheduled_jobs is platform-global (no installation_id column) — no tenancy filter applies.
     const due = await sql<DueScheduleRow>`
-      SELECT schedule_id, job_type, cadence_kind, cadence_spec, input
+      SELECT schedule_id, job_type, cadence_kind, cadence_spec, input, next_run_at
         FROM core.scheduled_jobs
        WHERE enabled AND next_run_at <= ${now}
          FOR UPDATE SKIP LOCKED`.execute(trx);
@@ -261,11 +264,38 @@ export async function pollAndEnqueue(
         // between enqueue and advance leaves the row due, and the retrying pass's enqueue dedups
         // onto the active job (at-least-once + exactly-one-ACTIVE; module doc §3).
         const enqueuedAt = o.clock.now();
-        const nextRunAt = computeNextRun(CadenceKind.parse(row.cadence_kind), row.cadence_spec, enqueuedAt);
+        const cadenceKind = CadenceKind.parse(row.cadence_kind);
+        const nextRunAt = computeNextRun(cadenceKind, row.cadence_spec, enqueuedAt);
         await o.repo.enqueue({ jobType: row.job_type, payload: row.input, dedupKey: row.schedule_id });
         await sql`UPDATE core.scheduled_jobs
             SET next_run_at = ${nextRunAt}, last_enqueued_at = ${enqueuedAt}, updated_at = ${enqueuedAt}
           WHERE schedule_id = ${row.schedule_id}`.execute(trx);
+        // W3.8 (OM11) — cadence-lateness signal: a wedged/starved schedule must be visible at the
+        // SCHEDULE level (pre-OM11 only downstream symptoms — leaked mutexes, stuck runs — betrayed
+        // a scheduler outage / OC3 wedge). Lateness = this tick's instant minus the row's own
+        // next_run_at; the threshold is ONE FULL CADENCE (the due instant → its next computed
+        // instant), strictly greater — at least one whole cycle was missed, which a healthy poll
+        // loop (pollIntervalS ≪ cadence) can never produce. ONE structured WARN per late tick (the
+        // CS8 console-JSON idiom), emitted AFTER the tick's writes succeeded: pure observability —
+        // LOGS ONLY, deliberately no OTel (the OM11 gauge/alert rides the W3.9 SLO wave); it never
+        // gates the enqueue/advance, and an isolated-failed schedule warns via the W4a.2 path
+        // below instead.
+        const latenessMs = enqueuedAt.getTime() - row.next_run_at.getTime();
+        const cadenceMs =
+          computeNextRun(cadenceKind, row.cadence_spec, row.next_run_at).getTime() -
+          row.next_run_at.getTime();
+        if (latenessMs > cadenceMs) {
+          console.warn(
+            JSON.stringify({
+              event: "scheduler.cadence_late",
+              schedule_id: row.schedule_id,
+              job_type: row.job_type,
+              due_at: row.next_run_at.toISOString(),
+              lateness_s: Math.round(latenessMs / 1000),
+              cadence_s: Math.round(cadenceMs / 1000),
+            }),
+          );
+        }
         await sql.raw(`RELEASE SAVEPOINT ${savepoint}`).execute(trx);
         enqueued += 1;
       } catch (e) {
