@@ -59,8 +59,10 @@ import type { ReleaseWorkspaceInput } from "#contracts/release_workspace_input.v
 import type { GenerateWalkthroughInputV1 } from "#contracts/generate_walkthrough_input.v1.js";
 import type { PostCheckRunInputV1, PostedCheckRunV1 } from "#contracts/posted_check_run.v1.js";
 import type { DedupFindingsInputV1, DedupedFindingsV1 } from "#contracts/dedup_findings.v1.js";
-import type { LoadRepoConfigInputV1 } from "#contracts/load_repo_config.v1.js";
-import type { CodemasterConfigV1 } from "#contracts/codemaster_config.v1.js";
+import type {
+  LoadRepoConfigInputV1,
+  LoadRepoConfigResultV1,
+} from "#contracts/load_repo_config.v1.js";
 import type {
   ComputePolicyRulesInputV1,
   ComputedPolicyRulesV1,
@@ -154,7 +156,7 @@ export function makeActivityPorts(): ReviewActivityPorts {
   }>(toActivityOptions(RETRY_POLICIES.clone));
 
   const { loadRepoConfigActivity } = proxyActivities<{
-    loadRepoConfigActivity(input: LoadRepoConfigInputV1): Promise<CodemasterConfigV1>;
+    loadRepoConfigActivity(input: LoadRepoConfigInputV1): Promise<LoadRepoConfigResultV1>;
   }>(toActivityOptions(RETRY_POLICIES.loadRepoConfig));
 
   const { computePolicyRules } = proxyActivities<{

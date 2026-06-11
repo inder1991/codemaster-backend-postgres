@@ -19,6 +19,7 @@ import {
   resolveInternalRepositoryId,
 } from "#backend/ingest/_webhook_resolvers.js";
 import { supersedeRun } from "#backend/workflow/_supersede.js";
+import { CrossInstallationViolation } from "#backend/workspace/errors.js";
 
 import { TenancyPlugin } from "#platform/db/tenancy_plugin.js";
 import { FakeClock } from "#platform/clock.js";
@@ -199,6 +200,59 @@ describeDb("webhook persistence DB primitives (integration, disposable PG)", () 
       });
       expect(outcome.oldRunId).toBeNull();
       expect(outcome.wasSupersede).toBe(false);
+    } finally {
+      await cleanup(seed, reviewId);
+    }
+  });
+
+  // W4.2 [L10] — the BF-9 cross-installation fence must be ENFORCED on the webhook allocation path,
+  // not dormant. allocateRun knows the resolved internal installation_id (its caller resolved it from
+  // the webhook), so it MUST thread it into supersedeRun/flipCurrentRun as expectedInstallationId; a
+  // mismatch against the review's actual repo-chain tenancy is a CrossInstallationViolation, NOT a
+  // WARN-and-proceed.
+  it("allocateRun ENFORCES the BF-9 fence: a mismatched installation_id throws CrossInstallationViolation (L10)", async () => {
+    const seed = await seedTenant();
+    let reviewId: string | undefined;
+    try {
+      const prNumber = (uniqueBigint() % 9000) + 1;
+      reviewId = await db.transaction().execute((tx) =>
+        upsertReview(tx, { provider: "github", repoId: seed.githubRepoId, prNumber, providerPrId: "n1", prNodeId: "n1", branch: "main" }),
+      );
+      const rid = reviewId;
+      const foreignInstallationId = newUuid(); // NOT the tenant that owns the review's repo chain
+      const err = await db
+        .transaction()
+        .execute((tx) =>
+          allocateRun(tx, { reviewId: rid, installationId: foreignInstallationId, triggerType: "pr_opened", triggeredBy: null, provider: "github", deliveryId: "d-cross", clock: CLOCK }),
+        )
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
+      expect(err).toBeInstanceOf(CrossInstallationViolation);
+      // the rolled-back transaction must leave NO run row behind
+      const runs = await pool.query(`SELECT run_id FROM core.review_runs WHERE review_id = $1`, [rid]);
+      expect(runs.rows).toHaveLength(0);
+      expect(await currentRunId(rid)).toBeNull();
+    } finally {
+      await cleanup(seed, reviewId);
+    }
+  });
+
+  it("allocateRun with the MATCHING installation_id passes the BF-9 fence on both the fresh and supersede paths (L10)", async () => {
+    const seed = await seedTenant();
+    let reviewId: string | undefined;
+    try {
+      const prNumber = (uniqueBigint() % 9000) + 1;
+      const first = await db.transaction().execute(async (tx) => {
+        reviewId = await upsertReview(tx, { provider: "github", repoId: seed.githubRepoId, prNumber, providerPrId: "n1", prNodeId: "n1", branch: "main" });
+        return allocateRun(tx, { reviewId, installationId: seed.installationId, triggerType: "pr_opened", triggeredBy: null, provider: "github", deliveryId: "d1", clock: CLOCK });
+      });
+      const second = await db.transaction().execute((tx) =>
+        allocateRun(tx, { reviewId: reviewId!, installationId: seed.installationId, triggerType: "pr_synchronize", triggeredBy: null, provider: "github", deliveryId: "d2", clock: CLOCK }),
+      );
+      expect(second.supersededRunId).toBe(first.newRunId);
+      expect(await currentRunId(reviewId!)).toBe(second.newRunId);
     } finally {
       await cleanup(seed, reviewId);
     }

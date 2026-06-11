@@ -77,7 +77,7 @@ export async function upsertInstallation(
   const now = args.clock.now();
 
   // Read prior state for the audit before/after (1:1 with the Python SELECT).
-  // tenant:exempt reason=installation-identity-edge-keys-on-github-surrogate follow_up=FOLLOW-UP-gf3-error-mode
+  // tenant:exempt reason=installation-identity-edge-keys-on-github-surrogate follow_up=PERMANENT-EXEMPTION-global-identity-tables
   const prior = await sql<{
     installation_id: string;
     account_login: string;
@@ -166,12 +166,13 @@ export async function ensureSenderUser(
     adUserId = null;
   } else {
     const principal = `${args.senderLogin}@acme.com`;
-    // tenant:exempt reason=ad-user-principal-lookup-not-tenant-scoped follow_up=FOLLOW-UP-gf3-error-mode
+    // tenant:exempt reason=ad-user-principal-lookup-not-tenant-scoped follow_up=PERMANENT-EXEMPTION-global-identity-tables
     const found = await sql<{ ad_user_id: string }>`
       SELECT ad_user_id FROM core.ad_users WHERE principal_name = ${principal}
     `.execute(tx);
     const existing = found.rows[0]?.ad_user_id;
     if (existing === undefined) {
+      // tenant:exempt reason=ad_users-principal-directory-no-installation_id-column follow_up=PERMANENT-EXEMPTION-global-identity-tables
       const ins = await sql<{ ad_user_id: string }>`
         INSERT INTO core.ad_users
           (ad_user_id, principal_name, display_name, last_synced_at)
@@ -261,7 +262,7 @@ export async function upsertRepository(
   const now = args.clock.now();
 
   // Prior-state read (1:1 with the Python SELECT). Keys on github_repo_id (globally unique).
-  // tenant:exempt reason=PK-lookup-on-globally-unique-github-repo-id follow_up=FOLLOW-UP-gf3-error-mode
+  // tenant:exempt reason=PK-lookup-on-globally-unique-github-repo-id follow_up=PERMANENT-EXEMPTION-global-github-keys
   const prior = await sql<{
     repository_id: string;
     full_name: string;
@@ -336,7 +337,7 @@ export async function removeRepository(
   tx: Kysely<unknown>,
   args: { githubRepoId: number; clock: Clock },
 ): Promise<RemoveRepositoryResult> {
-  // tenant:exempt reason=PK-lookup-on-globally-unique-github-repo-id follow_up=FOLLOW-UP-gf3-error-mode
+  // tenant:exempt reason=PK-lookup-on-globally-unique-github-repo-id follow_up=PERMANENT-EXEMPTION-global-github-keys
   const prior = await sql<{
     repository_id: string;
     full_name: string;
@@ -355,7 +356,7 @@ export async function removeRepository(
   }
 
   const now = args.clock.now();
-  // tenant:exempt reason=PK-lookup-on-globally-unique-github-repo-id follow_up=FOLLOW-UP-gf3-error-mode
+  // tenant:exempt reason=PK-lookup-on-globally-unique-github-repo-id follow_up=PERMANENT-EXEMPTION-global-github-keys
   await sql`
     UPDATE core.repositories
        SET archived = true, enabled = false, updated_at = ${now}

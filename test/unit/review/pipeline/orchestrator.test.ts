@@ -35,6 +35,7 @@ import { PrMetaV1 } from "#contracts/walkthrough.v1.js";
 import { WorkspaceHandle } from "#contracts/workspace_handle.v1.js";
 import { ClonedRepoV1 } from "#contracts/cloned_repo.v1.js";
 import { CodemasterConfigV1, PathInstructionV1 } from "#contracts/codemaster_config.v1.js";
+import { LoadRepoConfigResultV1 } from "#contracts/load_repo_config.v1.js";
 import { ComputedPolicyRulesV1 } from "#contracts/policy_compute.v1.js";
 import { FileRoutingV1 } from "#contracts/file_routing.v1.js";
 import { DiffChunkV1 } from "#contracts/diff_chunking.v1.js";
@@ -157,6 +158,8 @@ type StubOverrides = {
   /** FIX #6+#9 — the repo_config.path_instructions the loadRepoConfig stub returns (drives the per-chunk
    *  matched_path_instructions wiring). Default [] (no per-glob instructions). */
   pathInstructions?: ReadonlyArray<PathInstructionV1>;
+  /** W4.4 [M6] — the config_status the loadRepoConfig stub returns (drives the malformed notice). */
+  configStatus?: "absent" | "valid" | "malformed";
   bundles?: Record<string, ResolvedGuidanceBundleV1>;
   /** FIX #12 — when true, computePolicyRules THROWS (asserts the policy-compute fail-open wrap). */
   computePolicyThrows?: boolean;
@@ -278,9 +281,12 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
     },
     loadRepoConfig: async () => {
       calls.push("loadRepoConfig");
-      return CodemasterConfigV1.parse({
-        path_filters: o.pathFilters ?? [],
-        path_instructions: o.pathInstructions ?? [],
+      return LoadRepoConfigResultV1.parse({
+        config: CodemasterConfigV1.parse({
+          path_filters: o.pathFilters ?? [],
+          path_instructions: o.pathInstructions ?? [],
+        }),
+        config_status: o.configStatus ?? "valid", // M6: drives the malformed-config notice
       });
     },
     computePolicyRules: async () => {
@@ -1572,6 +1578,28 @@ describe("config-change notice (spec §7 — cfg.no_spurious_notice)", () => {
     const result = await orchestrate(ctxWithChangedPaths(stub, [".codemaster.yaml"]));
     const notices = result.aggregated!.findings.filter((f) => f.file === ".codemaster.yaml");
     expect(notices.length).toBe(1);
+  });
+
+  // W4.4 [M6] — the MALFORMED-config notice: load_repo_config rejected the whole doc and fell open
+  // to defaults; the user must SEE that their settings are not in effect.
+  it("appends the malformed-config notice when loadRepoConfig reports config_status='malformed' (M6)", async () => {
+    const stub = makeStub({ chunkCount: 1, configStatus: "malformed" });
+    const result = await orchestrate(ctxWithChangedPaths(stub, ["src/a.ts"]));
+    const notice = result.aggregated!.findings.find(
+      (f) => f.file === ".codemaster.yaml" && f.title.includes("malformed"),
+    );
+    expect(notice).toBeDefined();
+    // It flows through to the walkthrough + persist like every appended notice.
+    const walkthroughAgg = stub.walkthroughInputs[0]!.aggregated;
+    expect(walkthroughAgg.findings.some((f) => f.title.includes("malformed"))).toBe(true);
+  });
+
+  it("does NOT append the malformed-config notice for 'valid'/'absent' statuses (M6, no spurious notice)", async () => {
+    for (const configStatus of ["valid", "absent"] as const) {
+      const stub = makeStub({ chunkCount: 1, configStatus });
+      const result = await orchestrate(ctxWithChangedPaths(stub, ["src/a.ts"]));
+      expect(result.aggregated!.findings.some((f) => f.title.includes("malformed"))).toBe(false);
+    }
   });
 });
 

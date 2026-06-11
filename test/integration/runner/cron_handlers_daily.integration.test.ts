@@ -280,17 +280,18 @@ describeDb("cron_handlers — daily crons on the background-jobs platform (Phase
     expect(settled.last_error).toBeNull();
   });
 
-  it("(3) STARTUP: ensureScheduledJobs seeds ALL 7 rows; a due poll enqueues them; cycles dispatch them; daily rows hold for their wall instants", async () => {
+  it("(3) STARTUP: ensureScheduledJobs seeds ALL 8 rows; a due poll enqueues them; cycles dispatch them; daily rows hold for their wall instants", async () => {
     const t0 = new Date("2026-06-10T00:00:00.000Z");
     const fake = new FakeClock({ now: t0 });
     await ensureScheduledJobs(db, fake);
 
-    // ALL 7 rows seeded (ORDER BY schedule_id) — 2 interval (W3b.1) + 2 daily-cron (W3b.2) + the
+    // ALL 8 rows seeded (ORDER BY schedule_id) — 2 interval (W3b.1) + 2 daily-cron (W3b.2) + the
     // run_id_retention daily cron (W3d.1) + the workspace_retention interval (W3e.1) + the
-    // confluence_ingest interval (W3e.2).
+    // confluence_ingest interval (W3e.2) + the job_retention daily cron (W4.6 L4+L5).
     const seeded = await readSchedules();
     expect(seeded.map((r) => r.schedule_id)).toEqual([
       "codemaster-confluence-ingest",
+      "codemaster-job-retention",
       "codemaster-mark-stale-chunks",
       "codemaster-mutex-janitor",
       "codemaster-partition-maintenance",
@@ -318,15 +319,15 @@ describeDb("cron_handlers — daily crons on the background-jobs platform (Phase
     expect(retention.next_run_at.getTime()).toBe(t0.getTime());
     expect(retention.last_enqueued_at).toBeNull();
 
-    // Advance the FakeClock past the due instant → ONE poll enqueues ALL 7 (dedup_key = schedule_id).
+    // Advance the FakeClock past the due instant → ONE poll enqueues ALL 8 (dedup_key = schedule_id).
     fake.advance({ seconds: 1 });                                          // t1 = 00:00:01Z
     const repo = new BackgroundJobsRepo(db);
-    expect(await pollAndEnqueue({ repo, db, clock: fake })).toBe(7);
+    expect(await pollAndEnqueue({ repo, db, clock: fake })).toBe(8);
     const jobs = await sql<{ job_id: string; job_type: string; state: string; dedup_key: string | null }>`
       SELECT job_id, job_type, state, dedup_key FROM core.background_jobs ORDER BY job_type`.execute(db);
     expect(jobs.rows.map((j) => j.job_type)).toEqual([
-      "confluence_ingest", "mark_stale_chunks", "mutex_janitor", "partition_maintenance",
-      "review_run_reaper", "run_id_retention", "workspace_retention",
+      "confluence_ingest", "job_retention", "mark_stale_chunks", "mutex_janitor",
+      "partition_maintenance", "review_run_reaper", "run_id_retention", "workspace_retention",
     ]);
     const byType = new Map(jobs.rows.map((j) => [j.job_type, j]));
     for (const s of CRON_SCHEDULES) {
@@ -345,8 +346,9 @@ describeDb("cron_handlers — daily crons on the background-jobs platform (Phase
     expect(at("codemaster-mark-stale-chunks").next_run_at.toISOString()).toBe("2026-06-10T02:00:00.000Z");
     expect(at("codemaster-partition-maintenance").next_run_at.toISOString()).toBe("2026-06-10T02:00:00.000Z");
     expect(at("codemaster-run-id-retention").next_run_at.toISOString()).toBe("2026-06-10T03:00:00.000Z");
+    expect(at("codemaster-job-retention").next_run_at.toISOString()).toBe("2026-06-10T03:30:00.000Z");
 
-    // The background cycles dispatch ALL 7 through the registry to 'done' (WallClock composition —
+    // The background cycles dispatch ALL 8 through the registry to 'done' (WallClock composition —
     // claim order is priority/run_after-driven, so assert the SET, not the order). The retention job
     // runs its REAL sweeps here (no stale ephemeral candidates exist → the deferred-Vault GitHub
     // client is never built; the retire/delete sweeps are idempotent cross-tenant scans — as are the
@@ -355,13 +357,13 @@ describeDb("cron_handlers — daily crons on the background-jobs platform (Phase
     // deferred-Vault ConfluenceClient + the lazy embedder are never built).
     const handles = buildBackgroundRunner({ db, clock: new WallClock(), config: TEST_CONFIG });
     const dispatched = new Set<string>();
-    for (let i = 0; i < 7; i += 1) {
+    for (let i = 0; i < 8; i += 1) {
       const r = await handles.runOneCycle();
       expect(r.outcome).toBe("done");
       dispatched.add(r.jobId!);
     }
     expect(dispatched).toEqual(new Set(jobs.rows.map((j) => j.job_id)));
-    expect((await handles.runOneCycle()).outcome).toBe("idle");            // exactly 7 — nothing left
+    expect((await handles.runOneCycle()).outcome).toBe("idle");            // exactly 8 — nothing left
 
     // Daily-cadence discipline: at 01:59 only the interval rows are due (every daily row HOLDS) …
     fake.set({ now: new Date("2026-06-10T01:59:00.000Z") });
@@ -481,7 +483,7 @@ describeDb("cron_handlers — daily crons on the background-jobs platform (Phase
 
 // ─── CRON_SCHEDULES literal shape + cadence-vocabulary fit (pure — no DB) ──────────────────────────
 describe("CRON_SCHEDULES (Phase 3b W3b.2 + Phase 3d W3d.1 + Phase 3e W3e.1 + W3e.2 entries)", () => {
-  it("carries the 7 entries: the 2 W3b.1 intervals + the 2 daily 02:00 crons + run_id_retention at 03:00 UTC + the workspace_retention 5-min interval + the confluence_ingest 6-h interval", () => {
+  it("carries the 8 entries: the 2 W3b.1 intervals + the 2 daily 02:00 crons + run_id_retention at 03:00 + job_retention at 03:30 UTC + the workspace_retention 5-min interval + the confluence_ingest 6-h interval", () => {
     expect(CRON_SCHEDULES).toEqual([
       { schedule_id: "codemaster-mutex-janitor", job_type: "mutex_janitor", cadence_kind: "interval", cadence_spec: "300", input: {} },
       { schedule_id: "codemaster-review-run-reaper", job_type: "review_run_reaper", cadence_kind: "interval", cadence_spec: "600", input: {} },
@@ -497,6 +499,9 @@ describe("CRON_SCHEDULES (Phase 3b W3b.2 + Phase 3d W3d.1 + Phase 3e W3e.1 + W3e
       // CONFLUENCE_SYNC_INTERVAL_SECONDS = 6h, overlap=SKIP); schedule_id renamed onto the codemaster-
       // operator-correlation prefix (the mark-stale precedent — Temporal id "refresh-confluence-corpus").
       { schedule_id: "codemaster-confluence-ingest", job_type: "confluence_ingest", cadence_kind: "interval", cadence_spec: "21600", input: {} },
+      // W4.6 (L4+L5): NET-NEW platform cron (no Temporal predecessor) — the terminal-job-row +
+      // idempotency-ledger janitor, 03:30 UTC, TTLs pinned in the input (the run_id_retention posture).
+      { schedule_id: "codemaster-job-retention", job_type: "job_retention", cadence_kind: "cron", cadence_spec: "30 3 * * *", input: { reviewJobsTtlDays: 30, backgroundJobsTtlDays: 30 } },
     ]);
   });
 

@@ -380,6 +380,7 @@ async function allocateRunForPrWebhook(
   });
 
   // Backfill the audit row's run_id now that it's allocated.
+  // tenant:exempt reason=PK-update-by-webhook_event_id-backfills-run_id-on-row-inserted-this-txn follow_up=PERMANENT-EXEMPTION-pk-scoped-writes
   await sql`UPDATE audit.webhook_events SET run_id = ${outcome.newRunId} WHERE webhook_event_id = ${args.webhookEventId}`.execute(
     tx,
   );
@@ -564,6 +565,7 @@ export async function persistWebhook(args: {
       // also falls back to "unknown" — `??` alone would keep the literal "0" and diverge.
       const iidPart = githubIid ? String(githubIid) : "unknown";
       const cacheKey = `github-webhook:${iidPart}:${deliveryId}`;
+      // tenant:exempt reason=cache_idempotency-has-no-installation_id-column-cache_key-embeds-github-iid follow_up=PERMANENT-EXEMPTION-platform-cache-tables
       const ins = await sql<{ cache_key: string }>`
         INSERT INTO cache.cache_idempotency (cache_key, value, expires_at, created_at)
         VALUES (${cacheKey}, ${Buffer.from(webhookEventId, "utf-8")},

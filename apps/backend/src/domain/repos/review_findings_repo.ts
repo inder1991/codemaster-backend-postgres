@@ -376,7 +376,7 @@ export class PostgresReviewFindingsRepo {
         // rather than a hardcoded default. The FK on workflow_events.review_id guarantees the row
         // exists; provider is NOT NULL there. Defensive fallback to "github" preserves the emit under a
         // stale-cache race that doesn't see the FK target.
-        // tenant:exempt reason=provider-lookup-by-review-id-pk follow_up=FOLLOW-UP-gf3-error-mode
+        // tenant:exempt reason=provider-lookup-by-review-id-pk follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
         const providerResult = await sql<{ provider: string }>`
           SELECT provider FROM core.pull_request_reviews WHERE review_id = ${reviewId}
         `.execute(tx);

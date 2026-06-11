@@ -79,7 +79,7 @@ export async function getStateForEnqueueDecision(
   args: { githubInstallationId: number },
 ): Promise<RepairStateDecision> {
   const cooldownSeconds = getCooldownSeconds();
-  // tenant:exempt reason=cache-table-keyed-by-github-installation-id-PK follow_up=FOLLOW-UP-gf3-error-mode
+  // tenant:exempt reason=cache-table-keyed-by-github-installation-id-PK follow_up=PERMANENT-EXEMPTION-platform-cache-tables
   const result = await sql<{
     cooldown_active: boolean | null;
     is_blocked: boolean | null;

@@ -30,7 +30,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { Kysely, PostgresDialect } from "kysely";
+import { Kysely, PostgresDialect, sql } from "kysely";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -274,8 +274,8 @@ describeDb("event_handlers — sync_code_owners + refresh_semantic_docs (Phase 3
     try {
       const gh = stubCodeOwnersGithub();
       const registry = new HandlerRegistry();
-      // NO codeOwnersIsEnabled — the production default is OFF (FOLLOW-UP-code-owners-v1-flag-reader,
-      // 1:1 with build_activities.ts's `isEnabled: async () => false` wiring).
+      // NO codeOwnersIsEnabled — the production default is the REAL core.flags reader (OM9), and
+      // with no code_owners_v1 row in the disposable DB the reader's fail-OPEN default is false.
       registerEventHandlers(registry, { dsn: INTEGRATION_DSN!, codeOwnersGithub: gh.github });
       const repo = new BackgroundJobsRepo(db);
 
@@ -289,6 +289,38 @@ describeDb("event_handlers — sync_code_owners + refresh_semantic_docs (Phase 3
       expect(gh.callCount()).toBe(0); // the flag gate fires BEFORE any GitHub fetch
       expect(await countCodeOwnersRows(installationId, repositoryId)).toBe(0);
     } finally {
+      await cleanup({ installationId, repositoryId });
+    }
+  });
+
+  // W4.6 [OM9] — the production default is the REAL core.flags reader (no more hard-wired
+  // `async () => false`): with the code_owners_v1 row rolled out {"enabled": true} and
+  // codeOwnersIsEnabled OMITTED, the producer runs. Closes FOLLOW-UP-code-owners-v1-flag-reader.
+  it("(2b) FLAG READER: 'sync_code_owners' with isEnabled OMITTED reads core.flags — enabled row → real sync", async () => {
+    const installationId = randomUUID();
+    const repositoryId = randomUUID();
+    await seedParents({ installationId, repositoryId });
+    await sql`
+      INSERT INTO core.flags (flag_name, rollout) VALUES ('code_owners_v1', '{"enabled": true}')
+      ON CONFLICT (flag_name) DO UPDATE SET rollout = EXCLUDED.rollout
+    `.execute(db);
+    try {
+      const gh = stubCodeOwnersGithub();
+      const registry = new HandlerRegistry();
+      registerEventHandlers(registry, { dsn: INTEGRATION_DSN!, codeOwnersGithub: gh.github });
+      const repo = new BackgroundJobsRepo(db);
+
+      await repo.enqueue({
+        jobType: "sync_code_owners",
+        payload: syncCodeOwnersPayload(installationId, repositoryId),
+      });
+      const r = await runOne(registry, repo);
+      expect(r.outcome).toBe("done");
+
+      expect(gh.callCount()).toBe(1); // the flag-table row TURNED THE PRODUCER ON without a code change
+      expect(await countCodeOwnersRows(installationId, repositoryId)).toBe(3);
+    } finally {
+      await sql`DELETE FROM core.flags WHERE flag_name = 'code_owners_v1'`.execute(db);
       await cleanup({ installationId, repositoryId });
     }
   });

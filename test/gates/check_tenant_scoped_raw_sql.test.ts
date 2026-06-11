@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { Project } from "ts-morph";
 
-import { findTenancyViolations, isProductionSource } from "../../scripts/gates/check_tenant_scoped_raw_sql.js";
+import {
+  exitCodeFor,
+  findTenancyViolations,
+  isErrorModePath,
+  isProductionSource,
+} from "../../scripts/gates/check_tenant_scoped_raw_sql.js";
 
 // Build an in-memory TS project from a snippet and run the gate over it.
 // Mirrors the frozen Python gate's tests (test_check_tenant_scoped_raw_sql.py) but for Kysely's
@@ -92,6 +97,41 @@ describe("tenant-scoped raw-SQL gate", () => {
       expect(isProductionSource("/r/apps/backend/src/x.test.ts")).toBe(false);
       expect(isProductionSource("/r/test/integration/x.ts")).toBe(false);
       expect(isProductionSource("/r/tools/parity/x.ts")).toBe(false);
+    });
+  });
+
+  // W4.2 [RH1] — the tracked FOLLOW-UP-gf3-error-mode promotion: the gate BLOCKS (exit 1) on the
+  // runner data plane + review pipeline + platform libs; ONLY the admin/auth HTTP surface
+  // (apps/backend/src/api/**) stays WARN until W4.7 lands its own tenancy/authz wave.
+  describe("ERROR-mode for the runner/review surfaces (FOLLOW-UP-gf3-error-mode closure)", () => {
+    const unfiltered = "await db.executeQuery(sql`SELECT id FROM core.repositories WHERE run_id = ${rid}`);";
+
+    it("isErrorModePath: runner/ingest/workflow/review/activities/domain/workspace + libs → ERROR; api/** → WARN", () => {
+      expect(isErrorModePath("/r/apps/backend/src/runner/review_jobs_repo.ts")).toBe(true);
+      expect(isErrorModePath("/r/apps/backend/src/ingest/github_webhook_persistence.ts")).toBe(true);
+      expect(isErrorModePath("/r/apps/backend/src/workflow/_supersede.ts")).toBe(true);
+      expect(isErrorModePath("/r/apps/backend/src/review/pipeline/orchestrator.ts")).toBe(true);
+      expect(isErrorModePath("/r/apps/backend/src/activities/run_id_retention.activity.ts")).toBe(true);
+      expect(isErrorModePath("/r/apps/backend/src/domain/repos/outbox_repo.ts")).toBe(true);
+      expect(isErrorModePath("/r/libs/platform/src/db/x.ts")).toBe(true);
+      expect(isErrorModePath("/r/apps/backend/src/api/admin/admin_read_repo.ts")).toBe(false);
+      expect(isErrorModePath("/r/apps/backend/src/api/auth/local_user_repo.ts")).toBe(false);
+    });
+
+    it("an unfiltered site on the runner data plane is BLOCKING (exit 1)", () => {
+      const v = violations(unfiltered, "apps/backend/src/runner/some_repo.ts");
+      expect(v).toHaveLength(1);
+      expect(exitCodeFor(v)).toBe(1);
+    });
+
+    it("an unfiltered site on the api surface stays WARN-only (exit 0)", () => {
+      const v = violations(unfiltered, "apps/backend/src/api/admin/new_admin_read.ts");
+      expect(v).toHaveLength(1);
+      expect(exitCodeFor(v)).toBe(0);
+    });
+
+    it("zero findings → exit 0", () => {
+      expect(exitCodeFor([])).toBe(0);
     });
   });
 });

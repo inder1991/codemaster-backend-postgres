@@ -366,7 +366,7 @@ function makeStubActivities(
     },
     loadRepoConfigActivity: async (): Promise<unknown> => {
       calls.push("loadRepoConfig");
-      return CodemasterConfigV1.parse({});
+      return { schema_version: 1, config: CodemasterConfigV1.parse({}), config_status: "valid", reason: null };
     },
     computePolicyRules: async (): Promise<unknown> => {
       calls.push("computePolicyRules");

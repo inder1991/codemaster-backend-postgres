@@ -89,7 +89,18 @@ export async function runOneJob(o: { repo: ReviewJobsRepo; clock: Clock; owner: 
         const held = await o.repo.heartbeat({ jobId: job.job_id, owner: o.owner, token, leaseMs }); // false past timeout_at too
         if (!held) { recordHeartbeatFailure(); work.abort(new Error("lease lost or timed out")); break; }
       }
-    } catch { work.abort(new Error("heartbeat error")); }   // never let the hb loop throw out
+    } catch (e) {
+      // L13 (W4.6): the loop must never throw out — but the WHY must not vanish with it. A thrown
+      // heartbeat (vs a REFUSED one, which recordHeartbeatFailure covers above) is a DB/driver-class
+      // fault; log error_class + a bounded message so a recurring fault is diagnosable, then abort.
+      console.warn(JSON.stringify({
+        event: "runner.heartbeat_loop_error",
+        job_id: job.job_id,
+        error_class: e instanceof Error ? e.name : typeof e,
+        message: (e instanceof Error ? e.message : String(e)).slice(0, 500),
+      }));
+      work.abort(new Error("heartbeat error"));
+    }
   })();
   // HARD runtime ceiling — guarantees the worker slot returns even if the handler ignores `work.signal`.
   const hardTimeout = (async (): Promise<typeof HARD_TIMEOUT | undefined> => {
@@ -134,7 +145,16 @@ export async function runOneJob(o: { repo: ReviewJobsRepo; clock: Clock; owner: 
       // surface as an unhandled rejection — and meter it (F4). The .catch is attached BEFORE settlement
       // returns so the observer is wired no matter how the orphan eventually completes.
       recordHandlerOrphanSettled({ phase: "after_hard_timeout" });
-      handlerPromise.catch(() => undefined); // observe + swallow any late orphan rejection (no unhandled)
+      handlerPromise.catch((e: unknown) => {
+        // L13 (W4.6): observe + swallow the late orphan rejection (no unhandled) — but log the WHY,
+        // bounded, so a recurring post-timeout fault class is diagnosable, not just counted.
+        console.warn(JSON.stringify({
+          event: "runner.orphan_handler_late_rejection",
+          job_id: job.job_id,
+          error_class: e instanceof Error ? e.name : typeof e,
+          message: (e instanceof Error ? e.message : String(e)).slice(0, 500),
+        }));
+      });
       // Settle as failed; the fence guards against any late completion write.
       outcome = await settleFailure(`max runtime ${o.maxRuntimeS}s exceeded`);
     } else {

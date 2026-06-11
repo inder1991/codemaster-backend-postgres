@@ -86,12 +86,11 @@ import { bindAuditContext, emitAuditEvent } from "#backend/audit/emit.js";
 import { emitWorkflowEvent } from "#backend/ingest/_workflow_events_repository.js";
 import { PendingEmits, emitAfterCommit } from "#backend/infra/post_commit_emit.js";
 
-import { getPool, withPgTransaction } from "#platform/db/database.js";
+import { getPool, tenantKysely, withPgTransaction } from "#platform/db/database.js";
 import { type Clock, WallClock } from "#platform/clock.js";
 import { getMeter, type Counter } from "#platform/observability/metrics.js";
 
-import { CompiledQuery, Kysely, PostgresDialect, type Transaction } from "kysely";
-import { Pool as PgPool } from "pg";
+import { CompiledQuery, type Transaction } from "kysely";
 
 import {
   EventsRetentionResultV1,
@@ -472,13 +471,6 @@ type RetireCandidateRow = {
   installation_id: string | null;
 };
 
-/** A Kysely engine over the same pool DSN — emitWorkflowEvent requires a Kysely Transaction handle. */
-function kyselyOver(dsn: string): Kysely<unknown> {
-  return new Kysely<unknown>({
-    dialect: new PostgresDialect({ pool: new PgPool({ connectionString: dsn }) }),
-  });
-}
-
 /**
  * Run one raw `$N`-parameterized statement on a Kysely transaction and return its rows. The Python
  * retire sweep uses raw `text(...)` SQL (NOT the ORM query builder); this keeps the TS port byte-faithful
@@ -557,103 +549,104 @@ export async function runIdRetireOldRunsActivity(
   const clock: Clock = deps.clock ?? new WallClock();
   const ttlDays = resolveTtlDays(deps, DEFAULT_RUN_TTL_DAYS);
   const cutoff = cutoffFor(clock, ttlDays);
-  const kysely = kyselyOver(dsn);
+  // OM4 (W4.6): the memoized ADR-0062 Kysely over the SHARED per-DSN pool — emitWorkflowEvent needs
+  // a Kysely Transaction handle, but that never justified a second connection source: the old
+  // per-run `kyselyOver` (own `new PgPool`, destroyed in finally) could push the ~89/100 steady-state
+  // connection budget over max_connections during the 03:00 sweep, and a SIGKILL mid-sweep leaked
+  // sockets until process exit. The shared engine is process-owned — no per-run destroy.
+  const kysely = tenantKysely<unknown>(dsn);
 
   let totalRetired = 0;
-  try {
-    for (let batchIdx = 0; batchIdx < RETIRE_MAX_BATCHES; batchIdx += 1) {
-      const pending = new PendingEmits();
-      let batchHadCandidates = true;
+  for (let batchIdx = 0; batchIdx < RETIRE_MAX_BATCHES; batchIdx += 1) {
+    const pending = new PendingEmits();
+    let batchHadCandidates = true;
 
-      await kysely.transaction().execute(async (tx) => {
-        // The Kysely transaction owns the connection; the SELECT … FOR UPDATE, the UPDATE … RETURNING,
-        // every audit/workflow_event emit commit atomically per batch. Raw SQL is byte-faithful with the
-        // Python `text(...)` candidate + UPDATE statements.
-        // tenant:exempt reason=cross-tenant-run-retention-sweep follow_up=PERMANENT-EXEMPTION-run-id-retention
-        const candidates = await txQuery<RetireCandidateRow>(tx, RETIRE_CANDIDATE_SQL, [
-          cutoff,
-          RETIRE_BATCH_SIZE,
-        ]);
+    await kysely.transaction().execute(async (tx) => {
+      // The Kysely transaction owns the connection; the SELECT … FOR UPDATE, the UPDATE … RETURNING,
+      // every audit/workflow_event emit commit atomically per batch. Raw SQL is byte-faithful with the
+      // Python `text(...)` candidate + UPDATE statements.
+      // tenant:exempt reason=cross-tenant-run-retention-sweep follow_up=PERMANENT-EXEMPTION-run-id-retention
+      const candidates = await txQuery<RetireCandidateRow>(tx, RETIRE_CANDIDATE_SQL, [
+        cutoff,
+        RETIRE_BATCH_SIZE,
+      ]);
 
-        if (candidates.length === 0) {
-          batchHadCandidates = false;
-          return;
-        }
+      if (candidates.length === 0) {
+        batchHadCandidates = false;
+        return;
+      }
 
-        const runIds = candidates.map((c) => c.run_id);
-        const now = clock.now();
+      const runIds = candidates.map((c) => c.run_id);
+      const now = clock.now();
 
-        // AUTHORITATIVE: UPDATE … RETURNING returns only rows that actually transitioned. A concurrent
-        // supersede that flipped one of our candidates is naturally excluded by the WHERE guards; the
-        // `retired_at IS NULL` guard makes the UPDATE idempotent under Temporal retry.
-        const retiredRows = await txQuery<{ run_id: string; started_at: Date }>(tx, RETIRE_UPDATE_SQL, [
-          now,
-          runIds,
-        ]);
+      // AUTHORITATIVE: UPDATE … RETURNING returns only rows that actually transitioned. A concurrent
+      // supersede that flipped one of our candidates is naturally excluded by the WHERE guards; the
+      // `retired_at IS NULL` guard makes the UPDATE idempotent under Temporal retry.
+      const retiredRows = await txQuery<{ run_id: string; started_at: Date }>(tx, RETIRE_UPDATE_SQL, [
+        now,
+        runIds,
+      ]);
 
-        if (retiredRows.length === 0) {
-          // All candidates lost the race to a concurrent supersede. Move on (this batch contributes 0).
-          return;
-        }
-        const retiredIds = new Set(retiredRows.map((r) => r.run_id));
+      if (retiredRows.length === 0) {
+        // All candidates lost the race to a concurrent supersede. Move on (this batch contributes 0).
+        return;
+      }
+      const retiredIds = new Set(retiredRows.map((r) => r.run_id));
 
-        // Audit emit ONLY for rows that actually transitioned (iterate candidates → filter to retiredIds
-        // so the per-row installation_id context is preserved).
-        for (const c of candidates) {
-          if (!retiredIds.has(c.run_id)) continue;
-          if (c.installation_id === null) {
-            // Orphan: review row hard-deleted (no installation_id resolvable). Emit to workflow_events
-            // under system context with a tagged orphan_reason — NOT audit_events (no tenancy to bind).
-            console.info(
-              `retention.workflow_run.retired_orphan run_id=${c.run_id} review_id=${c.review_id}`,
-            );
-            emitAfterCommit(pending, () => RUNS_RETIRED_ORPHAN.add(1));
-            await emitWorkflowEvent({
-              dbOrTx: tx,
-              provider: "github",
-              runId: c.run_id,
-              reviewId: c.review_id,
-              eventType: "lifecycle_transition",
-              payload: {
-                to: "retired_orphan",
-                reason: "ttl_expired",
-                note: "review row missing — system retire",
-                orphan_reason: "orphan_retire",
-              },
-              installationId: null,
-              clock,
-            });
-            continue;
-          }
-          // Bind the tenancy context on the SAME adapter object passed as `client` so getAuditContext
-          // reads it back (the WeakMap keys on the client object).
-          const auditClient = auditClientFor(tx);
-          bindAuditContext(auditClient, { installationId: c.installation_id });
-          await emitAuditEvent({
-            client: auditClient,
-            actorKind: "system",
-            actorId: null,
-            action: "retention.workflow_run.retired",
-            targetKind: "workflow_run",
-            targetId: String(c.run_id),
-            before: { retired_at: null },
-            after: { retired_at: now.toISOString(), retention_reason: "ttl_expired" },
+      // Audit emit ONLY for rows that actually transitioned (iterate candidates → filter to retiredIds
+      // so the per-row installation_id context is preserved).
+      for (const c of candidates) {
+        if (!retiredIds.has(c.run_id)) continue;
+        if (c.installation_id === null) {
+          // Orphan: review row hard-deleted (no installation_id resolvable). Emit to workflow_events
+          // under system context with a tagged orphan_reason — NOT audit_events (no tenancy to bind).
+          console.info(
+            `retention.workflow_run.retired_orphan run_id=${c.run_id} review_id=${c.review_id}`,
+          );
+          emitAfterCommit(pending, () => RUNS_RETIRED_ORPHAN.add(1));
+          await emitWorkflowEvent({
+            dbOrTx: tx,
+            provider: "github",
+            runId: c.run_id,
+            reviewId: c.review_id,
+            eventType: "lifecycle_transition",
+            payload: {
+              to: "retired_orphan",
+              reason: "ttl_expired",
+              note: "review row missing — system retire",
+              orphan_reason: "orphan_retire",
+            },
+            installationId: null,
             clock,
           });
+          continue;
         }
+        // Bind the tenancy context on the SAME adapter object passed as `client` so getAuditContext
+        // reads it back (the WeakMap keys on the client object).
+        const auditClient = auditClientFor(tx);
+        bindAuditContext(auditClient, { installationId: c.installation_id });
+        await emitAuditEvent({
+          client: auditClient,
+          actorKind: "system",
+          actorId: null,
+          action: "retention.workflow_run.retired",
+          targetKind: "workflow_run",
+          targetId: String(c.run_id),
+          before: { retired_at: null },
+          after: { retired_at: now.toISOString(), retention_reason: "ttl_expired" },
+          clock,
+        });
+      }
 
-        const retiredCount = retiredRows.length;
-        totalRetired += retiredCount;
-        emitAfterCommit(pending, () =>
-          RUNS_RETIRED.add(retiredCount, { retention_reason: "ttl_expired" }),
-        );
-      });
+      const retiredCount = retiredRows.length;
+      totalRetired += retiredCount;
+      emitAfterCommit(pending, () =>
+        RUNS_RETIRED.add(retiredCount, { retention_reason: "ttl_expired" }),
+      );
+    });
 
-      pending.drain();
-      if (!batchHadCandidates) break;
-    }
-  } finally {
-    await kysely.destroy();
+    pending.drain();
+    if (!batchHadCandidates) break;
   }
 
   // total_retired already covers ALL rows the UPDATE … RETURNING confirmed-transitioned, orphans

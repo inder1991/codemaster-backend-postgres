@@ -82,6 +82,7 @@ import {
   pathFiltersExcludedAllFinding,
   buildPolicyCitationContext,
   maybeAppendConfigNotice,
+  maybeAppendMalformedConfigNotice,
 } from "./helpers.js";
 import { stageOutcome, recordStage, type StageLogger } from "./degradation.js";
 import { postReviewResults, type PostingLifecycleDeps } from "./posting.js";
@@ -402,10 +403,14 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
     // Step 1a — load .codemaster.yaml into state.repoConfig (repo-config-wiring collapse-on). Runs here
     // because the workspace is populated (clone done) and every downstream config consumer (policy
     // compute, review-set filter, per-chunk context) expects the config already resolved.
-    state.repoConfig = await ports.loadRepoConfig({
+    // M6 (W4.4): the port returns the status ENVELOPE — the config feeds state as before; the
+    // status feeds the malformed-config NOTICE appended after aggregate (see Step 7).
+    const loadedConfig = await ports.loadRepoConfig({
       schema_version: 1,
       workspace_path: workspaceRoot,
     });
+    state.repoConfig = loadedConfig.config;
+    state.repoConfigStatus = loadedConfig.config_status;
 
     // Step 1b — compute in-repo policy rules (policy-engine-wiring collapse-on). Populates
     // state.policyBundles (keyed by changed_path) so the per-chunk context build can attach
@@ -847,6 +852,13 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
     // maybeAppendConfigNotice never double-appends. cfg.no_spurious_notice smoke surface: the notice appears
     // IFF .codemaster.yaml is in the changed set, NOT otherwise.
     aggregated = maybeAppendConfigNotice(aggregated, repo.changedPaths);
+
+    // W4.4 [M6] — the malformed-config NOTICE: when load_repo_config rejected the WHOLE document and
+    // fell open to defaults, the customer must SEE that their settings are not in effect (SEED
+    // scenario (b): "fail-open to defaults + a NOTICE"). Same placement discipline as the
+    // config-change notice above: AFTER the MAX_INLINE_FINDINGS cap (never capped away), BEFORE
+    // every downstream consumer (persist / walkthrough / post), idempotent.
+    aggregated = maybeAppendMalformedConfigNotice(aggregated, state.repoConfigStatus);
 
     // Step 7.2 — inline policy post-filter (policy-post-filter-relocated collapse-on; the R-23 relocation).
     // Runs HERE, AFTER aggregate and BEFORE every downstream consumer (citation_validate / persist /

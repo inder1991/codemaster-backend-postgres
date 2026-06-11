@@ -76,6 +76,10 @@ import { join } from "node:path";
 import { load as yamlLoad, YAMLException } from "js-yaml";
 
 import { CodemasterConfigV1 } from "#contracts/codemaster_config.v1.js";
+import {
+  type ConfigMalformedReasonV1,
+  LoadRepoConfigResultV1,
+} from "#contracts/load_repo_config.v1.js";
 
 import { normalizeCodemasterYaml } from "./codemaster_config_yaml_input.js";
 
@@ -95,33 +99,43 @@ const CONFIG_MAX_BYTES = 50 * 1024;
  * FAIL-OPEN: any error returns `CodemasterConfigV1.parse({})` (full defaults). NEVER throws. Mirrors the
  * frozen Python `load_repo_config` (50 KiB cap; safe YAML load; whole-config-or-defaults validation).
  *
- * Synchronous to match the frozen Python `def load_repo_config` (a sync def) — the registered async
- * activity wrapper awaits nothing but a sync call.
+ * Synchronous to match the frozen Python `def load_repo_config` (a sync def). This bare-config shape
+ * is the byte-parity surface (config.parity.test.ts); the status-carrying variant below (M6) wraps it.
  */
 export function loadRepoConfig(workspace: string): CodemasterConfigV1 {
+  return loadRepoConfigWithStatus(workspace).config;
+}
+
+/**
+ * W4.4 [M6]: the status-carrying loader — same fail-open branch map, but each branch RETURNS which
+ * branch fired (`config_status` + `reason`) so the orchestrator can append the user-visible
+ * "your .codemaster.yaml was malformed and ignored" NOTICE instead of silently dropping the
+ * customer's settings. Each malformed branch also emits the ported Python WARN as a structured log
+ * (`repo_config.malformed{reason}`); the OTel `record_config_malformed` counter half stays deferred
+ * with the observability sub-project (W0.4/W0.5b owner steer). NEVER throws.
+ */
+export function loadRepoConfigWithStatus(workspace: string): LoadRepoConfigResultV1 {
   const yamlPath = join(workspace, CONFIG_FILENAME);
 
-  // Branch 1 + 2: missing file OR un-stat-able → defaults. `statSync` throws ENOENT for a missing path
-  // and (e.g.) EACCES for an unreadable one; both Python branches (`is_file()` false, `stat()` OSError)
-  // collapse to the same defaults return here. A non-regular-file (directory) is also treated as absent,
-  // mirroring Python `Path.is_file()` returning False for a directory.
+  // Branch 1 + 2: missing file OR un-stat-able. ENOENT / not-a-regular-file is the ABSENT branch
+  // (Python `is_file()` false → defaults, no metric); any other stat OSError is malformed/io_error.
   let size: number;
   try {
     const st = statSync(yamlPath);
     if (!st.isFile()) {
-      return defaults(); // not a regular file → Python `is_file()` false → defaults (no metric)
+      return absent(); // not a regular file → Python `is_file()` false → defaults (no metric)
     }
     size = st.size;
-  } catch {
-    // ENOENT here is the missing-file branch (Python `is_file()` false → defaults, no metric); any other
-    // OSError is the stat-failure branch (Python reason=io_error). The RETURN is identical for both, so
-    // a single catch suffices — the observability split is metric-only (deferred seam).
-    return defaults();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return absent();
+    }
+    return malformed("io_error"); // stat()-failure branch (Python reason=io_error)
   }
 
   // Branch 3: oversize → defaults (reason=oversize).
   if (size > CONFIG_MAX_BYTES) {
-    return defaults();
+    return malformed("oversize");
   }
 
   // Branch 4: read failure → defaults (reason=io_error).
@@ -129,7 +143,7 @@ export function loadRepoConfig(workspace: string): CodemasterConfigV1 {
   try {
     text = readFileSync(yamlPath, "utf-8");
   } catch {
-    return defaults();
+    return malformed("io_error");
   }
 
   // Branch 5: YAML parse error → defaults (reason=parse_error). js-yaml throws `YAMLException`, the
@@ -140,16 +154,22 @@ export function loadRepoConfig(workspace: string): CodemasterConfigV1 {
     data = yamlLoad(text);
   } catch (err) {
     if (err instanceof YAMLException) {
-      return defaults();
+      return malformed("parse_error");
     }
     // Defensive: any non-YAMLException throw is still a fail-open path (never raise out of the loader).
-    return defaults();
+    return malformed("parse_error");
   }
 
-  // Branch 6: empty document → defaults. Python `if data is None`. js-yaml returns `undefined` for an
-  // empty string and `null` for whitespace/comment-only/`null`-literal; both map here.
+  // Branch 6: empty document → defaults, STATUS 'valid'. Python `if data is None` (no metric — an
+  // intentionally-empty config IS the all-defaults opt-in, not an error). js-yaml returns `undefined`
+  // for an empty string and `null` for whitespace/comment-only/`null`-literal; both map here.
   if (data === null || data === undefined) {
-    return defaults();
+    return LoadRepoConfigResultV1.parse({
+      schema_version: 1,
+      config: defaults(),
+      config_status: "valid",
+      reason: null,
+    });
   }
 
   // Untrusted-boundary normalization (YAML-1.2 → Pydantic-v2-compatible scalars) BEFORE the strict parse.
@@ -167,9 +187,37 @@ export function loadRepoConfig(workspace: string): CodemasterConfigV1 {
   // the whole doc, NOT a partial merge. A valid document returns the validated, default-filled config.
   const parsed = CodemasterConfigV1.safeParse(normalized);
   if (!parsed.success) {
-    return defaults(); // reason=validation_error
+    return malformed("validation_error");
   }
-  return parsed.data;
+  return LoadRepoConfigResultV1.parse({
+    schema_version: 1,
+    config: parsed.data,
+    config_status: "valid",
+    reason: null,
+  });
+}
+
+/** The absent-file result (defaults, no notice, no warn — matching Python's metric-free branch). */
+function absent(): LoadRepoConfigResultV1 {
+  return LoadRepoConfigResultV1.parse({
+    schema_version: 1,
+    config: defaults(),
+    config_status: "absent",
+    reason: null,
+  });
+}
+
+/** A malformed-branch result: defaults + status + reason, with the ported WARN log. */
+function malformed(reason: ConfigMalformedReasonV1): LoadRepoConfigResultV1 {
+  // The Python WARN ("config malformed; using defaults") ported as a structured log line; the OTel
+  // `record_config_malformed{reason}` counter is the deferred W0.4/W0.5b half.
+  console.warn(JSON.stringify({ event: "repo_config.malformed", reason }));
+  return LoadRepoConfigResultV1.parse({
+    schema_version: 1,
+    config: defaults(),
+    config_status: "malformed",
+    reason,
+  });
 }
 
 /**

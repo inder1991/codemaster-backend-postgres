@@ -323,7 +323,9 @@ describe("loadRepoConfigActivity wrapper (already-typed envelope; no inv-11 work
     writeFileSync(join(workspace, ".codemaster.yaml"), "severity_min: issue\n", "utf-8");
 
     const input = LoadRepoConfigInputV1.parse({ workspace_path: workspace });
-    const cfg = await loadRepoConfigActivity(input);
+    const result = await loadRepoConfigActivity(input);
+    expect(result.config_status).toBe("valid"); // M6 envelope; the config inside stays byte-parity
+    const cfg = result.config;
     expect(cfg.severity_min).toBe("issue");
     expect(cfg.enabled).toBe(true);
   });
@@ -332,8 +334,9 @@ describe("loadRepoConfigActivity wrapper (already-typed envelope; no inv-11 work
     const workspace = mkdtempSync(join(tmpdir(), "config-activity-"));
     tempDirs.push(workspace);
     const input = LoadRepoConfigInputV1.parse({ workspace_path: workspace });
-    const cfg = await loadRepoConfigActivity(input);
-    expect(cfg).toEqual(CodemasterConfigV1.parse({}));
+    const result = await loadRepoConfigActivity(input);
+    expect(result.config).toEqual(CodemasterConfigV1.parse({}));
+    expect(result.config_status).toBe("absent"); // M6: the fail-open branch is now visible
   });
 });
 

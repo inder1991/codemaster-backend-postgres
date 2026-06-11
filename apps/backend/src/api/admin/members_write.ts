@@ -143,6 +143,7 @@ export async function getPendingChange(
   db: Kysely<unknown>,
   pendingId: string,
 ): Promise<MemberPendingRow | null> {
+  // tenant:exempt reason=PK-lookup-by-pending_id-tier-scoped-table follow_up=PERMANENT-EXEMPTION-tier-scoped-role-grants
   const r = await sql<PendingSqlRow>`
     SELECT ${PENDING_COLS} FROM core.role_grant_pending WHERE pending_id = ${pendingId}
   `.execute(db);
@@ -202,6 +203,7 @@ async function findExistingPendingId(
     args.scope === "platform"
       ? sql`scope = 'platform' AND subject_kind = ${args.subjectKind} AND subject_id = ${args.subjectId} AND state = 'pending'`
       : sql`scope = 'installation' AND installation_id = ${args.installationId} AND subject_kind = ${args.subjectKind} AND subject_id = ${args.subjectId} AND state = 'pending'`;
+  // tenant:exempt reason=scope-discriminated-lookup-platform-branch-carries-no-installation-predicate-by-design follow_up=PERMANENT-EXEMPTION-tier-scoped-role-grants
   const r = await sql<{ pending_id: string }>`
     SELECT pending_id FROM core.role_grant_pending WHERE ${where} LIMIT 1
   `.execute(db);
@@ -216,6 +218,7 @@ export async function applyChange(
   args: { pendingId: string; approvedByUserId: string; approvedAt: Date; appliedAt: Date },
 ): Promise<MemberPendingRow> {
   return db.transaction().execute(async (tx) => {
+    // tenant:exempt reason=CAS-update-by-pending_id-PK follow_up=PERMANENT-EXEMPTION-tier-scoped-role-grants
     const upd = await sql<PendingSqlRow>`
       UPDATE core.role_grant_pending
       SET state = 'applied', approved_by_user_id = ${args.approvedByUserId},
@@ -235,6 +238,7 @@ export async function applyChange(
 
     if (u.action === "grant" && u.subject_kind === "user") {
       // Upsert: remove any stale grant for the subject in this scope, then insert the new one.
+      // tenant:exempt reason=role_grants-delete-scope-routed-installPredicate-composed-fragment follow_up=PERMANENT-EXEMPTION-tier-scoped-role-grants
       await sql`
         DELETE FROM core.role_grants
         WHERE subject_kind = 'user' AND subject_id = ${u.subject_id} AND scope = ${u.scope} ${installPredicate}
@@ -245,6 +249,7 @@ export async function applyChange(
         VALUES (${u.installation_id}, ${u.scope}, 'user', ${u.subject_id}, ${u.role}, ${args.appliedAt})
       `.execute(tx);
     } else if (u.action === "revoke" && u.subject_kind === "user") {
+      // tenant:exempt reason=role_grants-delete-scope-routed-installPredicate-composed-fragment follow_up=PERMANENT-EXEMPTION-tier-scoped-role-grants
       await sql`
         DELETE FROM core.role_grants
         WHERE subject_kind = 'user' AND subject_id = ${u.subject_id} AND scope = ${u.scope} ${installPredicate}
@@ -262,6 +267,7 @@ export async function rejectChange(
   args: { pendingId: string; approvedByUserId: string; approvedAt: Date },
 ): Promise<MemberPendingRow> {
   return db.transaction().execute(async (tx) => {
+    // tenant:exempt reason=CAS-update-by-pending_id-PK follow_up=PERMANENT-EXEMPTION-tier-scoped-role-grants
     const r = await sql<PendingSqlRow>`
       UPDATE core.role_grant_pending
       SET state = 'rejected', approved_by_user_id = ${args.approvedByUserId}, approved_at = ${args.approvedAt}

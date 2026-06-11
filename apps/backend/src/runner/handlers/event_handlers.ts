@@ -19,6 +19,7 @@ import {
 } from "#backend/activities/sync_code_owners.activity.js";
 import type { EmbeddingsPort } from "#backend/adapters/embeddings_port.js";
 import { PostgresCodeOwnersRepo } from "#backend/domain/repos/code_owners_repo.js";
+import { readCodeOwnersV1Enabled } from "#backend/ingest/_code_owners_v1_flag.js";
 import { PostgresKnowledgeChunkRepo } from "#backend/domain/repos/knowledge_chunks_repo.js";
 import type { GitHubApiClient, TokenProvider } from "#backend/integrations/github/api_client.js";
 import type { GitHubAppTokenProvider } from "#backend/integrations/github/token_provider.js";
@@ -403,13 +404,19 @@ export function registerEventHandlers(registry: HandlerRegistry, deps: EventHand
   // EXISTING holder's syncCodeOwners. The holder is constructed PER DISPATCH — cheap object wiring;
   // the Postgres pool underneath is the memoized ADR-0062 shared pool (tenantKysely), so no
   // per-dispatch pool churn — with the composition-root CODEOWNERS port (injected stub under test;
-  // deferred-Vault 3-path lookup otherwise), the flag gate (DEFAULT-OFF — module doc), and the
-  // runner's Clock seam.
+  // deferred-Vault 3-path lookup otherwise), the flag gate, and the runner's Clock seam.
+  //
+  // OM9 (W4.6): the default `isEnabled` is the REAL ported core.flags reader (read per dispatch,
+  // exactly like the Python activity) — closing FOLLOW-UP-code-owners-v1-flag-reader. The reader is
+  // fail-OPEN to false (absent row / malformed rollout / DB blip → producer stays off), so the
+  // pre-port DEFAULT-OFF posture is preserved until an operator inserts the
+  // `code_owners_v1 → {"enabled": true}` rollout row.
   const codeOwnersGithub = deps.codeOwnersGithub ?? makeLazyCodeOwnersFilePort();
-  const codeOwnersIsEnabled: IsEnabled = deps.codeOwnersIsEnabled ?? (async (): Promise<boolean> => false);
   registry.register("sync_code_owners", async (payload, _signal, handlerDeps) => {
     const parsed = SyncCodeOwnersPayloadV1.parse(payload);
     const dsn = requireDsn(deps, "sync_code_owners");
+    const codeOwnersIsEnabled: IsEnabled =
+      deps.codeOwnersIsEnabled ?? ((): Promise<boolean> => readCodeOwnersV1Enabled(tenantKysely<unknown>(dsn)));
     const holder = new SyncCodeOwnersActivity({
       github: codeOwnersGithub,
       repo: PostgresCodeOwnersRepo.fromDsn(dsn),

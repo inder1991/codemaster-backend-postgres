@@ -114,7 +114,54 @@ function scanRepos(): ReadonlyArray<PoolViolation> {
   return out;
 }
 
+/** W4.6 [OM4]: the activities layer regressed the same invariant once — the run_id retire sweep
+ *  opened a fresh non-memoized `new PgPool` per run (`kyselyOver`), a second connection source
+ *  against the same DSN during the 03:00 sweep. Activities MUST route through `getPool`/
+ *  `tenantKysely` like everything else; scan the whole activities directory for owned pools
+ *  (`Pool` AND the `Pool as PgPool` alias). */
+const ACTIVITIES_DIR = path.resolve(__dirname, "../../apps/backend/src/activities");
+
+function activitySourcePaths(): ReadonlyArray<string> {
+  return readdirSync(ACTIVITIES_DIR)
+    .filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"))
+    .map((f) => path.join(ACTIVITIES_DIR, f))
+    .sort();
+}
+
+function ownedPoolViolationsIn(sf: SourceFile): ReadonlyArray<PoolViolation> {
+  const out: Array<PoolViolation> = [];
+  const rel = path.basename(sf.getFilePath());
+  sf.forEachDescendant((node) => {
+    if (!Node.isNewExpression(node)) {
+      return;
+    }
+    if (isNewOf(node, "Pool") || isNewOf(node, "PgPool")) {
+      out.push({ file: rel, line: node.getStartLineNumber(), kind: "new Pool", snippet: node.getText().slice(0, 80) });
+    }
+  });
+  return out;
+}
+
 describe("ADR-0062 pool-memoization guard (Task-2.14)", () => {
+  it("no activity under activities/ constructs its own pg Pool (OM4 — route through getPool/tenantKysely)", () => {
+    const project = new Project({
+      useInMemoryFileSystem: false,
+      skipFileDependencyResolution: true,
+      skipAddingFilesFromTsConfig: true,
+      compilerOptions: { allowJs: false },
+    });
+    const violations: Array<PoolViolation> = [];
+    for (const p of activitySourcePaths()) {
+      violations.push(...ownedPoolViolationsIn(project.addSourceFileAtPath(p)));
+    }
+    expect(activitySourcePaths().length).toBeGreaterThan(0); // not vacuously green
+    const report = violations.map((v) => `  ${v.file}:${v.line} — ${v.kind}: ${v.snippet}`).join("\n");
+    expect(
+      violations,
+      violations.length === 0 ? "" : `OM4 regression — activities must use getPool/tenantKysely:\n${report}`,
+    ).toHaveLength(0);
+  });
+
   it("no repo under domain/repos constructs its own Pool / Kysely / per-DSN cache", () => {
     const violations = scanRepos();
     const report = violations

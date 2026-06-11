@@ -236,6 +236,7 @@ export class PostgresCoreUserRepo implements CoreUserRepo {
     newHash: string;
     now: Date;
   }): Promise<void> {
+    // tenant:exempt reason=PK-update-by-user_id-auth-identity-path follow_up=PERMANENT-EXEMPTION-auth-identity-pk
     const r = await sql`
       UPDATE core.users SET password_hash = ${args.newHash}, password_changed_at = ${args.now}
       WHERE user_id = ${args.userId}
@@ -254,6 +255,7 @@ export class PostgresCoreUserRepo implements CoreUserRepo {
     return this.#db.transaction().execute(async (tx) => {
       let row: { failed_attempts: number } | undefined;
       if (args.success) {
+        // tenant:exempt reason=PK-update-by-user_id-auth-identity-path follow_up=PERMANENT-EXEMPTION-auth-identity-pk
         const r = await sql<{ failed_attempts: number }>`
           UPDATE core.users
           SET failed_attempts = 0, locked_until = NULL, last_login_at = ${args.now}
@@ -263,6 +265,7 @@ export class PostgresCoreUserRepo implements CoreUserRepo {
         row = r.rows[0];
       } else {
         const lockoutAt = new Date(args.now.getTime() + LOCKOUT_DURATION_MS);
+        // tenant:exempt reason=PK-update-by-user_id-auth-identity-path follow_up=PERMANENT-EXEMPTION-auth-identity-pk
         const r = await sql<{ failed_attempts: number; locked_until: Date | null }>`
           UPDATE core.users
           SET failed_attempts = failed_attempts + 1,

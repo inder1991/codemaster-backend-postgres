@@ -259,6 +259,70 @@ export function maybeAppendConfigNotice(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
+// W4.4 [M6] — the MALFORMED-config notice (net-new TS surface; the frozen Python had the WARN +
+// OTel emit but NO user-visible feedback). When `load_repo_config` rejected the WHOLE document and
+// fell open to defaults (config_status === 'malformed' — parse error, schema violation, oversize,
+// io error), the customer's settings — including a safety-critical `enabled: false` opt-out — are
+// silently NOT in effect. This notice is the SEED-scenario-(b) contract: "fail-open to defaults +
+// a NOTICE". DISTINCT from configChangeNoticeFinding (that one fires when the PR *touches* the
+// file; this one fires when the file is *broken* — both can appear on the same PR). Same idempotent
+// append discipline; callers append AFTER the MAX_INLINE_FINDINGS cap so it can never be capped away.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+const MALFORMED_CONFIG_TITLE = "codemaster: .codemaster.yaml is malformed and was ignored";
+
+/** The malformed-config notice finding (pure; mirrors configChangeNoticeFinding's shape). */
+export function malformedConfigNoticeFinding(): ReviewFindingV1 {
+  return ReviewFindingV1.parse({
+    file: ".codemaster.yaml",
+    start_line: 1,
+    end_line: 1,
+    severity: "suggestion",
+    category: "config",
+    title: MALFORMED_CONFIG_TITLE,
+    body:
+      "Your `.codemaster.yaml` could not be parsed or validated, so codemaster ignored it and " +
+      "reviewed this PR with the defaults. Any opt-outs, path filters, or thresholds in the " +
+      "file are NOT currently in effect — fix the file to restore them.",
+    suggestion: null,
+    confidence: 0.99,
+  });
+}
+
+/** Does `findings` already carry the malformed-config notice? (Idempotency guard.) */
+function hasMalformedConfigNotice(findings: ReadonlyArray<ReviewFindingV1>): boolean {
+  for (const f of findings) {
+    if (f.file === CONFIG_YAML_PATH && f.category === "config" && f.title === MALFORMED_CONFIG_TITLE) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Append the malformed-config notice IFF `configStatus === 'malformed'`. 'valid' and 'absent' are
+ * notice-free (no spurious noise); idempotent (re-invocation in a fan-out/retry path can never
+ * duplicate it — the maybeAppendConfigNotice discipline).
+ */
+export function maybeAppendMalformedConfigNotice(
+  aggregated: AggregatedFindingsV1,
+  configStatus: "absent" | "valid" | "malformed",
+): AggregatedFindingsV1 {
+  if (configStatus !== "malformed") {
+    return aggregated;
+  }
+  if (hasMalformedConfigNotice(aggregated.findings)) {
+    return aggregated;
+  }
+  return {
+    schema_version: aggregated.schema_version,
+    findings: [...aggregated.findings, malformedConfigNoticeFinding()],
+    dedupe_stats: aggregated.dedupe_stats,
+    policy_revision: aggregated.policy_revision,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
 // _path_filters_excluded_all_finding (review_pipeline_orchestrator.py:365)
 //
 // spec §6.4 — informational finding when path_filters excludes every changed file. Mirrors

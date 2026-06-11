@@ -15,7 +15,7 @@ export async function resolveInternalInstallationId(
   if (githubInstallationId === null) {
     return null;
   }
-  // tenant:exempt reason=installation-identity-edge-resolves-internal-iid follow_up=FOLLOW-UP-gf3-error-mode
+  // tenant:exempt reason=installation-identity-edge-resolves-internal-iid follow_up=PERMANENT-EXEMPTION-global-identity-tables
   const r = await sql<{ installation_id: string }>`
     SELECT installation_id FROM core.installations WHERE github_installation_id = ${githubInstallationId}
   `.execute(db);

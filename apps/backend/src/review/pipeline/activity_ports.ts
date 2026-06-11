@@ -47,8 +47,10 @@ import type { ReleaseWorkspaceInput } from "#contracts/release_workspace_input.v
 import type { GenerateWalkthroughInputV1 } from "#contracts/generate_walkthrough_input.v1.js";
 import type { PostCheckRunInputV1, PostedCheckRunV1 } from "#contracts/posted_check_run.v1.js";
 import type { DedupFindingsInputV1, DedupedFindingsV1 } from "#contracts/dedup_findings.v1.js";
-import type { LoadRepoConfigInputV1 } from "#contracts/load_repo_config.v1.js";
-import type { CodemasterConfigV1 } from "#contracts/codemaster_config.v1.js";
+import type {
+  LoadRepoConfigInputV1,
+  LoadRepoConfigResultV1,
+} from "#contracts/load_repo_config.v1.js";
 import type {
   ComputePolicyRulesInputV1,
   ComputedPolicyRulesV1,
@@ -95,7 +97,7 @@ export type ChangedLineRanges = Readonly<Record<string, ReadonlyArray<ChangedLin
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 export type ReviewActivityPorts = {
   clone(input: CloneRepoIntoWorkspaceInput): Promise<ClonedRepoV1>;
-  loadRepoConfig(input: LoadRepoConfigInputV1): Promise<CodemasterConfigV1>;
+  loadRepoConfig(input: LoadRepoConfigInputV1): Promise<LoadRepoConfigResultV1>;
   computePolicyRules(input: ComputePolicyRulesInputV1): Promise<ComputedPolicyRulesV1>;
   classify(input: ClassifyFilesInputV1): Promise<FileRoutingV1>;
   chunkAndRedact(input: ChunkAndRedactInputV1): Promise<ReadonlyArray<DiffChunkV1>>;

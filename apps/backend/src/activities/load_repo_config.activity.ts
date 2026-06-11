@@ -23,17 +23,23 @@
  * awaits nothing — it returns the sync result wrapped in the activity's `Promise`.
  */
 
-import { loadRepoConfig } from "#backend/config/config_loader.js";
+import { loadRepoConfigWithStatus } from "#backend/config/config_loader.js";
 
-import type { CodemasterConfigV1 } from "#contracts/codemaster_config.v1.js";
-import type { LoadRepoConfigInputV1 } from "#contracts/load_repo_config.v1.js";
+import type {
+  LoadRepoConfigInputV1,
+  LoadRepoConfigResultV1,
+} from "#contracts/load_repo_config.v1.js";
 
 /**
- * Return the repo's `.codemaster.yaml` as a validated config, or {@link CodemasterConfigV1} defaults on
- * any failure. Mirrors `return load_repo_config(Path(input_.workspace_path))`.
+ * Return the repo's `.codemaster.yaml` as a validated config inside the M6 status envelope
+ * (`{ config, config_status, reason }`) — the config itself is byte-identical with the frozen
+ * Python `load_repo_config(Path(input_.workspace_path))` return (defaults on any failure; the
+ * loader NEVER throws). W4.4 [M6]: `config_status` lets the orchestrator append the user-visible
+ * "malformed and ignored" NOTICE instead of silently dropping a customer's settings — a TS
+ * hardening divergence from the bare-config Python return.
  */
 export async function loadRepoConfigActivity(
   input: LoadRepoConfigInputV1,
-): Promise<CodemasterConfigV1> {
-  return loadRepoConfig(input.workspace_path);
+): Promise<LoadRepoConfigResultV1> {
+  return loadRepoConfigWithStatus(input.workspace_path);
 }

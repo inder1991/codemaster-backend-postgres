@@ -211,7 +211,7 @@ export async function assertCurrentRun(args: AssertCurrentRunArgs): Promise<void
   // supersede transaction's FOR UPDATE is mutually exclusive. We fetch `provider` in the same trip so
   // the STALE_WRITE_BLOCKED emit can satisfy the NOT NULL `workflow_events.provider` column without a
   // second round-trip.
-  // tenant:exempt reason=PK-lookup-by-review-id follow_up=FOLLOW-UP-gf3-error-mode
+  // tenant:exempt reason=PK-lookup-by-review-id follow_up=PERMANENT-EXEMPTION-pk-fenced-writes
   const reviewResult = await sql<{ current_run_id: string | null; provider: string }>`
     SELECT current_run_id, provider
       FROM core.pull_request_reviews

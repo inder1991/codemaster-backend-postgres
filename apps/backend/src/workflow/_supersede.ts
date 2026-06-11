@@ -73,6 +73,7 @@ export async function supersedeRun(
   // Step 1: optimistic cancel UPDATE. The WHERE lifecycle_state IN (active) is the guard — concurrent
   // supersedes both observe an active run, only one returns a row. cancelled_at + state flip in one UPDATE
   // (AD-7 inverse CHECK never sees a mid-transition row).
+  // tenant:exempt reason=AD-5-cancel-by-review_id-fenced-by-BF-9-installation-resolve-above follow_up=PERMANENT-EXEMPTION-bf9-fenced-review-runs
   const r = await sql<{ run_id: string }>`
     UPDATE core.review_runs
        SET lifecycle_state = 'CANCELLED', cancelled_at = ${clock.now()},

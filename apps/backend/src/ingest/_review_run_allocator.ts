@@ -58,6 +58,10 @@ export async function allocateRun(
   const newRunId = uuid7({ clock });
 
   // Step 1: optimistic supersede (skipped on retry — AD-6 parent_run_id XOR supersedes_run_id).
+  // W4.2 [L10]: the caller's resolved internal installation_id is threaded through as
+  // expectedInstallationId so the BF-9 cross-installation fence is ENFORCED on the ingestion path
+  // (mismatch vs the review's repo-chain tenancy → CrossInstallationViolation; previously the
+  // undefined arg routed both primitives onto their WARN-and-skip Phase-B grace branch).
   let supersededRunId: string | null = null;
   if (parentRunId === null) {
     const outcome = await supersedeRun(db, {
@@ -65,13 +69,18 @@ export async function allocateRun(
       newRunId,
       provider: args.provider,
       cancelReason: "superseded",
+      expectedInstallationId: args.installationId,
       clock,
     });
     supersededRunId = outcome.oldRunId;
   }
   const wasSupersede = supersededRunId !== null;
 
-  // Step 2: INSERT the new PENDING run.
+  // Step 2: INSERT the new PENDING run. core.review_runs carries NO installation_id column — its
+  // tenancy is transitive via review_id → pull_request_reviews.repo_id → repositories, and is
+  // enforced in this same transaction by the BF-9 fence in supersedeRun (above, fresh/supersede
+  // path) and flipCurrentRun (below, EVERY path). [L10]
+  // tenant:exempt reason=review_runs-has-no-installation_id-column-tenancy-via-BF-9-fence-on-review_id follow_up=PERMANENT-EXEMPTION-bf9-fenced-review-runs
   await sql`
     INSERT INTO core.review_runs
       (run_id, review_id, trigger_type, triggered_by, attempt_number, lifecycle_state,
@@ -81,11 +90,13 @@ export async function allocateRun(
   `.execute(db);
 
   // Step 3: flip the authoritative pointer. The optimistic guard fires only when a supersede happened
-  // (current_run_id MUST equal supersededRunId then); fresh/retry → null guard (skip).
+  // (current_run_id MUST equal supersededRunId then); fresh/retry → null guard (skip). The BF-9
+  // expectedInstallationId fence fires on EVERY allocation path, including retry (which skips Step 1).
   await flipCurrentRun(db, {
     reviewId: args.reviewId,
     newRunId,
     oldRunIdExpected: wasSupersede ? supersededRunId : null,
+    expectedInstallationId: args.installationId,
   });
 
   // Step 4: emit WEBHOOK_RECEIVED for the new run (only when a provider delivery key is present).

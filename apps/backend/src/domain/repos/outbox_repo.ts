@@ -221,6 +221,7 @@ export class PostgresOutboxRepo {
         return [];
       }
       const ids = rows.map((r) => r.id);
+      // tenant:exempt reason=lease-stamp-on-ids-claimed-in-this-txn follow_up=PERMANENT-EXEMPTION-worker-pool-claim
       await sql`
         UPDATE core.outbox
            SET leased_until = ${now}::timestamptz + ${leaseSeconds} * interval '1 second'
@@ -252,6 +253,7 @@ export class PostgresOutboxRepo {
     db: Executor;
     id: string;
   }): Promise<{ lastAttemptedAt: Date | null; createdAt: Date | null } | null> {
+    // tenant:exempt reason=CAS-update-by-outbox-id-PK follow_up=PERMANENT-EXEMPTION-pk-scoped-writes
     const result = await sql<{ last_attempted_at: Date | null; created_at: Date | null }>`
       UPDATE core.outbox
          SET state = 'dispatched', dispatched_at = ${this.#clock.now()}, leased_until = NULL
@@ -298,6 +300,7 @@ export class PostgresOutboxRepo {
     permanent?: boolean;
   }): Promise<{ state: string; sink: string } | null> {
     const permanent = args.permanent === true;
+    // tenant:exempt reason=CAS-update-by-outbox-id-PK-attempts-fenced follow_up=PERMANENT-EXEMPTION-pk-scoped-writes
     const result = await sql<{ state: string; sink: string }>`
       UPDATE core.outbox
          SET attempts = attempts + 1,
@@ -321,6 +324,7 @@ export class PostgresOutboxRepo {
    * loop is deferred; this method lands now so the seam stays clean). Also usable standalone for ops.
    */
   public async extendLease(args: { db: Executor; id: string; leaseSeconds: number }): Promise<void> {
+    // tenant:exempt reason=PK-update-by-outbox-id-lease-extend follow_up=PERMANENT-EXEMPTION-pk-scoped-writes
     await sql`
       UPDATE core.outbox
          SET leased_until = ${this.#clock.now()}::timestamptz + ${args.leaseSeconds} * interval '1 second'
@@ -331,6 +335,7 @@ export class PostgresOutboxRepo {
   /** Terminal dead-letter, ops-only manual path (Python `mark_dead`). The dispatcher reaches 'dead' via the
    *  atomic {@link markAttemptFailed} CASE; this remains for operator-driven dead-lettering. */
   public async markDead(args: { db: Executor; id: string; error: string }): Promise<void> {
+    // tenant:exempt reason=PK-update-by-outbox-id-operator-dead-letter follow_up=PERMANENT-EXEMPTION-pk-scoped-writes
     await sql`
       UPDATE core.outbox
          SET state = 'dead', last_error = ${args.error.slice(0, 1024)},

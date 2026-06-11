@@ -46,6 +46,7 @@ import { PrMetaV1 } from "#contracts/walkthrough.v1.js";
 import { WorkspaceHandle } from "#contracts/workspace_handle.v1.js";
 import { ClonedRepoV1 } from "#contracts/cloned_repo.v1.js";
 import { CodemasterConfigV1 } from "#contracts/codemaster_config.v1.js";
+import { LoadRepoConfigResultV1 } from "#contracts/load_repo_config.v1.js";
 import { ComputedPolicyRulesV1 } from "#contracts/policy_compute.v1.js";
 import { FileRoutingV1 } from "#contracts/file_routing.v1.js";
 import { DiffChunkV1 } from "#contracts/diff_chunking.v1.js";
@@ -194,7 +195,10 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
     },
     loadRepoConfig: async () => {
       calls.push("loadRepoConfig");
-      return CodemasterConfigV1.parse({ path_filters: [] });
+      return LoadRepoConfigResultV1.parse({
+        config: CodemasterConfigV1.parse({ path_filters: [] }),
+        config_status: "valid",
+      });
     },
     computePolicyRules: async () => {
       calls.push("computePolicyRules");

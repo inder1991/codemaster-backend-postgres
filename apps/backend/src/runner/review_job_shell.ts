@@ -191,7 +191,7 @@ export type RunReviewJobDeps = {
 async function readCurrentRunId(pool: Pool, reviewId: string): Promise<string | null> {
   // `core.pull_request_reviews` is keyed by `review_id` (globally unique; no installation_id column) — the
   // same PK the AD-4 flipCurrentRun fence reads. tenant:exempt reason=supersede-fence-read-by-review_id
-  // follow_up=FOLLOW-UP-gf3-error-mode
+  // follow_up=PERMANENT-EXEMPTION-bf9-fenced-review-runs
   const r = await pool.query<{ current_run_id: string | null }>(
     "SELECT current_run_id FROM core.pull_request_reviews WHERE review_id = $1",
     [reviewId],

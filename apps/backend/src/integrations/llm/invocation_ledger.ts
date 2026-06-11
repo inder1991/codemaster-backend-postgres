@@ -197,7 +197,7 @@ export class LlmInvocationLedger {
    * here it is the mechanism only.
    */
   public async pruneOlderThan(days: number): Promise<number> {
-    // tenant:exempt reason=retention-sweep follow_up=FOLLOW-UP-gf3-error-mode
+    // tenant:exempt reason=retention-sweep follow_up=PERMANENT-EXEMPTION-cross-tenant-retention-sweep
     const r = await sql`
       DELETE FROM core.llm_invocation_ledger
        WHERE created_at < now() - make_interval(days => ${days})
