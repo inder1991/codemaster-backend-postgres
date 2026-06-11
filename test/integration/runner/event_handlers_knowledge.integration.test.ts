@@ -36,7 +36,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import type { CacheGitCloner } from "#backend/activities/clone_repository.activity.js";
 import type { CodeOwnersFilePort } from "#backend/activities/sync_code_owners.activity.js";
+import type { EmbeddingsPort } from "#backend/adapters/embeddings_port.js";
 import { RecordingEmbeddingsClient } from "#backend/adapters/embeddings_port.js";
+import {
+  GitHubAppUnauthorized,
+  GitHubNotFoundError,
+} from "#backend/integrations/github/api_client.js";
 import { BackgroundJobsRepo } from "#backend/runner/background_jobs_repo.js";
 import { runOneBackgroundJob } from "#backend/runner/background_runner.js";
 import { HandlerRegistry } from "#backend/runner/handler_registry.js";
@@ -411,6 +416,217 @@ describe("event registry + workflow_job_map (Phase 3d W3d.2 widening)", () => {
     registerEventHandlers(registry, {});
     for (const jobType of Object.values(WORKFLOW_TYPE_TO_JOB_TYPE)) {
       expect(registry.registeredTypes()).toContain(jobType);
+    }
+  });
+});
+
+// ─── CS4.3 / T2: Temporal nonRetryableErrorTypes parity — permanent faults dead-letter in ONE ────
+// attempt. The Temporal proxies declared per-step non-retryable error NAMES (sync_code_owners +
+// the refresh clone step: GitHubAppUnauthorized / GitHubNotFoundError; the refresh embed step:
+// WrongVectorDimensionError — sync_code_owners.workflow.ts:65, refresh_semantic_docs.workflow.ts:82,107)
+// and Temporal matched them by error NAME. The platform handlers must reproduce that split: a fault
+// whose name is in the step's list is wrapped in PermanentJobError (runner → 'dead' after ONE
+// attempt, no retry burn); every OTHER error keeps the bounded markFailed retry curve.
+describeDb("event_handlers — nonRetryableErrorTypes parity (CS4.3 / T2)", () => {
+  it("(P1) sync_code_owners: GitHubAppUnauthorized dead-letters after ONE attempt (no retry burn)", async () => {
+    const installationId = randomUUID();
+    const repositoryId = randomUUID();
+    await seedParents({ installationId, repositoryId });
+    try {
+      let fetches = 0;
+      const github: CodeOwnersFilePort = {
+        fetchCodeowners: async (): Promise<readonly [Uint8Array, string] | null> => {
+          await Promise.resolve();
+          fetches += 1;
+          throw new GitHubAppUnauthorized("401 bad credentials (refresh did not help)");
+        },
+      };
+      const registry = new HandlerRegistry();
+      registerEventHandlers(registry, {
+        dsn: INTEGRATION_DSN!,
+        codeOwnersGithub: github,
+        codeOwnersIsEnabled: async (): Promise<boolean> => {
+          await Promise.resolve();
+          return true;
+        },
+      });
+      const repo = new BackgroundJobsRepo(db);
+
+      const jobId = await repo.enqueue({
+        jobType: "sync_code_owners",
+        payload: syncCodeOwnersPayload(installationId, repositoryId),
+        maxAttempts: 3,
+      });
+      const r = await runOne(registry, repo);
+      expect(r.outcome).toBe("failed");
+
+      const job = await repo.getById(jobId);
+      expect(job!.state).toBe("dead"); // terminal DESPITE attempts remaining (1 < max 3)
+      expect(job!.attempts).toBe(1);
+      expect(fetches).toBe(1); // exactly ONE GitHub call — never redriven
+      expect(job!.dead_reason).toContain("GitHubAppUnauthorized");
+      expect(job!.dead_reason).toContain("401 bad credentials");
+    } finally {
+      await cleanup({ installationId, repositoryId });
+    }
+  });
+
+  it("(P2) refresh_semantic_docs clone step: GitHubNotFoundError dead-letters after ONE attempt", async () => {
+    const installationId = randomUUID();
+    const repositoryId = randomUUID();
+    await seedParents({ installationId, repositoryId });
+    const cacheRoot = mkdtempSync(join(tmpdir(), "cs43-clone-cache-"));
+    const priorCacheRoot = process.env.CODEMASTER_CLONE_CACHE_ROOT;
+    process.env.CODEMASTER_CLONE_CACHE_ROOT = cacheRoot;
+    try {
+      let mints = 0;
+      // The installation was deleted upstream: the token mint 404s — the clone step's declared
+      // non-retryable (refresh_semantic_docs.workflow.ts:82).
+      const getToken = async (): Promise<string> => {
+        await Promise.resolve();
+        mints += 1;
+        throw new GitHubNotFoundError("installation gone");
+      };
+      const cloner: CacheGitCloner = {
+        clone: async (): Promise<void> => {
+          throw new Error("unreachable: the token mint failed before any clone");
+        },
+      };
+      const registry = new HandlerRegistry();
+      registerEventHandlers(registry, {
+        dsn: INTEGRATION_DSN!,
+        refreshCloner: cloner,
+        refreshGetToken: getToken,
+        refreshEmbeddings: new RecordingEmbeddingsClient(),
+      });
+      const repo = new BackgroundJobsRepo(db);
+
+      const jobId = await repo.enqueue({
+        jobType: "refresh_semantic_docs",
+        payload: refreshPayload(installationId, repositoryId),
+        maxAttempts: 3,
+      });
+      const r = await runOne(registry, repo);
+      expect(r.outcome).toBe("failed");
+
+      const job = await repo.getById(jobId);
+      expect(job!.state).toBe("dead");
+      expect(job!.attempts).toBe(1);
+      expect(mints).toBe(1);
+      expect(job!.dead_reason).toContain("GitHubNotFoundError");
+      expect(job!.dead_reason).toContain("installation gone");
+    } finally {
+      if (priorCacheRoot === undefined) {
+        delete process.env.CODEMASTER_CLONE_CACHE_ROOT;
+      } else {
+        process.env.CODEMASTER_CLONE_CACHE_ROOT = priorCacheRoot;
+      }
+      rmSync(cacheRoot, { recursive: true, force: true });
+      await cleanup({ installationId, repositoryId });
+    }
+  });
+
+  it("(P3) refresh_semantic_docs embed step: an error NAMED WrongVectorDimensionError dead-letters after ONE attempt", async () => {
+    const installationId = randomUUID();
+    const repositoryId = randomUUID();
+    await seedParents({ installationId, repositoryId });
+    const cacheRoot = mkdtempSync(join(tmpdir(), "cs43-embed-cache-"));
+    const priorCacheRoot = process.env.CODEMASTER_CLONE_CACHE_ROOT;
+    process.env.CODEMASTER_CLONE_CACHE_ROOT = cacheRoot;
+    try {
+      // No TS class carries this name — the Temporal proxy matched the NAME string
+      // (refresh_semantic_docs.workflow.ts:107), so the platform parity is a name match too.
+      class WrongVectorDimensionError extends Error {
+        public constructor(message: string) {
+          super(message);
+          this.name = "WrongVectorDimensionError";
+        }
+      }
+      let embeds = 0;
+      const embeddings: EmbeddingsPort = {
+        embed: async (): Promise<never> => {
+          await Promise.resolve();
+          embeds += 1;
+          throw new WrongVectorDimensionError("expected 1024, got 768");
+        },
+      };
+      const cloner: CacheGitCloner = {
+        clone: async (args): Promise<void> => {
+          const docAbs = join(args.targetDir, "repo", ADR_DOC.path);
+          await mkdir(join(docAbs, ".."), { recursive: true });
+          await writeFile(docAbs, ADR_DOC.body, "utf-8");
+        },
+      };
+      const registry = new HandlerRegistry();
+      registerEventHandlers(registry, {
+        dsn: INTEGRATION_DSN!,
+        refreshCloner: cloner,
+        refreshGetToken: async (): Promise<string> => "tok-test",
+        refreshEmbeddings: embeddings,
+      });
+      const repo = new BackgroundJobsRepo(db);
+
+      const jobId = await repo.enqueue({
+        jobType: "refresh_semantic_docs",
+        payload: refreshPayload(installationId, repositoryId),
+        maxAttempts: 3,
+      });
+      const r = await runOne(registry, repo);
+      expect(r.outcome).toBe("failed");
+
+      const job = await repo.getById(jobId);
+      expect(job!.state).toBe("dead");
+      expect(job!.attempts).toBe(1);
+      expect(embeds).toBe(1);
+      expect(job!.dead_reason).toContain("WrongVectorDimensionError");
+    } finally {
+      if (priorCacheRoot === undefined) {
+        delete process.env.CODEMASTER_CLONE_CACHE_ROOT;
+      } else {
+        process.env.CODEMASTER_CLONE_CACHE_ROOT = priorCacheRoot;
+      }
+      rmSync(cacheRoot, { recursive: true, force: true });
+      await cleanup({ installationId, repositoryId });
+    }
+  });
+
+  it("(P4) PIN: a plain transient Error from the SAME seam keeps the retry curve — re-enqueued 'ready', NOT dead", async () => {
+    const installationId = randomUUID();
+    const repositoryId = randomUUID();
+    await seedParents({ installationId, repositoryId });
+    try {
+      const github: CodeOwnersFilePort = {
+        fetchCodeowners: async (): Promise<readonly [Uint8Array, string] | null> => {
+          await Promise.resolve();
+          throw new Error("503 service unavailable"); // NOT in the non-retryable list
+        },
+      };
+      const registry = new HandlerRegistry();
+      registerEventHandlers(registry, {
+        dsn: INTEGRATION_DSN!,
+        codeOwnersGithub: github,
+        codeOwnersIsEnabled: async (): Promise<boolean> => {
+          await Promise.resolve();
+          return true;
+        },
+      });
+      const repo = new BackgroundJobsRepo(db);
+
+      const jobId = await repo.enqueue({
+        jobType: "sync_code_owners",
+        payload: syncCodeOwnersPayload(installationId, repositoryId),
+        maxAttempts: 3,
+      });
+      const r = await runOne(registry, repo);
+      expect(r.outcome).toBe("failed");
+
+      const job = await repo.getById(jobId);
+      expect(job!.state).toBe("ready"); // re-enqueued for retry — the wrap must NOT over-classify
+      expect(job!.attempts).toBe(1);
+      expect(job!.dead_reason).toBeNull();
+      expect(job!.last_error).toContain("503 service unavailable");
+    } finally {
+      await cleanup({ installationId, repositoryId });
     }
   });
 });
