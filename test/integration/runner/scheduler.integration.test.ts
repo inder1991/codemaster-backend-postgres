@@ -247,3 +247,60 @@ describeDb("Postgres scheduler — pollAndEnqueue (Phase 3a W3)", () => {
     expect(schedErrSpy).toHaveBeenCalledTimes(2);
   });
 });
+
+// ─── CS7 (RT4/M13): per-schedule SAVEPOINT isolation — a poisoned advance UPDATE cannot ──────────
+// cascade-retick the batch. Test (7) above covers the PURE-JS poison (computeNextRun throws before
+// any statement); this covers the SQL-level poison the W4a.2 try/catch alone CANNOT contain: a
+// failed UPDATE aborts the surrounding Postgres transaction, so every OTHER schedule's advance in
+// the same pass rolls back at commit — the whole due batch re-ticks (double-enqueues) next poll.
+// Each schedule's enqueue+advance must run inside its own SAVEPOINT so the poisoned one rolls back
+// ALONE and every healthy advance COMMITS in the same pass.
+describeDb("Postgres scheduler — per-schedule SAVEPOINT isolation (CS7)", () => {
+  it("(8) a POISONED advance UPDATE rolls back alone; healthy schedules in the SAME pass still advance", async () => {
+    const clock = new FakeClock({ now: new Date("2026-06-10T12:00:00.000Z") });
+    const repo = new BackgroundJobsRepo(db);
+    const healthyA = mintIds(); const poisoned = mintIds(); const healthyB = mintIds();
+    for (const s of [healthyA, poisoned, healthyB]) {
+      await seedSchedule({ scheduleId: s.scheduleId, jobType: s.jobType, cadenceKind: "interval",
+        cadenceSpec: "300", nextRunAt: new Date("2026-06-10T11:59:00.000Z") });
+    }
+    // Poison the SQL level: a BEFORE UPDATE trigger that raises for ONE schedule_id — the advance
+    // UPDATE itself fails mid-transaction (the class test (7)'s pure-JS poison cannot reach).
+    // sql.raw: a bind parameter cannot appear inside a dollar-quoted function body (DDL takes no
+    // binds); the interpolated id is this test's own randomUUID-derived literal.
+    await sql.raw(`CREATE OR REPLACE FUNCTION pg_temp_cs7_poison() RETURNS trigger AS $$
+        BEGIN
+          IF NEW.schedule_id = '${poisoned.scheduleId}' THEN
+            RAISE EXCEPTION 'cs7: poisoned advance UPDATE';
+          END IF;
+          RETURN NEW;
+        END $$ LANGUAGE plpgsql`).execute(db);
+    await sql`CREATE TRIGGER cs7_poison_advance BEFORE UPDATE ON core.scheduled_jobs
+        FOR EACH ROW EXECUTE FUNCTION pg_temp_cs7_poison()`.execute(db);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      // The pass must COMPLETE (not reject at commit) and count the 2 healthy enqueues.
+      expect(await pollAndEnqueue({ repo, db, clock })).toBe(2);
+
+      // BOTH healthy schedules advanced + stamped IN THE SAME PASS (committed — not rolled back
+      // by the poisoned sibling): the batch did NOT cascade-retick.
+      for (const s of [healthyA, healthyB]) {
+        const row = await readSchedule(s.scheduleId);
+        expect(row.next_run_at).toEqual(new Date("2026-06-10T12:05:00.000Z"));
+        expect(row.last_enqueued_at).toEqual(new Date("2026-06-10T12:00:00.000Z"));
+        expect(await jobsFor(s.scheduleId)).toHaveLength(1);
+      }
+
+      // The poisoned schedule is isolated: left UNADVANCED (stays due → re-attempted next poll)
+      // and metered + WARN-named.
+      const bad = await readSchedule(poisoned.scheduleId);
+      expect(bad.next_run_at).toEqual(new Date("2026-06-10T11:59:00.000Z"));
+      expect(bad.last_enqueued_at).toBeNull();
+      expect(schedErrSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls.some((c) => String(c[0]).includes(poisoned.scheduleId))).toBe(true);
+    } finally {
+      await sql`DROP TRIGGER IF EXISTS cs7_poison_advance ON core.scheduled_jobs`.execute(db);
+      await sql`DROP FUNCTION IF EXISTS pg_temp_cs7_poison()`.execute(db);
+    }
+  });
+});
