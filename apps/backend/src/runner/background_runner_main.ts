@@ -1,6 +1,7 @@
 import { hostname } from "node:os";
 
 import type { Kysely } from "kysely";
+import type { z } from "zod";
 
 import { OutboxDispatchActivities } from "#backend/activities/outbox_dispatch.activity.js";
 import {
@@ -150,6 +151,12 @@ export type BackgroundRunnerDeps = {
    *  bundle (NO overrides in production: the full GitHub/LLM/workspace surface). Tests inject a
    *  recording stub so the composed loop can be driven without real GitHub/LLM side effects. */
   reviewHandler?: JobHandler;
+  /** W3.8 (RM7) TEST SEAM: the scheduler-boundary input-contract registry. Default = the REAL
+   *  {@link SCHEDULED_JOB_INPUT_CONTRACTS} (production NEVER overrides — the default-deny posture
+   *  over operator-writable core.scheduled_jobs is pinned by the scheduler integration suite).
+   *  Composition tests that drive pollOnce with synthetic job_types extend it so their schedules
+   *  pass the boundary. */
+  scheduledInputContracts?: ReadonlyMap<string, z.ZodTypeAny>;
 };
 
 /** The composed runtime pieces + single-shot drive seams (tests / operator diagnostics). */
@@ -266,11 +273,16 @@ export function buildBackgroundRunner(deps: BackgroundRunnerDeps): BackgroundRun
     maxRuntimeS: config.maxRuntimeS,
     shadow,
   };
-  // W3.8 (RM7): the PRODUCTION composition always threads the scheduler-boundary input-contract
-  // registry — core.scheduled_jobs is operator-writable platform config, so the poll pass
-  // default-denies unknown job_types and contract-rejecting inputs BEFORE the enqueue side effect
+  // W3.8 (RM7): the composition always threads the scheduler-boundary input-contract registry —
+  // core.scheduled_jobs is operator-writable platform config, so the poll pass default-denies
+  // unknown job_types and contract-rejecting inputs BEFORE the enqueue side effect
   // (scheduler.ts::pollAndEnqueue doc; the registry is pinned in lockstep with CRON_SCHEDULES).
-  const schedulerArgs = { repo, db, clock, shadow, inputContracts: SCHEDULED_JOB_INPUT_CONTRACTS };
+  // Production never overrides the default; the deps seam exists for composition tests driving
+  // pollOnce with synthetic job_types ({@link BackgroundRunnerDeps.scheduledInputContracts}).
+  const schedulerArgs = {
+    repo, db, clock, shadow,
+    inputContracts: deps.scheduledInputContracts ?? SCHEDULED_JOB_INPUT_CONTRACTS,
+  };
 
   // Phase 3c: the outbox drain loop — REUSES the proven Postgres-backed dispatch activities
   // (OutboxDispatchActivities, the exact 4 the Temporal worker registers via
