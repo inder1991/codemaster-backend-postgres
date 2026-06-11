@@ -65,6 +65,7 @@ import {
   type EmbedRequest,
   EmbeddingsValidationError,
 } from "#backend/adapters/embeddings_port.js";
+import { recordChunkEmbedSkipped } from "#backend/observability/confluence_ingest_metrics.js";
 
 import { chunkSanitizedBody } from "#backend/ingest/confluence/chunker.js";
 import { contentSha256 } from "#backend/ingest/confluence/chunker.js";
@@ -342,7 +343,7 @@ export class ConfluenceSyncActivities {
       const chunkByIndex = new Map(chunks.map((c) => [c.chunk_index, c]));
       for (let start = 0; start < needsEmbed.length; start += EMBED_BATCH_SIZE) {
         const batch = needsEmbed.slice(start, start + EMBED_BATCH_SIZE);
-        const embedded = await this.embedBatchResilient(batch);
+        const embedded = await this.embedBatchResilient(batch, sanitized.page_id);
         for (const { item, vector } of embedded) {
           const chunkId = makeChunkId({
             spaceKey: sanitized.space_key,
@@ -375,10 +376,18 @@ export class ConfluenceSyncActivities {
    * Embed a batch of needs-embed items. Falls back to per-text truncating embed on
    * {@link EmbeddingsValidationError} so a single chunk that exceeds the embedder's context window is
    * SKIPPED rather than aborting the whole corpus sync. Returns `(item, vector)` for the texts that
-   * embedded; skipped texts are omitted. 1:1 with the Python `_embed_batch_resilient`.
+   * embedded; skipped texts are omitted. 1:1 with the Python `_embed_batch_resilient` — PLUS the RM9
+   * observability the Python also lacked: every skip increments
+   * `codemaster_confluence_chunk_embed_skipped_total` and WARN-logs `page_id` + `chunk_index`.
+   *
+   * DECISION (RM9, explicit): a page that loses chunks still upserts the SURVIVORS — availability
+   * over completeness for corpus ingest. A retry cannot fix an embedder context-window rejection
+   * (the input is what it is), so failing/flagging the whole page would only convert a partial
+   * index into NO index; the counter + log make the gap alertable instead of silent.
    */
   private async embedBatchResilient(
     batch: ReadonlyArray<NeedsEmbed>,
+    pageId: string,
   ): Promise<Array<{ item: NeedsEmbed; vector: Array<number> }>> {
     const texts = batch.map((item) => item.wrappedBody);
     try {
@@ -405,7 +414,16 @@ export class ConfluenceSyncActivities {
     for (const item of batch) {
       const vector = await this.embedOneTruncating(item.wrappedBody);
       if (vector === null) {
-        // Skipped — embedder still rejects below the 256-char floor.
+        // Skipped — embedder still rejects below the 256-char floor. COUNT + LOG (RM9): the chunk
+        // is omitted from the upsert, and that omission must be observable, not silent.
+        recordChunkEmbedSkipped(1);
+        console.warn(
+          JSON.stringify({
+            event: "confluence.chunk_embed_skipped",
+            page_id: pageId,
+            chunk_index: item.chunkIndex,
+          }),
+        );
         continue;
       }
       out.push({ item, vector });
