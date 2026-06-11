@@ -70,7 +70,7 @@ import { ReviewPullRequestPayloadV1 } from "#contracts/review_pull_request.v1.js
 
 import type { BackgroundJobsRepo } from "./background_jobs_repo.js";
 import type { ReviewJobsRepo } from "./review_jobs_repo.js";
-import { WORKFLOW_TYPE_TO_JOB_TYPE } from "./workflow_job_map.js";
+import { JOB_TYPE_MAX_ATTEMPTS, WORKFLOW_TYPE_TO_JOB_TYPE } from "./workflow_job_map.js";
 
 /** A {@link TemporalClientPort} whose startWorkflow enqueues a core.background_jobs row — or, for
  *  {@link REVIEW_WORKFLOW_TYPE}, a core.review_jobs row (module doc: the cutover hinge + the W4d.1
@@ -83,6 +83,9 @@ export class BackgroundJobsTemporalPort implements TemporalClientPort {
   /** A Map (never the raw record): a payload-controlled workflow_type like "constructor" must miss,
    *  not resolve through Object.prototype (`record["constructor"]` is a function, not undefined). */
   readonly #jobTypeByWorkflowType: ReadonlyMap<string, string>;
+  /** W1.9d (RC5): job_type → Temporal-parity max_attempts, threaded into every enqueue. A Map for
+   *  the same prototype-safety reason as the translation registry. */
+  readonly #maxAttemptsByJobType: ReadonlyMap<string, number>;
   /** CS1.2 SHADOW posture — see the {@link startWorkflow} top guard. */
   readonly #shadow: boolean;
 
@@ -92,6 +95,11 @@ export class BackgroundJobsTemporalPort implements TemporalClientPort {
     reviewJobs: ReviewJobsRepo;
     /** The translation registry — production passes {@link WORKFLOW_TYPE_TO_JOB_TYPE}. */
     workflowTypeToJobType: Readonly<Record<string, string>>;
+    /** W1.9d (RC5): per-job_type attempt budgets. DEFAULTS to the production
+     *  {@link JOB_TYPE_MAX_ATTEMPTS} table — the Temporal-parity budgets must hold wherever this
+     *  port is constructed (forgetting to thread them was exactly the RC5 collapse); tests may
+     *  override. A job_type absent from the table falls back to the repo's enqueue default. */
+    maxAttemptsByJobType?: Readonly<Record<string, number>>;
     /** CS1.2 SHADOW posture: true → startWorkflow performs NO real enqueue (no core.background_jobs
      *  row, no core.review_jobs row) — a would-enqueue log + sentinel id instead. The seam-level
      *  enforcement of the cutover-safety plan's "no real review/background enqueue" clause, behind
@@ -102,6 +110,7 @@ export class BackgroundJobsTemporalPort implements TemporalClientPort {
     this.#repo = o.repo;
     this.#reviewJobs = o.reviewJobs;
     this.#jobTypeByWorkflowType = new Map(Object.entries(o.workflowTypeToJobType));
+    this.#maxAttemptsByJobType = new Map(Object.entries(o.maxAttemptsByJobType ?? JOB_TYPE_MAX_ATTEMPTS));
     this.#shadow = o.shadow ?? false;
   }
 
@@ -145,11 +154,16 @@ export class BackgroundJobsTemporalPort implements TemporalClientPort {
     // port's 2nd param, and it lands as core.background_jobs.installation_id. null/omitted stays
     // NULL = platform-scoped by design (e.g. appendReconcile rows, whose outbox installation_id is
     // NULL under the ck_outbox_installation_id_required bootstrap-sink exemption).
+    //
+    // W1.9d (RC5): the job_type's Temporal-parity attempt budget rides the enqueue — max_attempts
+    // on the row, NOT a claim()-side mutation. Absent from the table → the repo default (3).
+    const maxAttempts = this.#maxAttemptsByJobType.get(jobType);
     return this.#repo.enqueue({
       jobType,
       payload,
       dedupKey: call.workflowId,
       installationId: installationId ?? null,
+      ...(maxAttempts !== undefined ? { maxAttempts } : {}),
     });
   }
 
@@ -248,6 +262,9 @@ export function makeOutboxBackgroundJobsPort(deps: {
     repo: deps.backgroundJobs,
     reviewJobs: deps.reviewJobs,
     workflowTypeToJobType: WORKFLOW_TYPE_TO_JOB_TYPE,
+    // W1.9d (RC5): explicit even though the ctor defaults to the same table — the production
+    // composition NAMES its budget source.
+    maxAttemptsByJobType: JOB_TYPE_MAX_ATTEMPTS,
     shadow: deps.shadow ?? false,
   });
 }

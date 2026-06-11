@@ -44,3 +44,43 @@ export const WORKFLOW_TYPE_TO_JOB_TYPE: Readonly<Record<string, string>> = {
   refreshSemanticDocs: "refresh_semantic_docs",
   triggerPageResyncWorkflow: "trigger_page_resync",
 };
+
+// ─── W1.9d (RC5): per-workflow-type retry budgets carried across the cutover ────────────────────
+//
+// The Temporal proxies these job_types replace carried TUNED per-workflow retry curves; without an
+// explicit budget the cutover enqueue collapses every type onto BackgroundJobsRepo's max_attempts
+// default (3, ~3s of 1s-base exponential backoff) — so an out-of-order `installation_repositories`
+// webhook (H4: the reconcile activity THROWS until `installation.created` seeds the parent row,
+// relying on redrive) dead-letters before GitHub's fan-out skew resolves, and a brief GitHub outage
+// permanently kills a repair the 12-attempt Temporal window would have ridden out.
+//
+// BackgroundJobsTemporalPort threads these into enqueue (max_attempts on the job row) — budgets are
+// fixed WHERE JOBS ARE ENQUEUED, never by mutating claim(). The runner's markFailed backoff base
+// stays 1000ms: 10 attempts ≈ an 8.5-minute redrive window (vs Temporal's 5s-base ≈ minutes — same
+// order), 12 attempts ≈ 34 minutes (vs the hydrate proxy's 10s→300s ≈ 35 minutes — near-parity by
+// coincidence of the curves; a per-type backoff base would need a schema column and is deliberately
+// out of W1.9d's scope).
+//
+// ## Parity sources (the Temporal proxy each budget transcribes — do NOT retune from memory)
+//   - reconcile_installation             5   reconcile.workflow.ts:71-77   (1s initial, 5 attempts)
+//   - reconcile_repositories            10   reconcile.workflow.ts:98-103  (5s initial, 10 — the H4
+//                                            out-of-order absorption window)
+//   - repair_installation_repositories  12   reconcile.workflow.ts:127-134 (10s→300s ×2.0, 12 — the
+//                                            bursty-GitHub-outage hydrate window)
+//   - sync_code_owners                   5   sync_code_owners.workflow.ts:61-64 (2s initial, 5)
+//   - refresh_semantic_docs              3   refresh_semantic_docs.workflow.ts:77-81 (clone step) +
+//                                            :103-106 (refresh step) — both steps 3
+//   - trigger_page_resync                3   trigger_page_resync.workflow.ts:65-67 (10s→2m, 3)
+//
+// Lockstep: test/unit/runner/workflow_job_map.test.ts pins the values AND that every mapped
+// job_type carries a budget — migrating a new workflow_type forces an explicit budget decision.
+
+/** Platform job_type → max_attempts (the Temporal-parity attempt budget). Readonly. */
+export const JOB_TYPE_MAX_ATTEMPTS: Readonly<Record<string, number>> = {
+  reconcile_installation: 5,
+  reconcile_repositories: 10,
+  repair_installation_repositories: 12,
+  sync_code_owners: 5,
+  refresh_semantic_docs: 3,
+  trigger_page_resync: 3,
+};
