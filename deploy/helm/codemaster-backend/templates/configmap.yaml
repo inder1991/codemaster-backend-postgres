@@ -23,6 +23,9 @@ data:
   CODEMASTER_API_PORT: {{ .Values.config.api.port | quote }}
   CODEMASTER_AUTH_ROUTES_ENABLED: {{ .Values.config.api.authRoutesEnabled | ternary "true" "false" | quote }}
   CODEMASTER_SECURE_COOKIES: {{ .Values.config.api.secureCookies | ternary "true" "false" | quote }}
+  # The cutover knob (CS1.1 / W0.1, audit C8): which runtime this pod boots. Mutually exclusive
+  # modes; parseRuntimeMode refuses garbage at boot, and the schema enum refuses it at install time.
+  CODEMASTER_RUNTIME_MODE: {{ .Values.config.runtime.mode | quote }}
   TEMPORAL_ADDRESS: {{ .Values.config.temporal.address | quote }}
   TEMPORAL_NAMESPACE: {{ .Values.config.temporal.namespace | quote }}
   TEMPORAL_TASK_QUEUE: {{ .Values.config.temporal.taskQueue | quote }}

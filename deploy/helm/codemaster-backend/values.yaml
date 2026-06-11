@@ -205,6 +205,15 @@ config:
     authRoutesEnabled: true   # eagerly loads field-encryption keys from Vault at boot
     secureCookies: true       # HTTPS-only session cookies (PROD)
 
+  # ---- Runtime engine selector (CS1.1 / W0.1, audit C8) ----
+  # The ONE cutover knob: which runtime this pod boots (CODEMASTER_RUNTIME_MODE).
+  #   temporal — the two Temporal workers (DEFAULT; the pre-cutover production shape)
+  #   postgres — the Postgres background runner (runner + scheduler + outbox loops; Temporal absent)
+  #   shadow   — the Postgres runtime in observe-only mode (no side effects; CS1.2 contract)
+  # The modes are mutually exclusive BY CONSTRUCTION (boot_tasks.ts); a garbage value refuses boot.
+  runtime:
+    mode: temporal
+
   temporal:
     address: ""               # REQUIRED, e.g. temporal-frontend.temporal.svc:7233
     namespace: ""             # REQUIRED in production

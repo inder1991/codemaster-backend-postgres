@@ -109,6 +109,13 @@
         "nodeEnv": { "type": "string" },
         "nodeMaxOldSpaceSizeMb": { "type": "integer", "minimum": 0 },
         "api": { "type": "object" },
+        "runtime": {
+          "type": "object",
+          "properties": {
+            "mode": { "type": "string", "enum": ["temporal", "postgres", "shadow"] }
+          },
+          "required": ["mode"]
+        },
         "temporal": { "type": "object" },
         "embeddings": {
           "type": "object",
