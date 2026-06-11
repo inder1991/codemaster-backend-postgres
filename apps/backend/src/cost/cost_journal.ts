@@ -485,3 +485,18 @@ const SHADOW_WRITE_FAILED_COUNTER: Counter = COST_JOURNAL_METER.createCounter(
 export function recordCostJournalShadowWriteFailed(entry: "reserve" | "settle"): void {
   try { SHADOW_WRITE_FAILED_COUNTER.add(1, { entry }); } catch { /* telemetry never perturbs the paid path */ }
 }
+
+// ─── the feature seam (default OFF) ─────────────────────────────────────────────────────────────────
+
+/**
+ * The Phase-0 shadow-write feature seam: the composition roots wire a {@link PostgresCostJournal}
+ * into the `LlmClient` ONLY when `CODEMASTER_COST_JOURNAL_SHADOW` is EXACTLY `"1"`. STRICT on
+ * purpose — truthy-looking strings (`"true"`, `"yes"`, `" 1"`) stay OFF, so a typo can never
+ * silently turn on double-writes; an operator must set the one documented value. Unset (every
+ * environment today) → no journal anywhere → production behavior is byte-identical until the
+ * deliberate cutover-prep flip. Read at COLLABORATOR-BUILD time (not module import), so a test /
+ * operator toggle takes effect without re-importing the world.
+ */
+export function costJournalShadowEnabled(env: NodeJS.ProcessEnv): boolean {
+  return env["CODEMASTER_COST_JOURNAL_SHADOW"] === "1";
+}

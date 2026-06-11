@@ -121,7 +121,8 @@ function buildStrictLedgerCache(dsn: string): LlmClientCache {
   const credentialsProvider = new LlmCredentialsProvider({ repo });
 
   const strictLedgerClientFactory: ClientFactory = ({ sdk }) => {
-    const { costCap, blobStore, telemetry, langfuse, clock } = sharedClientCollaborators(dsn);
+    const { costCap, blobStore, telemetry, langfuse, clock, costJournal } =
+      sharedClientCollaborators(dsn);
     return new LlmClient({
       sdk,
       costCap,
@@ -132,6 +133,9 @@ function buildStrictLedgerCache(dsn: string): LlmClientCache {
       // F4 — the de-Temporal Phase-2 hardening: ledger + STRICT mode (un-ledgered paid call → throw).
       ledger: LlmInvocationLedger.fromDsn(dsn),
       strictLedger: true,
+      // de-Temporal Phase 0 — shadow cost journal, env-gated DEFAULT OFF in the collaborators memo
+      // (spread-when-present: exactOptionalPropertyTypes forbids an explicit `undefined`).
+      ...(costJournal !== undefined ? { costJournal } : {}),
     });
   };
 
