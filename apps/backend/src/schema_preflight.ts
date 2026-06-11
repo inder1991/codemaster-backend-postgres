@@ -29,6 +29,7 @@ export const EXPECTED_MIGRATIONS = [
   "0040_scheduled_jobs",
   "0041_background_jobs_deadletter_cols",
   "0042_background_jobs_state_and_indexes",
+  "0043_cost_journal",
 ] as const satisfies ReadonlyArray<string>;
 
 /** The DB's applied migration sequence diverges from the image's compiled-in expectation — the pod
