@@ -373,3 +373,61 @@ describeDb("Postgres scheduler — per-schedule SAVEPOINT isolation (CS7)", () =
     }
   });
 });
+
+// ─── W3.8 (OM11): cadence-lateness structured WARN — a wedged or starved schedule must be ────────
+// DIRECTLY visible at the schedule level, not only via downstream symptoms (leaked mutexes, stuck
+// runs). THRESHOLD SEMANTICS: lateness = the tick instant (clock.now() when the due row is
+// processed) minus the row's OWN next_run_at; the threshold is ONE FULL CADENCE (the distance from
+// that next_run_at to the schedule's next computed instant) — strictly-greater means at least one
+// whole cycle elapsed past the due time, the signature of a scheduler outage / OC3 wedge, while a
+// healthy poll loop (pollIntervalS ≪ cadence) never trips it. The signal is ONE structured console
+// WARN per late tick (the CS8 console-JSON idiom: event + correlation keys) — LOGS ONLY, deliberately
+// NO OTel metric (the gauge/alert from the OM11 finding rides the W3.9 SLO wave; the log line is
+// greppable/alertable now). The WARN is pure observability: the late tick still enqueues + advances.
+describeDb("Postgres scheduler — OM11 cadence-lateness WARN (W3.8)", () => {
+  it("(11) a tick later than ONE FULL CADENCE past next_run_at emits ONE structured WARN (schedule_id + lateness); the boundary stays quiet; ticks are never gated", async () => {
+    const clock = new FakeClock({ now: new Date("2026-06-10T12:00:00.000Z") });
+    const repo = new BackgroundJobsRepo(db);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const wayLate = mintIds();   // interval 300s, due 2h ago → lateness 7200s > 300s cadence → WARN
+    const boundary = mintIds();  // interval 300s, due EXACTLY one cadence ago → 300s = 300s → quiet (strict >)
+    const cronLate = mintIds();  // daily 02:00 cron, due 2026-06-08T02:00Z → lateness 208800s > 86400s → WARN
+    await seedSchedule({ scheduleId: wayLate.scheduleId, jobType: wayLate.jobType, cadenceKind: "interval",
+      cadenceSpec: "300", nextRunAt: new Date("2026-06-10T10:00:00.000Z") });
+    await seedSchedule({ scheduleId: boundary.scheduleId, jobType: boundary.jobType, cadenceKind: "interval",
+      cadenceSpec: "300", nextRunAt: new Date("2026-06-10T11:55:00.000Z") });
+    await seedSchedule({ scheduleId: cronLate.scheduleId, jobType: cronLate.jobType, cadenceKind: "cron",
+      cadenceSpec: "0 2 * * *", nextRunAt: new Date("2026-06-08T02:00:00.000Z") });
+
+    // ALL THREE tick — the WARN is observability, never a gate on the enqueue/advance.
+    expect(await pollAndEnqueue({ repo, db, clock })).toBe(3);
+    for (const s of [wayLate, boundary, cronLate]) {
+      expect(await jobsFor(s.scheduleId)).toHaveLength(1);
+      expect((await readSchedule(s.scheduleId)).last_enqueued_at).toEqual(new Date("2026-06-10T12:00:00.000Z"));
+    }
+    expect((await readSchedule(wayLate.scheduleId)).next_run_at).toEqual(new Date("2026-06-10T12:05:00.000Z"));
+    expect((await readSchedule(cronLate.scheduleId)).next_run_at).toEqual(new Date("2026-06-11T02:00:00.000Z"));
+
+    // EXACTLY one structured WARN per late tick — the CS8 console-JSON idiom, parseable fields.
+    const cadenceWarns = warnSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((m) => m.startsWith("{"))
+      .map((m) => JSON.parse(m) as Record<string, unknown>)
+      .filter((w) => w.event === "scheduler.cadence_late");
+    expect(cadenceWarns).toHaveLength(2);
+    const forWayLate = cadenceWarns.find((w) => w.schedule_id === wayLate.scheduleId);
+    expect(forWayLate).toMatchObject({
+      event: "scheduler.cadence_late", schedule_id: wayLate.scheduleId, job_type: wayLate.jobType,
+      due_at: "2026-06-10T10:00:00.000Z", lateness_s: 7200, cadence_s: 300,
+    });
+    const forCronLate = cadenceWarns.find((w) => w.schedule_id === cronLate.scheduleId);
+    expect(forCronLate).toMatchObject({
+      event: "scheduler.cadence_late", schedule_id: cronLate.scheduleId, job_type: cronLate.jobType,
+      due_at: "2026-06-08T02:00:00.000Z", lateness_s: 208_800, cadence_s: 86_400,
+    });
+    // The exactly-one-cadence-late sibling stays QUIET (strictly-greater threshold), and lateness
+    // is LOGS ONLY — no error counter fires for a late-but-healthy tick (NO OTel by design).
+    expect(cadenceWarns.some((w) => w.schedule_id === boundary.scheduleId)).toBe(false);
+    expect(schedErrSpy).not.toHaveBeenCalled();
+  });
+});
