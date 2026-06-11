@@ -255,3 +255,19 @@ describe("cloneRepoIntoWorkspace — oversized tree", () => {
     expect((err as WorkspaceTooLargeError).repo).toBe("https://github.com/acme/widget");
   });
 });
+
+// ─── Cutover smoke fix (2026-06-11): the production heartbeat default must be RUNTIME-AGNOSTIC ───
+// The in-process review path (runner/in_process_ports.ts buildClonerDeps) wires the REAL activity
+// with its production defaults — and defaultHeartbeat called Context.current().heartbeat(), which
+// only exists under a Temporal worker. In CODEMASTER_RUNTIME_MODE=postgres every review died after
+// 3 attempts with "Activity context not initialized" (caught LIVE by live_cluster_smoke PR #136).
+// Outside a worker the heartbeat is a no-op BY DESIGN: the review job's lease heartbeat (runOneJob)
+// is this runtime's liveness signal; the phase payload had no consumer here anyway.
+describe("defaultHeartbeat — runtime-agnostic (cutover)", () => {
+  it("outside a Temporal activity context it is a safe no-op, never a throw", async () => {
+    const { defaultHeartbeat } = await import(
+      "#backend/activities/clone_repo_into_workspace.activity.js"
+    );
+    expect(() => defaultHeartbeat({ phase: "cloned" })).not.toThrow();
+  });
+});
