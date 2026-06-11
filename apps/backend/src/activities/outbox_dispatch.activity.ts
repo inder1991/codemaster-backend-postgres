@@ -88,7 +88,9 @@ export class OutboxDispatchActivities {
     // (which carries no delivery_id field), so the wire contract stays byte-identical while the
     // sinks gain the independent identity source for the destination-side cross-check. The
     // Temporal proxy path never passes it → null, 1:1 with the frozen Python's SinkContext.
-    extras?: { deliveryId?: string | null },
+    // DEFAULTED (not `?:`) so Function.length stays 1 — the worker-registration arity pin
+    // (invariant 11: single-typed-input activities) holds on the Temporal-registered surface.
+    extras: { deliveryId?: string | null } = {},
   ): Promise<void> => {
     // Boundary validation FIRST — restores the DispatchRowInputV1.superRefine tagged-union guard
     // (installation_id null IFF orphan_reason set) that the Python pydantic_data_converter re-runs on
@@ -103,7 +105,7 @@ export class OutboxDispatchActivities {
     }
 
     const context: SinkContext = {
-      deliveryId: extras?.deliveryId ?? null, // the wire contract carries no delivery_id (doc above)
+      deliveryId: extras.deliveryId ?? null, // the wire contract carries no delivery_id (doc above)
       installationId: v.installation_id,
       runId: v.run_id,
     };

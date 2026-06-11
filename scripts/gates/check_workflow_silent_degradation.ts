@@ -182,17 +182,10 @@ export const EXEMPTED: Record<string, ExemptedEntry> = {
       "Python F13 PERMANENT-EXEMPTION-defensive-log-emit at review_pull_request.py::3430). " +
       "PERMANENT by construction.",
   },
-  "apps/backend/src/runner/run_with_retry.ts::15": {
-    symbol: "runWithRetry",
-    follow_up_story: "PERMANENT-EXEMPTION-retry-helper-conditional-rethrow",
-    reason:
-      "The retry primitive's catch IS the retry contract: every caught error is either rethrown " +
-      "immediately (nonRetryable / last attempt) or retried and rethrown at exhaustion (`throw " +
-      "lastErr` after the loop) — no swallow path exists, but the rethrow is conditional, which " +
-      "the gate refuses by design (strict top-level rule 2). Same strict-spec false-positive class " +
-      "as the Python's PERMANENT-EXEMPTION-helper-self (stage_outcome.py::223: the helper cannot " +
-      "route through itself).",
-  },
+  // run_with_retry.ts::15 (PERMANENT-EXEMPTION-retry-helper-conditional-rethrow) became an INLINE
+  // `// silent-degradation:exempt` marker at the try site itself: the W1.9c composed-abort
+  // threading shifted the try line, and the marker travels with the code where a line-keyed
+  // registry entry cannot. The curated rationale lives verbatim in the marker's comment block.
 };
 
 /** Inline exemption marker — the TS-comment equivalent of the registry, mirroring the sibling
