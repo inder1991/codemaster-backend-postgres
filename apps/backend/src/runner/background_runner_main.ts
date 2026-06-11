@@ -12,7 +12,10 @@ import { PostgresOutboxRepo } from "#backend/domain/repos/outbox_repo.js";
 import { LlmInvocationLedger } from "#backend/integrations/llm/invocation_ledger.js";
 import { registerInstallationReconcileSink } from "#backend/outbox/sinks/installation_reconcile.js";
 import { registerTemporalWorkflowStartSink } from "#backend/outbox/sinks/temporal_workflow_start.js";
-import { installFieldKeyRegistryAtBoot } from "#backend/security/boot_field_keys.js";
+import {
+  installFieldKeyRegistryAtBoot,
+  startFieldKeyRefreshLoop,
+} from "#backend/security/boot_field_keys.js";
 
 import type { Clock } from "#platform/clock.js";
 import { WallClock } from "#platform/clock.js";
@@ -494,6 +497,27 @@ export function resolveBackgroundRunnerConfig(
   return { dsn, config };
 }
 
+/**
+ * W3.7 (EH4): wire the 30-minute field-encryption key-refresh loop into the runner boot — ONLY
+ * when the boot actually INSTALLED a registry (the dev/test no-source "skipped" posture has
+ * nothing to refresh). The loop's dispose handle rides the SAME {@link DisposableRegistry}
+ * runBackgroundRunner's DISPOSE PHASE drains once all loops have ended, so SIGTERM stops the
+ * refresh loop instead of leaving its interval sleep keeping the process alive. The loop itself
+ * (startFieldKeyRefreshLoop) is fail-open per pass: a failed refresh WARNs structured and KEEPS
+ * the previous, working registry — see security/boot_field_keys.ts.
+ */
+export function wireFieldKeyRefreshLoop(o: {
+  installResult: "installed" | "skipped";
+  env: NodeJS.ProcessEnv;
+  clock: Clock;
+  disposables: DisposableRegistry;
+}): void {
+  if (o.installResult !== "installed") {
+    return;
+  }
+  o.disposables.register(startFieldKeyRefreshLoop({ env: o.env, clock: o.clock }));
+}
+
 /** Bounded loop-name vocabulary of the supervision seam — doubles as the
  *  `codemaster_runner_loop_crashed_total{loop}` counter label (cardinality discipline).
  *  CS2.1 added `review` (the review-jobs RunnerLoop; supervised only in non-shadow). */
@@ -635,7 +659,9 @@ export async function runBackgroundRunner(
   // self-healing audit emit encrypts fail-closed: without keys, a production pod would wedge on
   // the FIRST reap (LocalKeyEncryptionError on every emit — the ADR-0064 re-wedging class) instead
   // of refusing boot here. Dev/test with no CODEMASTER_FIELD_KEY_SOURCE skips (codec fail-closed).
-  await installFieldKeyRegistryAtBoot(process.env);
+  // W3.7 (EH4): the result gates the periodic key-refresh loop wired below — keys still load ONCE
+  // at boot; the refresh loop is what makes a Vault rotation hot instead of a fleet restart.
+  const keyInstall = await installFieldKeyRegistryAtBoot(process.env);
 
   // CS1.2: the ONE shadow flag — resolved from the typed mode HERE and threaded explicitly into
   // every seam below (buildBackgroundRunner → the three loops + HandlerDeps; wireOutboxSinks → the
@@ -650,6 +676,11 @@ export async function runBackgroundRunner(
   // ports + supersede read over getPool(dsn); the ReviewJobsRepo reaper's raw-pg transaction pool) —
   // the SAME shared ADR-0062 pool `db` rides on, never a second pool.
   const handles = buildBackgroundRunner({ db, clock, config, shadow, dsn });
+
+  // W3.7 (EH4): start the 30-min key-rotation refresh loop (only when boot INSTALLED a registry)
+  // and hand its dispose to the runner's shared registry — the DISPOSE PHASE below stops it after
+  // the loops end, so a SIGTERM'd pod never hangs on the refresh interval sleep.
+  wireFieldKeyRefreshLoop({ installResult: keyInstall, env: process.env, clock, disposables: handles.disposables });
 
   // CS2.2 FAIL-LOUD boot self-check (closes audit C6/OC4: never enqueue into a table nothing
   // drains): AFTER the runtime is built, BEFORE any loop starts / sink is wired / schedule is
