@@ -13,16 +13,18 @@
 // Degradation (curator_skipped):
 //   * zero findings → skipped (empty result, no LLM call).
 //   * only always-promote tools present (nothing curatable) → skipped (no Haiku call).
-//   * an UNEXPECTED failure during the Haiku path → FAIL-OPEN: return the always-promote findings
-//     only + curator_skipped=True (the workflow surfaces it in the walkthrough degradation_note).
+//   * ANY failure during the Haiku path EXCEPT LlmOutputUnsafeError → FAIL-OPEN (W1.9b / C1): WARN
+//     log + return the always-promote findings only + curator_skipped=True.
 //
-// Typed-error re-raise (NOT swallowed by fail-open): the Python maps budget / output-unsafe /
-// invocation errors to ApplicationError and re-raises them (carrying the right non_retryable
-// semantics) so the activity short-circuits. The TS LlmClient already raises those typed errors
-// (BedrockBudgetExceededError / LlmOutputUnsafeError / LlmInvocationError), so the port re-throws them
-// directly instead of re-wrapping — the Orchestrate-phase caller maps them. The fail-open catch only
-// covers genuinely unexpected errors (e.g. a role-resolution failure from forRole, or an unknown
-// error class), matching the Python `except ApplicationError: raise` / `except Exception: degrade`.
+// W1.9b (C1) HARDENING DIVERGENCE — the frozen Python re-raised budget / output-unsafe / invocation
+// errors as ApplicationError (`except ApplicationError: raise`), which made a Tier-1 curator hiccup
+// review-fatal: an org at its daily cost cap had EVERY review die on the cheap Haiku call before the
+// expensive Tier-2 fan-out ran (priority inversion against the documented contract — "Tier 1 is an
+// optimization layer for Tier 2 quality, not a correctness dependency"). The TS curator now fails
+// OPEN on BedrockBudgetExceededError and the whole retryable LlmInvocationError family (throttle /
+// 5xx / timeout / auth / role-resolution); ONLY LlmOutputUnsafeError still re-raises (output safety
+// is not negotiable — and the orchestrator's static_analysis stageOutcome wrap degrades even that to
+// a review-level note rather than a dead review).
 //
 // ── PORT NOTE: the curator's LlmClientCache seam ─────────────────────────────────────────────────
 // The frozen Python curator takes an injected BedrockClient + resolves its model at call time via the
@@ -39,19 +41,13 @@
 
 import { createHash } from "node:crypto";
 
-import { BedrockBudgetExceededError } from "#backend/cost/enforcer.js";
 import { purposeChunkId } from "#backend/integrations/llm/invocation_ledger.js";
 import { buildSystemPrompt } from "#backend/llm/review_prompt.js";
 import { modelForPurpose } from "#backend/llm/model_router.js";
 import { wrapUntrusted } from "#backend/security/trust_tier_wrapping.js";
 
 import type { LlmClient } from "#backend/integrations/llm/client.js";
-import {
-  LlmInvocationError,
-  LlmOutputUnsafeError,
-  LlmRoleDisabledError,
-  LlmRoleNotConfiguredError,
-} from "#backend/integrations/llm/errors.js";
+import { LlmOutputUnsafeError } from "#backend/integrations/llm/errors.js";
 
 import {
   CURATE_TOOL_SCHEMA,
@@ -227,15 +223,28 @@ export class AnalysisCurator {
       const curated = await this.invokeHaiku(curatable, { prMeta: args.prMeta });
       return { findings: [...alwaysPromote, ...curated], curator_skipped: false };
     } catch (e) {
-      // Re-raise the typed LLM errors the LlmClient maps to ApplicationError on the Python side
-      // (budget / output-unsafe / invocation) — they carry the right non_retryable semantics for the
-      // Orchestrate-phase caller. Everything else (e.g. a role-resolution failure, an unknown error
-      // class) FAILS OPEN: return the always-promote findings only + curator_skipped, so a curator
-      // flake never fails the review. 1:1 with the Python `except ApplicationError: raise` /
-      // `except Exception: degrade`.
-      if (isTypedLlmError(e)) {
+      // W1.9b (C1) — HARDENING DIVERGENCE from the frozen Python (`except ApplicationError: raise`).
+      // The curator is an OPTIMIZATION layer for Tier-2 quality, not a correctness dependency, so the
+      // typed-error re-raise inverted priorities: a BedrockBudgetExceededError (a NORMAL steady-state
+      // condition at per-org cost caps) or a retryable LlmInvocationError (throttle / 5xx / timeout —
+      // routine under load) killed the whole static-analysis envelope, and — pre the orchestrator
+      // fail-open wrap — the entire review, BEFORE the expensive Tier-2 fan-out ran.
+      //
+      // NEW CONTRACT: ONLY LlmOutputUnsafeError re-raises (the output-safety contract is not
+      // negotiable; the orchestrator's static_analysis stageOutcome degrades it review-side).
+      // EVERYTHING else — budget, the whole LlmInvocationError family, role-resolution failures,
+      // parse errors, unknown classes — FAILS OPEN: WARN log (the operator signal; curator_skipped on
+      // the output contract is the data signal) + the always-promote findings only.
+      if (e instanceof LlmOutputUnsafeError) {
         throw e;
       }
+      const errorClass = e instanceof Error ? e.constructor.name : typeof e;
+      const errorMsg = (e instanceof Error ? e.message : String(e)).slice(0, 512);
+      console.warn(
+        `curator: Haiku curation failed open; promoting always-promote findings only ` +
+          `error_class=${errorClass} error_msg=${JSON.stringify(errorMsg)} ` +
+          `curatable_count=${curatable.length} always_promote_count=${alwaysPromote.length}`,
+      );
       return { findings: alwaysPromote, curator_skipped: true };
     }
   }
@@ -248,11 +257,8 @@ export class AnalysisCurator {
   ): Promise<ReadonlyArray<ReviewFindingV1>> {
     const role = "secondary";
     // Resolve the Haiku LlmClient via the SECONDARY role. A resolution failure (role-not-configured /
-    // disabled — subclasses of LlmInvocationError) is NOT a typed-ApplicationError-equivalent here: in
-    // the Python it would surface from the bedrock client only at invoke time, but a forRole failure is
-    // a curator-degradation, so it routes into the fail-open catch in curate() (isTypedLlmError is
-    // false for it because forRole errors are caught and treated as unexpected per the Python outer
-    // except Exception). To make that explicit we let forRole errors propagate to curate()'s catch.
+    // disabled — subclasses of LlmInvocationError) is a curator-degradation: it propagates to
+    // curate()'s catch, which (W1.9b / C1) fails OPEN for everything except LlmOutputUnsafeError.
     const llmClient = await this.cache.forRole(role);
 
     const systemPrompt = buildSystemPrompt({ policyRevision: this.policyRevision });
@@ -297,24 +303,3 @@ export class AnalysisCurator {
   }
 }
 
-/**
- * True iff `e` is one of the typed LLM errors the Python curator re-raises as a non-retryable /
- * retryable ApplicationError (budget / output-unsafe / invocation) — these must NOT be swallowed by the
- * fail-open path; the Orchestrate-phase caller maps them. Everything else fails open.
- *
- * The role-resolution failures (LlmRoleNotConfiguredError / LlmRoleDisabledError) are SUBCLASSES of
- * LlmInvocationError but are EXCLUDED here: a forRole failure is a curator-degradation (the Python
- * outer `except Exception` fail-open), not an invoke-time ApplicationError, so it must fail open to the
- * always-promote findings. The explicit subclass exclusion makes that boundary unambiguous (an
- * instanceof LlmInvocationError check alone would wrongly re-raise them).
- */
-function isTypedLlmError(e: unknown): boolean {
-  if (e instanceof LlmRoleNotConfiguredError || e instanceof LlmRoleDisabledError) {
-    return false;
-  }
-  return (
-    e instanceof BedrockBudgetExceededError ||
-    e instanceof LlmOutputUnsafeError ||
-    e instanceof LlmInvocationError
-  );
-}

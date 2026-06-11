@@ -564,21 +564,50 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
     }
 
     // Step 3 — parallel: chunk+redact the review files; static analysis on the sandbox files.
-    const [chunks, sa] = await Promise.all([
+    // W1.9b (C1): the pair is SPLIT so only chunkAndRedact can be fatal. staticAnalysis is wrapped in
+    // a fail-open stageOutcome (mirroring the policy_compute wrap): Tier 1 is an optimization layer
+    // for Tier-2 quality, NOT a correctness dependency — a curator budget hit (a normal steady-state
+    // condition at per-org cost caps) or an analyzer fault must not kill the review before the
+    // expensive Tier-2 fan-out runs. On failure the EMPTY-VALID envelope below is substituted (the
+    // same shape the activity returns for empty routing — StaticAnalysisResultV1.parse({}) defaults,
+    // built as a typed literal because the orchestrator's workflow bundle holds the contract
+    // type-only) and stageOutcome appends `static_analysis_failed` + emits the CS8 WARN. The two
+    // dispatches still start back-to-back (parallelism unchanged); a swallowed staticAnalysis
+    // rejection can never short-circuit the chunkAndRedact branch.
+    const [chunks, saOutcome] = await Promise.all([
       ports.chunkAndRedact({
         schema_version: 1,
         workspace_path: workspaceRoot,
         files: [...reviewFiles],
         changed_line_ranges: toMutableRanges(pr.changedLineRanges),
       }),
-      ports.staticAnalysis({
-        schema_version: 1,
-        workspace_path: workspaceRoot,
-        sandbox_files: [...routing.sandbox_files],
-        changed_line_ranges: toMutableRanges(pr.changedLineRanges),
-        pr_meta: pr.prMeta,
-      }),
+      stageOutcome(
+        "static_analysis",
+        {
+          logger: ctx.logger ?? NULL_LOGGER,
+          degradationNotes: degradationAdapter(state),
+          headSha,
+          runId,
+        },
+        async () =>
+          ports.staticAnalysis({
+            schema_version: 1,
+            workspace_path: workspaceRoot,
+            sandbox_files: [...routing.sandbox_files],
+            changed_line_ranges: toMutableRanges(pr.changedLineRanges),
+            pr_meta: pr.prMeta,
+          }),
+      ),
     ]);
+    const sa: StaticAnalysisResultV1 = saOutcome ?? {
+      schema_version: 1,
+      findings: [],
+      per_tool_errors: {},
+      curator_skipped: true,
+      truncated_per_tool: {},
+      tier1_findings: [],
+      tool_statuses: [],
+    };
 
     if (Object.keys(sa.per_tool_errors).length > 0) {
       state.degradation.add(
