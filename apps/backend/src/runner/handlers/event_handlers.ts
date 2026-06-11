@@ -36,6 +36,7 @@ import { SyncCodeOwnersPayloadV1 } from "#contracts/sync_code_owners_payload.v1.
 import { TriggerPageResyncInputV1 } from "#contracts/trigger_page_resync.v1.js";
 
 import type { DisposableRegistry } from "../disposables.js";
+import { PermanentJobError } from "../errors.js";
 import type { HandlerRegistry } from "../handler_registry.js";
 import {
   buildConfluenceSyncActivities,
@@ -94,15 +95,18 @@ import {
 // that land MID-step (the clone wipes a stale target before re-cloning; the refresh/resync upserts
 // are content-addressed + natural-key ON CONFLICT), so a redriven attempt converges.
 //
-// ## W3d.2 retry semantics vs the Temporal per-step curves
+// ## W3d.2 retry semantics vs the Temporal per-step curves (CS4.3 / T2 — the W4a.1 follow-up, DONE)
 // The Temporal sync_code_owners proxy retried 5× (non-retryable GitHubAppUnauthorized /
 // GitHubNotFoundError); the refresh proxy retried clone 3× (same non-retryables) and refresh 3×
-// (non-retryable WrongVectorDimensionError). The platform has ONE retry curve (module doc above):
-// these PLAIN-Error faults burn their bounded attempts and dead-letter with the error persisted —
-// a W4a.1 follow-up may wrap them in PermanentJobError to short-circuit like the ZodError path
-// (the runner already classifies; only the throw sites need the wrap). Embed-service degradation is
-// NOT a throw: the refresh activity returns `retrieval_degraded=true` and the job settles done
-// with the degradation logged (1:1 with the Temporal workflow surfacing the result verbatim).
+// (non-retryable WrongVectorDimensionError). The platform reproduces that split at the SAME
+// per-step granularity: each dispatch is wrapped in {@link rethrowDeclaredPermanent} with the
+// step's Temporal nonRetryableErrorTypes list, re-thrown as PermanentJobError → the runner
+// dead-letters after ONE attempt (the ZodError path's posture). Matching is by error NAME —
+// exactly how Temporal's nonRetryableErrorTypes matched — so the lists carry name strings even
+// where no TS class exists (WrongVectorDimensionError). Every OTHER fault keeps the ONE bounded
+// retry curve (module doc above). Embed-service degradation is NOT a throw: the refresh activity
+// returns `retrieval_degraded=true` and the job settles done with the degradation logged (1:1
+// with the Temporal workflow surfacing the result verbatim).
 //
 // ## W3d.2 workspace lifecycle (1:1 with the Temporal workflow body)
 // Neither the Temporal refresh workflow nor this adapter tears the clone-cache dir down after the
@@ -307,6 +311,37 @@ function requireDsn(deps: EventHandlersDeps, jobType: string): string {
   return dsn;
 }
 
+// CS4.3 / T2 — the per-step nonRetryableErrorTypes lists, byte-1:1 with the Temporal proxies they
+// replace (sync_code_owners.workflow.ts:65; refresh_semantic_docs.workflow.ts:82 = the clone step,
+// :107 = the refresh/embed step — clone and sync share one list, the same two GitHub faults).
+const SYNC_CODE_OWNERS_NON_RETRYABLE = ["GitHubAppUnauthorized", "GitHubNotFoundError"] as const;
+const REFRESH_CLONE_NON_RETRYABLE = SYNC_CODE_OWNERS_NON_RETRYABLE;
+const REFRESH_EMBED_NON_RETRYABLE = ["WrongVectorDimensionError"] as const;
+
+/**
+ * Run one handler STEP under its Temporal proxy's `nonRetryableErrorTypes` list (CS4.3 / T2): a
+ * fault whose error NAME is in the list is re-thrown as {@link PermanentJobError} (cause attached,
+ * name prefixed into the message so the dead row is self-describing) — the runner dead-letters it
+ * after ONE attempt instead of burning the bounded retry curve on a deterministic fault. Matching
+ * is by NAME, not instanceof — exactly how Temporal's nonRetryableErrorTypes matched, and the only
+ * option where no TS class carries the name (WrongVectorDimensionError). Everything else re-throws
+ * untouched (the transient retry path). An AbortSignal's `signal.reason` never enters: the
+ * cooperative `throwIfAborted` checkpoints sit OUTSIDE these wraps.
+ */
+async function rethrowDeclaredPermanent<T>(
+  nonRetryableNames: ReadonlyArray<string>,
+  fn: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    if (e instanceof Error && nonRetryableNames.includes(e.name)) {
+      throw new PermanentJobError(`${e.name}: ${e.message}`, { cause: e });
+    }
+    throw e;
+  }
+}
+
 /**
  * Register the W3d.1 + W3d.2 event-driven handlers on the runner's registry. Called ONCE at the
  * composition root ({@link import("../background_runner_main.js").buildBackgroundRunner});
@@ -381,7 +416,9 @@ export function registerEventHandlers(registry: HandlerRegistry, deps: EventHand
       isEnabled: codeOwnersIsEnabled,
       clock: handlerDeps.clock,
     });
-    const written = await holder.syncCodeOwners(parsed);
+    const written = await rethrowDeclaredPermanent(SYNC_CODE_OWNERS_NON_RETRYABLE, () =>
+      holder.syncCodeOwners(parsed),
+    );
     console.info(
       `sync_code_owners applied: rules_written=${written} repository_id=${parsed.repository_id} ` +
         `job_id=${handlerDeps.job.job_id}`,
@@ -420,17 +457,19 @@ export function registerEventHandlers(registry: HandlerRegistry, deps: EventHand
 
     // Step 1: clone the repository → workspace path (1:1 with the workflow body's Step 1; the
     // cloner/resolveRepo fall to the activity's REAL production defaults unless a test injects).
-    const workspacePath = await cloneRepositoryActivity(
-      {
-        schema_version: 1,
-        installation_id: parsed.installation_id,
-        repository_id: parsed.repository_id,
-        head_sha: parsed.head_sha,
-      },
-      {
-        getToken: refreshGetToken,
-        ...(deps.refreshCloner !== undefined ? { cloner: deps.refreshCloner } : {}),
-      },
+    const workspacePath = await rethrowDeclaredPermanent(REFRESH_CLONE_NON_RETRYABLE, () =>
+      cloneRepositoryActivity(
+        {
+          schema_version: 1,
+          installation_id: parsed.installation_id,
+          repository_id: parsed.repository_id,
+          head_sha: parsed.head_sha,
+        },
+        {
+          getToken: refreshGetToken,
+          ...(deps.refreshCloner !== undefined ? { cloner: deps.refreshCloner } : {}),
+        },
+      ),
     );
 
     // W4b.3: cooperative cancellation BEFORE the refresh — an abort that landed during the clone
@@ -444,11 +483,13 @@ export function registerEventHandlers(registry: HandlerRegistry, deps: EventHand
       modelName: REFRESH_EMBED_MODEL_NAME,
       clock: handlerDeps.clock,
     });
-    const result = await holder.refreshSemanticDocs({
-      input: parsed,
-      workspacePath,
-      customKnowledgePaths: [],
-    });
+    const result = await rethrowDeclaredPermanent(REFRESH_EMBED_NON_RETRYABLE, () =>
+      holder.refreshSemanticDocs({
+        input: parsed,
+        workspacePath,
+        customKnowledgePaths: [],
+      }),
+    );
     console.info(
       `refresh_semantic_docs applied: docs_discovered=${result.docs_discovered} ` +
         `chunks_persisted=${result.chunks_persisted} retrieval_degraded=${result.retrieval_degraded} ` +
