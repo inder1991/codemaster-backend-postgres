@@ -1,8 +1,12 @@
-// Phase 3d.3: the CUTOVER HINGE — BackgroundJobsTemporalPort + the flag-gated outbox sink port
-// selection (resolveOutboxPort). With CODEMASTER_OUTBOX_USE_BACKGROUND_JOBS=true the event-driven
-// outbox sinks (`temporal_workflow_start` / `installation_reconcile`) ENQUEUE core.background_jobs
-// rows instead of starting Temporal workflows; the default (unset/false) keeps the existing
-// RealTemporalClient path byte-identical. Proves:
+// Phase 3d.3, reshaped by CS1.1: the CUTOVER HINGE — BackgroundJobsTemporalPort + the runner's
+// ALWAYS-POSTGRES sink wiring (wireOutboxSinks). The event-driven outbox sinks
+// (`temporal_workflow_start` / `installation_reconcile`) ENQUEUE core.background_jobs /
+// core.review_jobs rows instead of starting Temporal workflows — unconditionally: the old
+// flag-gated selection (CODEMASTER_OUTBOX_USE_BACKGROUND_JOBS / resolveOutboxPort, with a
+// RealTemporalClient fallback) is REMOVED because the runner only boots under
+// CODEMASTER_RUNTIME_MODE=postgres|shadow, where Temporal is absent by construction
+// (boot_tasks.ts mutual exclusivity; temporal-mode outbox draining is the separate Temporal
+// dispatcher worker, outbox_dispatcher_main.ts). Proves:
 //   (1) TRANSLATION: startWorkflow({workflowType, workflowId, args:[input]}) enqueues ONE
 //       background_job with job_type = WORKFLOW_TYPE_TO_JOB_TYPE[workflowType], payload = args[0]
 //       (the producers' single positional workflow input — github_webhook_persistence.ts /
@@ -16,20 +20,17 @@
 //   (4) cancelWorkflow / signalWorkflow throw — the outbox sinks only ever call startWorkflow (the
 //       review supersede path is DB flipCurrentRun, not a Temporal signal; admin-console signals
 //       ride _admin_temporal_port.ts, a different port wiring entirely).
-//   (5) FLAG SELECTION: resolveOutboxPort returns the caller's Temporal port when the flag is
-//       unset/false/0 (the DEFAULT — additive + cold until Phase 4), a BackgroundJobsTemporalPort
-//       when true/1 (without ever invoking the Temporal-port thunk), and throws on garbage.
-//   (6) END-TO-END CUTOVER PARITY (flag ON): a seeded `temporal_workflow_start` outbox row → ONE
-//       drain pass (buildBackgroundRunner.drainOutboxOnce → the registered sink →
+//   (6) END-TO-END CUTOVER PARITY: a seeded `temporal_workflow_start` outbox row → ONE drain pass
+//       (buildBackgroundRunner.drainOutboxOnce → the registered sink →
 //       BackgroundJobsTemporalPort.enqueue) → ONE runner cycle (runOneCycle → reconcile handler) →
 //       the reconcile DB effect lands on core.installations and the outbox row is 'dispatched'.
-//       webhook-shape → outbox → Postgres-enqueue → handler: ZERO Temporal anywhere in the chain
-//       (the Temporal-port thunk THROWS if touched).
+//       webhook-shape → outbox → Postgres-enqueue → handler: ZERO Temporal anywhere in the chain.
+//       (6)/(7)/(11) drive wireOutboxSinks — the runner's REAL boot wiring (CS1.1: it binds BOTH
+//       sinks to the Postgres-enqueue port unconditionally), so these chains exercise the exact
+//       production composition, not a hand-built port.
 //   (7) Same end-to-end through the `installation_reconcile` sink, seeded via the REAL producer
 //       repo call (PostgresOutboxRepo.appendReconcile — the exact byte path
 //       github_webhook_persistence.ts writes, NULL installation_id schema exemption included).
-//   (8) FLAG OFF (default): the SAME sink + drain pass routes the row to the Temporal port
-//       (RecordingTemporalClient observes the startWorkflow call) and NO background_job is enqueued.
 //
 // Phase 4d W4d.1 (F6 — the review trigger leaves Temporal): `reviewPullRequest` is SPECIAL-CASED
 // onto the REVIEW-JOBS platform (core.review_jobs — the runner the review shell executes), NOT the
@@ -40,7 +41,7 @@
 //       string is the review job_id; NOTHING lands on core.background_jobs.
 //   (10) FAIL-LOUD: a reviewPullRequest row whose args[0] does NOT parse as
 //       ReviewPullRequestPayloadV1 throws PermanentSinkError; NEITHER table gets a row.
-//   (11) END-TO-END (flag ON): a seeded `temporal_workflow_start` outbox row stamped with the REAL
+//   (11) END-TO-END: a seeded `temporal_workflow_start` outbox row stamped with the REAL
 //       producer envelope shape (github_webhook_persistence.ts::buildOuterPayload — workflow_type
 //       'reviewPullRequest', args:[the fully-allocated payload]) → ONE drain pass → the outbox row
 //       is 'dispatched' and core.review_jobs (NOT background_jobs) carries the job.
@@ -61,7 +62,6 @@ import { Pool } from "pg";
 import { WallClock } from "#platform/clock.js";
 import { disposePool } from "#platform/db/database.js";
 import {
-  RecordingTemporalClient,
   type StartWorkflowCall,
   type TemporalClientPort,
 } from "#backend/adapters/temporal_port.js";
@@ -70,16 +70,11 @@ import {
   RECONCILE_PAYLOAD_SCHEMA_VERSION,
 } from "#backend/domain/repos/outbox_repo.js";
 import { PermanentSinkError, resetRegistryForTesting } from "#backend/outbox/sink_registry.js";
-import { registerInstallationReconcileSink } from "#backend/outbox/sinks/installation_reconcile.js";
-import { registerTemporalWorkflowStartSink } from "#backend/outbox/sinks/temporal_workflow_start.js";
 import { BackgroundJobsRepo } from "#backend/runner/background_jobs_repo.js";
-import {
-  BackgroundJobsTemporalPort,
-  OUTBOX_USE_BACKGROUND_JOBS_ENV,
-  resolveOutboxPort,
-} from "#backend/runner/background_jobs_temporal_port.js";
+import { BackgroundJobsTemporalPort } from "#backend/runner/background_jobs_temporal_port.js";
 import {
   buildBackgroundRunner,
+  wireOutboxSinks,
   type BackgroundRunnerConfig,
 } from "#backend/runner/background_runner_main.js";
 import { ReviewJobsRepo } from "#backend/runner/review_jobs_repo.js";
@@ -260,12 +255,7 @@ function reconcileEnvelope(o: { gid: number; login: string; action: "created" | 
   };
 }
 
-/** A Temporal-port thunk that MUST NOT be reached (flag-ON paths never build a Temporal client). */
-function forbiddenTemporalPort(): never {
-  throw new Error("makeTemporalPort must not be invoked when the cutover flag is ON");
-}
-
-describeDb("BackgroundJobsTemporalPort + flag-gated outbox sink port (Phase 3d.3 cutover hinge)", () => {
+describeDb("BackgroundJobsTemporalPort + the runner's always-Postgres sink wiring (Phase 3d.3 cutover hinge, CS1.1)", () => {
   it("(1) startWorkflow translates workflowType→job_type, args[0]→payload, workflowId→dedup_key; returns the job_id", async () => {
     const gid = nextGhIid();
     const login = `cutover-${gid}`;
@@ -361,42 +351,7 @@ describeDb("BackgroundJobsTemporalPort + flag-gated outbox sink port (Phase 3d.3
     ).rejects.toThrow(/not supported/);
   });
 
-  it("(5) resolveOutboxPort: default/false → the caller's Temporal port; true/1 → BackgroundJobsTemporalPort; garbage → throws", async () => {
-    const repo = new BackgroundJobsRepo(db);
-    const reviewJobs = new ReviewJobsRepo(db);
-    const recording = new RecordingTemporalClient();
-
-    // DEFAULT (unset) + every explicit OFF spelling → EXACTLY the caller's Temporal port instance.
-    for (const env of [{}, { [OUTBOX_USE_BACKGROUND_JOBS_ENV]: "" },
-      { [OUTBOX_USE_BACKGROUND_JOBS_ENV]: "false" }, { [OUTBOX_USE_BACKGROUND_JOBS_ENV]: "0" }]) {
-      expect(
-        await resolveOutboxPort({ env, backgroundJobs: repo, reviewJobs, makeTemporalPort: () => recording }),
-      ).toBe(recording);
-    }
-
-    // ON spellings → the Postgres-enqueue port; the Temporal-port thunk is NEVER invoked.
-    for (const on of ["true", "1"]) {
-      const port = await resolveOutboxPort({
-        env: { [OUTBOX_USE_BACKGROUND_JOBS_ENV]: on },
-        backgroundJobs: repo,
-        reviewJobs,
-        makeTemporalPort: forbiddenTemporalPort,
-      });
-      expect(port).toBeInstanceOf(BackgroundJobsTemporalPort);
-    }
-
-    // Garbage is a refused boot, not a silent default — this flag is the Phase-4 cutover hinge.
-    await expect(
-      resolveOutboxPort({
-        env: { [OUTBOX_USE_BACKGROUND_JOBS_ENV]: "yes" },
-        backgroundJobs: repo,
-        reviewJobs,
-        makeTemporalPort: () => recording,
-      }),
-    ).rejects.toThrow(/CODEMASTER_OUTBOX_USE_BACKGROUND_JOBS/);
-  });
-
-  it("(6) E2E flag ON: temporal_workflow_start outbox row → drain pass enqueues the job → runner cycle applies the reconcile; ZERO Temporal", async () => {
+  it("(6) E2E (runner boot wiring): temporal_workflow_start outbox row → drain pass enqueues the job → runner cycle applies the reconcile; ZERO Temporal", async () => {
     const gid = nextGhIid();
     const login = `cutover-${gid}`;
     // Seed the installations row directly (the repair-suite idiom): it carries the outbox row's
@@ -408,15 +363,9 @@ describeDb("BackgroundJobsTemporalPort + flag-gated outbox sink port (Phase 3d.3
     );
     const installationUuid = ins.rows[0]!.installation_id;
 
-    // The cutover wiring: flag ON → BackgroundJobsTemporalPort registered under BOTH sink names.
-    const port = await resolveOutboxPort({
-      env: { [OUTBOX_USE_BACKGROUND_JOBS_ENV]: "true" },
-      backgroundJobs: new BackgroundJobsRepo(db),
-      reviewJobs: new ReviewJobsRepo(db),
-      makeTemporalPort: forbiddenTemporalPort,
-    });
-    registerTemporalWorkflowStartSink(port);
-    registerInstallationReconcileSink(port);
+    // The runner's REAL boot wiring (CS1.1): BOTH sinks bound to the Postgres-enqueue port,
+    // unconditionally — no flag, no Temporal client anywhere in this process.
+    wireOutboxSinks(db);
 
     // A `temporal_workflow_start` row carrying the producers' envelope (workflow_type + args:[input]).
     const envelope = reconcileEnvelope({ gid, login, action: "suspended" });
@@ -454,17 +403,10 @@ describeDb("BackgroundJobsTemporalPort + flag-gated outbox sink port (Phase 3d.3
     expect(after.rows[0]!.suspended_at).not.toBeNull(); // webhook-shape → outbox → job → handler: DONE
   });
 
-  it("(7) E2E flag ON through the installation_reconcile sink, seeded via the REAL producer append (appendReconcile)", async () => {
+  it("(7) E2E through the installation_reconcile sink, seeded via the REAL producer append (appendReconcile)", async () => {
     const gid = nextGhIid();
     const login = `cutover-${gid}`;
-    const port = await resolveOutboxPort({
-      env: { [OUTBOX_USE_BACKGROUND_JOBS_ENV]: "true" },
-      backgroundJobs: new BackgroundJobsRepo(db),
-      reviewJobs: new ReviewJobsRepo(db),
-      makeTemporalPort: forbiddenTemporalPort,
-    });
-    registerTemporalWorkflowStartSink(port);
-    registerInstallationReconcileSink(port);
+    wireOutboxSinks(db);
 
     // The byte-faithful producer path (github_webhook_persistence.ts): sink='installation_reconcile',
     // NULL installation_id (the ck_outbox_installation_id_required exemption), envelope payload.
@@ -492,41 +434,6 @@ describeDb("BackgroundJobsTemporalPort + flag-gated outbox sink port (Phase 3d.3
     expect(created.rows).toHaveLength(1);          // the reconcile handler CREATED the installation
     expect(created.rows[0]!.account_login).toBe(login);
     expect(created.rows[0]!.suspended_at).toBeNull();
-  });
-
-  it("(8) flag OFF (default): the SAME sink + drain pass starts on the Temporal port; NO background_job is enqueued", async () => {
-    const gid = nextGhIid();
-    const login = `cutover-${gid}`;
-    const recording = new RecordingTemporalClient();
-    const port = await resolveOutboxPort({
-      env: {},                                     // DEFAULT — the flag is absent
-      backgroundJobs: new BackgroundJobsRepo(db),
-      reviewJobs: new ReviewJobsRepo(db),
-      makeTemporalPort: () => recording,
-    });
-    expect(port).toBe(recording);                  // selection: the existing Temporal port, unchanged
-    registerTemporalWorkflowStartSink(port);
-    registerInstallationReconcileSink(port);
-
-    await new PostgresOutboxRepo().appendReconcile({
-      db,
-      payload: reconcileEnvelope({ gid, login, action: "created" }),
-      schemaVersion: RECONCILE_PAYLOAD_SCHEMA_VERSION,
-      deliveryId: `cutover-it8-${gid}`,
-    });
-
-    const handles = buildBackgroundRunner({ db, clock: new WallClock(), config: TEST_CONFIG });
-    expect(await handles.drainOutboxOnce()).toBe(1);
-
-    // The row dispatched via startWorkflow on the TEMPORAL port — the pre-cutover behavior.
-    expect(recording.calls).toHaveLength(1);
-    expect(recording.calls[0]!.workflowType).toBe("reconcileInstallation");
-    expect(recording.calls[0]!.workflowId).toBe(`reconcile-installation/${gid}`);
-    expect(recording.calls[0]!.args).toEqual([installationPayload({ action: "created", gid, login })]);
-    expect(await allJobs()).toHaveLength(0);       // NOTHING enqueued on the Postgres platform
-    const outboxRow = await sql<{ state: string }>`
-      SELECT state FROM core.outbox WHERE delivery_id = ${`cutover-it8-${gid}`}`.execute(db);
-    expect(outboxRow.rows[0]!.state).toBe("dispatched");
   });
 
   // ─── Phase 4d W4d.1 (F6): the review trigger routes onto the REVIEW-JOBS platform ──────────────
@@ -569,7 +476,7 @@ describeDb("BackgroundJobsTemporalPort + flag-gated outbox sink port (Phase 3d.3
     expect(await allJobs()).toHaveLength(0);
   });
 
-  it("(11) E2E flag ON: a temporal_workflow_start outbox row with the REAL review envelope → drain pass enqueues core.review_jobs (NOT background_jobs); ZERO Temporal", async () => {
+  it("(11) E2E (runner boot wiring): a temporal_workflow_start outbox row with the REAL review envelope → drain pass enqueues core.review_jobs (NOT background_jobs); ZERO Temporal", async () => {
     const gid = nextGhIid();
     const login = `cutover-${gid}`;
     // The outbox row's installation_id is FK-anchored on core.installations (and NOT NULL for this
@@ -586,14 +493,7 @@ describeDb("BackgroundJobsTemporalPort + flag-gated outbox sink port (Phase 3d.3
       runId: seeded.runId, reviewId: seeded.reviewId, installationId: installationUuid,
     });
 
-    const port = await resolveOutboxPort({
-      env: { [OUTBOX_USE_BACKGROUND_JOBS_ENV]: "true" },
-      backgroundJobs: new BackgroundJobsRepo(db),
-      reviewJobs: new ReviewJobsRepo(db),
-      makeTemporalPort: forbiddenTemporalPort,
-    });
-    registerTemporalWorkflowStartSink(port);
-    registerInstallationReconcileSink(port);
+    wireOutboxSinks(db);
 
     // The producer byte path: ONE temporal_workflow_start row whose payload is the buildOuterPayload
     // envelope (workflow_type='reviewPullRequest', args:[the fully-allocated v2 payload]).

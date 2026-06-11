@@ -1,10 +1,13 @@
-import { createRequire } from "node:module";
 import { hostname } from "node:os";
 
 import type { Kysely } from "kysely";
 
 import { OutboxDispatchActivities } from "#backend/activities/outbox_dispatch.activity.js";
-import type { TemporalClientPort } from "#backend/adapters/temporal_port.js";
+import {
+  RUNTIME_MODE_ENV,
+  parseRuntimeMode,
+  type BackgroundRunnerMode,
+} from "#backend/boot_tasks.js";
 import { PostgresOutboxRepo } from "#backend/domain/repos/outbox_repo.js";
 import { registerInstallationReconcileSink } from "#backend/outbox/sinks/installation_reconcile.js";
 import { registerTemporalWorkflowStartSink } from "#backend/outbox/sinks/temporal_workflow_start.js";
@@ -14,7 +17,7 @@ import { WallClock } from "#platform/clock.js";
 import { disposePool, tenantKysely } from "#platform/db/database.js";
 
 import { BackgroundJobsRepo } from "./background_jobs_repo.js";
-import { resolveOutboxPort } from "./background_jobs_temporal_port.js";
+import { makeOutboxBackgroundJobsPort } from "./background_jobs_temporal_port.js";
 import {
   BackgroundRunnerLoop,
   runOneBackgroundJob,
@@ -35,11 +38,14 @@ import { SchedulerLoop, pollAndEnqueue } from "./scheduler.js";
 // replacing Temporal Schedules) + the W2b HandlerRegistry into ONE Temporal-free runtime process.
 // Closes the F6 review finding's composition gap: the three pieces existed but nothing wired them
 // into a bootable process. Phase 3c adds the OutboxDispatcherLoop (the Postgres leased drain loop
-// replacing the OutboxDispatcherWorkflow singleton) over the SAME shared pool/clock. Phase 3d.3
-// adds the flag-gated outbox sink port ({@link wireOutboxSinks}): by DEFAULT the
-// temporal_workflow_start / installation_reconcile sinks still dispatch via the RealTemporalClient;
-// CODEMASTER_OUTBOX_USE_BACKGROUND_JOBS=true (the Phase-4 cutover flip) routes them onto the
-// Postgres background-jobs platform instead.
+// replacing the OutboxDispatcherWorkflow singleton) over the SAME shared pool/clock. CS1.1: this
+// runtime boots ONLY under CODEMASTER_RUNTIME_MODE=postgres|shadow (boot_tasks.ts — Temporal and
+// the Postgres runtime are mutually exclusive by construction), so {@link wireOutboxSinks} ALWAYS
+// binds the temporal_workflow_start / installation_reconcile sinks to the Postgres-enqueue port
+// (BackgroundJobsTemporalPort) — the old CODEMASTER_OUTBOX_USE_BACKGROUND_JOBS flag (and the
+// RealTemporalClient fallback it selected) is REMOVED; in temporal mode the outbox is drained by
+// the separate Temporal dispatcher worker (worker/outbox_dispatcher_main.ts), never by this
+// process.
 //
 // ## NOT STARTED IN PRODUCTION YET (deliberate)
 //
@@ -208,63 +214,29 @@ export function buildBackgroundRunner(deps: BackgroundRunnerDeps): BackgroundRun
 }
 
 /**
- * Build the flag-OFF (pre-cutover) Temporal port: a RealTemporalClient over a freshly-connected
- * `@temporalio/client` Client, with the SAME config resolver + data converter the outbox-dispatcher
- * worker uses (outbox_dispatcher_main.ts) so the wire bytes are identical whichever process drains
- * the row. DYNAMIC imports keep the whole Temporal client graph off this runtime's static import
- * graph (the deferred-Vault idiom from handlers/event_handlers.ts): the Phase-4 posture (flag ON)
- * never loads — let alone connects — any Temporal code. Invoked ONLY by {@link wireOutboxSinks}'s
- * flag-OFF branch; a connect failure crash-loops the boot (fail-loud — a drainer that cannot reach
- * Temporal cannot dispatch, same posture as the Temporal dispatcher worker's own boot).
- */
-async function makeRealTemporalPort(): Promise<TemporalClientPort> {
-  const { Client, Connection } = await import("@temporalio/client");
-  const { RealTemporalClient } = await import("#backend/adapters/real_temporal_client.js");
-  const { resolveWorkerTemporalConfig } = await import("#backend/worker/temporal_config.js");
-  const temporal = resolveWorkerTemporalConfig(process.env);
-  const connection = await Connection.connect(
-    temporal.tls ? { address: temporal.address, tls: {} } : { address: temporal.address },
-  );
-  // createRequire bound to THIS module's URL so the data-converter specifier resolves whether the
-  // runner runs from .ts (tsx) or compiled .js (the outbox_dispatcher_main.ts idiom).
-  const require_ = createRequire(import.meta.url);
-  const client = new Client({
-    connection,
-    namespace: temporal.namespace,
-    dataConverter: { payloadConverterPath: require_.resolve("../worker/data_converter") },
-  });
-  return new RealTemporalClient(client);
-}
-
-/**
- * Phase 3d.3 — the CUTOVER HINGE: register the two event-driven outbox sinks
- * (`temporal_workflow_start` + `installation_reconcile`, both bound to the SAME port-shaped
- * handler) onto the flag-selected port, so this runtime's drain loop can dispatch the rows the
- * webhook producers append. Which port the sinks start work on is the cutover flag:
+ * Register the two event-driven outbox sinks (`temporal_workflow_start` + `installation_reconcile`,
+ * both bound to the SAME port-shaped handler) onto the Postgres-enqueue port
+ * (BackgroundJobsTemporalPort), so this runtime's drain loop dispatches the rows the webhook
+ * producers append onto the platforms THIS process (and the review runner) consume:
+ * core.background_jobs for the mapped event workflow types (workflow_job_map.ts translation; an
+ * unmapped workflow_type fails loud into the row's last_error), and core.review_jobs for
+ * `reviewPullRequest` (W4d.1 F6 — the REVIEW-JOBS platform the review shell runner claims from).
  *
- *   * CODEMASTER_OUTBOX_USE_BACKGROUND_JOBS unset/false (DEFAULT): the RealTemporalClient — rows
- *     keep starting Temporal workflows, byte-identical with the Temporal dispatcher worker
- *     (outbox_dispatcher_main.ts), so a runner booted before Phase 4 changes NOTHING about where
- *     work executes.
- *   * true: the BackgroundJobsTemporalPort — rows enqueue core.background_jobs jobs that THIS
- *     process's runner loop executes (workflow_job_map.ts translation; an unmapped workflow_type
- *     fails loud into the row's last_error), and `reviewPullRequest` rows enqueue core.review_jobs
- *     (W4d.1 F6 — the REVIEW-JOBS platform the review shell runner claims from). Flipping this
- *     flag IS the Phase-4 cutover and REQUIRES this background runner process AND the review-jobs
- *     runner to be BOOTED — they are the only consumers of the enqueued jobs; with the flag on and
- *     no runner, jobs pile up unexecuted.
+ * CS1.1 subsumed the old CODEMASTER_OUTBOX_USE_BACKGROUND_JOBS selection: this runtime only boots
+ * under CODEMASTER_RUNTIME_MODE=postgres|shadow, where Temporal is ABSENT by construction
+ * (boot_tasks.ts mutual exclusivity), so there is no Temporal port to fall back to — the sinks
+ * ALWAYS enqueue Postgres jobs. In temporal mode the outbox is drained by the separate Temporal
+ * dispatcher worker (worker/outbox_dispatcher_main.ts), which wires the RealTemporalClient itself;
+ * this process never boots there.
  *
  * Called once at process boot (runBackgroundRunner), BEFORE the drain loop starts — registerSink
- * throws on duplicates, so double-wiring fails loud.
+ * throws on duplicates, so double-wiring fails loud. Exported for the cutover integration suite
+ * (test/integration/runner/cutover_port.integration.test.ts), which drives the REAL boot wiring.
  */
-async function wireOutboxSinks(db: Kysely<unknown>): Promise<void> {
-  const port = await resolveOutboxPort({
-    env: process.env,
+export function wireOutboxSinks(db: Kysely<unknown>): void {
+  const port = makeOutboxBackgroundJobsPort({
     backgroundJobs: new BackgroundJobsRepo(db),
-    // W4d.1 F6: the flag-ON port routes `reviewPullRequest` rows onto core.review_jobs (the REVIEW
-    // runner platform) — the review trigger leaves Temporal with the same flag flip.
     reviewJobs: new ReviewJobsRepo(db),
-    makeTemporalPort: makeRealTemporalPort,
   });
   registerTemporalWorkflowStartSink(port);
   registerInstallationReconcileSink(port);
@@ -452,18 +424,30 @@ export async function runSupervisedLoops(loops: {
  * instead of leaving a zombie pod that looks healthy with zero live loops.
  *
  * NOT booted by any deployment yet — see the module doc (Phase 3b+ registers handlers first).
+ *
+ * `mode` is the resolved CODEMASTER_RUNTIME_MODE ("postgres" | "shadow" — "temporal" is excluded
+ * by type AND re-asserted at runtime below: CS1.1 mutual exclusivity, defense-in-depth for
+ * non-typechecked callers). Shadow-specific behavior layers onto this seam in the CS follow-ups;
+ * the mode is threaded + logged from day one so the runner always knows which posture it boots in.
  */
-export async function runBackgroundRunner(): Promise<void> {
+export async function runBackgroundRunner(mode: BackgroundRunnerMode): Promise<void> {
+  if (mode !== "postgres" && mode !== "shadow") {
+    throw new Error(
+      `runBackgroundRunner: mode must be 'postgres' or 'shadow'; got '${String(mode)}' — the ` +
+        `Temporal and Postgres runtimes are mutually exclusive (CS1.1): the background runner ` +
+        `NEVER boots under ${RUNTIME_MODE_ENV}=temporal (booting both double-runs every cron ` +
+        `and double-drains the outbox)`,
+    );
+  }
   const { dsn, config } = resolveBackgroundRunnerConfig(process.env);
   const db = tenantKysely<unknown>(dsn); // THE shared ADR-0062 pool for this DSN
   const clock = new WallClock();
   const handles = buildBackgroundRunner({ db, clock, config });
 
-  // Phase 3d.3: wire the event-driven outbox sinks onto the flag-selected port BEFORE the drain
-  // loop starts (see wireOutboxSinks — flipping CODEMASTER_OUTBOX_USE_BACKGROUND_JOBS is the
-  // Phase-4 cutover). Fail-loud: a garbage flag value or (flag-OFF) an unreachable Temporal
-  // refuses to boot rather than drain rows it cannot dispatch.
-  await wireOutboxSinks(db);
+  // Wire the event-driven outbox sinks onto the Postgres-enqueue port BEFORE the drain loop starts
+  // (see wireOutboxSinks — CS1.1: always the BackgroundJobsTemporalPort; Temporal is absent in
+  // this runtime's modes by construction). registerSink throws on duplicates — fail-loud.
+  wireOutboxSinks(db);
 
   // Seed the cron schedules BEFORE the loops start (W3b.1) — idempotent ON CONFLICT DO NOTHING, so
   // concurrent pods / redeploys never clobber operator-paused/edited rows. Fail-loud: a runner that
@@ -482,7 +466,7 @@ export async function runBackgroundRunner(): Promise<void> {
   process.once("SIGTERM", stopAll);
 
   console.info(
-    `background runner starting: owner=${config.owner} ` +
+    `background runner starting: mode=${mode} owner=${config.owner} ` +
       `registered_job_types=[${handles.registry.registeredTypes().join(", ")}] ` +
       `(lease=${config.leaseS}s heartbeat=${config.heartbeatS}s maxRuntime=${config.maxRuntimeS}s ` +
       `idle=${config.idleS}s schedulerPoll=${config.pollIntervalS}s ` +
@@ -522,12 +506,28 @@ export async function runBackgroundRunner(): Promise<void> {
 
 // Main-module entrypoint guard — fires ONLY under a direct `node .../background_runner_main.js`
 // invocation (no prod manifest does this yet; see the module doc), never on import. Fail LOUD on
-// any startup error (same idiom as worker/main.ts / outbox_dispatcher_main.ts).
+// any startup error (same idiom as worker/main.ts / outbox_dispatcher_main.ts). CS1.1: the mode is
+// parsed from env HERE too, so even a direct invocation cannot boot the Postgres runtime while
+// CODEMASTER_RUNTIME_MODE is 'temporal' (the default) — mutual exclusivity holds on every boot
+// path, not only through main.ts's resolveBootTasks.
 if (process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`) {
-  runBackgroundRunner().catch((err: unknown) => {
-    process.stderr.write(
-      `background runner FAILED: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
-    );
-    process.exit(1);
-  });
+  Promise.resolve()
+    .then(() => {
+      const mode = parseRuntimeMode(process.env);
+      if (mode === "temporal") {
+        throw new Error(
+          `refusing to boot the background runner: ${RUNTIME_MODE_ENV} is 'temporal' (the ` +
+            `default) — in that mode the Temporal runtime owns the crons and the outbox, and ` +
+            `booting this runner alongside would double-run them (CS1.1 mutual exclusivity). ` +
+            `Set ${RUNTIME_MODE_ENV}=postgres or ${RUNTIME_MODE_ENV}=shadow.`,
+        );
+      }
+      return runBackgroundRunner(mode);
+    })
+    .catch((err: unknown) => {
+      process.stderr.write(
+        `background runner FAILED: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
+      );
+      process.exit(1);
+    });
 }

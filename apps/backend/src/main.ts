@@ -9,14 +9,14 @@
 // non-zero so Kubernetes restarts the pod and the fault is visible to alerting. No silently-degraded pod.
 // (Matches every sibling entrypoint's `.catch(() => process.exit(1))` convention.)
 //
-// WHICH tasks boot is the PURE resolveBootTasks seam (boot_tasks.ts — Phase 4d review blocker #6):
-// CODEMASTER_RUN_BACKGROUND_RUNNER unset/false (DEFAULT) → the two Temporal workers, byte-identical to the
-// pre-flag boot. true → the Postgres background runner (runner + scheduler + outbox-drain loops) JOINS the
-// Promise.all. ⚠️ The flag MUST stay OFF while the Temporal worker (with its Temporal Schedules) is also
-// booted here — both fire the SAME crons, so booting both double-runs them; it flips ON only at the Phase-4
-// cutover when the Temporal worker is removed from this boot. The runner's thunk dynamic-imports its module
-// graph, so the flag-OFF boot loads NOTHING of the Postgres runtime (the deferred-import idiom from
-// background_runner_main.ts's makeRealTemporalPort).
+// WHICH tasks boot is the PURE resolveBootTasks seam (boot_tasks.ts — Phase 4d review blocker #6,
+// reshaped by CS1.1): CODEMASTER_RUNTIME_MODE unset/"temporal" (DEFAULT) → the two Temporal workers,
+// byte-identical to the pre-mode boot; "postgres"/"shadow" → ONLY the Postgres background runner (runner +
+// scheduler + outbox-drain loops), with the mode threaded through so the runner knows whether it shadows.
+// The two runtimes are MUTUALLY EXCLUSIVE BY CONSTRUCTION — no mode boots both (the old two-boolean shape
+// allowed exactly that: both runtimes fire the SAME crons and drain the SAME outbox, so the joined boot
+// double-ran every cron — audit C7/C9/RC8/C8/RT1). The runner's thunk dynamic-imports its module graph, so
+// the temporal-mode boot loads NOTHING of the Postgres runtime.
 
 import { resolveBootTasks } from "#backend/boot_tasks.js";
 import { runServer } from "#backend/api/server.js";
@@ -24,14 +24,14 @@ import { runWorker } from "#backend/worker/main.js";
 import { runOutboxDispatcherWorker } from "#backend/worker/outbox_dispatcher_main.js";
 
 async function main(): Promise<void> {
-  // Resolve the boot composition BEFORE any I/O — a garbage CODEMASTER_RUN_BACKGROUND_RUNNER value
-  // refuses boot here (fail-loud), before the HTTP server ever binds.
+  // Resolve the boot composition BEFORE any I/O — a garbage CODEMASTER_RUNTIME_MODE value (or a
+  // still-set removed cutover boolean) refuses boot here (fail-loud), before the HTTP server binds.
   const tasks = resolveBootTasks(process.env, {
     runWorker,
     runOutboxDispatcherWorker,
-    runBackgroundRunner: async () => {
+    runBackgroundRunner: async (mode) => {
       const { runBackgroundRunner } = await import("#backend/runner/background_runner_main.js");
-      await runBackgroundRunner();
+      await runBackgroundRunner(mode);
     },
   });
   // HTTP API first — app.listen() returns once bound; the server keeps serving on the event loop.

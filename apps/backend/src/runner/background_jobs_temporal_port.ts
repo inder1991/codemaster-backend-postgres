@@ -52,9 +52,9 @@
 // WORKFLOW_TYPE_TO_JOB_TYPE carries ONLY the migrated workflow types. A row stamped with an
 // unmigrated, non-review type throws PermanentSinkError: the drain loop records the attempt with
 // the error persisted in last_error and the row dead-letters at the threshold — visible in the
-// outbox dead-letter signal, instead of vanishing. Flipping the cutover flag before every
-// event-driven workflow_type is mapped is an operator error this adapter SURFACES rather than
-// papers over.
+// outbox dead-letter signal, instead of vanishing. Cutting over (CODEMASTER_RUNTIME_MODE=
+// postgres|shadow) before every event-driven workflow_type is mapped is an operator error this
+// adapter SURFACES rather than papers over.
 //
 // ## cancel / signal are structurally unreachable from the outbox sinks
 // makeTemporalWorkflowStartHandler only ever calls startWorkflow. The review supersede path is the
@@ -71,12 +71,6 @@ import { ReviewPullRequestPayloadV1 } from "#contracts/review_pull_request.v1.js
 import type { BackgroundJobsRepo } from "./background_jobs_repo.js";
 import type { ReviewJobsRepo } from "./review_jobs_repo.js";
 import { WORKFLOW_TYPE_TO_JOB_TYPE } from "./workflow_job_map.js";
-
-/** The cutover flag (read by {@link resolveOutboxPort}). Unset/false (DEFAULT): the outbox sinks
- *  keep starting Temporal workflows via the RealTemporalClient. true: they enqueue Postgres
- *  background jobs. Flipping it is the Phase-4 cutover and REQUIRES the background runner process
- *  to be BOOTED — the runner loop is the only consumer of the enqueued jobs. */
-export const OUTBOX_USE_BACKGROUND_JOBS_ENV = "CODEMASTER_OUTBOX_USE_BACKGROUND_JOBS";
 
 /** A {@link TemporalClientPort} whose startWorkflow enqueues a core.background_jobs row — or, for
  *  {@link REVIEW_WORKFLOW_TYPE}, a core.review_jobs row (module doc: the cutover hinge + the W4d.1
@@ -203,54 +197,28 @@ export class BackgroundJobsTemporalPort implements TemporalClientPort {
   }
 }
 
-/** Strict boolean parse of the cutover flag — garbage REFUSES to boot (a typo'd cutover flag
- *  silently defaulting either way is worse than a crash-loop; the resolveBackgroundRunnerConfig
- *  fail-loud posture). Accepted: "true"/"1" → on; unset/""/"false"/"0" → off (the DEFAULT). */
-function readUseBackgroundJobsFlag(env: NodeJS.ProcessEnv): boolean {
-  // The key is the module's own const — not an attacker-controlled object-key sink; the
-  // prototype-pollution threat model does not apply (the envPositiveSeconds idiom).
-  // eslint-disable-next-line security/detect-object-injection
-  const raw = env[OUTBOX_USE_BACKGROUND_JOBS_ENV];
-  if (raw === undefined || raw === "" || raw === "false" || raw === "0") {
-    return false;
-  }
-  if (raw === "true" || raw === "1") {
-    return true;
-  }
-  throw new Error(
-    `${OUTBOX_USE_BACKGROUND_JOBS_ENV} must be one of true|1|false|0 (or unset); got '${raw}'`,
-  );
-}
-
-/** What {@link resolveOutboxPort} selects over. `makeTemporalPort` is a THUNK so the flag-ON path
- *  never constructs (or connects) a Temporal client at all. */
-export type ResolveOutboxPortDeps = {
-  env: NodeJS.ProcessEnv;
-  /** The shared-pool repo the flag-ON port enqueues through (ADR-0062: ONE Kysely per process). */
-  backgroundJobs: BackgroundJobsRepo;
-  /** The shared-pool review-jobs repo the flag-ON port routes {@link REVIEW_WORKFLOW_TYPE} rows
-   *  through (W4d.1 F6 — the review trigger leaves Temporal onto the review runner). */
-  reviewJobs: ReviewJobsRepo;
-  /** Builds the flag-OFF Temporal port (production: the RealTemporalClient over a connected
-   *  Client; tests: a RecordingTemporalClient). Invoked ONLY when the flag is off. */
-  makeTemporalPort: () => TemporalClientPort | Promise<TemporalClientPort>;
-};
-
 /**
- * The flag-gated port selection (the Phase-3d.3 cutover seam, wired at the sink registration point
- * in background_runner_main.ts): {@link OUTBOX_USE_BACKGROUND_JOBS_ENV} unset/false (DEFAULT) →
- * the caller's Temporal port, byte-identical pre-cutover behavior; true → a
- * {@link BackgroundJobsTemporalPort} over {@link WORKFLOW_TYPE_TO_JOB_TYPE}. Flipping the flag is
- * the Phase-4 cutover and REQUIRES the background runner to be booted (else enqueued jobs pile up
- * with no consumer).
+ * Build THE production outbox port: a {@link BackgroundJobsTemporalPort} over the
+ * {@link WORKFLOW_TYPE_TO_JOB_TYPE} registry (the single production translation table).
+ *
+ * CS1.1 REMOVED the flag-gated selection that used to live here (resolveOutboxPort over
+ * CODEMASTER_OUTBOX_USE_BACKGROUND_JOBS, with a RealTemporalClient fallback): the background
+ * runtime only boots under CODEMASTER_RUNTIME_MODE=postgres|shadow — where Temporal is ABSENT by
+ * construction (boot_tasks.ts mutual exclusivity) — so when the runner boots, the outbox sinks
+ * ALWAYS dispatch onto the Postgres jobs platforms; there is no Temporal port to select anymore.
+ * Temporal-mode outbox draining is the separate dispatcher worker (worker/outbox_dispatcher_main.ts),
+ * which wires the RealTemporalClient itself and never coexists with this runtime in one boot.
  */
-export async function resolveOutboxPort(deps: ResolveOutboxPortDeps): Promise<TemporalClientPort> {
-  if (readUseBackgroundJobsFlag(deps.env)) {
-    return new BackgroundJobsTemporalPort({
-      repo: deps.backgroundJobs,
-      reviewJobs: deps.reviewJobs,
-      workflowTypeToJobType: WORKFLOW_TYPE_TO_JOB_TYPE,
-    });
-  }
-  return await deps.makeTemporalPort();
+export function makeOutboxBackgroundJobsPort(deps: {
+  /** The shared-pool repo the port enqueues through (ADR-0062: ONE Kysely per process). */
+  backgroundJobs: BackgroundJobsRepo;
+  /** The shared-pool review-jobs repo the port routes {@link REVIEW_WORKFLOW_TYPE} rows through
+   *  (W4d.1 F6 — the review trigger rides the review runner platform). */
+  reviewJobs: ReviewJobsRepo;
+}): BackgroundJobsTemporalPort {
+  return new BackgroundJobsTemporalPort({
+    repo: deps.backgroundJobs,
+    reviewJobs: deps.reviewJobs,
+    workflowTypeToJobType: WORKFLOW_TYPE_TO_JOB_TYPE,
+  });
 }

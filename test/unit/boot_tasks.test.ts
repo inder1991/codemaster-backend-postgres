@@ -81,7 +81,7 @@ describe("parseRuntimeMode", () => {
     "garbage '%s' REFUSES boot, naming the env var AND the valid values",
     (raw) => {
       expect(() => parseRuntimeMode({ [RUNTIME_MODE_ENV]: raw })).toThrow(
-        new RegExp(RUNTIME_MODE_ENV),
+        RUNTIME_MODE_ENV,
       );
       expect(() => parseRuntimeMode({ [RUNTIME_MODE_ENV]: raw })).toThrow(
         /temporal\|postgres\|shadow/,
@@ -93,8 +93,8 @@ describe("parseRuntimeMode", () => {
     "DEPRECATED CODEMASTER_RUN_BACKGROUND_RUNNER='%s' REFUSES boot naming the replacement — even alongside a VALID mode",
     (raw) => {
       const env = { [RUNTIME_MODE_ENV]: "postgres", [DEPRECATED_RUN_BACKGROUND_RUNNER_ENV]: raw };
-      expect(() => parseRuntimeMode(env)).toThrow(new RegExp(DEPRECATED_RUN_BACKGROUND_RUNNER_ENV));
-      expect(() => parseRuntimeMode(env)).toThrow(new RegExp(RUNTIME_MODE_ENV));
+      expect(() => parseRuntimeMode(env)).toThrow(DEPRECATED_RUN_BACKGROUND_RUNNER_ENV);
+      expect(() => parseRuntimeMode(env)).toThrow(RUNTIME_MODE_ENV);
     },
   );
 
@@ -103,9 +103,9 @@ describe("parseRuntimeMode", () => {
     (raw) => {
       const env = { [DEPRECATED_OUTBOX_USE_BACKGROUND_JOBS_ENV]: raw };
       expect(() => parseRuntimeMode(env)).toThrow(
-        new RegExp(DEPRECATED_OUTBOX_USE_BACKGROUND_JOBS_ENV),
+        DEPRECATED_OUTBOX_USE_BACKGROUND_JOBS_ENV,
       );
-      expect(() => parseRuntimeMode(env)).toThrow(new RegExp(RUNTIME_MODE_ENV));
+      expect(() => parseRuntimeMode(env)).toThrow(RUNTIME_MODE_ENV);
     },
   );
 
@@ -201,9 +201,9 @@ describe("resolveBootTasks", () => {
   it("the OLD boolean spelling (CODEMASTER_RUN_BACKGROUND_RUNNER=true alone) REFUSES boot — never a silent temporal-only boot, never the old joined boot", () => {
     expect(() =>
       resolveBootTasks({ [DEPRECATED_RUN_BACKGROUND_RUNNER_ENV]: "true" }, explodingDeps()),
-    ).toThrow(new RegExp(RUNTIME_MODE_ENV));
+    ).toThrow(RUNTIME_MODE_ENV);
     expect(() =>
       resolveBootTasks({ [DEPRECATED_OUTBOX_USE_BACKGROUND_JOBS_ENV]: "true" }, explodingDeps()),
-    ).toThrow(new RegExp(RUNTIME_MODE_ENV));
+    ).toThrow(RUNTIME_MODE_ENV);
   });
 });
