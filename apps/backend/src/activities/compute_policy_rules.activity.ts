@@ -197,6 +197,7 @@ export async function computePolicyRules(
   const { paths, capped: pathsCapped } = cappedChangedPaths(input.changed_paths);
   const bundles: Record<string, ResolvedGuidanceBundleV1> = {};
   for (let i = 0; i < paths.length; i += 1) {
+    // eslint-disable-next-line security/detect-object-injection -- bounded numeric loop index into a local ReadonlyArray slice, not an attacker-controlled object key
     const cp = paths[i]!;
     // eslint-disable-next-line security/detect-object-injection -- write-only into a fresh local object; `cp` is a repo-relative changed-file path from the typed input, used purely as a string key (no prototype-chain read)
     bundles[cp] = resolveGuidance({ changedPath: cp, extractedRules: allRules });
