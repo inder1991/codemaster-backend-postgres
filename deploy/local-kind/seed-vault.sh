@@ -5,7 +5,7 @@
 # Optional real-PR creds (export before running to enable the live review chain):
 #   GITHUB_APP_ID, GITHUB_INSTALLATION_ID, GITHUB_WEBHOOK_SECRET, GITHUB_APP_PRIVATE_KEY_PATH, ANTHROPIC_API_KEY
 set -euo pipefail
-NS=codemaster-backend
+NS="${NS:-codemaster-backend}"   # override for other namespaces, e.g. NS=codemaster-cutover (20-postgres-cutover.yaml)
 POD=$(kubectl -n "$NS" get pod -l app.kubernetes.io/name=vault -o jsonpath='{.items[0].metadata.name}')
 ex() { kubectl -n "$NS" exec "$POD" -- sh -c "VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=devroot $*"; }
 exi() { kubectl -n "$NS" exec -i "$POD" -- sh -c "VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=devroot $*"; }

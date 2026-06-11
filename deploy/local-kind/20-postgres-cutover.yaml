@@ -1,0 +1,202 @@
+# THE POSTGRES-MODE CUTOVER SMOKE — a fully ISOLATED namespace proving the de-Temporal claim:
+# the backend boots and serves with NO Temporal server anywhere (contrast 00-infra.yaml, which
+# ships one). Its OWN fresh Postgres (cold 0001→head migration run — exercises the CS5 preflight
+# from zero) + its OWN dev Vault (seed the keyset BEFORE the backend starts: the image runs
+# NODE_ENV=production, so the CS6 boot key-install is fail-loud — an unseeded Vault = CrashLoop
+# with FieldKeyBootError, BY DESIGN).
+#
+# Bring-up order:
+#   1. kubectl apply -f deploy/local-kind/20-postgres-cutover.yaml   (infra schedules; backend+migrate
+#      sit in ErrImageNeverPull until the image is loaded — harmless)
+#   2. NS=codemaster-cutover deploy/local-kind/seed-vault.sh         (the keyset + auth secrets)
+#   3. docker build -t codemaster-backend:dev . && kind load docker-image codemaster-backend:dev
+#   4. kubectl -n codemaster-cutover delete job backend-migrate --ignore-not-found && re-apply this file
+#   5. watch: migrate Job → Completed; backend → Ready (readiness = the REAL /readyz: DB + Vault +
+#      runtime-loop health, CS3); logs carry the schema-preflight pass, the key-registry install,
+#      the CS2.2 consumer self-check, and the three supervised loops starting.
+# DEV ONLY (ephemeral storage, dev-mode Vault root token). Never any other environment.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: codemaster-cutover
+---
+# ─── Postgres (fresh, in-namespace) ────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: pg-postgresql
+  namespace: codemaster-cutover
+spec:
+  selector: { app: pg }
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: pg
+  namespace: codemaster-cutover
+spec:
+  serviceName: pg-postgresql
+  replicas: 1
+  selector:
+    matchLabels: { app: pg }
+  template:
+    metadata:
+      labels: { app: pg }
+    spec:
+      containers:
+        - name: postgres
+          image: codemaster-postgres:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: POSTGRES_PASSWORD, value: devpass }
+            - { name: POSTGRES_DB, value: postgres }
+          ports: [{ containerPort: 5432 }]
+          readinessProbe:
+            exec: { command: [pg_isready, -U, postgres] }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+# ─── Vault (dev mode, root token 'devroot') ────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault
+  namespace: codemaster-cutover
+  labels: { app.kubernetes.io/name: vault }
+spec:
+  selector: { app.kubernetes.io/name: vault }
+  ports:
+    - { name: http, port: 8200, targetPort: 8200 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vault
+  namespace: codemaster-cutover
+  labels: { app.kubernetes.io/name: vault }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: vault }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: vault }
+    spec:
+      containers:
+        - name: vault
+          image: hashicorp/vault:1.18
+          args: [server, -dev, -dev-root-token-id=devroot, -dev-listen-address=0.0.0.0:8200]
+          env:
+            - { name: VAULT_ADDR, value: http://127.0.0.1:8200 }
+            - { name: VAULT_DEV_ROOT_TOKEN_ID, value: devroot }
+            - { name: SKIP_SETCAP, value: "true" }
+          ports: [{ containerPort: 8200, name: http }]
+          readinessProbe:
+            httpGet: { path: /v1/sys/health, port: 8200 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            capabilities: { add: ["IPC_LOCK"] }
+---
+# ─── Backend env — postgres mode; NOTE: zero TEMPORAL_* vars (nothing in this mode reads them) ─────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-env
+  namespace: codemaster-cutover
+data:
+  CODEMASTER_PG_CORE_DSN: "postgresql://postgres:devpass@pg-postgresql:5432/postgres"
+  # THE cutover knob (CS1.1/W0.1): the Postgres background runner (runner + scheduler + outbox
+  # loops). The Temporal worker does NOT boot; this namespace ships no Temporal server at all.
+  CODEMASTER_RUNTIME_MODE: "postgres"
+  VAULT_ADDR: "http://vault:8200"
+  VAULT_TOKEN: "devroot"
+  CODEMASTER_VAULT_SECRET_SOURCE: "vault-api"
+  CODEMASTER_AUTH_ROUTES_ENABLED: "true"
+  CODEMASTER_SECURE_COOKIES: "false"
+  CODEMASTER_API_PORT: "8080"
+  CODEMASTER_API_HOST: "0.0.0.0"
+  # Embedder (ADR-0059): dev stub — no Qwen service in this namespace; embedder-dependent stages
+  # use the recording stub exactly as in 10-backend.yaml.
+  CODEMASTER_QWEN_DSN: "stub://recording"
+---
+# One-shot schema migration (node-pg-migrate up): the COLD path — 0001→head on a fresh database,
+# which is also what arms the CS5 boot preflight (a backend booting before this completes refuses
+# loudly with SchemaRevisionMismatchError; the Deployment just restarts until the Job finishes).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: backend-migrate
+  namespace: codemaster-cutover
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: codemaster-backend:dev
+          imagePullPolicy: Never
+          command: ["npm", "run", "migrate:up"]
+          envFrom:
+            - configMapRef: { name: backend-env }
+---
+# THE single postgres-mode pod: HTTP API + the Postgres background runner (runner + scheduler +
+# outbox drain loops) in ONE fail-loud process. No Temporal connection is attempted anywhere.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: codemaster-cutover
+  labels: { app: backend }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: backend }
+  template:
+    metadata:
+      labels: { app: backend }
+    spec:
+      containers:
+        - name: backend
+          image: codemaster-backend:dev
+          imagePullPolicy: Never
+          envFrom:
+            - configMapRef: { name: backend-env }
+          env:
+            - { name: POD_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+            - { name: POD_NAME, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+          ports: [{ containerPort: 8080, name: http }]
+          # CS3 probes: /readyz aggregates the REAL dependency checks (DB SELECT 1, Vault
+          # sys/health, runtime-loop health) — a dead loop or dead DB pulls the pod from rotation.
+          # /healthz is wedge-only liveness (dependency failures must never restart-storm the pod).
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            initialDelaySeconds: 8
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 40
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits: { cpu: "2", memory: 1536Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: codemaster-cutover
+spec:
+  selector: { app: backend }
+  ports:
+    - { port: 8080, targetPort: 8080 }

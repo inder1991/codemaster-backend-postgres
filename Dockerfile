@@ -6,8 +6,15 @@
 
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
+# Registry fetches through the Docker Desktop VM NAT flake under load (ECONNRESET observed 3x,
+# 2026-06-11): retry hard with long timeouts, and persist the npm tarball cache across builds
+# (BuildKit cache mount) so a retry/rebuild RESUMES from cached tarballs instead of re-pulling
+# the whole tree — the long single-shot download is exactly what keeps getting reset.
+ENV npm_config_fetch_retries=5 \
+    npm_config_fetch_retry_maxtimeout=120000 \
+    npm_config_fetch_timeout=600000
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm npm ci
 COPY tsconfig.json tsconfig.build.json ./
 COPY libs ./libs
 COPY apps ./apps
@@ -61,7 +68,14 @@ RUN set -eux; \
 RUN npm install -g "eslint@${ESLINT_VERSION}" \
   && eslint --version
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+# Reuse the BUILD stage's already-installed node_modules and prune devDependencies in place instead
+# of a second full `npm ci` registry download: BuildKit runs the two stages CONCURRENTLY, and the
+# doubled traffic through Docker Desktop's NAT reliably ECONNRESETs one of them ~10 min in (observed
+# twice, 2026-06-11). prune is offline (no registry), deterministic against the same lockfile, and
+# also serializes this stage behind the builder's single download. Native addons (@node-rs/argon2,
+# @temporalio gRPC core) were compiled in the SAME base image, so the copied tree is ABI-identical.
+COPY --from=build /app/node_modules ./node_modules
+RUN npm prune --omit=dev && npm cache clean --force
 # Flatten the compiled tree into /app so the package.json "imports" map (#backend/* -> ./apps/backend/src/*,
 # which tsc keeps VERBATIM in the emitted .js) resolves against the compiled .js. node_modules at /app
 # resolves by walk-up from /app/apps/backend/src/*.js.

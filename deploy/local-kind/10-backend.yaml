@@ -10,6 +10,9 @@ metadata:
   namespace: codemaster-backend
 data:
   CODEMASTER_PG_CORE_DSN: "postgresql://postgres:devpass@pg-postgresql:5432/postgres"
+  # This namespace runs the PRE-CUTOVER temporal-mode shape (CODEMASTER_RUNTIME_MODE unset =
+  # temporal). The postgres-mode cutover smoke lives in its OWN isolated namespace with no
+  # Temporal server at all — see 20-postgres-cutover.yaml.
   VAULT_ADDR: "http://vault:8200"
   VAULT_TOKEN: "devroot"
   CODEMASTER_VAULT_SECRET_SOURCE: "vault-api"
@@ -84,14 +87,16 @@ spec:
             - { name: POD_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
             - { name: POD_NAME, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
           ports: [{ containerPort: 8080, name: http }]
-          # The API binds 8080 FIRST (runServer awaits Vault field-keys + auth secrets), then the workers
-          # start — so a bound 8080 means the API is live + Vault reads succeeded.
+          # CS3 probes: /readyz aggregates the REAL dependency checks (DB SELECT 1, Vault sys/health,
+          # runtime-loop health in postgres mode) — a dead loop or dead DB pulls the pod from rotation.
+          # /healthz is wedge-only liveness (no dependency checks — dependency failures must never
+          # restart-storm the pod; CS3.2).
           readinessProbe:
-            tcpSocket: { port: 8080 }
+            httpGet: { path: /readyz, port: 8080 }
             initialDelaySeconds: 8
             periodSeconds: 5
           livenessProbe:
-            tcpSocket: { port: 8080 }
+            httpGet: { path: /healthz, port: 8080 }
             initialDelaySeconds: 40
             periodSeconds: 15
           # Low REQUESTS (scheduling) — the kind node is shared + memory-tight (~96% allocated). Limits stay
