@@ -120,6 +120,21 @@ describeDb("admin knowledge (disposable :5434)", () => {
     expect(await getLearningWithRevisions(db, "ffffffff-ffff-ffff-ffff-ffffffffffff", INST)).toBeNull();
   });
 
+  // W4.2 (raw-SQL tenancy gate triage) — the revisions sub-read must carry its OWN installation_id
+  // filter, not rely solely on the tenant-fenced parent lookup: a drifted revision row stamped with
+  // another tenant's installation_id (learnings_revisions carries the column with no parent-match
+  // CHECK) must never be returned into tenant A's detail view.
+  it("getLearningWithRevisions: a revision row stamped with ANOTHER tenant's installation_id is excluded (defense in depth)", async () => {
+    await sql`INSERT INTO core.learnings_revisions (learning_id, installation_id, body_markdown, version, edited_by_user_id, edited_at)
+              VALUES (${L1}, ${INST_OTHER}, 'drifted-rev', 3, ${EDITOR}, '2026-06-07T11:45:00.000Z')`.execute(db);
+    try {
+      const detail = await getLearningWithRevisions(db, L1, INST);
+      expect(detail?.revisions.map((r) => r.body_markdown)).toEqual(["rev2", "rev1"]); // drifted row excluded
+    } finally {
+      await sql`DELETE FROM core.learnings_revisions WHERE learning_id = ${L1} AND body_markdown = 'drifted-rev'`.execute(db);
+    }
+  });
+
   it("routes: list 200; detail 200/404; bad uuid 422; authz", async () => {
     const app = await makeApp();
     const reader = { [SESSION_COOKIE_NAME]: mintCookie("reader", INST) };
