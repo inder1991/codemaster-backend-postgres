@@ -164,10 +164,10 @@ Separately, **stop storing the pre-redaction `original_text` (a detected secret)
 
 | # | Wave | Closes (master-plan IDs) | Effort | Test green? |
 |---|------|--------------------------|--------|-------------|
-| CS1 | Runtime MODE exclusivity (+ shadow no-side-effects) | RT1, C7, C9, RC8, C8 | M | ☐ |
-| CS2 | RunnerLoop + unified reaper + fail-loud orphaned sink | C6, OC4, OC3 | M | ☐ |
-| CS3 | Loop-health → readiness (correct K8s semantics) | C5, H7, XH11, RT2 | M | ☐ |
-| CS4 | delivery_id + idempotent enqueue + classification + one retry/backoff | RT3, H9, RC7, T2, H3, RC6, XH2 | M | ☐ |
+| CS1 | Runtime MODE exclusivity (+ shadow no-side-effects) | RT1, C7, C9, RC8, C8 | M | ✅ |
+| CS2 | RunnerLoop + unified reaper + fail-loud orphaned sink | C6, OC4, OC3 | M | ✅ |
+| CS3 | Loop-health → readiness (correct K8s semantics) | C5, H7, XH11, RT2 | M | ✅ |
+| CS4 | delivery_id + idempotent enqueue + classification + one retry/backoff | RT3, H9, RC7, T2, H3, RC6, XH2 | M | ✅ |
 | CS5 | DB schema-revision boot preflight + 0042 cold-only guard | XH7, L16, RT6 | S | ☐ |
 | CS6 | Key registry fail-loud (PROD) + dev/test source + no cleartext secrets | EC5, RC1 | M | ☐ |
 | CS7 | Scheduler per-schedule txn isolation | RT4, M13 | S | ☐ |
