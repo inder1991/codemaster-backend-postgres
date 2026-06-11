@@ -112,6 +112,21 @@ function assertPayloadIdentityMatchesJobRow(payload: ReviewPullRequestPayloadV1,
   }
 }
 
+/**
+ * CS4.1 (RC6/H9): SQLSTATE 23505 on the partial unique index `uq_review_jobs_active_run` (migration
+ * 0036 — at most one ACTIVE ('ready'|'leased') job per run_id) is the REDELIVERY signature: the outbox
+ * row re-drives the review enqueue after a crash between enqueue and markDispatched, while the first
+ * job is still active. The constraint NAME is matched (not just the code) so every OTHER unique
+ * violation (e.g. a job_id PK collision) keeps throwing — only the active-run conflict coalesces.
+ */
+function isActiveRunUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === "object" && err !== null &&
+    (err as { code?: unknown }).code === "23505" &&
+    (err as { constraint?: unknown }).constraint === "uq_review_jobs_active_run"
+  );
+}
+
 export class ReviewJobsRepo {
   /**
    * @param db          Kysely over the (shared, ADR-0062) pool — drives every fenced single-statement op.
@@ -140,12 +155,35 @@ export class ReviewJobsRepo {
     const payloadSha256 = sha256hex(canonical);
     const jobId = uuid4();
     // The INSERT lists installation_id ⇒ raw-SQL tenancy gate escape hatch (a) is satisfied (no marker needed).
-    await sql`INSERT INTO core.review_jobs
-        (job_id, run_id, review_id, installation_id, delivery_id, priority, max_attempts,
-         job_payload_schema_version, payload, payload_sha256)
-      VALUES (${jobId}, ${a.runId}, ${a.reviewId}, ${a.installationId},
-        ${a.deliveryId ?? null}, ${a.priority ?? 0}, ${a.maxAttempts ?? 3},
-        ${JOB_PAYLOAD_SCHEMA_VERSION}, CAST(${canonical} AS jsonb), ${payloadSha256})`.execute(this.db);
+    try {
+      await sql`INSERT INTO core.review_jobs
+          (job_id, run_id, review_id, installation_id, delivery_id, priority, max_attempts,
+           job_payload_schema_version, payload, payload_sha256)
+        VALUES (${jobId}, ${a.runId}, ${a.reviewId}, ${a.installationId},
+          ${a.deliveryId ?? null}, ${a.priority ?? 0}, ${a.maxAttempts ?? 3},
+          ${JOB_PAYLOAD_SCHEMA_VERSION}, CAST(${canonical} AS jsonb), ${payloadSha256})`.execute(this.db);
+    } catch (err) {
+      if (!isActiveRunUniqueViolation(err)) {
+        throw err; // identity-mismatch threw ABOVE; every other integrity error keeps throwing here
+      }
+      // CS4.1 (RC6/H9): an ACTIVE job already holds this run_id — the outbox REDELIVERY shape (a crash
+      // between enqueue and markDispatched re-drives the row while the first job is enqueued and
+      // possibly running). Return the EXISTING active job_id (idempotent) instead of throwing: the
+      // pre-fix 23505 retried the outbox row toward dead-letter as pure NOISE. The SELECT filters
+      // installation_id (tenancy) — identical by the F2 identity assert above (same run_id ⇒ same
+      // envelope identity, barring an out-of-band divergent row, which falls through to the rethrow).
+      const existing = await sql<{ job_id: string }>`SELECT job_id FROM core.review_jobs
+          WHERE run_id = ${a.runId} AND installation_id = ${a.installationId}
+            AND state IN ('ready','leased')`.execute(this.db);
+      const row = existing.rows[0];
+      if (row === undefined) {
+        // Razor-thin race: the conflicting job settled between our INSERT and this SELECT. Re-throw
+        // the original violation — the outbox retry re-drives enqueue, which then inserts fresh
+        // (the unique key is freed by the settled state). Convergent, never silent.
+        throw err;
+      }
+      return row.job_id;
+    }
     return jobId;
   }
 

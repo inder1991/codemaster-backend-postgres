@@ -196,6 +196,11 @@ export class BackgroundJobsTemporalPort implements TemporalClientPort {
       runId: parsed.run_id,
       reviewId: parsed.review_id,
       installationId: parsed.installation_id,
+      // CS4.1 RT3: the payload carries the webhook delivery_id (required, 1..200 chars) — persist it
+      // onto the job row so the admin/debug timeline joins hold, and so enqueue's non-null
+      // delivery_id identity cross-check (assertPayloadIdentityMatchesEnvelope) ENGAGES instead of
+      // being skipped (the pre-fix omission left the column NULL).
+      deliveryId: parsed.delivery_id,
       payload: parsed,
     });
   }
