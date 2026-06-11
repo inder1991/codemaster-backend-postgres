@@ -108,12 +108,17 @@ export async function jobRetentionSweepActivity(
   // transition stamps finished_at, but a drifted/hand-edited terminal row without one must still
   // age out rather than live forever.
   // tenant:exempt reason=cross-tenant-retention-sweep-of-terminal-job-rows follow_up=PERMANENT-EXEMPTION-job-retention-sweep
+  // MATERIALIZED CTE (here + the two sweeps below): a bare `WHERE pk IN (SELECT … LIMIT n FOR
+  // UPDATE SKIP LOCKED)` subselect is NOT guaranteed single-evaluation — under some plans the
+  // locking subquery is rescanned and one statement deletes MORE than a batch (observed: a 5-row
+  // delete under LIMIT 2). The materialized CTE pins one evaluation, so the batch bound is real.
   const review = await sweepBatches(dsn, async (client) => {
     const r = await client.query(
-      "DELETE FROM core.review_jobs WHERE job_id IN (" +
+      "WITH batch AS MATERIALIZED (" +
         "  SELECT job_id FROM core.review_jobs" +
         "  WHERE state IN ('done','dead','cancelled') AND COALESCE(finished_at, created_at) < $1" +
-        "  ORDER BY created_at LIMIT $2 FOR UPDATE SKIP LOCKED)",
+        "  ORDER BY created_at LIMIT $2 FOR UPDATE SKIP LOCKED)" +
+        " DELETE FROM core.review_jobs j USING batch WHERE j.job_id = batch.job_id",
       [reviewCutoff, batchSize],
     );
     return r.rowCount ?? 0;
@@ -122,10 +127,11 @@ export async function jobRetentionSweepActivity(
   // Sweep 2 — terminal background_jobs past the TTL (same shape; 'cancelled' not in this vocabulary).
   const background = await sweepBatches(dsn, async (client) => {
     const r = await client.query(
-      "DELETE FROM core.background_jobs WHERE job_id IN (" +
+      "WITH batch AS MATERIALIZED (" +
         "  SELECT job_id FROM core.background_jobs" +
         "  WHERE state IN ('done','dead') AND COALESCE(finished_at, created_at) < $1" +
-        "  ORDER BY created_at LIMIT $2 FOR UPDATE SKIP LOCKED)",
+        "  ORDER BY created_at LIMIT $2 FOR UPDATE SKIP LOCKED)" +
+        " DELETE FROM core.background_jobs j USING batch WHERE j.job_id = batch.job_id",
       [backgroundCutoff, batchSize],
     );
     return r.rowCount ?? 0;
@@ -135,10 +141,11 @@ export async function jobRetentionSweepActivity(
   // tenant:exempt reason=cache_idempotency-has-no-installation_id-column-expiry-is-row-local follow_up=PERMANENT-EXEMPTION-job-retention-sweep
   const idempotency = await sweepBatches(dsn, async (client) => {
     const r = await client.query(
-      "DELETE FROM cache.cache_idempotency WHERE cache_key IN (" +
+      "WITH batch AS MATERIALIZED (" +
         "  SELECT cache_key FROM cache.cache_idempotency" +
         "  WHERE expires_at < $1" +
-        "  ORDER BY expires_at LIMIT $2 FOR UPDATE SKIP LOCKED)",
+        "  ORDER BY expires_at LIMIT $2 FOR UPDATE SKIP LOCKED)" +
+        " DELETE FROM cache.cache_idempotency c USING batch WHERE c.cache_key = batch.cache_key",
       [now, batchSize],
     );
     return r.rowCount ?? 0;
