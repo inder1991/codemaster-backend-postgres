@@ -146,12 +146,21 @@ export async function defaultAssertLeaseAllocated(
 }
 
 /**
- * REAL production default for `heartbeat` — forwards the phase payload to the Temporal activity
- * heartbeat (1:1 with the Python `activity.heartbeat({...})`). Only valid inside a worker activity
- * context; tests inject a no-op since there is no Temporal context off-worker.
+ * REAL production default for `heartbeat` — RUNTIME-AGNOSTIC (cutover fix, 2026-06-11): inside a
+ * Temporal worker it forwards the phase payload to the activity heartbeat (1:1 with the Python
+ * `activity.heartbeat({...})`); outside one (CODEMASTER_RUNTIME_MODE=postgres — the in-process
+ * review path wires this REAL activity via runner/in_process_ports.ts buildClonerDeps) it is a
+ * deliberate NO-OP: the review job's lease heartbeat (runOneJob's heartbeat loop) is that
+ * runtime's liveness signal, and the phase payload has no consumer there. Pre-fix, the bare
+ * Context.current() throw ("Activity context not initialized") dead-lettered every postgres-mode
+ * review after 3 attempts — caught live by the postgres-mode live_cluster_smoke.
  */
 export function defaultHeartbeat(payload: unknown): void {
-  Context.current().heartbeat(payload);
+  try {
+    Context.current().heartbeat(payload);
+  } catch {
+    /* no Temporal activity context — the postgres runtime's job-lease heartbeat owns liveness */
+  }
 }
 
 /**
