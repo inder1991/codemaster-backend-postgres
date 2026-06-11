@@ -148,6 +148,71 @@ describeDb("ReviewJobsRepo — F2 payload↔job identity equality", () => {
   });
 });
 
+// ─── CS4.1 (RT3 + RC6/H9): delivery_id persisted at enqueue + idempotent enqueue on redelivery ─────
+//
+// RC6/H9: the outbox row REDELIVERS after a crash between the review enqueue and markDispatched. The
+// re-driven enqueue used to plain-INSERT into uq_review_jobs_active_run (UNIQUE active job per run_id)
+// → 23505 → throw → the outbox row retried to dead-letter as NOISE even though a job WAS already
+// enqueued (and possibly running). The fix: the active-run unique conflict returns the EXISTING active
+// job_id (idempotent); identity-mismatch + every OTHER integrity error keeps throwing.
+describeDb("ReviewJobsRepo.enqueue — CS4.1 delivery_id persistence + redelivery idempotency (RC6/H9)", () => {
+  it("persists the envelope deliveryId onto the delivery_id COLUMN (not NULL) — RT3 supporting half", async () => {
+    const repo = new ReviewJobsRepo(db); const s = await seedRun(db);
+    const payload = minimalReviewPayload(s);
+    const id = await repo.enqueue({ ...s, deliveryId: payload.delivery_id, payload });
+    // tenant:exempt reason=test-assertion-PK-lookup follow_up=FOLLOW-UP-gf3-error-mode
+    const r = await sql<{ delivery_id: string | null }>`
+      SELECT delivery_id FROM core.review_jobs WHERE job_id = ${id}`.execute(db);
+    expect(r.rows[0]!.delivery_id).toBe(payload.delivery_id);   // the timeline-join column is POPULATED
+  });
+
+  it("a REDELIVERED enqueue (same run_id, job still 'ready') returns the EXISTING job_id — no 23505, exactly ONE row", async () => {
+    const repo = new ReviewJobsRepo(db); const s = await seedRun(db);
+    const payload = minimalReviewPayload(s);
+    const first = await repo.enqueue({ ...s, deliveryId: payload.delivery_id, payload });
+    // The redelivery byte-shape: the SAME envelope re-driven by the outbox retry. Must NOT throw.
+    const second = await repo.enqueue({ ...s, deliveryId: payload.delivery_id, payload });
+    expect(second).toBe(first);                                  // idempotent: the EXISTING job_id
+    const r = await sql<{ n: number }>`
+      SELECT count(*)::int AS n FROM core.review_jobs WHERE run_id = ${s.runId}`.execute(db);
+    expect(r.rows[0]!.n).toBe(1);                                // no duplicate row
+    expect((await repo.getById(first))!.state).toBe("ready");    // the existing job is untouched
+  });
+
+  it("a REDELIVERED enqueue while the job is LEASED (runner already claimed it) returns the same job_id without disturbing the lease", async () => {
+    const repo = new ReviewJobsRepo(db); const s = await seedRun(db);
+    const payload = minimalReviewPayload(s);
+    const first = await repo.enqueue({ ...s, payload });
+    const c = await repo.claim({ owner: "w1", leaseMs: 60_000, maxRuntimeMs: 60_000 });
+    expect(c!.job_id).toBe(first);
+    // The crash-window scenario: enqueue succeeded, markDispatched did NOT, the runner ALREADY claimed
+    // the job — the redelivered enqueue must coalesce onto the running job, not 23505 into noise.
+    const second = await repo.enqueue({ ...s, payload });
+    expect(second).toBe(first);
+    const job = await repo.getById(first);
+    expect(job!.state).toBe("leased");                           // the live lease is untouched
+    expect(job!.attempts).toBe(1);
+    const r = await sql<{ n: number }>`
+      SELECT count(*)::int AS n FROM core.review_jobs WHERE run_id = ${s.runId}`.execute(db);
+    expect(r.rows[0]!.n).toBe(1);
+  });
+
+  it("a SETTLED run frees the key: enqueue after markDone inserts a FRESH job (only the ACTIVE conflict coalesces)", async () => {
+    const repo = new ReviewJobsRepo(db); const s = await seedRun(db);
+    const payload = minimalReviewPayload(s);
+    const first = await repo.enqueue({ ...s, payload });
+    const c = await repo.claim({ owner: "w1", leaseMs: 60_000, maxRuntimeMs: 60_000 });
+    expect((await repo.markDone({ jobId: c!.job_id, owner: "w1", token: c!.attempt_token! })).applied).toBe(true);
+    // uq_review_jobs_active_run covers ONLY state IN ('ready','leased') — a settled job frees the run
+    // key, so a NEW attempt enqueues a fresh row (the pre-CS4.1 behavior, pinned as the fix's boundary).
+    const second = await repo.enqueue({ ...s, payload });
+    expect(second).not.toBe(first);
+    const r = await sql<{ n: number }>`
+      SELECT count(*)::int AS n FROM core.review_jobs WHERE run_id = ${s.runId}`.execute(db);
+    expect(r.rows[0]!.n).toBe(2);
+  });
+});
+
 /** Local mirror of the repo's stable key-ordered canonicalizer — keeps the test independent of the impl import. */
 function sortKeysForTest(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortKeysForTest);

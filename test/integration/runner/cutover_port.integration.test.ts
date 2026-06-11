@@ -209,11 +209,11 @@ async function allJobs(): Promise<Array<JobRow>> {
 
 type ReviewJobRow = {
   job_id: string; run_id: string; review_id: string; installation_id: string;
-  payload: Record<string, unknown>; state: string;
+  delivery_id: string | null; payload: Record<string, unknown>; state: string;
 };
 async function allReviewJobs(): Promise<Array<ReviewJobRow>> {
   // tenant:exempt reason=test-assertion-scan follow_up=FOLLOW-UP-gf3-error-mode
-  const r = await sql<ReviewJobRow>`SELECT job_id, run_id, review_id, installation_id, payload, state
+  const r = await sql<ReviewJobRow>`SELECT job_id, run_id, review_id, installation_id, delivery_id, payload, state
     FROM core.review_jobs ORDER BY created_at`.execute(db);
   return r.rows;
 }
@@ -457,9 +457,34 @@ describeDb("BackgroundJobsTemporalPort + the runner's always-Postgres sink wirin
     expect(reviewRows[0]!.run_id).toBe(s.runId);
     expect(reviewRows[0]!.review_id).toBe(s.reviewId);
     expect(reviewRows[0]!.installation_id).toBe(s.installationId);
+    // CS4.1 RT3: the payload's delivery_id is PERSISTED onto the job row (the admin/debug timeline
+    // join column) — and, being non-null, it ENGAGES enqueue's delivery_id identity cross-check.
+    expect(reviewRows[0]!.delivery_id).toBe(payload.delivery_id);
     expect(reviewRows[0]!.payload).toEqual(payload); // the durable workflow-argument store holds it
     expect(reviewRows[0]!.state).toBe("ready");
     expect(await allJobs()).toHaveLength(0);       // the review trigger NEVER lands on background_jobs
+  });
+
+  it("(9b) a REDELIVERED reviewPullRequest dispatch (same active run) returns the SAME job_id — no unique-violation noise; ONE row (CS4.1 RC6/H9)", async () => {
+    // The crash window: enqueue succeeded but markDispatched did not → the outbox row REDELIVERS the
+    // SAME envelope. The re-driven startWorkflow must coalesce onto the existing active job instead of
+    // 23505-ing the row toward dead-letter while a job is already enqueued/running.
+    const s = await seedRunTracked();
+    const payload = minimalReviewPayload(s);
+    const port = makeCutoverPort();
+    const call = startCall({
+      workflowType: "reviewPullRequest",
+      workflowId: `review/${payload.installation_id}/${payload.repository_id}/${payload.pr_number}`,
+      args: [payload],
+    });
+
+    const first = await port.startWorkflow(call);
+    const second = await port.startWorkflow(call);   // the redelivery — must NOT throw
+    expect(second).toBe(first);                      // idempotent: the EXISTING review job_id
+    const reviewRows = await allReviewJobs();
+    expect(reviewRows).toHaveLength(1);              // exactly ONE core.review_jobs row
+    expect(reviewRows[0]!.job_id).toBe(first);
+    expect(reviewRows[0]!.state).toBe("ready");
   });
 
   it("(10) a reviewPullRequest dispatch whose args[0] is not a valid ReviewPullRequestPayloadV1 throws PermanentSinkError; NEITHER table gets a row", async () => {
@@ -516,6 +541,9 @@ describeDb("BackgroundJobsTemporalPort + the runner's always-Postgres sink wirin
     expect(reviewRows[0]!.run_id).toBe(seeded.runId);
     expect(reviewRows[0]!.review_id).toBe(seeded.reviewId);
     expect(reviewRows[0]!.installation_id).toBe(installationUuid);
+    // CS4.1 RT3 end-to-end: the webhook delivery_id rode producer envelope → outbox → drain → port →
+    // enqueue and landed on the persisted job row (the admin/debug timeline join holds).
+    expect(reviewRows[0]!.delivery_id).toBe(payload.delivery_id);
     expect(reviewRows[0]!.payload).toEqual(payload);
     expect(reviewRows[0]!.state).toBe("ready");
     expect(await allJobs()).toHaveLength(0);       // NOT a background_jobs row
