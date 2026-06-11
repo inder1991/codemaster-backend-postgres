@@ -182,7 +182,9 @@ export function mapAnthropicException(exc: unknown): LlmInvocationError {
     return new LlmTimeoutError(excMsg);
   }
   if (exc instanceof RateLimitError) {
-    return new LlmRateLimitError(excMsg);
+    // CS4.4 (H3): carry the provider's retry-after directive — the runners' retry_hints.ts defers
+    // the job's run_after by it instead of burning an attempt against a still-throttled provider.
+    return new LlmRateLimitError(excMsg, { retryAfterSeconds: retryAfterSecondsFromHeaders(exc.headers) });
   }
   if (exc instanceof AuthenticationError || exc instanceof PermissionDeniedError) {
     return new LlmAuthError(excMsg);
@@ -207,6 +209,23 @@ function errorMessage(exc: unknown): string {
     return exc.message;
   }
   return String(exc);
+}
+
+/** Parse a positive delta-seconds `retry-after` from the SDK error's headers (Headers instance or
+ *  plain record — the SDK's typing has carried both across versions); null when absent/unparseable.
+ *  HTTP-date Retry-After values are deliberately treated as unparseable (Bedrock sends seconds). */
+function retryAfterSecondsFromHeaders(headers: unknown): number | null {
+  let raw: unknown;
+  if (headers instanceof Headers) {
+    raw = headers.get("retry-after");
+  } else if (headers !== null && typeof headers === "object") {
+    raw = (headers as Record<string, unknown>)["retry-after"];
+  }
+  if (typeof raw !== "string" || raw === "") {
+    return null;
+  }
+  const seconds = Number(raw);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
 }
 
 // ─── default REAL SDK factory (bearer-token authed `@anthropic-ai/bedrock-sdk`) ──────────────────

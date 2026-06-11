@@ -229,6 +229,30 @@ export class BackgroundJobsRepo {
   }
 
   /**
+   * Defer a THROTTLED attempt to `runAfter` WITHOUT consuming an attempt (CS4.4 — H3/RC6/XH2): the
+   * rate-limit settle. Re-enqueues 'ready' at the caller's hint instant (the runner derives it via
+   * retry_hints.ts — Retry-After/resetAt, capped) and DECREMENTS `attempts` back: `claim` charges
+   * the attempt up-front, and a throttle is the ENVIRONMENT refusing the work, not the work
+   * failing — so it must never march a job toward 'dead' (markFailed's exhaustion CASE is absent
+   * here BY DESIGN; a perpetually-throttled job stays 'ready', visible on run_after/last_error).
+   * `last_error` still records the throttle forensically. Fenced exactly like {@link markFailed}.
+   */
+  async deferRetry(a: { jobId: string; owner: string; token: string; error: string; runAfter: Date }):
+    Promise<FencedResult> {
+    // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
+    const r = await sql`UPDATE core.background_jobs SET
+        last_error  = left(${a.error}, 2000),
+        state       = 'ready',
+        attempts    = GREATEST(attempts - 1, 0),
+        run_after   = ${a.runAfter},
+        lease_owner = NULL, attempt_token = NULL, leased_until = NULL, timeout_at = NULL, heartbeat_at = NULL,
+        updated_at  = now()
+      WHERE job_id = ${a.jobId} AND state = 'leased' AND lease_owner = ${a.owner} AND attempt_token = ${a.token}
+      RETURNING job_id`.execute(this.db);
+    return { applied: r.rows.length === 1 };
+  }
+
+  /**
    * Terminally settle a job → `dead` REGARDLESS of attempts remaining (the poison-pill / operator
    * path) — it is never re-enqueued. Fenced exactly like {@link markDone}. Atomic by construction:
    * ONE fenced UPDATE (the generic platform has no review_run/mutex second row to keep in lockstep,

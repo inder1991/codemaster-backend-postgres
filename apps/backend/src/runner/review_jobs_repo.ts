@@ -325,6 +325,29 @@ export class ReviewJobsRepo {
   }
 
   /**
+   * Defer a THROTTLED attempt to `runAfter` WITHOUT consuming an attempt (CS4.4 — H3/RC6/XH2): the
+   * rate-limit settle, mirrored from BackgroundJobsRepo.deferRetry. Re-enqueues 'ready' at the
+   * caller's hint instant and DECREMENTS `attempts` back (`claim` charged it up-front; a throttle
+   * is the environment refusing the work, not the work failing) — so a routine GitHub/Bedrock
+   * rate-limit window can NEVER dead-letter a review (markFailed's exhaustion CASE is absent BY
+   * DESIGN). The run is deliberately untouched: it stays RUNNING and the deferred attempt re-uses
+   * it, exactly like the markFailed retry branch. Fenced exactly like {@link markFailed}.
+   */
+  async deferRetry(a: { jobId: string; owner: string; token: string; error: string; runAfter: Date }):
+    Promise<{ applied: boolean }> {
+    // tenant:exempt reason=PK-lookup-by-job_id follow_up=FOLLOW-UP-gf3-error-mode
+    const r = await sql`UPDATE core.review_jobs SET
+        last_error  = left(${a.error}, 2000),
+        state       = 'ready',
+        attempts    = GREATEST(attempts - 1, 0),
+        run_after   = ${a.runAfter},
+        lease_owner = NULL, attempt_token = NULL, leased_until = NULL, timeout_at = NULL, heartbeat_at = NULL
+      WHERE job_id = ${a.jobId} AND state = 'leased' AND lease_owner = ${a.owner} AND attempt_token = ${a.token}
+      RETURNING job_id`.execute(this.db);
+    return { applied: r.rows.length === 1 };
+  }
+
+  /**
    * Atomically settle a job AND its run terminal in ONE transaction (F4 — no split-brain). The job and the
    * run can only move TOGETHER: a single fenced `db.transaction()` (a) fence-updates `core.review_jobs`
    * (state → `jobState` ∈ {cancelled,dead}, `cancel_reason`/`dead_reason`, `finished_at`, ALL lease metadata

@@ -42,9 +42,15 @@ export class LlmServerError extends LlmInvocationError {
 
 /** Provider returned 429 / quota exhausted. Activity-level retry: YES with backoff. */
 export class LlmRateLimitError extends LlmInvocationError {
-  public constructor(message?: string) {
+  /** Seconds from the provider's `retry-after` header when one was sent (CS4.4 — the runners'
+   *  retry_hints.ts plumbs it into `run_after` so the deferred retry waits the window out instead
+   *  of burning an attempt); null when absent/unparseable. */
+  public readonly retryAfterSeconds: number | null;
+
+  public constructor(message?: string, options?: { retryAfterSeconds?: number | null }) {
     super(message);
     this.name = "LlmRateLimitError";
+    this.retryAfterSeconds = options?.retryAfterSeconds ?? null;
   }
 }
 

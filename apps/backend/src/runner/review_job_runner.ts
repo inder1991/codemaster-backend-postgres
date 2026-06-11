@@ -2,6 +2,7 @@ import type { Clock } from "#platform/clock.js";
 import type { ReviewJobsRepo } from "./review_jobs_repo.js";
 import type { ReviewJobV1 } from "#contracts/review_jobs.v1.js";
 import { cancellableSleep } from "./clock_async.js";
+import { extractRetryAtHint } from "./retry_hints.js";
 import { DEFAULT_LEDGER_RETENTION_DAYS } from "#backend/integrations/llm/invocation_ledger.js";
 import {
   recordClaimLatencyMs,
@@ -152,7 +153,20 @@ export async function runOneJob(o: { repo: ReviewJobsRepo; clock: Clock; owner: 
       if (!c.applied) recordStaleTokenWrite({ op: "markFailed" });   // lease was stolen → loser; bounded op label
       outcome = c.applied ? "cancelled" : "lease_lost";
     } else {
-      outcome = await settleFailure(e instanceof Error ? e.message : String(e));
+      // CS4.4 (H3/RC6/XH2): a THROTTLE fault (GitHubRateLimitExceeded / LlmRateLimitError —
+      // retry_hints.ts) defers to the Retry-After/resetAt hint WITHOUT consuming the attempt —
+      // bypassing settleFailure's isLastAttempt fork ENTIRELY, so a routine rate-limit window can
+      // never dead-letter a review the reopened window would have saved. The run stays RUNNING
+      // (deferRetry touches only the job row), exactly like the markFailed retry branch.
+      const msg = e instanceof Error ? e.message : String(e);
+      const retryAt = extractRetryAtHint(e, o.clock);
+      if (retryAt !== null) {
+        const r = await o.repo.deferRetry({ jobId: job.job_id, owner: o.owner, token, error: msg, runAfter: retryAt });
+        if (!r.applied) recordStaleTokenWrite({ op: "markFailed" }); // bounded op label (the failure-settle family)
+        outcome = r.applied ? "failed" : "lease_lost";
+      } else {
+        outcome = await settleFailure(msg);
+      }
     }
   } finally { stop.abort(); await hb; await hardTimeout; }   // immediate stop (cancellableSleep wakes); helpers never mask `outcome`
   recordHandlerDurationMs((o.clock.monotonic() - handlerStart) * 1000);

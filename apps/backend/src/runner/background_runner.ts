@@ -4,6 +4,7 @@ import type { BackgroundJobsRepo } from "./background_jobs_repo.js";
 import type { HandlerDeps, HandlerRegistry } from "./handler_registry.js";
 import { PermanentJobError } from "./errors.js";
 import { cancellableSleep } from "./clock_async.js";
+import { extractRetryAtHint } from "./retry_hints.js";
 import {
   recordBackgroundJobOutcome,
   recordClaimLatencyMs,
@@ -156,16 +157,26 @@ export async function runOneBackgroundJob(o: { repo: BackgroundJobsRepo; registr
       outcome = done.applied ? "done" : "lease_lost";
     }
   } catch (e) {
-    // Dispatch seam ③ — permanent-failure classification (Phase 4a W4a.1; mirrors the outbox's
+    // Dispatch seam ③ — failure classification (Phase 4a W4a.1 + CS4.4; mirrors the outbox's
     // RetryableSinkError/PermanentSinkError split). PermanentJobError is the handler-declared
     // "retry CANNOT succeed" signal; a bare ZodError means the stored payload failed its contract —
     // the SAME bytes re-parse identically on every retry. Both dead-letter IMMEDIATELY
     // (terminalSettle, dead_reason = the message) instead of burning the bounded attempts.
+    // A THROTTLE fault (GitHubRateLimitExceeded / LlmRateLimitError — retry_hints.ts) is the
+    // OPPOSITE pole: deferRetry re-enqueues at the Retry-After/resetAt hint WITHOUT consuming the
+    // attempt, so a routine rate-limit window can never dead-letter the job (CS4.4 — H3/RC6/XH2).
     // Everything else is presumed transient → the markFailed retry/backoff curve.
     const msg = e instanceof Error ? e.message : String(e);
-    outcome = (e instanceof PermanentJobError || e instanceof ZodError)
-      ? await settlePoison(msg, "failed")
-      : await settleFailure(msg);
+    const retryAt = extractRetryAtHint(e, o.clock);
+    if (e instanceof PermanentJobError || e instanceof ZodError) {
+      outcome = await settlePoison(msg, "failed");
+    } else if (retryAt !== null) {
+      const r = await o.repo.deferRetry({ jobId: job.job_id, owner: o.owner, token, error: msg, runAfter: retryAt });
+      if (!r.applied) recordStaleTokenWrite({ op: "markFailed" });   // bounded op label (the failure-settle family)
+      outcome = r.applied ? "failed" : "lease_lost";
+    } else {
+      outcome = await settleFailure(msg);
+    }
   } finally { stop.abort(); await hb; await hardTimeout; }   // immediate stop (cancellableSleep wakes); helpers never mask `outcome`
   recordHandlerDurationMs((o.clock.monotonic() - handlerStart) * 1000);
   recordBackgroundJobOutcome({ outcome });

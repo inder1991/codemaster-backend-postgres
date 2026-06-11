@@ -355,6 +355,22 @@ describe("AnthropicBedrockSdkAdapter — exception mapping", () => {
     expect(await invokeWith(rate)).toBeInstanceOf(LlmRateLimitError);
   });
 
+  it("plumbs the retry-after header into LlmRateLimitError.retryAfterSeconds (CS4.4 — H3)", async () => {
+    const rate = new RateLimitError(429, { type: "error" }, "429", new Headers({ "retry-after": "120" }));
+    const mapped = await invokeWith(rate);
+    expect(mapped).toBeInstanceOf(LlmRateLimitError);
+    expect((mapped as LlmRateLimitError).retryAfterSeconds).toBe(120);
+  });
+
+  it("an absent or garbage retry-after header yields retryAfterSeconds null (never NaN)", async () => {
+    const absent = await invokeWith(new RateLimitError(429, { type: "error" }, "429", new Headers()));
+    expect((absent as LlmRateLimitError).retryAfterSeconds).toBeNull();
+    const garbage = await invokeWith(
+      new RateLimitError(429, { type: "error" }, "429", new Headers({ "retry-after": "soon" })),
+    );
+    expect((garbage as LlmRateLimitError).retryAfterSeconds).toBeNull();
+  });
+
   it("maps AuthenticationError (401) and PermissionDeniedError (403) → LlmAuthError", async () => {
     const auth = new AuthenticationError(401, { type: "error" }, "401", new Headers());
     const perm = new PermissionDeniedError(403, { type: "error" }, "403", new Headers());
