@@ -10,6 +10,12 @@
 //   (2) a row whose dispatch THROWS → the REAL markAttemptFailed (attempts+1, still 'pending',
 //       last_error recorded, lease released, NOT dispatched) and the NEXT row in the SAME batch
 //       still dispatches — the workflow's per-row try/catch isolation is preserved;
+//   (2c-2e) RC7 (cutover-safety CS4.2) — the loop CONSUMES the sink error taxonomy
+//       (outbox/sink_registry.ts): a NON-RETRYABLE failure (PermanentSinkError — the sink's
+//       declared "retry CANNOT succeed"; UnknownSinkError — no handler registered, a wiring bug
+//       retry cannot conjure away) dead-letters IMMEDIATELY after ONE drain (state='dead',
+//       attempts ~1 — NOT maxAttempts burned through backoff; last_error carries the taxonomy
+//       class name); a RetryableSinkError keeps the existing CS3c.1 backoff/retry path;
 //   (3) an empty outbox → drainOnce claims nothing and never dispatches;
 //   (4) run() idles on an empty outbox (it polled at least once) and stop() interrupts the idle
 //       cancellableSleep immediately (the RunnerLoop/SchedulerLoop shutdown shape).
@@ -34,6 +40,11 @@ import { Pool } from "pg";
 import { type Clock, FakeClock, WallClock } from "#platform/clock.js";
 import { OutboxDispatchActivities } from "#backend/activities/outbox_dispatch.activity.js";
 import { PostgresOutboxRepo } from "#backend/domain/repos/outbox_repo.js";
+import {
+  PermanentSinkError,
+  RetryableSinkError,
+  UnknownSinkError,
+} from "#backend/outbox/sink_registry.js";
 import {
   OutboxDispatcherLoop,
   type OutboxActivityFns,
@@ -209,6 +220,88 @@ describeDb("OutboxDispatcherLoop — Postgres leased drain loop (Phase 3c)", () 
     expect(afterRetry.attempts).toBe(2);
     // Exponential growth: second failure (prior attempts = 1) defers by 2 * 2^1 = 4s from 12:00:03.
     expect(afterRetry.leased_until!.getTime()).toBe(new Date("2026-06-10T12:00:07.000Z").getTime());
+  });
+
+  it("(2c) RC7: a PermanentSinkError dispatch dead-letters IMMEDIATELY — ONE drain, attempts NOT exhausted", async () => {
+    const clock = new FakeClock({ now: new Date("2026-06-10T12:00:00.000Z") });
+    const poison = await seedReconcileRow({ tag: "poison", createdAt: new Date("2026-06-10T11:00:00.000Z") });
+    const ok = await seedReconcileRow({ tag: "ok", createdAt: new Date("2026-06-10T11:00:01.000Z") });
+    const { activities, dispatched } = makeActivities({
+      clock,
+      dispatchImpl: async (input) => {
+        if (input.row_id === poison) { throw new PermanentSinkError("payload schema violated"); }
+      },
+    });
+    const loop = new OutboxDispatcherLoop({ activities, clock, batchSize: 10, idleS: 2 });
+
+    expect(await loop.drainOnce()).toBe(2);
+
+    const dead = await rowOf(poison);
+    expect(dead.state).toBe("dead");        // IMMEDIATE terminal — NOT 'pending' awaiting 4 more burns
+    expect(dead.attempts).toBe(1);          // the one real attempt is recorded; maxAttempts(5) NOT exhausted
+    expect(dead.dispatched_at).toBeNull();
+    expect(dead.leased_until).toBeNull();   // terminal path releases the lease — never re-claimable
+    // The taxonomy class name is prefixed so the dead row's forensics are self-describing.
+    expect(dead.last_error).toBe("PermanentSinkError: payload schema violated");
+
+    // Per-row isolation preserved (1:1 with the retryable path): the batch survivor still dispatched.
+    expect(dispatched.map((d) => d.row_id)).toEqual([poison, ok]);
+    expect((await rowOf(ok)).state).toBe("dispatched");
+
+    // Terminal means terminal: the dead row is OUT of every subsequent claim — even after time passes.
+    clock.advance({ seconds: 600 });
+    expect(await loop.drainOnce()).toBe(0);
+    expect(dispatched).toHaveLength(2);     // never re-dispatched
+  });
+
+  it("(2d) RC7: an UnknownSinkError dispatch dead-letters IMMEDIATELY — a wiring bug surfaces ONCE, not maxAttempts times", async () => {
+    const clock = new FakeClock({ now: new Date("2026-06-10T12:00:00.000Z") });
+    const unrouted = await seedReconcileRow({ tag: "unrouted", createdAt: new Date("2026-06-10T11:00:00.000Z") });
+    const { activities, dispatched } = makeActivities({
+      clock,
+      // The real dispatchRow's getSink(v.sink) throws UnknownSinkError BEFORE any DB work — the stub
+      // reproduces that boundary (no handler registered for the row's sink).
+      dispatchImpl: async () => { throw new UnknownSinkError("installation_reconcile"); },
+    });
+    const loop = new OutboxDispatcherLoop({ activities, clock, batchSize: 10, idleS: 2 });
+
+    expect(await loop.drainOnce()).toBe(1);
+    expect(dispatched).toHaveLength(1);
+
+    const dead = await rowOf(unrouted);
+    expect(dead.state).toBe("dead");
+    expect(dead.attempts).toBe(1);
+    expect(dead.dispatched_at).toBeNull();
+    expect(dead.leased_until).toBeNull();
+    expect(dead.last_error).toBe("UnknownSinkError: installation_reconcile");
+  });
+
+  it("(2e) RC7: a RetryableSinkError dispatch keeps the CS3c.1 backoff/retry path — NOT dead until the threshold", async () => {
+    const clock = new FakeClock({ now: new Date("2026-06-10T12:00:00.000Z") });
+    const flaky = await seedReconcileRow({ tag: "flaky", createdAt: new Date("2026-06-10T11:00:00.000Z") });
+    const { activities, dispatched } = makeActivities({
+      clock,
+      dispatchImpl: async () => { throw new RetryableSinkError("GitHub 502"); },
+    });
+    const loop = new OutboxDispatcherLoop({ activities, clock, batchSize: 10, idleS: 2 });
+
+    expect(await loop.drainOnce()).toBe(1);
+
+    const failed = await rowOf(flaky);
+    expect(failed.state).toBe("pending");           // transient → still retryable, NOT dead
+    expect(failed.attempts).toBe(1);                 // the attempt is recorded against the threshold
+    expect(failed.dispatched_at).toBeNull();
+    expect(failed.last_error).toBe("GitHub 502");
+    // The CS3c.1 exponential backoff defers the re-claim (BASE 2s * 2^0 prior attempts).
+    expect(failed.leased_until).not.toBeNull();
+    expect(failed.leased_until!.getTime()).toBe(new Date("2026-06-10T12:00:02.000Z").getTime());
+
+    // Within the backoff window the row stays out of the claim; after it elapses, it retries.
+    expect(await loop.drainOnce()).toBe(0);
+    clock.advance({ seconds: 3 });
+    expect(await loop.drainOnce()).toBe(1);
+    expect(dispatched).toHaveLength(2);
+    expect((await rowOf(flaky)).attempts).toBe(2);   // still riding the bounded retry curve
   });
 
   it("(3) an empty outbox → drainOnce claims nothing and never dispatches", async () => {
