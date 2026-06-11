@@ -22,8 +22,10 @@
 //   * STATIC-ANALYSIS tool failures (per_tool_errors / truncated_per_tool, reported as DATA) →
 //     degradation note(s), review continues. PLUS: the static-analysis ACTIVITY raising → HARD fail
 //     (Promise.all branch propagates), cleanup still runs.
-//   * LLM single-chunk failure (one of N reviewChunk dispatches throws) → the WHOLE review FAILS
-//     (fan-out re-raises; the other chunks' results are discarded), cleanup still runs.
+//   * LLM single-chunk failure (one of N reviewChunk dispatches throws) → W1.9a (C2) fail-soft:
+//     the failed chunk contributes ZERO findings + a degradation note, the OTHER chunks complete
+//     and the review still posts. ALL chunks failing re-raises (no healthy zero-finding 'done');
+//     cancellation (lost-lease/supersede abort) re-raises immediately and is NOT a degradation.
 //   * WALKTHROUGH: the synthesized-fallback WalkthroughV1 (degradation_note + synthesized file_rows,
 //     the activity's collapsed-on fallback) FLOWS THROUGH to post normally; a genuine (non-fallback)
 //     walkthrough-port throw PROPAGATES (orchestrate bare-awaits it), cleanup still runs.
@@ -127,6 +129,12 @@ type StubOverrides = {
   staticAnalysisThrows?: boolean;
   /** the chunk_id suffix whose reviewChunk dispatch throws (LLM single-chunk failure). */
   reviewChunkThrowsForChunkIndex?: number;
+  /** W1.9a (C2): EVERY reviewChunk dispatch throws (drives the all-chunks-failed abort threshold).
+   *  The error message carries the chunk_id so the first-(input-order)-failure re-raise is assertable. */
+  reviewChunkThrowsAllChunks?: boolean;
+  /** W1.9a (C2): the chunk_id suffix whose reviewChunk dispatch throws an ABORT-shaped cancellation
+   *  (name === "AbortError" — the lost-lease/supersede abort). Must re-raise, NOT degrade. */
+  reviewChunkAbortsForChunkIndex?: number;
   /** generateWalkthrough returns the synthesized-fallback WalkthroughV1 (the activity's collapsed-on
    *  fallback: degradation_note + synthesized file_rows) — NOT a throw. */
   walkthroughFallback?: boolean;
@@ -228,6 +236,17 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
         const failingChunkId = uuidFor(100 + o.reviewChunkThrowsForChunkIndex);
         if (input.chunk.chunk_id === failingChunkId) {
           throw new Error(`review-chunk boom for index ${o.reviewChunkThrowsForChunkIndex}`);
+        }
+      }
+      if (o.reviewChunkThrowsAllChunks) {
+        throw new Error(`review-chunk boom for ${input.chunk.chunk_id}`);
+      }
+      if (o.reviewChunkAbortsForChunkIndex !== undefined) {
+        const abortChunkId = uuidFor(100 + o.reviewChunkAbortsForChunkIndex);
+        if (input.chunk.chunk_id === abortChunkId) {
+          const abort = new Error("supersede abort: lease lost");
+          abort.name = "AbortError";
+          throw abort;
         }
       }
       return ReviewChunkResponseV1.parse({
@@ -493,36 +512,101 @@ describe("orchestrate — STATIC-ANALYSIS activity raising is a HARD fail", () =
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-// LLM single-chunk failure — one of N reviewChunk dispatches throws. PORTED BEHAVIOUR (confirmed
-// empirically against the frozen Python fan_out_review, parallelism.py): a single chunk activity
-// raising propagates through the anyio.create_task_group → the WHOLE review FAILS (it does NOT drop
-// the offending chunk and continue). The TS fanOutReview mirrors this — the rejection propagates
-// through Promise.all, and the orchestrator wraps reviewChunk in stageOutcome(raiseAfterLog:true) which
-// re-raises. So one bad chunk in a multi-chunk PR fails the whole review; cleanup still runs (try).
+// LLM single-chunk failure — W1.9a (C2) FAIL-SOFT fan-out.
+//
+// OLD (pre-W1.9a, the 1:1 Python task-group port): one chunk's rejection propagated through the
+// fan-out → the WHOLE review failed and every peer chunk's completed (paid-for) findings were
+// discarded. NEW contract: the per-chunk stageOutcome(raiseAfterLog:true) still logs the CS8
+// structured WARN + record_stage(review_chunk, error), then fanOutReview's failure-isolation slot
+// RECORDS the failure and the peers COMPLETE — the failed chunk contributes zero findings, the
+// orchestrator appends the "N of M chunks failed review" note, and the review still posts.
+//
+// GUARDED EDGES:
+//   * ALL chunks failing must NOT settle as a healthy zero-finding 'done' — the first (input-order)
+//     chunk failure re-raises (mirrors the classifier-failure-ratio threshold idiom).
+//   * Cancellation (a lost-lease/supersede abort, name === "AbortError", or a Temporal
+//     CancelledFailure) is NOT a degradation — it re-raises immediately (degradation.ts discipline).
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-describe("orchestrate — LLM single-chunk failure FAILS the whole review (no drop-the-chunk)", () => {
-  it("propagates when ONE of several chunks throws (the review does not silently drop it)", async () => {
-    // 3 chunks; the SECOND (index 1 → chunk_id suffix 101) throws. fanOutReview re-raises → orchestrate
-    // rejects. The other chunks' partial results are discarded (the whole fan-in is thrown away).
+describe("orchestrate — LLM single-chunk failure DEGRADES; surviving chunks still post (W1.9a/C2)", () => {
+  it("continues to post when ONE of 3 chunks throws — the other 2 chunks' findings flow through", async () => {
+    // 3 chunks; the SECOND (index 1 → chunk_id suffix 101) throws. The failed chunk contributes
+    // ZERO findings; the other two complete and the review posts end-to-end.
     const stub = makeStub({ chunkCount: 3, reviewChunkThrowsForChunkIndex: 1 });
-    await expect(orchestrate(makeCtx(stub))).rejects.toThrow(/review-chunk boom for index 1/);
-    // The review never reached dedup/aggregate/persist/post — the single chunk failure was fatal.
-    expect(stub.calls).not.toContain("dedupFindings");
-    expect(stub.calls).not.toContain("aggregate");
-    expect(stub.calls).not.toContain("postReview");
+    const result = await orchestrate(makeCtx(stub));
+    expect(result.status).toBe("accepted");
+    // every chunk was dispatched — peers are NOT cancelled by the one failure.
+    expect(stub.calls.filter((c) => c === "reviewChunk").length).toBe(3);
+    expect(stub.calls).toContain("dedupFindings");
+    expect(stub.calls).toContain("aggregate");
+    expect(stub.calls).toContain("postReview");
+    expect(stub.cleanupCalled()).toBe(true);
+    // 2 surviving chunks × 1 finding each; the failed chunk contributed zero.
+    expect(result.findingsCount).toBe(2);
   });
 
-  it("still runs cleanup when a single chunk failure propagates (finally armed)", async () => {
-    const stub = makeStub({ chunkCount: 3, reviewChunkThrowsForChunkIndex: 0 });
-    await expect(orchestrate(makeCtx(stub))).rejects.toThrow(/review-chunk boom/);
+  it("appends the 'N of M chunks failed review' note + the review_chunk_failed marker", async () => {
+    const stub = makeStub({ chunkCount: 3, reviewChunkThrowsForChunkIndex: 1 });
+    const result = await orchestrate(makeCtx(stub));
+    expect(result.degradationNotes).toContain(
+      "1 of 3 chunks failed review; findings may be incomplete",
+    );
+    expect(result.degradationNotes).toContain("review_chunk_failed");
+  });
+
+  it("emits the CS8 structured WARN (stage=review_chunk outcome=degraded) for the failed chunk", async () => {
+    const messages: Array<string> = [];
+    const fields: Array<unknown> = [];
+    const stub = makeStub({ chunkCount: 3, reviewChunkThrowsForChunkIndex: 1 });
+    const logger = {
+      warning: (m: string, f?: unknown): void => {
+        messages.push(m);
+        fields.push(f);
+      },
+    };
+    const result = await orchestrate(makeCtx(stub, logger));
+    expect(result.status).toBe("accepted");
+    const warnIdx = messages.findIndex((m) => m.includes("review_chunk failed"));
+    expect(warnIdx).toBeGreaterThanOrEqual(0);
+    expect(fields[warnIdx]).toEqual({
+      stage: "review_chunk",
+      outcome: "degraded",
+      error_class: "Error",
+    });
+  });
+
+  it("FAILS the review when ALL chunks fail — the first (input-order) failure re-raises", async () => {
+    // 2 chunks, both throw. A review where EVERY chunk failed must not settle as a healthy
+    // zero-finding 'done' — the first failure (input order; chunk_id suffix 100) re-raises.
+    const stub = makeStub({ chunkCount: 2, reviewChunkThrowsAllChunks: true });
+    const ctx = makeCtx(stub);
+    await expect(orchestrate(ctx)).rejects.toThrow(new RegExp(uuidFor(100)));
+    expect(stub.calls).not.toContain("dedupFindings");
+    expect(stub.calls).not.toContain("postReview");
+    // The N-of-M note still lands on the live collector (operator pivot) before the re-raise.
+    expect(ctx.state.degradation.notes).toContain(
+      "2 of 2 chunks failed review; findings may be incomplete",
+    );
+    // cleanup still released the workspace (the throw is inside the try → finally armed).
     expect(stub.cleanupCalled()).toBe(true);
   });
 
-  it("does NOT throw when every chunk succeeds (control: the matrix isolates the single-failure axis)", async () => {
+  it("re-raises a cancellation (abort-shaped) chunk error immediately — NOT a degradation", async () => {
+    // The lost-lease/supersede abort raised mid-fan-out must propagate (the isCancellation
+    // discipline in degradation.ts), with NO chunk-failure degradation notes.
+    const stub = makeStub({ chunkCount: 3, reviewChunkAbortsForChunkIndex: 1 });
+    const ctx = makeCtx(stub);
+    await expect(orchestrate(ctx)).rejects.toThrow(/supersede abort: lease lost/);
+    expect(ctx.state.degradation.notes.some((n) => n.includes("chunks failed review"))).toBe(false);
+    expect(ctx.state.degradation.notes).not.toContain("review_chunk_failed");
+    expect(stub.cleanupCalled()).toBe(true);
+  });
+
+  it("does NOT throw when every chunk succeeds (control: fail-soft is inert on the happy path)", async () => {
     const stub = makeStub({ chunkCount: 3 }); // no failing index
     const result = await orchestrate(makeCtx(stub));
     expect(result.status).toBe("accepted");
     expect(stub.calls.filter((c) => c === "reviewChunk").length).toBe(3);
+    expect(result.degradationNotes).toEqual([]);
   });
 });
 

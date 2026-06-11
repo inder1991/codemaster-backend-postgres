@@ -14,13 +14,19 @@
 //   * CONCURRENCY BOUND — at most `concurrency` dispatches are in-flight at once (the Python
 //     anyio.Semaphore(concurrency) cap); default is CHUNK_CONCURRENCY_DEFAULT = 4.
 //   * SHORT-CIRCUITS — empty chunks → ([], []); concurrency <= 0 → throws.
-//   * ERROR PROPAGATION — the first dispatch rejection propagates out of fanOutReview.
+//   * ERROR PROPAGATION — the first dispatch rejection propagates out of fanOutReview (the LEGACY
+//     no-slot mode; the 1:1 Python task-group contract).
+//   * FAILURE-ISOLATION SLOT (W1.9a / C2) — with options.failureSlot, a rejecting dispatch is
+//     RECORDED (chunk-INPUT order) and its peers complete; cancellation STILL propagates.
 import { describe, it, expect } from "vitest";
+
+import { CancelledFailure } from "@temporalio/common";
 
 import {
   fanOutReview,
   coerceChunkResult,
   CHUNK_CONCURRENCY_DEFAULT,
+  type ChunkDispatchFailure,
   type ChunkThreadingV1,
   type InvokeChunkFn,
 } from "#backend/review/pipeline/parallelism.js";
@@ -447,5 +453,163 @@ describe("fanOutReview — cancel-peers on first hard failure (anyio task-group 
       "intent-from-chunk-3",
       "intent-from-chunk-4",
     ]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// W1.9a (C2) — failure-isolation slot: fail-soft fan-out.
+//
+// The first-error-wins contract above (the 1:1 Python task-group port) made the single most
+// expensive stage the LEAST fault-tolerant: one chunk's LLM hard-failure discarded ALL chunks'
+// completed findings. With `options.failureSlot` supplied, a rejecting dispatch is RECORDED on the
+// slot (in chunk-INPUT order — replay-deterministic regardless of completion order) and its peers
+// COMPLETE; the failed chunk simply contributes zero findings to the fan-in.
+//
+// CANCELLATION DISCIPLINE (the degradation.ts isCancellation contract): a Temporal CancelledFailure
+// or an abort-shaped error (name === "AbortError" — the lost-lease/supersede abort) is NEVER
+// recorded as a chunk failure — it propagates immediately and stops the peers (the FIX #11
+// cancel-peers behaviour is preserved for cancellation).
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describe("fanOutReview — failure-isolation slot (W1.9a fail-soft; C2)", () => {
+  it("records a failing chunk on the slot and completes the peers (input-ordered surviving findings)", async () => {
+    const chunks = [chunk(0), chunk(1), chunk(2)];
+    const failures: Array<ChunkDispatchFailure> = [];
+    const invoke: InvokeChunkFn = async (c) => {
+      const idx = Number(c.path.replace(/\D/g, ""));
+      if (idx === 1) {
+        throw new Error("chunk-1 dispatch failed");
+      }
+      return envelope(idx);
+    };
+    const [findings, intents] = await fanOutReview(chunks, invoke, {
+      concurrency: 3,
+      failureSlot: { recordFailure: (f) => failures.push(f) },
+    });
+    expect(findings.map((f) => f.title)).toEqual([
+      "finding-from-chunk-0",
+      "finding-from-chunk-2",
+    ]);
+    expect(intents).toEqual([]);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.chunkIndex).toBe(1);
+    expect(failures[0]!.chunkId).toBe(uuidFor(1));
+    expect(failures[0]!.path).toBe("src/file_1.ts");
+    expect((failures[0]!.error as Error).message).toBe("chunk-1 dispatch failed");
+  });
+
+  it("keeps dispatching later chunks after a recorded failure (peers are NOT cancelled)", async () => {
+    const n = 5;
+    const chunks = Array.from({ length: n }, (_, i) => chunk(i));
+    const dispatched: Array<number> = [];
+    const failures: Array<ChunkDispatchFailure> = [];
+    const invoke: InvokeChunkFn = async (c) => {
+      const idx = Number(c.path.replace(/\D/g, ""));
+      dispatched.push(idx);
+      if (idx === 1) {
+        throw new Error("chunk-1 dispatch failed");
+      }
+      return envelope(idx);
+    };
+    const [findings] = await fanOutReview(chunks, invoke, {
+      concurrency: 2,
+      failureSlot: { recordFailure: (f) => failures.push(f) },
+    });
+    // EVERY chunk dispatched — fail-soft never sets the cancel-peers abort flag for a plain failure.
+    expect(dispatched).toHaveLength(n);
+    expect(findings).toHaveLength(n - 1);
+    expect(failures.map((f) => f.chunkIndex)).toEqual([1]);
+  });
+
+  it("records MULTIPLE failures in chunk-INPUT order even when they settle out of order", async () => {
+    // 4 chunks at full concurrency — idx 0 is PARKED on a gate and fails LAST; idx 3 fails first.
+    // The slot must still receive [0, 3] (input order) — the replay-deterministic record order.
+    const chunks = Array.from({ length: 4 }, (_, i) => chunk(i));
+    const failures: Array<ChunkDispatchFailure> = [];
+    let releaseChunk0!: () => void;
+    const chunk0Gate = new Promise<void>((res) => {
+      releaseChunk0 = res;
+    });
+    const invoke: InvokeChunkFn = async (c) => {
+      const idx = Number(c.path.replace(/\D/g, ""));
+      if (idx === 0) {
+        await chunk0Gate;
+        throw new Error("chunk-0 failed (last to settle)");
+      }
+      if (idx === 3) {
+        throw new Error("chunk-3 failed (first to settle)");
+      }
+      return envelope(idx);
+    };
+    const promise = fanOutReview(chunks, invoke, {
+      concurrency: 4,
+      failureSlot: { recordFailure: (f) => failures.push(f) },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    releaseChunk0();
+    const [findings] = await promise;
+    expect(failures.map((f) => f.chunkIndex)).toEqual([0, 3]);
+    expect(findings.map((f) => f.title)).toEqual([
+      "finding-from-chunk-1",
+      "finding-from-chunk-2",
+    ]);
+  });
+
+  it("still propagates an abort-shaped cancellation — NOT recorded, peers stop scheduling", async () => {
+    const n = 5;
+    const chunks = Array.from({ length: n }, (_, i) => chunk(i));
+    const failures: Array<ChunkDispatchFailure> = [];
+    const dispatched: Array<number> = [];
+    let releaseChunk0!: () => void;
+    const chunk0Gate = new Promise<void>((res) => {
+      releaseChunk0 = res;
+    });
+    const invoke: InvokeChunkFn = async (c) => {
+      const idx = Number(c.path.replace(/\D/g, ""));
+      dispatched.push(idx);
+      if (idx === 0) {
+        await chunk0Gate;
+        return envelope(0);
+      }
+      if (idx === 1) {
+        const abort = new Error("workflow cancelled");
+        abort.name = "AbortError";
+        throw abort;
+      }
+      return envelope(idx);
+    };
+    const promise = fanOutReview(chunks, invoke, {
+      concurrency: 2,
+      failureSlot: { recordFailure: (f) => failures.push(f) },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    releaseChunk0();
+    await expect(promise).rejects.toThrow("workflow cancelled");
+    // Cancellation is NEVER a degradation record — and the FIX #11 cancel-peers behaviour holds.
+    expect(failures).toEqual([]);
+    expect(dispatched).not.toContain(3);
+    expect(dispatched).not.toContain(4);
+  });
+
+  it("still propagates a Temporal CancelledFailure — cancellation is never fail-soft", async () => {
+    const chunks = [chunk(0), chunk(1)];
+    const failures: Array<ChunkDispatchFailure> = [];
+    const invoke: InvokeChunkFn = async (c) => {
+      const idx = Number(c.path.replace(/\D/g, ""));
+      if (idx === 1) {
+        throw new CancelledFailure("workflow cancelled");
+      }
+      return envelope(idx);
+    };
+    await expect(
+      fanOutReview(chunks, invoke, {
+        concurrency: 2,
+        failureSlot: { recordFailure: (f) => failures.push(f) },
+      }),
+    ).rejects.toBeInstanceOf(CancelledFailure);
+    expect(failures).toEqual([]);
   });
 });
