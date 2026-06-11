@@ -92,21 +92,21 @@ import {
 // abort). The throw is `signal.reason`; the runner settles it failed (markFailed/lease_lost).
 
 /** mutex_janitor scheduled input — zero-config, 1:1 with the Temporal zero-arg dispatch. */
-const MutexJanitorCronInputV1 = z.object({}).strict();
+export const MutexJanitorCronInputV1 = z.object({}).strict();
 
 /** review_run_reaper scheduled input — zero-config; the stale threshold stays env-resolved
  *  (`CODEMASTER_REVIEW_RUN_REAPER_STALE_AFTER_SECONDS`, ADR-0074) at the activity boundary. */
-const ReviewRunReaperCronInputV1 = z.object({}).strict();
+export const ReviewRunReaperCronInputV1 = z.object({}).strict();
 
 /** partition_maintenance scheduled input — zero-config, 1:1 with the Temporal zero-arg dispatch
  *  (the activity's only parameter is its DSN deps, a composition concern — not caller input). */
-const PartitionMaintenanceCronInputV1 = z.object({}).strict();
+export const PartitionMaintenanceCronInputV1 = z.object({}).strict();
 
 /** run_id_retention scheduled input — the three retention TTLs (days), 1:1 with the Temporal
  *  Schedule's pinned workflow input (run_id_retention.workflow.ts::RunIdRetentionInput; Python
  *  `args=[7, 30, 90]`). STRICT + all-required: the scheduled row carries the full TTL object, and a
  *  drifted/garbage operator edit fails the parse loudly instead of silently sweeping with defaults. */
-const RunIdRetentionCronInputV1 = z
+export const RunIdRetentionCronInputV1 = z
   .object({
     prTtlDays: z.number().int().min(1),
     runTtlDays: z.number().int().min(1),
@@ -117,7 +117,7 @@ const RunIdRetentionCronInputV1 = z
 /** workspace_retention scheduled input — zero-config, 1:1 with the Temporal workflow's zero-arg
  *  activity dispatches (every timing threshold is a WorkspaceConfig-default module constant resolved
  *  at the activity boundary — workspace_retention.activity.ts). */
-const WorkspaceRetentionCronInputV1 = z.object({}).strict();
+export const WorkspaceRetentionCronInputV1 = z.object({}).strict();
 
 /**
  * A {@link GitHubApiClient} built lazily on first `.get`/`.patch` and memoized — the SAME
@@ -174,7 +174,7 @@ function makeLazyRetentionGithubClient(): GitHubApiClient {
 /** confluence_ingest scheduled input — the REAL `RefreshConfluenceInputV1` (the ADR-0047
  *  single-typed-input marker — `.strict()` with only the defaulted `schema_version`), exactly what the
  *  Temporal Schedule dispatches into confluenceIngestWorkflow (the mark_stale_chunks parse posture). */
-const ConfluenceIngestCronInput = RefreshConfluenceInputV1;
+export const ConfluenceIngestCronInput = RefreshConfluenceInputV1;
 
 /** Per-space accumulator (1:1 with the workflow body's SpaceStats, including the F-40 `pages_failed`
  *  counter — observability-only, never aggregated into the cross-space tally). */

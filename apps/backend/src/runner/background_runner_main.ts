@@ -41,6 +41,7 @@ import { ReviewJobsRepo } from "./review_jobs_repo.js";
 import { assertRoutedWorkflowTypesHaveConsumers } from "./routed_consumers_check.js";
 import { recordRunnerLoopCrashed } from "./runner_metrics.js";
 import { SchedulerLoop, pollAndEnqueue } from "./scheduler.js";
+import { SCHEDULED_JOB_INPUT_CONTRACTS } from "./scheduled_input_contracts.js";
 
 // Phase 3a W4: the background-runner PROCESS ENTRYPOINT — composes the W2b BackgroundRunnerLoop
 // (claim/dispatch/settle over core.background_jobs) + the W3 SchedulerLoop (the Postgres poller
@@ -265,7 +266,11 @@ export function buildBackgroundRunner(deps: BackgroundRunnerDeps): BackgroundRun
     maxRuntimeS: config.maxRuntimeS,
     shadow,
   };
-  const schedulerArgs = { repo, db, clock, shadow };
+  // W3.8 (RM7): the PRODUCTION composition always threads the scheduler-boundary input-contract
+  // registry — core.scheduled_jobs is operator-writable platform config, so the poll pass
+  // default-denies unknown job_types and contract-rejecting inputs BEFORE the enqueue side effect
+  // (scheduler.ts::pollAndEnqueue doc; the registry is pinned in lockstep with CRON_SCHEDULES).
+  const schedulerArgs = { repo, db, clock, shadow, inputContracts: SCHEDULED_JOB_INPUT_CONTRACTS };
 
   // Phase 3c: the outbox drain loop — REUSES the proven Postgres-backed dispatch activities
   // (OutboxDispatchActivities, the exact 4 the Temporal worker registers via

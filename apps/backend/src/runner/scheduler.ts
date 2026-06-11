@@ -1,4 +1,5 @@
 import { type Kysely, sql } from "kysely";
+import type { z } from "zod";
 import type { Clock } from "#platform/clock.js";
 import { CadenceKind } from "#contracts/scheduled_job.v1.js";
 import type { EnqueueArgs } from "./background_jobs_repo.js";
@@ -185,7 +186,17 @@ export async function pollAndEnqueue(
     /** CS1.2 SHADOW posture: true → the pass OBSERVES the due set (would-enqueue logs) and
      *  performs NO side effect — no enqueue, no `next_run_at` advance, no `last_enqueued_at`
      *  stamp. Default false (the production behavior). */
-    shadow?: boolean },
+    shadow?: boolean;
+    /** W3.8 (RM7) — the scheduler-boundary input-contract registry (job_type → the SAME Zod
+     *  contract its handler parses at dispatch; production threads
+     *  {@link import("./scheduled_input_contracts.js").SCHEDULED_JOB_INPUT_CONTRACTS}). When
+     *  present the boundary is DEFAULT-DENY over the operator-writable `core.scheduled_jobs` row:
+     *  a job_type with no registry entry, or an `input` failing its contract, is rejected BEFORE
+     *  the enqueue side effect — isolated to its own row via the W4a.2 posture (WARN naming the
+     *  schedule_id + bounded error counter + left UNADVANCED), never forwarded to dead-letter at
+     *  handler dispatch after burning a job slot. Omitted → legacy pass-through (the seam stays
+     *  injectable for harnesses that mint synthetic job_types). */
+    inputContracts?: ReadonlyMap<string, z.ZodTypeAny> },
 ): Promise<number> {
   return await o.db.transaction().execute(async (trx) => {
     const now = o.clock.now();
@@ -222,7 +233,29 @@ export async function pollAndEnqueue(
       const savepoint = `cs7_schedule_${i}`;
       await sql.raw(`SAVEPOINT ${savepoint}`).execute(trx);
       try {
-        // Validate the cadence FIRST ({@link computeNextRun} is pure — throws on a poison spec
+        // W3.8 (RM7): validate the UNTRUSTED row against the job_type's dispatch contract FIRST —
+        // default-deny. `scheduled_jobs` is platform-global operator config with no row tenancy;
+        // pre-RM7 a malformed/hostile row only failed at HANDLER dispatch (dead-letter after
+        // burning a job slot, re-enqueued every tick) and ANY job_type was schedulable, including
+        // the cross-tenant event-driven ones. The throw lands in the W4a.2 catch below: WARN with
+        // the schedule_id, bounded counter, row left unadvanced — and NOTHING was enqueued.
+        if (o.inputContracts !== undefined) {
+          const contract = o.inputContracts.get(row.job_type);
+          if (contract === undefined) {
+            throw new Error(
+              `job_type '${row.job_type}' has no scheduled input contract — ` +
+                `default-deny at the scheduler boundary (RM7; scheduled_input_contracts.ts ` +
+                `registers the schedulable job_types)`,
+            );
+          }
+          const parsed = contract.safeParse(row.input);
+          if (!parsed.success) {
+            throw new Error(
+              `input rejected by the '${row.job_type}' scheduled contract (RM7): ${parsed.error.message}`,
+            );
+          }
+        }
+        // Validate the cadence ({@link computeNextRun} is pure — throws on a poison spec
         // BEFORE any side effect, so a bad schedule enqueues NOTHING), then enqueue (on the repo's
         // own connection — autocommits independently of this txn), then advance the cadence: a crash
         // between enqueue and advance leaves the row due, and the retrying pass's enqueue dedups
@@ -269,7 +302,10 @@ export class SchedulerLoop {
   constructor(
     private o: { repo: SchedulerEnqueuePort; db: Kysely<unknown>; clock: Clock; pollIntervalS: number;
       /** CS1.2 SHADOW posture, threaded straight into every {@link pollAndEnqueue} pass. */
-      shadow?: boolean },
+      shadow?: boolean;
+      /** W3.8 (RM7) — the boundary input-contract registry, threaded straight into every
+       *  {@link pollAndEnqueue} pass (see its doc for the default-deny semantics). */
+      inputContracts?: ReadonlyMap<string, z.ZodTypeAny> },
   ) {}
   stop(): void { this.#stopped = true; this.#stop.abort(); }
 
