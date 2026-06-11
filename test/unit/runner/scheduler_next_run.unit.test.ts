@@ -3,9 +3,11 @@
 // by the caller (pollAndEnqueue threads clock.now()), so every case here is fully deterministic.
 //
 //   * interval: cadence_spec is an integer number of seconds → `after` + that many seconds.
-//   * cron: ONLY the daily "M H * * *" shape is supported — the next UTC instant at H:M STRICTLY
-//     after `after` (today if H:M is still ahead, else tomorrow). Every other cron shape (lists,
-//     ranges, steps, non-* in fields 3-5, wrong field count, out-of-range M/H) THROWS the
+//   * cron (M12 / W3.8 vocabulary): the MINUTE and HOUR fields take the common cron subset — a
+//     bare value, `*`, steps (`*/S`), ranges (`A-B`), stepped ranges (`A-B/S`) and comma-lists of
+//     those — evaluated as the next matching UTC minute boundary STRICTLY after `after`. Fields
+//     3-5 (day-of-month / month / day-of-week) must stay `*`; that and every malformed atom
+//     (out-of-range values, inverted ranges, zero steps, wrong field count) THROWS the
 //     deliberate-extension error so new shapes are added consciously, never half-parsed.
 import { describe, expect, it } from "vitest";
 import { computeNextRun } from "#backend/runner/scheduler.js";
@@ -82,23 +84,86 @@ describe('computeNextRun — daily cron "M H * * *"', () => {
   });
 
   it.each([
-    "*/5 * * * *", // step
-    "0 1,2 * * *", // list
-    "0-30 5 * * *", // range
-    "30 5 1 * *", // non-* day-of-month
+    "30 5 1 * *", // non-* day-of-month — still OUTSIDE the deliberate vocabulary
     "30 5 * 6 *", // non-* month
     "30 5 * * 1", // non-* day-of-week
     "60 5 * * *", // minute out of range
     "30 24 * * *", // hour out of range
     "-1 5 * * *", // negative minute
-    "* 5 * * *", // wildcard minute (every minute of the hour — NOT daily)
+    "0-60 5 * * *", // range end out of range
+    "10-5 2 * * *", // inverted range
+    "*/0 * * * *", // zero step
+    "1/5 2 * * *", // step on a bare value (cron requires * or a range base)
+    "1-2-3 4 * * *", // malformed range
+    "a b * * *", // garbage atoms
     "30 5 * *", // 4 fields
     "30 5 * * * *", // 6 fields
-    "30  5 * * *", // double space (not the literal "M H * * *" shape)
+    "30  5 * * *", // double space → an empty field atom
     "", // empty
   ])("THROWS the deliberate-extension error on unsupported cron shape %j", (spec) => {
     expect(() => computeNextRun("cron", spec, at("2026-06-10T12:00:00.000Z")))
-      .toThrow(`unsupported cron spec: ${spec} (only "M H * * *" daily supported)`);
+      .toThrow(`unsupported cron spec: ${spec}`);
+  });
+});
+
+// ─── M12 / W3.8: the cron-vocabulary expansion — steps, lists, ranges on minute + hour. The
+// Temporal "*/5 * * * *"-class schedules were re-encoded as drifting intervals and an operator's
+// legitimate step cron poison-looped on every poll (left unadvanced + re-WARNed forever); these
+// shapes now evaluate wall-aligned. Fields 3-5 stay `*`-only (the deliberate-extension posture). ──
+describe("computeNextRun — expanded cron vocabulary (M12 / W3.8)", () => {
+  it('"*/15 * * * *" → the next wall-ALIGNED quarter-hour strictly after `after` (no interval drift)', () => {
+    expect(computeNextRun("cron", "*/15 * * * *", at("2026-06-10T12:07:13.000Z")))
+      .toEqual(at("2026-06-10T12:15:00.000Z"));
+    expect(computeNextRun("cron", "*/15 * * * *", at("2026-06-10T12:45:00.000Z")))
+      .toEqual(at("2026-06-10T13:00:00.000Z")); // strictly-after: exactly-on-tick rolls forward
+    expect(computeNextRun("cron", "*/15 * * * *", at("2026-06-10T23:59:00.000Z")))
+      .toEqual(at("2026-06-11T00:00:00.000Z")); // day rollover
+  });
+
+  it('"*/5 * * * *" — the exact M12 poison-class operator spec — advances instead of throwing', () => {
+    expect(computeNextRun("cron", "*/5 * * * *", at("2026-06-10T12:01:00.000Z")))
+      .toEqual(at("2026-06-10T12:05:00.000Z"));
+    expect(computeNextRun("cron", "*/5 * * * *", at("2026-06-10T12:05:00.000Z")))
+      .toEqual(at("2026-06-10T12:10:00.000Z"));
+  });
+
+  it('comma-lists: "0,30 * * * *" picks the nearest listed minute', () => {
+    expect(computeNextRun("cron", "0,30 * * * *", at("2026-06-10T12:10:00.000Z")))
+      .toEqual(at("2026-06-10T12:30:00.000Z"));
+    expect(computeNextRun("cron", "0,30 * * * *", at("2026-06-10T12:30:00.000Z")))
+      .toEqual(at("2026-06-10T13:00:00.000Z"));
+  });
+
+  it('hour ranges: "0 9-17 * * *" fires on the hour inside the range, rolls to tomorrow 09:00 past it', () => {
+    expect(computeNextRun("cron", "0 9-17 * * *", at("2026-06-10T10:30:00.000Z")))
+      .toEqual(at("2026-06-10T11:00:00.000Z"));
+    expect(computeNextRun("cron", "0 9-17 * * *", at("2026-06-10T17:00:00.000Z")))
+      .toEqual(at("2026-06-11T09:00:00.000Z")); // 17:00 itself is not strictly-after
+  });
+
+  it('stepped ranges ("0-30/10 2 * * *") and the wildcard minute ("* 5 * * *")', () => {
+    expect(computeNextRun("cron", "0-30/10 2 * * *", at("2026-06-10T02:11:00.000Z")))
+      .toEqual(at("2026-06-10T02:20:00.000Z"));
+    expect(computeNextRun("cron", "0-30/10 2 * * *", at("2026-06-10T02:30:00.000Z")))
+      .toEqual(at("2026-06-11T02:00:00.000Z")); // past the stepped range → tomorrow's first tick
+    expect(computeNextRun("cron", "* 5 * * *", at("2026-06-10T05:10:30.000Z")))
+      .toEqual(at("2026-06-10T05:11:00.000Z")); // every minute of hour 5
+    expect(computeNextRun("cron", "* 5 * * *", at("2026-06-10T06:00:00.000Z")))
+      .toEqual(at("2026-06-11T05:00:00.000Z"));
+  });
+
+  it('mixed list atoms compose: "5,40-50/5 6,18 * * *"', () => {
+    expect(computeNextRun("cron", "5,40-50/5 6,18 * * *", at("2026-06-10T06:41:00.000Z")))
+      .toEqual(at("2026-06-10T06:45:00.000Z"));
+    expect(computeNextRun("cron", "5,40-50/5 6,18 * * *", at("2026-06-10T07:00:00.000Z")))
+      .toEqual(at("2026-06-10T18:05:00.000Z")); // hour list jumps to the evening slot
+  });
+
+  it("zeroes seconds + milliseconds on every expanded-vocabulary instant", () => {
+    const next = computeNextRun("cron", "*/7 3-4 * * *", at("2026-06-10T03:08:59.123Z"));
+    expect(next).toEqual(at("2026-06-10T03:14:00.000Z"));
+    expect(next.getUTCSeconds()).toBe(0);
+    expect(next.getUTCMilliseconds()).toBe(0);
   });
 });
 
