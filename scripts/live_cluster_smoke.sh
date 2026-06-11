@@ -127,9 +127,20 @@ temporal_registry_preflight() {
     bad "registry smoke FAILED (see /tmp/cm_reg.log) — wiring drift; fix before trusting the live run"
   fi
 }
+# pod_logs — kubectl logs with 3 retries: a single flaked API call must not turn a present boot
+# line into a hard RED (observed live 2026-06-11: section 1 found the line, section 2's identical
+# single-shot grep came back empty).
+pod_logs() {
+  local out try
+  for try in 1 2 3; do
+    out="$(kubectl -n "$NS" logs "$BACKEND_POD" 2>/dev/null)" && [[ -n "$out" ]] && { printf '%s' "$out"; return 0; }
+    for _ in $(seq 1 3); do kubectl -n "$NS" exec "$BACKEND_POD" -- true >/dev/null 2>&1; done
+  done
+  printf '%s' "$out"
+}
 pg_registry_preflight() {
   local boot_line n_types
-  boot_line="$(kubectl -n "$NS" logs "$BACKEND_POD" 2>/dev/null | grep "background runner starting: mode=postgres" | tail -1)"
+  boot_line="$(pod_logs | grep "background runner starting: mode=postgres" | tail -1)"
   n_types="$(printf '%s' "$boot_line" | grep -oE 'registered_job_types=\[[^]]+\]' | tr ',' '\n' | grep -c .)"
   if [[ "$boot_line" == *"review_loop=composed"* && "${n_types:-0}" -ge 13 ]]; then
     ok "runner boot self-check: review_loop=composed + $n_types registered job types (CS2.2 fail-loud consumer-completeness check passed at boot — a Ready pod IS the registry proof)"
@@ -146,7 +157,7 @@ temporal_worker_dispatch_check() {
   [[ "${POLLERS:-0}" -gt 0 ]] && ok "worker polling review-default ($POLLERS poller line(s) on this pod)" || bad "no pollers from $BACKEND_POD on review-default"
 }
 pg_worker_dispatch_check() {
-  if kubectl -n "$NS" logs "$BACKEND_POD" 2>/dev/null | grep -q "background runner starting: mode=postgres"; then
+  if pod_logs | grep -q "background runner starting: mode=postgres"; then
     ok "background runner booted in this pod ('background runner starting: mode=postgres' boot line present)"
   else
     bad "no 'background runner starting: mode=postgres' boot line in $BACKEND_POD logs"
