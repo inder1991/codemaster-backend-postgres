@@ -294,7 +294,9 @@ export async function getLearningWithRevisions(
     edited_at: Date;
   }>`
     SELECT revision_id, body_markdown, version, edited_by_user_id, edited_at
-    FROM core.learnings_revisions WHERE learning_id = ${learningId} ORDER BY edited_at DESC LIMIT 10
+    FROM core.learnings_revisions
+    WHERE learning_id = ${learningId} AND installation_id = ${installationId}
+    ORDER BY edited_at DESC LIMIT 10
   `.execute(db);
   const revisions: Array<LearningRevisionItemV1> = rev.rows.map((rr) => ({
     revision_id: rr.revision_id,
