@@ -9,6 +9,11 @@ import { main as exemptedListsPointed } from "./check_exempted_lists_pointed.js"
 import { main as exemptedRotationAge } from "./check_exempted_rotation_age.js";
 import { main as clockRandom } from "./check_clock_random.js";
 import { main as pythonOraclePresent } from "./check_python_oracle_present.js";
+// W0.11 — the four bug-class gates (each maps to a real shipped Python incident):
+import { main as unsafeMigrationPattern } from "./check_unsafe_migration_pattern.js";
+import { main as activityInputJsonSafe } from "./check_activity_input_json_safe.js";
+import { main as llmOutputParsersUseCoercion } from "./check_llm_output_parsers_use_coercion.js";
+import { main as workflowSilentDegradation } from "./check_workflow_silent_degradation.js";
 
 const gates: Array<() => number> = [
   tenantScopedRawSql,
@@ -16,6 +21,10 @@ const gates: Array<() => number> = [
   exemptedRotationAge,
   clockRandom,
   pythonOraclePresent,
+  unsafeMigrationPattern,
+  activityInputJsonSafe,
+  llmOutputParsersUseCoercion,
+  workflowSilentDegradation,
 ];
 
 let rc = 0;
