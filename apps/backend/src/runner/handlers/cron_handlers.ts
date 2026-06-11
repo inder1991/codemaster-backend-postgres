@@ -4,6 +4,7 @@ import {
   type ConfluenceChunkClient,
   type ConfluenceSyncActivities,
 } from "#backend/activities/confluence_sync.activity.js";
+import { jobRetentionSweepActivity } from "#backend/activities/job_retention.activity.js";
 import { ListActiveConfluenceSpacesActivity } from "#backend/activities/list_active_confluence_spaces.activity.js";
 import { MarkStaleChunksActivity } from "#backend/activities/mark_stale_chunks.activity.js";
 import { mutexJanitorActivity } from "#backend/activities/mutex_janitor.activity.js";
@@ -118,6 +119,17 @@ const RunIdRetentionCronInputV1 = z
  *  activity dispatches (every timing threshold is a WorkspaceConfig-default module constant resolved
  *  at the activity boundary — workspace_retention.activity.ts). */
 const WorkspaceRetentionCronInputV1 = z.object({}).strict();
+
+/** job_retention scheduled input — the two terminal-job-row TTLs (days), W4.6 (L4+L5). STRICT +
+ *  all-required (the run_id_retention posture): the scheduled row carries the full TTL object, and
+ *  a drifted/garbage operator edit fails the parse loudly instead of silently sweeping with
+ *  defaults. cache_idempotency needs no TTL — its rows carry their own expires_at. */
+const JobRetentionCronInputV1 = z
+  .object({
+    reviewJobsTtlDays: z.number().int().min(1),
+    backgroundJobsTtlDays: z.number().int().min(1),
+  })
+  .strict();
 
 /**
  * A {@link GitHubApiClient} built lazily on first `.get`/`.patch` and memoized — the SAME
@@ -401,6 +413,28 @@ export function registerCronHandlers(registry: HandlerRegistry, deps: CronHandle
       `run_id_retention swept: prs_closed=${prCloser.closed} prs_skipped=${prCloser.skipped} ` +
         `runs_retired=${runs.retired} events_deleted=${events.deleted} ` +
         `events_batches=${events.batches} job_id=${handlerDeps.job.job_id}`,
+    );
+  });
+
+  // W4.6 (L4+L5): job_retention — the daily 03:30 UTC janitor for the runner's OWN terminal job
+  // rows (core.review_jobs done/dead/cancelled, core.background_jobs done/dead — both TTL'd from
+  // the scheduled input) + the webhook idempotency ledger (cache.cache_idempotency past its own
+  // expires_at). Idempotent bounded-batch DELETEs (FOR UPDATE SKIP LOCKED, per-batch transactions)
+  // — the same no-signal posture as the other sweep crons (a lease-lost duplicate re-sweep is
+  // harmless by construction).
+  registry.register("job_retention", async (payload, _signal, handlerDeps) => {
+    const input = JobRetentionCronInputV1.parse(payload);
+    const result = await jobRetentionSweepActivity({
+      ...(deps.dsn !== undefined ? { dsn: deps.dsn } : {}),
+      clock: handlerDeps.clock,
+      reviewJobsTtlDays: input.reviewJobsTtlDays,
+      backgroundJobsTtlDays: input.backgroundJobsTtlDays,
+    });
+    console.info(
+      `job_retention swept: review_jobs_deleted=${result.review_jobs_deleted} ` +
+        `background_jobs_deleted=${result.background_jobs_deleted} ` +
+        `idempotency_deleted=${result.idempotency_deleted} batches=${result.batches} ` +
+        `job_id=${handlerDeps.job.job_id}`,
     );
   });
 

@@ -20,7 +20,7 @@ import { HandlerRegistry } from "#backend/runner/handler_registry.js";
 import { registerCronHandlers } from "#backend/runner/handlers/cron_handlers.js";
 import { computeNextRun } from "#backend/runner/scheduler.js";
 import { disposePool } from "#platform/db/database.js";
-import { FakeClock } from "#platform/clock.js";
+import { FakeClock, WallClock } from "#platform/clock.js";
 import { minimalReviewPayload, seedRun } from "./_fixtures.js";
 
 const NOW = new Date("2026-06-11T12:00:00.000Z");
@@ -156,7 +156,7 @@ describeDb("jobRetentionSweepActivity (W4.6 L4+L5)", () => {
   });
 
   it("(5) HANDLER PARITY: an enqueued 'job_retention' job through one runner cycle runs the sweep with the scheduled TTLs", async () => {
-    const aged = await seedReviewJob("done", 40);
+    const aged = await seedReviewJob("done", 40); // 40d before NOW ≈ 40d before the wall clock too
     const registry = new HandlerRegistry();
     registerCronHandlers(registry, { dsn: INTEGRATION_DSN! });
     const repo = new BackgroundJobsRepo(db);
@@ -164,8 +164,10 @@ describeDb("jobRetentionSweepActivity (W4.6 L4+L5)", () => {
       jobType: "job_retention",
       payload: { reviewJobsTtlDays: 30, backgroundJobsTtlDays: 30 }, // the CRON_SCHEDULES input shape
     });
+    // WallClock for the runner cycle (the daily-suite idiom): a FakeClock would make the runner's
+    // hard-runtime ceiling fire instantly and orphan the handler mid-sweep.
     const r = await runOneBackgroundJob({
-      repo, registry, clock: new FakeClock({ now: NOW }),
+      repo, registry, clock: new WallClock(),
       owner: "job-ret-test", leaseS: 30, heartbeatS: 5, maxRuntimeS: 300,
     });
     expect(r.outcome).toBe("done");

@@ -125,6 +125,19 @@ export const CRON_SCHEDULES: ReadonlyArray<CronScheduleSeed> = [
     cadence_spec: "21600", // every 6 hours — parity with the Temporal ScheduleIntervalSpec(hours=6)
     input: {},
   },
+  // W4.6 (L4+L5): job_retention — NET-NEW platform cron (no Temporal predecessor: it sweeps the
+  // de-Temporal runner's OWN job tables, which the Python/Temporal side never had). Daily 03:30 UTC
+  // — the low-traffic retention window, offset from run_id_retention's 03:00 so the two janitors
+  // never contend. TTLs pinned in the input (the run_id_retention posture): 30 days for terminal
+  // review_jobs AND background_jobs rows (the runTtlDays=30 precedent); cache_idempotency rows
+  // carry their own expires_at and need no TTL here.
+  {
+    schedule_id: "codemaster-job-retention",
+    job_type: "job_retention",
+    cadence_kind: "cron",
+    cadence_spec: "30 3 * * *", // daily 03:30 UTC — inside computeNextRun's "M H * * *" vocabulary
+    input: { reviewJobsTtlDays: 30, backgroundJobsTtlDays: 30 },
+  },
 ];
 
 /**
