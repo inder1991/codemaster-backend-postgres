@@ -284,9 +284,23 @@ export function makeInProcessPorts(deps: InProcessPortDeps, signal: AbortSignal)
   // would otherwise need. This is what makes "ALL ports stubbed at the in-process bundle level" a true
   // no-real-wiring path while production (no overrides) still builds the FULLY-real surface, ONCE.
   let baseMemo: Record<string, (input: never) => Promise<unknown>> | undefined;
+  const wiredNames: Array<string> = []; // every baseFn key — validated against the bundle below
   const base = (): Record<string, (input: never) => Promise<unknown>> => {
     if (baseMemo === undefined) {
       baseMemo = buildActivities();
+      // FAIL-LOUD wiring self-check at FIRST resolution (live finding, PR #137): a renamed/mistyped
+      // bundle key is otherwise a silent `undefined` until the port actually FIRES mid-review (the
+      // output-safety emit only fires on a secret-bearing chunk — it died with the opaque
+      // `base(...)[name] is not a function` on the first real review). All baseFn names are
+      // registered before any port can invoke base(), so the check covers the full wired set. The
+      // static twin lives in test/smoke/in_process_ports_wired_keys.smoke.test.ts (CI, env-free).
+      const missing = wiredNames.filter((n) => typeof baseMemo![n] !== "function");
+      if (missing.length > 0) {
+        throw new Error(
+          `in-process ports wired to MISSING buildActivities key(s): ${missing.join(", ")} — ` +
+            `a bundle key was renamed/mistyped; fix the baseFn name(s) in in_process_ports.ts`,
+        );
+      }
     }
     return baseMemo;
   };
@@ -296,9 +310,11 @@ export function makeInProcessPorts(deps: InProcessPortDeps, signal: AbortSignal)
   // dedupFindings, aggregate, persistReviewFindings, persistReviewWalkthrough, postCheckRun, cleanup,
   // citationValidate, emitOutputSafetyAudit, recordDeliverySkipped, buildRetrievedEvidence,
   // updatePrDescriptionSummary, applyArbitration, recordToolRuns) — exactly as build_activities registers.
-  const baseFn = <I, O>(name: string): (input: I) => Promise<O> =>
+  const baseFn = <I, O>(name: string): (input: I) => Promise<O> => {
+    wiredNames.push(name); // wiring time = makeInProcessPorts; base() validates the full set on first use
     // eslint-disable-next-line security/detect-object-injection -- `name` is a hardcoded build_activities registry key, not external input
-    (input: I): Promise<O> => (base()[name] as unknown as (input: I) => Promise<O>)(input);
+    return (input: I): Promise<O> => (base()[name] as unknown as (input: I) => Promise<O>)(input);
+  };
 
   // The strict-ledger cache (F4) + the LLM-bearing holders, built lazily ONCE.
   let strictCacheMemo: LlmClientCacheLike | undefined;
@@ -410,7 +426,9 @@ export function makeInProcessPorts(deps: InProcessPortDeps, signal: AbortSignal)
     postCheckRun: pick("postCheckRun", baseFn("postCheckRun")),
     cleanup: pick("cleanup", baseFn("releaseWorkspace")),
     citationValidate: pick("citationValidate", baseFn("citationValidate")),
-    emitOutputSafetyAudit: pick("emitOutputSafetyAudit", baseFn("emitOutputSafetyAudit")),
+    // NB the bundle key carries the `Event` suffix (build_activities.ts registers the bare activity
+    // fn `emitOutputSafetyAuditEvent`) — the PORT name does not. The mismatch was the PR #137 bug.
+    emitOutputSafetyAudit: pick("emitOutputSafetyAudit", baseFn("emitOutputSafetyAuditEvent")),
     recordDeliverySkipped: pick("recordDeliverySkipped", baseFn("recordDeliverySkipped")),
     buildRetrievedEvidence: pick("buildRetrievedEvidence", baseFn("buildRetrievedEvidence")),
     updatePrDescriptionSummary: pick("updatePrDescriptionSummary", baseFn("updatePrDescriptionSummary")),
