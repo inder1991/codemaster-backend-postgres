@@ -100,3 +100,67 @@ describeDb("runReviewJob — happy path (W5.2 Step 3)", () => {
     }
   });
 });
+
+// ─── CS8 (C4/L12): structured degradation logging — a degraded review is VISIBLE in logs ─────────
+// Pre-CS8 the shell hardcoded a discard StageLogger (`void msg`), and recordStage no-ops outside a
+// Temporal workflow context — so in the Postgres runner a degraded stage emitted NOTHING anywhere.
+// The shell must bind the job's correlation context (run_id / installation_id / head_sha / repo /
+// trace_id) into a structured logger whose SINK is injectable (production default: pino), and the
+// degradation WARN must arrive as a structured record, not a string to be regex-mined.
+describeDb("runReviewJob — structured degradation logging (CS8)", () => {
+  it("a degraded stage emits ONE structured record on the injected logSink with the full correlation context", async () => {
+    const repo = new ReviewJobsRepo(db);
+    const seed = await seedTenant(db, 117);
+    try {
+      await repo.enqueue({
+        runId: seed.runId,
+        reviewId: seed.reviewId,
+        installationId: seed.installationId,
+        payload: payloadFor(seed),
+      });
+
+      const calls: Array<string> = [];
+      const records: Array<Record<string, unknown>> = [];
+      const handler = runReviewJob({
+        repo,
+        pool,
+        dsn: INTEGRATION_DSN!,
+        clock,
+        mutexRenewIntervalS: 999,
+        ports: makeStubPorts(calls, {
+          persistReviewFindings: async () => {
+            throw new Error("persist blew up (CS8 fail-soft fixture)");
+          },
+        }),
+        lifecycle: makeStubLifecycle(calls),
+        logSink: (record) => {
+          records.push(record as unknown as Record<string, unknown>);
+        },
+      });
+
+      const res = await runOneJob({
+        repo, clock, owner: "cs8-w1", leaseS: 5, heartbeatS: 1, maxRuntimeS: 60, handler,
+      });
+
+      // Fail-soft unchanged: the degraded stage does NOT fail the review.
+      expect(res.outcome).toBe("done");
+
+      // The degradation is no longer silently discarded: ONE structured record for the stage,
+      // carrying every correlation key an operator pivots on.
+      const degraded = records.filter((r) => r.stage === "persist_findings");
+      expect(degraded).toHaveLength(1);
+      const rec = degraded[0]!;
+      expect(rec.event).toBe("review.stage_degraded");
+      expect(rec.outcome).toBe("degraded");
+      expect(rec.run_id).toBe(seed.runId);
+      expect(rec.installation_id).toBe(seed.installationId);
+      expect(rec.head_sha).toBe("0".repeat(40));
+      expect(rec.repo).toBe("acme/widgets");
+      expect(rec.trace_id).toBeNull(); // OTel trace capture is deferred — the field is carried, null
+      expect(rec.error_class).toBe("Error");
+      expect(String(rec.msg)).toContain("persist_findings failed");
+    } finally {
+      await cleanup(db, seed);
+    }
+  });
+});

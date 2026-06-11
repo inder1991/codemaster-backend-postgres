@@ -33,7 +33,7 @@
 // Runs ONLY against an explicitly-set CODEMASTER_PG_CORE_DSN (the disposable :5434 DB) — never a
 // shared cluster (test skips when the DSN is absent, per test/integration/_db.ts).
 import { randomUUID } from "node:crypto"; // test/ is OUT of the clock/random gate's scope
-import { afterAll, beforeEach, expect, it } from "vitest";
+import { afterAll, beforeEach, expect, it, vi } from "vitest";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import { Pool } from "pg";
 
@@ -334,4 +334,42 @@ describeDb("OutboxDispatcherLoop — Postgres leased drain loop (Phase 3c)", () 
     await run;
     expect(dispatched).toHaveLength(0); // empty outbox → the pass idled; nothing dispatched
   }, 10_000);
+});
+
+// ─── CS8: the per-row catch emits a STRUCTURED WARN — failures were previously log-invisible ─────
+// (the error landed only in the row's last_error column, visible only by querying core.outbox).
+describeDb("OutboxDispatcherLoop — structured per-row failure WARN (CS8)", () => {
+  it("(8) a failing dispatch emits ONE structured console.warn JSON per row — classification included", async () => {
+    const clock = new FakeClock({ now: new Date("2026-06-10T12:00:00.000Z") });
+    const poison = await seedReconcileRow({ tag: "cs8-poison", createdAt: new Date("2026-06-10T11:00:00.000Z") });
+    const flaky = await seedReconcileRow({ tag: "cs8-flaky", createdAt: new Date("2026-06-10T11:00:01.000Z") });
+    const { activities } = makeActivities({
+      clock,
+      dispatchImpl: async (input) => {
+        if (input.row_id === poison) { throw new PermanentSinkError("payload schema violated"); }
+        if (input.row_id === flaky) { throw new Error("503 from GitHub"); }
+      },
+    });
+    const loop = new OutboxDispatcherLoop({ activities, clock, batchSize: 10, idleS: 2 });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await loop.drainOnce();
+
+      const parsed = warnSpy.mock.calls
+        .map((c) => { try { return JSON.parse(String(c[0])) as Record<string, unknown>; } catch { return null; } })
+        .filter((r): r is Record<string, unknown> => r !== null && r.event === "outbox.dispatch_failed");
+      expect(parsed).toHaveLength(2);
+
+      const perm = parsed.find((r) => r.row_id === poison)!;
+      expect(perm.classification).toBe("permanent");
+      expect(perm.sink).toBe("installation_reconcile");
+      expect(String(perm.error)).toContain("payload schema violated");
+
+      const retry = parsed.find((r) => r.row_id === flaky)!;
+      expect(retry.classification).toBe("retryable");
+      expect(String(retry.error)).toContain("503 from GitHub");
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
 });
