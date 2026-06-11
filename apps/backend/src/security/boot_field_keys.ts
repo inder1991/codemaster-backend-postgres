@@ -143,7 +143,15 @@ function fileKeysetReader(path: string): VaultKvRawReadPort {
   return {
     kvReadRaw: async (): Promise<Record<string, unknown>> => {
       const raw = await readFile(path, "utf-8");
-      const parsed: unknown = JSON.parse(raw);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        // CONTENT-FREE on purpose (FileKvReader's sterile-message rule): a V8 SyntaxError embeds a
+        // snippet of the parsed input in its message, and this file's content is AES key material —
+        // the raw error must never reach the boot logs the entrypoints' fail-loud catches print to.
+        throw new FieldKeyBootError(`keyset file ${path} is not valid JSON`);
+      }
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
         throw new FieldKeyBootError(`keyset file ${path} must contain a JSON object`);
       }

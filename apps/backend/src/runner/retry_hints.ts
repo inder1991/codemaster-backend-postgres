@@ -45,8 +45,16 @@ export function extractRetryAtHint(e: unknown, clock: Clock): Date | null {
   if (typeof retryAfterSeconds === "number" && Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
     waitSeconds = retryAfterSeconds;
   } else if (resetAt instanceof Date && Number.isFinite(resetAt.getTime())) {
-    waitSeconds = Math.max(0, (resetAt.getTime() - nowMs) / 1000);
+    waitSeconds = (resetAt.getTime() - nowMs) / 1000;
   } else {
+    waitSeconds = DEFAULT_THROTTLE_DEFER_SECONDS;
+  }
+  // A NON-POSITIVE derived wait means "no usable hint", NOT "retry now": the GitHub client stamps
+  // resetAt = clock.now() on a header-less secondary limit (api_client.ts — Retry-After is often
+  // absent there), and deferRetry un-burns the attempt while both runner loops sleep only on
+  // 'idle' — so flooring at zero would produce an UNBOUNDED zero-backoff claim→call→defer hot
+  // loop against a still-throttled GitHub, deepening the very penalty this seam exists to avoid.
+  if (waitSeconds <= 0) {
     waitSeconds = DEFAULT_THROTTLE_DEFER_SECONDS;
   }
   return new Date(nowMs + Math.min(waitSeconds, MAX_THROTTLE_DEFER_SECONDS) * 1000);
