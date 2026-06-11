@@ -363,6 +363,22 @@ describeDb("BackgroundJobsTemporalPort + the runner's always-Postgres sink wirin
     expect(await allJobs()).toHaveLength(0);
   });
 
+  it("(3b) a DEEP non-JSON payload value (NaN) on the background route throws PermanentSinkError — deterministic poison never burns the outbox retry curve (W1.9e)", async () => {
+    // BackgroundJobsRepo.enqueue's strict JSON-tree validation (W4c.1 #9) throws a ZodError on a
+    // nested NaN/undefined/Date — the SAME bytes fail identically on every redelivery, so the
+    // dispatch path must classify it PERMANENT (dead-letter on attempt 1), not retryable noise.
+    const port = makeCutoverPort();
+    const call = startCall({
+      workflowType: "reconcileInstallation",
+      workflowId: "wf-deep-poison",
+      args: [{ nested: { bad: Number.NaN } }],
+    });
+
+    await expect(port.startWorkflow(call)).rejects.toBeInstanceOf(PermanentSinkError);
+    await expect(port.startWorkflow(call)).rejects.toThrow(/reconcileInstallation/);
+    expect(await allJobs()).toHaveLength(0);
+  });
+
   it("(4) cancelWorkflow / signalWorkflow throw — the outbox sinks only start", async () => {
     // Widened to the PORT type — the realistic caller view (the concrete class omits the params
     // entirely; a TS implementation may take fewer params than its interface).
@@ -509,6 +525,38 @@ describeDb("BackgroundJobsTemporalPort + the runner's always-Postgres sink wirin
     expect(reviewRows[0]!.state).toBe("ready");
   });
 
+  it("(9c) the dispatching outbox ROW's delivery_id cross-checks the payload identity — a divergence is PERMANENT, a match engages the persisted column (W1.9e)", async () => {
+    // Pre-W1.9e the port sourced the enqueue envelope's delivery_id FROM the payload itself, so
+    // assertPayloadIdentityMatchesEnvelope's delivery_id arm compared the payload against itself
+    // (tautological). The row's delivery_id (the producer stamps ONE webhook delivery id on BOTH —
+    // github_webhook_persistence.ts) is the INDEPENDENT identity source: threaded through the port's
+    // 3rd param it makes the cross-check real, and a divergent pair (a drifted/poisoned producer)
+    // must dead-letter PERMANENTLY instead of retrying toward the same deterministic mismatch.
+    const s = await seedRunTracked();
+    const payload = minimalReviewPayload(s);
+    const port = makeCutoverPort();
+    const call = startCall({
+      workflowType: "reviewPullRequest",
+      workflowId: `review/${payload.installation_id}/${payload.repository_id}/${payload.pr_number}`,
+      args: [payload],
+    });
+
+    await expect(
+      port.startWorkflow(call, payload.installation_id, "dlv-DIVERGED-from-payload"),
+    ).rejects.toBeInstanceOf(PermanentSinkError);
+    await expect(
+      port.startWorkflow(call, payload.installation_id, "dlv-DIVERGED-from-payload"),
+    ).rejects.toThrow(/delivery_id/);
+    expect(await allReviewJobs()).toHaveLength(0); // nothing was written on the mismatch
+
+    // The MATCHING row delivery_id (the production shape) enqueues with the cross-check engaged.
+    const jobId = await port.startWorkflow(call, payload.installation_id, payload.delivery_id);
+    const rows = await allReviewJobs();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.job_id).toBe(jobId);
+    expect(rows[0]!.delivery_id).toBe(payload.delivery_id);
+  });
+
   it("(10) a reviewPullRequest dispatch whose args[0] is not a valid ReviewPullRequestPayloadV1 throws PermanentSinkError; NEITHER table gets a row", async () => {
     const port = makeCutoverPort();
     const call = startCall({
@@ -543,18 +591,21 @@ describeDb("BackgroundJobsTemporalPort + the runner's always-Postgres sink wirin
     wireOutboxSinks(db);
 
     // The producer byte path: ONE temporal_workflow_start row whose payload is the buildOuterPayload
-    // envelope (workflow_type='reviewPullRequest', args:[the fully-allocated v2 payload]).
+    // envelope (workflow_type='reviewPullRequest', args:[the fully-allocated v2 payload]). W1.9e:
+    // the row's delivery_id is the SAME webhook delivery id the payload carries — the producer
+    // stamps one value on both (github_webhook_persistence.ts), and the port now cross-checks them.
     const envelope = reviewStartEnvelope(payload);
+    const rowId = randomUUID();
     await sql`INSERT INTO core.outbox
         (id, sink, payload, schema_version, run_id, trace_context, delivery_id, installation_id)
-      VALUES (${randomUUID()}, 'temporal_workflow_start', CAST(${JSON.stringify(envelope)} AS JSONB), 2,
-              NULL, CAST('{}' AS JSONB), ${`cutover-it11-${gid}`}, ${installationUuid})`.execute(db);
+      VALUES (${rowId}, 'temporal_workflow_start', CAST(${JSON.stringify(envelope)} AS JSONB), 2,
+              NULL, CAST('{}' AS JSONB), ${payload.delivery_id}, ${installationUuid})`.execute(db);
 
     const handles = buildBackgroundRunner({ db, clock: new WallClock(), config: TEST_CONFIG });
     expect(await handles.drainOutboxOnce()).toBe(1);
 
     const outboxRow = await sql<{ state: string; last_error: string | null }>`
-      SELECT state, last_error FROM core.outbox WHERE delivery_id = ${`cutover-it11-${gid}`}`.execute(db);
+      SELECT state, last_error FROM core.outbox WHERE id = ${rowId}`.execute(db);
     expect(outboxRow.rows[0]!.state).toBe("dispatched");
     expect(outboxRow.rows[0]!.last_error).toBeNull();
 
@@ -569,6 +620,45 @@ describeDb("BackgroundJobsTemporalPort + the runner's always-Postgres sink wirin
     expect(reviewRows[0]!.payload).toEqual(payload);
     expect(reviewRows[0]!.state).toBe("ready");
     expect(await allJobs()).toHaveLength(0);       // NOT a background_jobs row
+  });
+
+  it("(11b) E2E: an outbox row whose delivery_id DIVERGES from the payload's dead-letters PERMANENTLY on the first drain (W1.9e)", async () => {
+    // The full chain — claimPending → drain loop → dispatchRow → SinkContext → sink handler →
+    // port → enqueue identity assert: a row/payload delivery_id divergence is a deterministic
+    // identity fault (the SAME bytes mismatch on every redelivery), so the row must go DEAD on
+    // attempt 1 with the divergence named in last_error — never burn the 5-attempt outbox curve,
+    // and never enqueue a review job under a divergent identity.
+    const gid = nextGhIid();
+    const login = `cutover-${gid}`;
+    const ins = await pool.query<{ installation_id: string }>(
+      `INSERT INTO core.installations (github_installation_id, account_login, account_type)
+       VALUES ($1, $2, 'Organization') RETURNING installation_id`,
+      [gid, login],
+    );
+    const installationUuid = ins.rows[0]!.installation_id;
+    const seeded = await seedRunTracked();
+    const payload = minimalReviewPayload({
+      runId: seeded.runId, reviewId: seeded.reviewId, installationId: installationUuid,
+    });
+
+    wireOutboxSinks(db);
+
+    const rowId = randomUUID();
+    await sql`INSERT INTO core.outbox
+        (id, sink, payload, schema_version, run_id, trace_context, delivery_id, installation_id)
+      VALUES (${rowId}, 'temporal_workflow_start',
+              CAST(${JSON.stringify(reviewStartEnvelope(payload))} AS JSONB), 2,
+              NULL, CAST('{}' AS JSONB), ${`DIVERGED-${payload.delivery_id}`}, ${installationUuid})`.execute(db);
+
+    const handles = buildBackgroundRunner({ db, clock: new WallClock(), config: TEST_CONFIG });
+    expect(await handles.drainOutboxOnce()).toBe(1);
+
+    const outboxRow = await sql<{ state: string; last_error: string | null }>`
+      SELECT state, last_error FROM core.outbox WHERE id = ${rowId}`.execute(db);
+    expect(outboxRow.rows[0]!.state).toBe("dead");               // PERMANENT — attempt 1, no retry burn
+    expect(outboxRow.rows[0]!.last_error).toMatch(/delivery_id/); // the dead row names the divergence
+    expect(await allReviewJobs()).toHaveLength(0);               // no job under a divergent identity
+    expect(await allJobs()).toHaveLength(0);
   });
 
   it("(12) every MAPPED event workflow_type still routes onto background_jobs (and never review_jobs)", async () => {
