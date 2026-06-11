@@ -2,6 +2,9 @@
 // vendor/codemaster-py/codemaster/activities/outbox.py: claim_pending_rows / dispatch_row /
 // mark_dispatched / mark_attempt_failed). Bundled in one collaborator-injected holder (Shape B) —
 // buildOutboxActivities constructs it once at worker boot and registers the four arrow-property methods.
+// Phase 3c / RC7 adds a 5th, LOOP-ONLY method (markPermanentlyFailed — the immediate dead-letter for
+// non-retryable sink failures); it has no Python counterpart and is NOT Temporal-registered: only the
+// Temporal-free OutboxDispatcherLoop consumes it.
 //
 // Activities run in the NORMAL Node runtime (NOT the workflow V8-isolate sandbox), so they freely touch
 // Postgres + the injected Clock. Each registered method takes exactly ONE typed input (CLAUDE.md
@@ -24,6 +27,7 @@ import {
   DispatchRowInputV1,
   MarkAttemptFailedInputV1,
   MarkDispatchedInputV1,
+  MarkPermanentlyFailedInputV1,
 } from "#contracts/outbox_dispatch.v1.js";
 
 // Sprint 14.5 / S14.5.D — lease-heartbeat tunables (1:1 with vendor/codemaster-py/codemaster/activities/
@@ -147,6 +151,41 @@ export class OutboxDispatchActivities {
           row_id: v.row_id,
           sink: result.sink,
           error: v.error,
+        }),
+      );
+    }
+  };
+
+  /**
+   * `markPermanentlyFailed` (Phase 3c / RC7 — NO Python counterpart; NOT registered on the Temporal
+   * worker): the IMMEDIATE terminal settle for a NON-RETRYABLE dispatch failure. The
+   * OutboxDispatcherLoop classifies PermanentSinkError / UnknownSinkError in its per-row catch and
+   * routes them here instead of {@link markAttemptFailed} — same fenced atomic UPDATE (attempts+1 +
+   * last_error recorded; the R-6 expected_attempts fence suppresses duplicate settlement) but routed
+   * STRAIGHT to 'dead' so a permanent failure never burns maxAttempts backoff cycles. Emits the SAME
+   * canonical `outbox.dead_letter` signal exactly once (the fence's `null` on a duplicate suppresses
+   * a second emit), tagged `classification: "permanent"` to distinguish it from attempts-exhausted.
+   */
+  public readonly markPermanentlyFailed = async (input: MarkPermanentlyFailedInputV1): Promise<void> => {
+    const v = MarkPermanentlyFailedInputV1.parse(input);
+    const result = await this.#repo.markAttemptFailed({
+      db: this.#db,
+      id: v.row_id,
+      error: v.error,
+      maxAttempts: this.#maxAttempts,
+      expectedAttempts: v.expected_attempts,
+      permanent: true,
+    });
+    if (result?.state === "dead") {
+      // SEAM (OTel — DEFER §D5): OUTBOX_DEAD_LETTER_COUNTER.add(1, { sink: result.sink }) — same seam
+      // as markAttemptFailed's emit above.
+      console.error(
+        JSON.stringify({
+          event: "outbox.dead_letter",
+          row_id: v.row_id,
+          sink: result.sink,
+          error: v.error,
+          classification: "permanent",
         }),
       );
     }

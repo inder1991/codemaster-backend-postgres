@@ -280,6 +280,9 @@ export function buildBackgroundRunner(deps: BackgroundRunnerDeps): BackgroundRun
       dispatchRow: outboxActivities.dispatchRow,
       markDispatched: outboxActivities.markDispatched,
       markAttemptFailed: outboxActivities.markAttemptFailed,
+      // RC7: the loop-only immediate dead-letter for non-retryable sink failures
+      // (PermanentSinkError / UnknownSinkError) — NOT registered on the Temporal worker.
+      markPermanentlyFailed: outboxActivities.markPermanentlyFailed,
     },
     clock,
     idleS: config.outboxIdleS,

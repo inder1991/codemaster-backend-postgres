@@ -11,11 +11,14 @@
 //   * continueAsNew / workflowInfo().continueAsNewSuggested — the BF-12 history boundary exists
 //     only because Temporal accumulates event history; this loop holds no history at all.
 //   * The per-activity proxyActivities retry curves (retryDb ×5 / retryDispatch ×2). Dispatch-level
-//     retry rides the ROW's durable `attempts` column instead: a failed dispatch is recorded via
-//     markAttemptFailed (lease released → re-claimable; atomically dead-lettered at the threshold),
-//     so retries survive process restarts exactly as they did under Temporal. A DB error on
-//     claim/mark propagates OUT of {@link OutboxDispatcherLoop.run} — fail-loud; the composition
-//     root's restart policy is the supervisor (the same posture as SchedulerLoop.run).
+//     retry rides the ROW's durable `attempts` column instead: a TRANSIENT dispatch failure is
+//     recorded via markAttemptFailed (lease deferred by the CS3c.1 backoff → re-claimable;
+//     atomically dead-lettered at the threshold), so retries survive process restarts exactly as
+//     they did under Temporal; a NON-RETRYABLE failure (PermanentSinkError / UnknownSinkError —
+//     RC7, see drainOnce's per-row catch) dead-letters IMMEDIATELY via markPermanentlyFailed
+//     instead of burning the threshold. A DB error on claim/mark propagates OUT of
+//     {@link OutboxDispatcherLoop.run} — fail-loud; the composition root's restart policy is the
+//     supervisor (the same posture as SchedulerLoop.run).
 //   * The isCancellation re-throw in the per-row catch — Temporal injects cancellation into
 //     activity awaits on worker shutdown; this runtime's stop() NEVER interrupts an in-flight
 //     drain pass (it only wakes the idle sleep), so a dispatch failure here is ALWAYS a real
@@ -31,25 +34,30 @@
 // (`ORDER BY o.created_at`), 1:1 with the workflow body's `for (const row of rows)`.
 
 import type { OutboxRow } from "#backend/domain/repos/outbox_repo.js";
+import { PermanentSinkError, UnknownSinkError } from "#backend/outbox/sink_registry.js";
 import type {
   ClaimPendingRowsInputV1,
   DispatchRowInputV1,
   MarkAttemptFailedInputV1,
   MarkDispatchedInputV1,
+  MarkPermanentlyFailedInputV1,
 } from "#contracts/outbox_dispatch.v1.js";
 
 import type { Clock } from "#platform/clock.js";
 
 import { cancellableSleep } from "./clock_async.js";
 
-/** The 4-activity surface the loop drains through — the arrow-property methods of
+/** The 5-activity surface the loop drains through — the arrow-property methods of
  *  OutboxDispatchActivities satisfy it structurally (buildBackgroundRunner wires them; tests
- *  substitute a recording dispatchRow). */
+ *  substitute a recording dispatchRow). markPermanentlyFailed (RC7) is LOOP-ONLY — the Temporal
+ *  workflow proxies just the first 4 (its generic catch predates the taxonomy and retires with it
+ *  in Phase 4). */
 export type OutboxActivityFns = {
   claimPendingRows(input: ClaimPendingRowsInputV1): Promise<Array<OutboxRow>>;
   dispatchRow(input: DispatchRowInputV1): Promise<void>;
   markDispatched(input: MarkDispatchedInputV1): Promise<void>;
   markAttemptFailed(input: MarkAttemptFailedInputV1): Promise<void>;
+  markPermanentlyFailed(input: MarkPermanentlyFailedInputV1): Promise<void>;
 };
 
 // Loop tuning — 1:1 with the workflow module constants (outbox_dispatcher.workflow.ts:24-26).
@@ -150,14 +158,35 @@ export class OutboxDispatcherLoop {
         });
         await this.o.activities.markDispatched({ row_id: row.id });
       } catch (e) {
-        // mark_attempt_failed atomically dead-letters at the threshold; expected_attempts =
-        // row.attempts (the pre-attempt snapshot from claimPendingRows) makes a duplicate
-        // settlement a no-op (R-6).
-        await this.o.activities.markAttemptFailed({
-          row_id: row.id,
-          error: (e instanceof Error ? e.message : String(e)).slice(0, 1024),
-          expected_attempts: row.attempts,
-        });
+        // RC7 — sink error taxonomy (cutover-safety CS4.2; mirrors the background runner's W4a.1
+        // PermanentJobError split). Classification of the dispatch failure:
+        //   * NON-RETRYABLE → dead-letter IMMEDIATELY. PermanentSinkError is the sink's declared
+        //     "retry CANNOT succeed" (schema-violating payload, REJECT_DUPLICATE, …);
+        //     UnknownSinkError means NO handler is registered for the row's sink — a wiring bug
+        //     retry cannot conjure away. Burning maxAttempts backoff cycles on these only delays
+        //     the dead-letter signal operators page off. The taxonomy class name is prefixed into
+        //     last_error so the one-attempt dead row is self-describing. instanceof is sound here:
+        //     dispatchRow is an in-process call (no Temporal serialization boundary), so the thrown
+        //     error keeps its class identity.
+        //   * Everything else is presumed TRANSIENT → markAttemptFailed (the CS3c.1 exponential-
+        //     backoff retry path; atomically dead-letters at the threshold).
+        // Both settles share the R-6 fence: expected_attempts = row.attempts (the pre-attempt
+        // snapshot from claimPendingRows) makes a duplicate settlement a rowcount-0 no-op, and the
+        // lease semantics are the repo's (terminal → lease released; retry → lease DEFERRED by the
+        // backoff so a failing sink is paced, not hammered).
+        if (e instanceof PermanentSinkError || e instanceof UnknownSinkError) {
+          await this.o.activities.markPermanentlyFailed({
+            row_id: row.id,
+            error: `${e.name}: ${e.message}`.slice(0, 1024),
+            expected_attempts: row.attempts,
+          });
+        } else {
+          await this.o.activities.markAttemptFailed({
+            row_id: row.id,
+            error: (e instanceof Error ? e.message : String(e)).slice(0, 1024),
+            expected_attempts: row.attempts,
+          });
+        }
       }
     }
     return rows.length;

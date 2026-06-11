@@ -78,3 +78,22 @@ export const MarkAttemptFailedInputV1 = z.object({
   expected_attempts: z.number().int().min(0).default(0),
 });
 export type MarkAttemptFailedInputV1 = z.infer<typeof MarkAttemptFailedInputV1>;
+
+/**
+ * Input for the `markPermanentlyFailed` activity (Phase 3c / RC7 — the Postgres drain loop's consumer of
+ * the sink error taxonomy): the IMMEDIATE terminal settle for a NON-RETRYABLE dispatch failure
+ * (PermanentSinkError / UnknownSinkError). Same shape as MarkAttemptFailedInputV1 — `expected_attempts`
+ * keeps the R-6 fence so a duplicate settlement is a rowcount=0 no-op, never a double increment.
+ *
+ * TS-ONLY: the frozen Python outbox never classified permanent failures (its dispatcher burned every
+ * attempt through markAttemptFailed), so this model has NO Pydantic counterpart and is deliberately
+ * ABSENT from outbox_dispatch.v1.parity.test.ts. It is also NOT registered on the Temporal worker
+ * (build_outbox_activities.ts stays at the 4 workflow-proxied activities) — only the Temporal-free
+ * OutboxDispatcherLoop calls it.
+ */
+export const MarkPermanentlyFailedInputV1 = z.object({
+  row_id: z.string().uuid(),
+  error: z.string().max(1024),
+  expected_attempts: z.number().int().min(0).default(0),
+});
+export type MarkPermanentlyFailedInputV1 = z.infer<typeof MarkPermanentlyFailedInputV1>;

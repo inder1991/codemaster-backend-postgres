@@ -154,6 +154,7 @@ function makeOutboxActivities(clock: Clock): {
     },
     markDispatched: acts.markDispatched,
     markAttemptFailed: acts.markAttemptFailed,
+    markPermanentlyFailed: acts.markPermanentlyFailed,
   };
   return { activities, dispatched, claims };
 }

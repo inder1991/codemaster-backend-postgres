@@ -121,6 +121,7 @@ function makeActivities(o: {
     },
     markDispatched: acts.markDispatched,
     markAttemptFailed: acts.markAttemptFailed,
+    markPermanentlyFailed: acts.markPermanentlyFailed,
   };
   return { activities, dispatched, claims };
 }

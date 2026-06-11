@@ -88,6 +88,7 @@ function stubOutboxActivities(onClaim: () => void): OutboxActivityFns {
     dispatchRow: async () => undefined,
     markDispatched: async () => undefined,
     markAttemptFailed: async () => undefined,
+    markPermanentlyFailed: async () => undefined,
   };
 }
 
@@ -215,6 +216,7 @@ describe("runSupervisedLoops — every loop crashed (the fail-loud exit path)", 
       activities: {
         claimPendingRows: async (): Promise<never> => { throw new Error("rigged: outbox claim failure"); },
         dispatchRow: async () => undefined, markDispatched: async () => undefined, markAttemptFailed: async () => undefined,
+        markPermanentlyFailed: async () => undefined,
       },
       clock, idleS: 600,
     });

@@ -274,6 +274,14 @@ export class PostgresOutboxRepo {
    * would hammer a failing sink and burn every attempt in milliseconds. The terminal ('dead') path
    * sets `leased_until = NULL` — no re-claim ever. Both branches compute "now" from the injected
    * {@link Clock} (consistent with `last_attempted_at` on the same statement; never SQL `now()`).
+   *
+   * ## Permanent failures (Phase 3c / RC7 — sink error taxonomy)
+   * `permanent: true` routes the SAME fenced atomic UPDATE straight to the terminal branch
+   * ('dead' + lease released) regardless of `attempts + 1 >= maxAttempts` — a NON-RETRYABLE
+   * dispatch failure (PermanentSinkError / UnknownSinkError, classified by the caller) must NOT
+   * burn maxAttempts backoff cycles before dead-lettering. The attempt is still recorded
+   * (attempts+1, last_error, last_attempted_at) and the R-6 `attempts = expectedAttempts` fence
+   * still makes a duplicate settlement a rowcount=0 no-op. Default false (the retry/backoff path).
    */
   public async markAttemptFailed(args: {
     db: Executor;
@@ -281,19 +289,21 @@ export class PostgresOutboxRepo {
     error: string;
     maxAttempts: number;
     expectedAttempts: number;
+    permanent?: boolean;
   }): Promise<{ state: string; sink: string } | null> {
+    const permanent = args.permanent === true;
     const result = await sql<{ state: string; sink: string }>`
       UPDATE core.outbox
          SET attempts = attempts + 1,
              last_error = ${args.error.slice(0, 1024)},
              last_attempted_at = ${this.#clock.now()},
              leased_until = CASE
-               WHEN attempts + 1 >= ${args.maxAttempts} THEN NULL
+               WHEN ${permanent}::boolean OR attempts + 1 >= ${args.maxAttempts} THEN NULL
                ELSE ${this.#clock.now()}::timestamptz
                     + LEAST(${OUTBOX_RETRY_BACKOFF_BASE_SECONDS} * power(2, attempts),
                             ${OUTBOX_RETRY_BACKOFF_CAP_SECONDS}) * interval '1 second'
              END,
-             state = CASE WHEN attempts + 1 >= ${args.maxAttempts} THEN 'dead' ELSE state END
+             state = CASE WHEN ${permanent}::boolean OR attempts + 1 >= ${args.maxAttempts} THEN 'dead' ELSE state END
        WHERE id = ${args.id} AND attempts = ${args.expectedAttempts}
        RETURNING state, sink
     `.execute(args.db);
