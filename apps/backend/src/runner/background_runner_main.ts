@@ -12,6 +12,7 @@ import { PostgresOutboxRepo } from "#backend/domain/repos/outbox_repo.js";
 import { LlmInvocationLedger } from "#backend/integrations/llm/invocation_ledger.js";
 import { registerInstallationReconcileSink } from "#backend/outbox/sinks/installation_reconcile.js";
 import { registerTemporalWorkflowStartSink } from "#backend/outbox/sinks/temporal_workflow_start.js";
+import { installFieldKeyRegistryAtBoot } from "#backend/security/boot_field_keys.js";
 
 import type { Clock } from "#platform/clock.js";
 import { WallClock } from "#platform/clock.js";
@@ -629,6 +630,13 @@ export async function runBackgroundRunner(
         `and double-drains the outbox)`,
     );
   }
+  // CS6 (EC5): install the field-encryption key registry BEFORE anything else — decoupled from
+  // CODEMASTER_AUTH_ROUTES_ENABLED. The runner's idle review cycle runs reapStuckRuns, whose
+  // self-healing audit emit encrypts fail-closed: without keys, a production pod would wedge on
+  // the FIRST reap (LocalKeyEncryptionError on every emit — the ADR-0064 re-wedging class) instead
+  // of refusing boot here. Dev/test with no CODEMASTER_FIELD_KEY_SOURCE skips (codec fail-closed).
+  await installFieldKeyRegistryAtBoot(process.env);
+
   // CS1.2: the ONE shadow flag — resolved from the typed mode HERE and threaded explicitly into
   // every seam below (buildBackgroundRunner → the three loops + HandlerDeps; wireOutboxSinks → the
   // enqueue port). In shadow the runtime boots, polls, and observes but performs NO production

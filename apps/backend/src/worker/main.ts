@@ -40,6 +40,7 @@ import { createRequire } from "node:module";
 import { NativeConnection, Worker } from "@temporalio/worker";
 
 import { startupSelfCheck } from "../chunking/treesitter_loader.js";
+import { installFieldKeyRegistryAtBoot } from "../security/boot_field_keys.js";
 import { buildActivities } from "./registry.js";
 import { resolveWorkerTemporalConfig } from "./temporal_config.js";
 
@@ -57,6 +58,14 @@ const require_ = createRequire(import.meta.url);
  * conditionally rather than passing `undefined`.
  */
 export async function runWorker(): Promise<void> {
+  // CS6 (EC5): install the field-encryption key registry FIRST — decoupled from
+  // CODEMASTER_AUTH_ROUTES_ENABLED. This worker registers the audit-emitting activities
+  // (review_run_reaper, mutex_janitor, start_review_for_webhook, run_id_retention), so a
+  // production pod without keys must refuse boot HERE rather than throw LocalKeyEncryptionError
+  // on the first self-healing emit and re-wedge the ADR-0064 stuck-review class. Dev/test with no
+  // CODEMASTER_FIELD_KEY_SOURCE skips (the codec stays fail-closed).
+  await installFieldKeyRegistryAtBoot(process.env);
+
   // Fail LOUD at worker boot if the vendored tree-sitter grammars are missing/corrupt (ADR-0067 cond 3,
   // SHA-256-verified). Without this, a missing .wasm would surface as a degraded review mid-flight (the
   // chunker falling back to hunk-mode) instead of a clear startup failure.
