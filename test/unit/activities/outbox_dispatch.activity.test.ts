@@ -125,6 +125,9 @@ describe("OutboxDispatchActivities", () => {
       deliveryId: "dlv-w19e-threaded",
       installationId: null,
       runId: null,
+      // RM2 (merged in the same wave): the context also carries the dispatching row's id — the
+      // destination-side idempotency key. The two context extensions compose.
+      outboxRowId: ROW_1,
     });
   });
 

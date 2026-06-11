@@ -28,6 +28,7 @@ import {
   MutexJanitorCronInputV1,
   PartitionMaintenanceCronInputV1,
   ReviewRunReaperCronInputV1,
+  JobRetentionCronInputV1,
   RunIdRetentionCronInputV1,
   WorkspaceRetentionCronInputV1,
 } from "./handlers/cron_handlers.js";
@@ -41,6 +42,8 @@ export const SCHEDULED_JOB_INPUT_CONTRACTS: ReadonlyMap<string, z.ZodTypeAny> = 
   ["review_run_reaper", ReviewRunReaperCronInputV1],
   ["mark_stale_chunks", MarkStaleChunksInputV1],
   ["partition_maintenance", PartitionMaintenanceCronInputV1],
+  // W4.6 (merged in the same wave): the job-retention janitor's pinned-TTL input.
+  ["job_retention", JobRetentionCronInputV1],
   ["run_id_retention", RunIdRetentionCronInputV1],
   ["workspace_retention", WorkspaceRetentionCronInputV1],
   ["confluence_ingest", ConfluenceIngestCronInput],

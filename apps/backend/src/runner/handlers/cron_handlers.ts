@@ -124,7 +124,7 @@ export const WorkspaceRetentionCronInputV1 = z.object({}).strict();
  *  all-required (the run_id_retention posture): the scheduled row carries the full TTL object, and
  *  a drifted/garbage operator edit fails the parse loudly instead of silently sweeping with
  *  defaults. cache_idempotency needs no TTL — its rows carry their own expires_at. */
-const JobRetentionCronInputV1 = z
+export const JobRetentionCronInputV1 = z
   .object({
     reviewJobsTtlDays: z.number().int().min(1),
     backgroundJobsTtlDays: z.number().int().min(1),
