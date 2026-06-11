@@ -214,9 +214,10 @@ describeDb("Postgres scheduler — pollAndEnqueue (Phase 3a W3)", () => {
     const good = mintIds();
     // The BAD row is seeded FIRST (heap order = iteration order on a wiped table) — under the
     // pre-W4a.2 code its computeNextRun throw rejected the WHOLE pass before the valid row ran.
-    // "*/5 * * * *" is the exact operator-plausible step syntax computeNextRun refuses (3a W3).
+    // "30 5 1 * *" (non-* day-of-month) is outside the deliberate vocabulary; the old poison
+    // example "*/5 * * * *" became VALID with the M12/W3.8 cron-vocabulary expansion.
     await seedSchedule({ scheduleId: bad.scheduleId, jobType: bad.jobType, cadenceKind: "cron",
-      cadenceSpec: "*/5 * * * *", nextRunAt: new Date("2026-06-10T11:58:00.000Z") });
+      cadenceSpec: "30 5 1 * *", nextRunAt: new Date("2026-06-10T11:58:00.000Z") });
     await seedSchedule({ scheduleId: good.scheduleId, jobType: good.jobType, cadenceKind: "interval",
       cadenceSpec: "300", nextRunAt: new Date("2026-06-10T11:59:00.000Z") });
 

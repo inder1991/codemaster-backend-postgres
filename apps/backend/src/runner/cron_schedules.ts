@@ -10,12 +10,15 @@ import type { CadenceKind } from "#contracts/scheduled_job.v1.js";
 // adapters (handlers/cron_handlers.ts) carry the job_type → activity dispatch.
 //
 // ## Cadence parity with the Temporal schedules (deliberate cron → interval translation)
-// The Python/Temporal Wave-1 schedules use 5-field crons ("*/5 * * * *" / "*/10 * * * *"). The
-// Postgres scheduler's cron vocabulary is DAILY-ONLY ("M H * * *" — scheduler.ts::computeNextRun
-// throws on step expressions BY DESIGN), so the every-N-minutes cadences land as
-// cadence_kind 'interval' (cadence_spec = seconds): 300 = every 5min, 600 = every 10min. The only
-// semantic drift is wall-alignment (interval ticks run N seconds after the previous enqueue rather
-// than at :00/:05 boundaries) — irrelevant for liveness backstops. overlap=SKIP falls out of the
+// The Python/Temporal Wave-1 schedules use 5-field crons ("*/5 * * * *" / "*/10 * * * *"). At
+// seed time the Postgres scheduler's cron vocabulary was DAILY-ONLY, so the every-N-minutes
+// cadences landed as cadence_kind 'interval' (cadence_spec = seconds): 300 = every 5min, 600 =
+// every 10min. The only semantic drift is wall-alignment (interval ticks run N seconds after the
+// previous enqueue rather than at :00/:05 boundaries) — irrelevant for liveness backstops. NOTE
+// (M12 / W3.8): scheduler.ts::computeNextRun now speaks the common cron subset (*/N, lists,
+// ranges on minute+hour), so NEW schedules can use wall-aligned "*/5 * * * *" directly; these
+// seeded interval rows are left as-is (ON CONFLICT DO NOTHING never re-cadences an existing row —
+// re-cadencing is an operator UPDATE). overlap=SKIP falls out of the
 // platform's dedup_key = schedule_id (at most one ACTIVE job per schedule), 1:1 with the Temporal
 // `ScheduleOverlapPolicy.SKIP` these schedules carried.
 //
