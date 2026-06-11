@@ -10,10 +10,30 @@ export type SinkContext = {
   deliveryId: string | null;
   installationId: string | null;
   runId: string | null;
+  /** W3.2 (RM2): the dispatching `core.outbox` row id — the canonical DESTINATION-SIDE idempotency
+   *  key. The outbox is at-least-once by construction (a crash between a successful sink dispatch
+   *  and `markDispatched` re-dispatches the SAME row after lease expiry), so every sink destination
+   *  must be able to deduplicate on this key even after a prior execution SETTLED. See the
+   *  at-least-once contract note on {@link SinkHandler}. */
+  outboxRowId: string;
 };
 
 /** A sink handler: deliver `payload` to the sink's destination. Throw {@link RetryableSinkError} for a
- *  transient failure (the dispatcher retries) or {@link PermanentSinkError} to dead-letter immediately. */
+ *  transient failure (the dispatcher retries) or {@link PermanentSinkError} to dead-letter immediately.
+ *
+ *  ## The at-least-once contract (W3.2 / RM2)
+ *  A handler MAY be invoked more than once for the same outbox row (crash-between-dispatch-and-
+ *  markDispatched redrive; an RM1 timeout whose abandoned dispatch later succeeded). Destinations
+ *  must therefore be idempotent on the dispatch identity. Current posture per destination:
+ *    * review route (`reviewPullRequest` → core.review_jobs): idempotent on run_id/delivery_id —
+ *      the CS4.1 (H9/RT3) enqueue coalesces a redrive onto the existing job.
+ *    * event route (workflow_type → core.background_jobs): coalesces on dedup_key=workflow_id ONLY
+ *      while a holder is ACTIVE; a re-dispatch after the first job settled enqueues a second
+ *      execution. {@link SinkContext.outboxRowId} is threaded to this boundary as the persistent
+ *      key; consuming it inside the enqueue path (persistent uniqueness on the row id) is the
+ *      W1.9e/W3.2 enqueue-path slice owned with the background-jobs platform.
+ *    * Temporal route (RealTemporalClient): deterministic workflow ids + reuse/conflict policies
+ *      coalesce by design. */
 export type SinkHandler = (args: { payload: unknown; context: SinkContext }) => Promise<void>;
 
 /** A handler is already registered for this sink name. */

@@ -1,4 +1,5 @@
 import { type Kysely, sql } from "kysely";
+import type { z } from "zod";
 import type { Clock } from "#platform/clock.js";
 import { CadenceKind } from "#contracts/scheduled_job.v1.js";
 import type { EnqueueArgs } from "./background_jobs_repo.js";
@@ -34,7 +35,9 @@ import { recordSchedulerScheduleError } from "./runner_metrics.js";
 //   * The repo's enqueue runs on its OWN pool connection while the poll transaction holds another —
 //     the shared pool must allow ≥ 2 concurrent connections per poller.
 //   * PER-SCHEDULE ISOLATION (Phase 4a W4a.2): a row whose cadence_spec cannot be computed
-//     ({@link computeNextRun} throws — e.g. an operator-inserted "*/5 * * * *") is SKIPPED, not
+//     ({@link computeNextRun} throws — e.g. an operator-inserted "30 5 1 * *"; the M12 vocabulary
+//     expansion made "*/5 * * * *"-class specs VALID, so the poison class is now non-* fields 3-5
+//     and malformed atoms) is SKIPPED, not
 //     pass-fatal: pollAndEnqueue WARN-logs the schedule_id + error, bumps the bounded counter
 //     codemaster_runner_scheduler_schedule_errors_total, leaves the row UNADVANCED (it stays due —
 //     re-attempted next poll, still isolated), and continues to the next schedule. A permanently-bad
@@ -51,12 +54,15 @@ import { recordSchedulerScheduleError } from "./runner_metrics.js";
  * function is deterministic and exhaustively unit-testable.
  *
  *   * `interval`: cadence_spec is a positive integer number of SECONDS → `after` + that many seconds.
- *   * `cron`: ONLY the daily 5-field shape `"M H * * *"` (M = minute 0-59, H = hour 0-23, fields 3-5
- *     the literal `*`) is supported → the next UTC instant at H:M strictly after `after` (today if
- *     H:M is still ahead of `after` today, else tomorrow; `Date.UTC` day-overflow normalization
- *     carries month/year/leap rollovers). ANY other cron shape (lists, ranges, steps, non-* in
- *     fields 3-5, wrong field count, out-of-range M/H) THROWS so we extend the vocabulary
- *     deliberately instead of half-parsing it.
+ *   * `cron` (M12 / W3.8 — the common-subset vocabulary): the 5-field shape `"m h * * *"` where the
+ *     MINUTE and HOUR fields each take a comma-list of atoms — a bare value (`30`), the wildcard
+ *     (`*`), a step (`*\/5`), a range (`9-17`), or a stepped range (`0-30/10`) — evaluated as the
+ *     next UTC minute boundary strictly after `after` whose minute AND hour are in the parsed sets
+ *     (wall-ALIGNED, unlike the drifting `interval` re-encoding the Temporal `*\/N` schedules got).
+ *     Fields 3-5 (day-of-month / month / day-of-week) must stay the literal `*`, and ANY malformed
+ *     atom (out-of-range value, inverted range, zero step, step on a bare value, wrong field count)
+ *     THROWS — we still extend the vocabulary deliberately instead of half-parsing it; the
+ *     per-schedule isolation (W4a.2 + CS7) contains a poison spec to its own row.
  */
 export function computeNextRun(cadenceKind: CadenceKind, cadenceSpec: string, after: Date): Date {
   if (cadenceKind === "interval") {
@@ -66,23 +72,81 @@ export function computeNextRun(cadenceKind: CadenceKind, cadenceSpec: string, af
     return new Date(after.getTime() + Number(cadenceSpec) * 1000);
   }
   if (cadenceKind === "cron") {
-    const bad = (): Error => new Error(`unsupported cron spec: ${cadenceSpec} (only "M H * * *" daily supported)`);
     const fields = cadenceSpec.split(" ");
-    if (fields.length !== 5) throw bad();
-    if (fields[2] !== "*" || fields[3] !== "*" || fields[4] !== "*") throw bad();
-    const m = fields[0]!;
-    const h = fields[1]!;
-    if (!/^\d+$/.test(m) || !/^\d+$/.test(h)) throw bad(); // pure integers only — no lists/ranges/steps/wildcards
-    const minute = Number(m);
-    const hour = Number(h);
-    if (minute > 59 || hour > 23) throw bad();
-    const todayAtMs = Date.UTC(after.getUTCFullYear(), after.getUTCMonth(), after.getUTCDate(), hour, minute, 0, 0);
-    if (todayAtMs > after.getTime()) return new Date(todayAtMs); // today's H:M is still STRICTLY ahead
-    // Else tomorrow — Date.UTC normalizes day overflow across month/year/leap boundaries.
-    return new Date(Date.UTC(after.getUTCFullYear(), after.getUTCMonth(), after.getUTCDate() + 1, hour, minute, 0, 0));
+    if (fields.length !== 5) throw badCronSpec(cadenceSpec);
+    if (fields[2] !== "*" || fields[3] !== "*" || fields[4] !== "*") throw badCronSpec(cadenceSpec);
+    const minutes = parseCronField(fields[0]!, 0, 59, cadenceSpec);
+    const hours = parseCronField(fields[1]!, 0, 23, cadenceSpec);
+    // Scan forward from the minute boundary at/below `after`: candidate i ≥ 1 is the i-th boundary
+    // AFTER it, so every candidate is strictly after `after` by construction. Both sets are
+    // non-empty and every day matches (fields 3-5 are `*`), so a match exists within 24h + 1min;
+    // the 2×1440 ceiling is pure fail-loud paranoia against an arithmetic regression.
+    const baseMs = Date.UTC(
+      after.getUTCFullYear(), after.getUTCMonth(), after.getUTCDate(),
+      after.getUTCHours(), after.getUTCMinutes(), 0, 0,
+    );
+    for (let i = 1; i <= 2 * 1440; i++) {
+      const candidate = new Date(baseMs + i * 60_000);
+      if (minutes.has(candidate.getUTCMinutes()) && hours.has(candidate.getUTCHours())) {
+        return candidate;
+      }
+    }
+    throw new Error(`unsupported cron spec: ${cadenceSpec} (internal: no matching instant within 48h)`);
   }
   // ck_scheduled_jobs_cadence_kind makes this unreachable from DB rows; fail loud on contract drift.
   throw new Error(`unsupported cadence_kind: ${String(cadenceKind)}`);
+}
+
+/** The single deliberate-extension error every malformed cron shape throws (M12). */
+function badCronSpec(spec: string): Error {
+  return new Error(
+    `unsupported cron spec: ${spec} (minute/hour fields take N, *, */S, A-B, A-B/S and ` +
+      `comma-lists of those; fields 3-5 must be *)`,
+  );
+}
+
+/**
+ * Parse ONE cron field (minute or hour) into its matching value set. Atom grammar (the M12 common
+ * subset): `*` | `N` | `*\/S` | `A-B` | `A-B/S`, comma-combined. Steps require a `*` or range base
+ * (standard cron: a step on a bare value is meaningless); ranges must not invert; every value must
+ * sit in [min, max]. PURE and total over strings — anything else throws {@link badCronSpec}.
+ */
+function parseCronField(field: string, min: number, max: number, spec: string): ReadonlySet<number> {
+  const out = new Set<number>();
+  if (field === "") throw badCronSpec(spec);
+  for (const atom of field.split(",")) {
+    let base = atom;
+    let step = 1;
+    const slash = atom.indexOf("/");
+    if (slash !== -1) {
+      base = atom.slice(0, slash);
+      const stepStr = atom.slice(slash + 1);
+      if (!/^\d+$/.test(stepStr) || Number(stepStr) < 1) throw badCronSpec(spec);
+      step = Number(stepStr);
+      if (base !== "*" && !base.includes("-")) throw badCronSpec(spec); // step needs * or a range base
+    }
+    let lo: number;
+    let hi: number;
+    if (base === "*") {
+      lo = min;
+      hi = max;
+    } else if (base.includes("-")) {
+      const parts = base.split("-");
+      if (parts.length !== 2 || !/^\d+$/.test(parts[0]!) || !/^\d+$/.test(parts[1]!)) throw badCronSpec(spec);
+      lo = Number(parts[0]);
+      hi = Number(parts[1]);
+      if (lo > hi) throw badCronSpec(spec); // no wrap-around ranges in the deliberate subset
+    } else {
+      if (!/^\d+$/.test(base)) throw badCronSpec(spec);
+      lo = Number(base);
+      hi = lo;
+    }
+    if (lo < min || hi > max) throw badCronSpec(spec);
+    for (let v = lo; v <= hi; v += step) {
+      out.add(v);
+    }
+  }
+  return out;
 }
 
 /** The narrow enqueue seam the scheduler depends on — BackgroundJobsRepo satisfies it structurally. */
@@ -97,6 +161,9 @@ type DueScheduleRow = {
   cadence_kind: string;
   cadence_spec: string;
   input: Record<string, unknown>;
+  /** The instant the row became due — read for the OM11 cadence-lateness signal (the tick instant
+   *  minus this is the lateness) as well as being the advance UPDATE's predecessor value. */
+  next_run_at: Date;
 };
 
 /**
@@ -122,13 +189,23 @@ export async function pollAndEnqueue(
     /** CS1.2 SHADOW posture: true → the pass OBSERVES the due set (would-enqueue logs) and
      *  performs NO side effect — no enqueue, no `next_run_at` advance, no `last_enqueued_at`
      *  stamp. Default false (the production behavior). */
-    shadow?: boolean },
+    shadow?: boolean;
+    /** W3.8 (RM7) — the scheduler-boundary input-contract registry (job_type → the SAME Zod
+     *  contract its handler parses at dispatch; production threads
+     *  {@link import("./scheduled_input_contracts.js").SCHEDULED_JOB_INPUT_CONTRACTS}). When
+     *  present the boundary is DEFAULT-DENY over the operator-writable `core.scheduled_jobs` row:
+     *  a job_type with no registry entry, or an `input` failing its contract, is rejected BEFORE
+     *  the enqueue side effect — isolated to its own row via the W4a.2 posture (WARN naming the
+     *  schedule_id + bounded error counter + left UNADVANCED), never forwarded to dead-letter at
+     *  handler dispatch after burning a job slot. Omitted → legacy pass-through (the seam stays
+     *  injectable for harnesses that mint synthetic job_types). */
+    inputContracts?: ReadonlyMap<string, z.ZodTypeAny> },
 ): Promise<number> {
   return await o.db.transaction().execute(async (trx) => {
     const now = o.clock.now();
     // core.scheduled_jobs is platform-global (no installation_id column) — no tenancy filter applies.
     const due = await sql<DueScheduleRow>`
-      SELECT schedule_id, job_type, cadence_kind, cadence_spec, input
+      SELECT schedule_id, job_type, cadence_kind, cadence_spec, input, next_run_at
         FROM core.scheduled_jobs
        WHERE enabled AND next_run_at <= ${now}
          FOR UPDATE SKIP LOCKED`.execute(trx);
@@ -159,17 +236,66 @@ export async function pollAndEnqueue(
       const savepoint = `cs7_schedule_${i}`;
       await sql.raw(`SAVEPOINT ${savepoint}`).execute(trx);
       try {
-        // Validate the cadence FIRST ({@link computeNextRun} is pure — throws on a poison spec
+        // W3.8 (RM7): validate the UNTRUSTED row against the job_type's dispatch contract FIRST —
+        // default-deny. `scheduled_jobs` is platform-global operator config with no row tenancy;
+        // pre-RM7 a malformed/hostile row only failed at HANDLER dispatch (dead-letter after
+        // burning a job slot, re-enqueued every tick) and ANY job_type was schedulable, including
+        // the cross-tenant event-driven ones. The throw lands in the W4a.2 catch below: WARN with
+        // the schedule_id, bounded counter, row left unadvanced — and NOTHING was enqueued.
+        if (o.inputContracts !== undefined) {
+          const contract = o.inputContracts.get(row.job_type);
+          if (contract === undefined) {
+            throw new Error(
+              `job_type '${row.job_type}' has no scheduled input contract — ` +
+                `default-deny at the scheduler boundary (RM7; scheduled_input_contracts.ts ` +
+                `registers the schedulable job_types)`,
+            );
+          }
+          const parsed = contract.safeParse(row.input);
+          if (!parsed.success) {
+            throw new Error(
+              `input rejected by the '${row.job_type}' scheduled contract (RM7): ${parsed.error.message}`,
+            );
+          }
+        }
+        // Validate the cadence ({@link computeNextRun} is pure — throws on a poison spec
         // BEFORE any side effect, so a bad schedule enqueues NOTHING), then enqueue (on the repo's
         // own connection — autocommits independently of this txn), then advance the cadence: a crash
         // between enqueue and advance leaves the row due, and the retrying pass's enqueue dedups
         // onto the active job (at-least-once + exactly-one-ACTIVE; module doc §3).
         const enqueuedAt = o.clock.now();
-        const nextRunAt = computeNextRun(CadenceKind.parse(row.cadence_kind), row.cadence_spec, enqueuedAt);
+        const cadenceKind = CadenceKind.parse(row.cadence_kind);
+        const nextRunAt = computeNextRun(cadenceKind, row.cadence_spec, enqueuedAt);
         await o.repo.enqueue({ jobType: row.job_type, payload: row.input, dedupKey: row.schedule_id });
         await sql`UPDATE core.scheduled_jobs
             SET next_run_at = ${nextRunAt}, last_enqueued_at = ${enqueuedAt}, updated_at = ${enqueuedAt}
           WHERE schedule_id = ${row.schedule_id}`.execute(trx);
+        // W3.8 (OM11) — cadence-lateness signal: a wedged/starved schedule must be visible at the
+        // SCHEDULE level (pre-OM11 only downstream symptoms — leaked mutexes, stuck runs — betrayed
+        // a scheduler outage / OC3 wedge). Lateness = this tick's instant minus the row's own
+        // next_run_at; the threshold is ONE FULL CADENCE (the due instant → its next computed
+        // instant), strictly greater — at least one whole cycle was missed, which a healthy poll
+        // loop (pollIntervalS ≪ cadence) can never produce. ONE structured WARN per late tick (the
+        // CS8 console-JSON idiom), emitted AFTER the tick's writes succeeded: pure observability —
+        // LOGS ONLY, deliberately no OTel (the OM11 gauge/alert rides the W3.9 SLO wave); it never
+        // gates the enqueue/advance, and an isolated-failed schedule warns via the W4a.2 path
+        // below instead.
+        const latenessMs = enqueuedAt.getTime() - row.next_run_at.getTime();
+        const cadenceMs =
+          computeNextRun(cadenceKind, row.cadence_spec, row.next_run_at).getTime() -
+          row.next_run_at.getTime();
+        if (latenessMs > cadenceMs) {
+          console.warn(
+            JSON.stringify({
+              event: "scheduler.cadence_late",
+              schedule_id: row.schedule_id,
+              job_type: row.job_type,
+              due_at: row.next_run_at.toISOString(),
+              lateness_s: Math.round(latenessMs / 1000),
+              cadence_s: Math.round(cadenceMs / 1000),
+            }),
+          );
+        }
         await sql.raw(`RELEASE SAVEPOINT ${savepoint}`).execute(trx);
         enqueued += 1;
       } catch (e) {
@@ -206,7 +332,10 @@ export class SchedulerLoop {
   constructor(
     private o: { repo: SchedulerEnqueuePort; db: Kysely<unknown>; clock: Clock; pollIntervalS: number;
       /** CS1.2 SHADOW posture, threaded straight into every {@link pollAndEnqueue} pass. */
-      shadow?: boolean },
+      shadow?: boolean;
+      /** W3.8 (RM7) — the boundary input-contract registry, threaded straight into every
+       *  {@link pollAndEnqueue} pass (see its doc for the default-deny semantics). */
+      inputContracts?: ReadonlyMap<string, z.ZodTypeAny> },
   ) {}
   stop(): void { this.#stopped = true; this.#stop.abort(); }
 

@@ -46,6 +46,7 @@ import {
   UnknownSinkError,
 } from "#backend/outbox/sink_registry.js";
 import {
+  DEFAULT_OUTBOX_DISPATCH_TIMEOUT_SECONDS,
   OutboxDispatcherLoop,
   type OutboxActivityFns,
 } from "#backend/runner/outbox_dispatcher_loop.js";
@@ -304,6 +305,43 @@ describeDb("OutboxDispatcherLoop — Postgres leased drain loop (Phase 3c)", () 
     expect(dispatched).toHaveLength(2);
     expect((await rowOf(flaky)).attempts).toBe(2);   // still riding the bounded retry curve
   });
+
+  it("(2f) RM1/W3.2: a HUNG dispatch is bounded by the per-dispatch timeout — the row releases to the backoff machinery and the batch still drains", async () => {
+    // WallClock + a tiny configured bound drive the REAL race here (FakeClock.sleep resolves
+    // instantly, which is the watchdog's hot-spin mode, not its timing mode); the production
+    // default bound is pinned at the bottom of the test.
+    const clock = new WallClock();
+    const t0 = Date.now();
+    const hung = await seedReconcileRow({ tag: "hung", createdAt: new Date(t0 - 2000) });
+    const ok = await seedReconcileRow({ tag: "ok", createdAt: new Date(t0 - 1000) });
+    const { activities, dispatched } = makeActivities({
+      clock,
+      dispatchImpl: async (input) => {
+        if (input.row_id === hung) {
+          await new Promise<never>(() => {}); // a black-holed sink: the dispatch NEVER settles (RM1)
+        }
+      },
+    });
+    const loop = new OutboxDispatcherLoop({ activities, clock, batchSize: 10, idleS: 2, dispatchTimeoutS: 0.2 });
+
+    // Pre-RM1 this await NEVER resolves (the serial loop is wedged on the hung dispatch forever).
+    expect(await loop.drainOnce()).toBe(2);
+
+    const failed = await rowOf(hung);
+    expect(failed.state).toBe("pending");      // released to the EXISTING retry path — not dead, not dispatched
+    expect(failed.attempts).toBe(1);            // the timeout is recorded as a real attempt (R-6 fence intact)
+    expect(failed.dispatched_at).toBeNull();
+    expect(failed.last_error).toContain("per-dispatch"); // the bound is named in last_error forensics
+    expect(failed.leased_until).not.toBeNull(); // the CS3c.1 backoff machinery engaged (lease DEFERRED)
+
+    // Per-row isolation preserved: the row claimed AFTER the hung one still dispatched + settled
+    // in the SAME pass — one unhealthy downstream no longer freezes all outbox draining.
+    expect(dispatched.map((d) => d.row_id)).toEqual([hung, ok]);
+    expect((await rowOf(ok)).state).toBe("dispatched");
+
+    // The production default is the old Temporal start-to-close bound the plain loop dropped (RM1).
+    expect(DEFAULT_OUTBOX_DISPATCH_TIMEOUT_SECONDS).toBe(60);
+  }, 10_000);
 
   it("(3) an empty outbox → drainOnce claims nothing and never dispatches", async () => {
     const clock = new FakeClock({ now: new Date("2026-06-10T12:00:00.000Z") });

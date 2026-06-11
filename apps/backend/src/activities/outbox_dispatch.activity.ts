@@ -37,6 +37,14 @@ import {
 // re-claims; the handler's eventual write either commits cleanly or surfaces a CHECK violation).
 const HEARTBEAT_INTERVAL_SECONDS = 2;
 const HEARTBEAT_LEASE_SECONDS = 10;
+/** W3.2 (RM3): the maximum TOTAL lease lifetime one dispatch's heartbeat may sustain — the old
+ *  Temporal `startToCloseTimeout` (60s), paired with the drain loop's RM1 per-dispatch bound.
+ *  Pre-RM3 the heartbeat re-extended `leased_until` for the entire life of the handler, so a
+ *  live-but-stuck sink kept its row un-reclaimable FOREVER (the lease safety net only fired for
+ *  the crashed case, not the hung case). Past this cap the heartbeat stops (one structured WARN)
+ *  and the lease expires on its own — another drainer can reclaim, and a zombie handler that
+ *  outlived the loop's RM1 timeout can no longer fight the backoff lease markAttemptFailed set. */
+const HEARTBEAT_MAX_TOTAL_SECONDS = 60;
 
 export type OutboxDispatchActivitiesOptions = {
   repo: PostgresOutboxRepo;
@@ -98,6 +106,10 @@ export class OutboxDispatchActivities {
       deliveryId: null, // DispatchRowInput carries no delivery_id field
       installationId: v.installation_id,
       runId: v.run_id,
+      // W3.2 (RM2): the destination-side idempotency key — the dispatching outbox row id. A
+      // re-dispatch of the same row (the at-least-once redrive) presents the SAME key, so a
+      // destination that dedupes on it is effectively-once even after a prior execution settled.
+      outboxRowId: v.row_id,
     };
 
     // Lease-heartbeat (S14.5.D — 1:1 with the Python dispatch_row _heartbeat closure). A background loop
@@ -272,13 +284,34 @@ export class OutboxDispatchActivities {
    * Clock then extends the row's lease by HEARTBEAT_LEASE_SECONDS. An extendLease failure is logged at WARN
    * and swallowed (fail-open: the lease itself is the safety net — Python catches `Exception` and continues).
    * `stop()` flips a flag so the loop exits after its current sleep (the Python `finally` cancels the task).
+   *
+   * W3.2 (RM3): the loop is CAPPED at {@link HEARTBEAT_MAX_TOTAL_SECONDS} of monotonic lifetime.
+   * Past the cap it stops extending (one structured WARN — `outbox.lease_heartbeat_capped`) and
+   * exits; the lease then expires within at most one HEARTBEAT_LEASE_SECONDS window, so a
+   * live-but-stuck handler's row becomes reclaimable instead of being pinned forever. The handler
+   * itself is NOT interrupted here — bounding the dispatch is the drain loop's RM1 watchdog.
    */
   #startLeaseHeartbeat(rowId: string): { stop(): void } {
     let stopped = false;
     const loop = async (): Promise<void> => {
+      const capDeadline = this.#clock.monotonic() + HEARTBEAT_MAX_TOTAL_SECONDS;
       while (!stopped) {
         await this.#clock.sleep(HEARTBEAT_INTERVAL_SECONDS);
         if (stopped) {
+          break;
+        }
+        if (this.#clock.monotonic() >= capDeadline) {
+          // RM3: max total lease lifetime reached — STOP heartbeating and let the lease expire so
+          // the row is reclaimable. WARN once: a handler still running at the cap is a stuck/slow
+          // sink the operator should see (the RM1 timeout settles its row on the loop side).
+          console.warn(
+            JSON.stringify({
+              event: "outbox.lease_heartbeat_capped",
+              row_id: rowId,
+              max_total_seconds: HEARTBEAT_MAX_TOTAL_SECONDS,
+              posture: "heartbeat stopped; lease will expire and the row becomes reclaimable (RM3)",
+            }),
+          );
           break;
         }
         try {

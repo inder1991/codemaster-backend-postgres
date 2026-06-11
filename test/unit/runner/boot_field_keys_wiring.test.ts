@@ -5,12 +5,18 @@
 // env + no Vault → the boot promise rejects with the field-encryption refusal, not a later error.
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { runBackgroundRunner } from "#backend/runner/background_runner_main.js";
+import {
+  runBackgroundRunner,
+  wireFieldKeyRefreshLoop,
+} from "#backend/runner/background_runner_main.js";
+import { DisposableRegistry } from "#backend/runner/disposables.js";
 import { runWorker } from "#backend/worker/main.js";
 import {
   getAuditKeyRegistry,
   resetAuditKeyRegistryForTesting,
 } from "#backend/security/audit_field_codec.js";
+
+import { WallClock } from "#platform/clock.js";
 
 describe("CS6 boot wiring — key registry is loaded at boot, fail-loud in production", () => {
   afterEach(() => {
@@ -47,5 +53,33 @@ describe("CS6 boot wiring — key registry is loaded at boot, fail-loud in produ
     vi.stubEnv("CODEMASTER_PG_CORE_DSN", "");
     // The boot gets PAST the key step (skipped) and fails on the DSN, exactly as before CS6.
     await expect(runBackgroundRunner("postgres")).rejects.toThrow(/CODEMASTER_PG_CORE_DSN/);
+  });
+});
+
+// ─── W3.7 (EH4): the runner boot wires the 30-min key-refresh loop with a DISPOSE handle ─────────
+describe("wireFieldKeyRefreshLoop — the runner-boot seam for the W3.7 rotation refresh", () => {
+  it("installResult='installed' → the refresh loop is registered on the DisposableRegistry and disposeAll stops it", async () => {
+    const disposables = new DisposableRegistry();
+    wireFieldKeyRefreshLoop({
+      installResult: "installed",
+      env: { NODE_ENV: "production" },
+      clock: new WallClock(),
+      disposables,
+    });
+    // The dispose handle rides the SAME registry runBackgroundRunner's DISPOSE PHASE drains after
+    // SIGTERM — without it the 30-min interval sleep would outlive the stopped loops.
+    expect(disposables.registeredNames()).toContain("field-key-refresh-loop");
+    await disposables.disposeAll(); // must interrupt the in-flight interval sleep and resolve
+  }, 10_000);
+
+  it("installResult='skipped' (dev/test no-source) → NO refresh loop is started (nothing to refresh)", async () => {
+    const disposables = new DisposableRegistry();
+    wireFieldKeyRefreshLoop({
+      installResult: "skipped",
+      env: { NODE_ENV: "development" },
+      clock: new WallClock(),
+      disposables,
+    });
+    expect(disposables.registeredNames()).not.toContain("field-key-refresh-loop");
   });
 });

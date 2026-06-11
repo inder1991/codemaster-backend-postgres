@@ -22,6 +22,8 @@ import { Pool } from "pg";
 import { FakeClock, WallClock } from "#platform/clock.js";
 import { describeDb, INTEGRATION_DSN } from "../_db.js";
 import { BackgroundJobsRepo } from "#backend/runner/background_jobs_repo.js";
+import { buildBackgroundRunner } from "#backend/runner/background_runner_main.js";
+import { SCHEDULED_JOB_INPUT_CONTRACTS } from "#backend/runner/scheduled_input_contracts.js";
 import { SchedulerLoop, pollAndEnqueue } from "#backend/runner/scheduler.js";
 
 // ── Metric spy (vi.mock is hoisted; the scheduler imports by name, so overriding the module export
@@ -214,9 +216,10 @@ describeDb("Postgres scheduler — pollAndEnqueue (Phase 3a W3)", () => {
     const good = mintIds();
     // The BAD row is seeded FIRST (heap order = iteration order on a wiped table) — under the
     // pre-W4a.2 code its computeNextRun throw rejected the WHOLE pass before the valid row ran.
-    // "*/5 * * * *" is the exact operator-plausible step syntax computeNextRun refuses (3a W3).
+    // "30 5 1 * *" (non-* day-of-month) is outside the deliberate vocabulary; the old poison
+    // example "*/5 * * * *" became VALID with the M12/W3.8 cron-vocabulary expansion.
     await seedSchedule({ scheduleId: bad.scheduleId, jobType: bad.jobType, cadenceKind: "cron",
-      cadenceSpec: "*/5 * * * *", nextRunAt: new Date("2026-06-10T11:58:00.000Z") });
+      cadenceSpec: "30 5 1 * *", nextRunAt: new Date("2026-06-10T11:58:00.000Z") });
     await seedSchedule({ scheduleId: good.scheduleId, jobType: good.jobType, cadenceKind: "interval",
       cadenceSpec: "300", nextRunAt: new Date("2026-06-10T11:59:00.000Z") });
 
@@ -245,6 +248,72 @@ describeDb("Postgres scheduler — pollAndEnqueue (Phase 3a W3)", () => {
     expect(await pollAndEnqueue({ repo, db, clock })).toBe(0); // good is no longer due; bad still fails
     expect(await jobsFor(bad.scheduleId)).toHaveLength(0);
     expect(schedErrSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ─── W3.8 (RM7): schedule-input contract validation AT ENQUEUE — core.scheduled_jobs.input is ────
+// operator-writable platform config the scheduler must treat as untrusted. With an injected
+// job_type→Zod registry (the SAME contracts the handlers parse at dispatch), the boundary is
+// default-deny: an unknown job_type or malformed input is rejected BEFORE the enqueue side effect,
+// isolated to its own row (the W4a.2 posture: WARN naming the schedule_id + bounded metric + left
+// unadvanced), never dead-lettered three layers deeper after burning a job slot.
+describeDb("Postgres scheduler — RM7 input-contract validation at enqueue (W3.8)", () => {
+  it("(9) malformed input + unknown job_type are REJECTED at the boundary; the valid sibling still fires in the SAME pass", async () => {
+    const clock = new FakeClock({ now: new Date("2026-06-10T12:00:00.000Z") });
+    const repo = new BackgroundJobsRepo(db);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const badInput = { scheduleId: `w3-sched-badinput-${randomUUID()}`, jobType: "mutex_janitor" };
+    const unknown = mintIds(); // a job_type with NO registered scheduled contract → default-deny
+    const valid = { scheduleId: `w3-sched-valid-${randomUUID()}`, jobType: "mutex_janitor" };
+    await seedSchedule({ scheduleId: badInput.scheduleId, jobType: badInput.jobType, cadenceKind: "interval",
+      cadenceSpec: "300", input: { junk: 1 }, nextRunAt: new Date("2026-06-10T11:57:00.000Z") });
+    await seedSchedule({ scheduleId: unknown.scheduleId, jobType: unknown.jobType, cadenceKind: "interval",
+      cadenceSpec: "300", nextRunAt: new Date("2026-06-10T11:58:00.000Z") });
+    await seedSchedule({ scheduleId: valid.scheduleId, jobType: valid.jobType, cadenceKind: "interval",
+      cadenceSpec: "300", nextRunAt: new Date("2026-06-10T11:59:00.000Z") });
+
+    expect(await pollAndEnqueue({ repo, db, clock, inputContracts: SCHEDULED_JOB_INPUT_CONTRACTS })).toBe(1);
+
+    // The malformed-input schedule enqueued NOTHING — rejected BEFORE the side effect, not at
+    // handler dispatch (the pre-RM7 path burned a job slot + dead-lettered on every tick).
+    expect(await jobsFor(badInput.scheduleId)).toHaveLength(0);
+    const b = await readSchedule(badInput.scheduleId);
+    expect(b.next_run_at).toEqual(new Date("2026-06-10T11:57:00.000Z")); // left unadvanced (isolated)
+    expect(b.last_enqueued_at).toBeNull();
+
+    // The unknown job_type is default-denied — scheduled_jobs cannot drive arbitrary job_types.
+    expect(await jobsFor(unknown.scheduleId)).toHaveLength(0);
+    expect((await readSchedule(unknown.scheduleId)).last_enqueued_at).toBeNull();
+
+    // The valid sibling fired with the payload intact (the W4a.2 isolation, not a pass rejection).
+    expect(await jobsFor(valid.scheduleId)).toHaveLength(1);
+    expect((await readSchedule(valid.scheduleId)).next_run_at).toEqual(new Date("2026-06-10T12:05:00.000Z"));
+
+    // Observability: BOTH rejects metered + WARNed naming their schedule_ids.
+    expect(schedErrSpy).toHaveBeenCalledTimes(2);
+    const warned = warnSpy.mock.calls.map((c) => String(c[0]));
+    expect(warned.some((m) => m.includes(badInput.scheduleId))).toBe(true);
+    expect(warned.some((m) => m.includes(unknown.scheduleId))).toBe(true);
+  });
+
+  it("(10) the PRODUCTION composition threads the registry: buildBackgroundRunner's pollOnce default-denies a junk-input schedule", async () => {
+    const clock = new FakeClock({ now: new Date("2026-06-10T12:00:00.000Z") });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const handles = buildBackgroundRunner({
+      db, clock,
+      config: { owner: "rm7-it", leaseS: 60, heartbeatS: 15, maxRuntimeS: 900, idleS: 5,
+        pollIntervalS: 30, outboxIdleS: 2, outboxMaxAttempts: 5 },
+    });
+    const poisoned = { scheduleId: `w3-sched-prod-${randomUUID()}`, jobType: "mutex_janitor" };
+    await seedSchedule({ scheduleId: poisoned.scheduleId, jobType: poisoned.jobType, cadenceKind: "interval",
+      cadenceSpec: "300", input: { junk: true }, nextRunAt: new Date("2026-06-10T11:59:00.000Z") });
+
+    expect(await handles.pollOnce()).toBe(0); // rejected at the boundary by the WIRED registry
+
+    expect(await jobsFor(poisoned.scheduleId)).toHaveLength(0);
+    expect((await readSchedule(poisoned.scheduleId)).last_enqueued_at).toBeNull();
+    expect(warnSpy.mock.calls.map((c) => String(c[0])).some((m) => m.includes(poisoned.scheduleId))).toBe(true);
+    await handles.disposables.disposeAll(); // release any lazily-registered handler resources
   });
 });
 
@@ -302,5 +371,63 @@ describeDb("Postgres scheduler — per-schedule SAVEPOINT isolation (CS7)", () =
       await sql`DROP TRIGGER IF EXISTS cs7_poison_advance ON core.scheduled_jobs`.execute(db);
       await sql`DROP FUNCTION IF EXISTS pg_temp_cs7_poison()`.execute(db);
     }
+  });
+});
+
+// ─── W3.8 (OM11): cadence-lateness structured WARN — a wedged or starved schedule must be ────────
+// DIRECTLY visible at the schedule level, not only via downstream symptoms (leaked mutexes, stuck
+// runs). THRESHOLD SEMANTICS: lateness = the tick instant (clock.now() when the due row is
+// processed) minus the row's OWN next_run_at; the threshold is ONE FULL CADENCE (the distance from
+// that next_run_at to the schedule's next computed instant) — strictly-greater means at least one
+// whole cycle elapsed past the due time, the signature of a scheduler outage / OC3 wedge, while a
+// healthy poll loop (pollIntervalS ≪ cadence) never trips it. The signal is ONE structured console
+// WARN per late tick (the CS8 console-JSON idiom: event + correlation keys) — LOGS ONLY, deliberately
+// NO OTel metric (the gauge/alert from the OM11 finding rides the W3.9 SLO wave; the log line is
+// greppable/alertable now). The WARN is pure observability: the late tick still enqueues + advances.
+describeDb("Postgres scheduler — OM11 cadence-lateness WARN (W3.8)", () => {
+  it("(11) a tick later than ONE FULL CADENCE past next_run_at emits ONE structured WARN (schedule_id + lateness); the boundary stays quiet; ticks are never gated", async () => {
+    const clock = new FakeClock({ now: new Date("2026-06-10T12:00:00.000Z") });
+    const repo = new BackgroundJobsRepo(db);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const wayLate = mintIds();   // interval 300s, due 2h ago → lateness 7200s > 300s cadence → WARN
+    const boundary = mintIds();  // interval 300s, due EXACTLY one cadence ago → 300s = 300s → quiet (strict >)
+    const cronLate = mintIds();  // daily 02:00 cron, due 2026-06-08T02:00Z → lateness 208800s > 86400s → WARN
+    await seedSchedule({ scheduleId: wayLate.scheduleId, jobType: wayLate.jobType, cadenceKind: "interval",
+      cadenceSpec: "300", nextRunAt: new Date("2026-06-10T10:00:00.000Z") });
+    await seedSchedule({ scheduleId: boundary.scheduleId, jobType: boundary.jobType, cadenceKind: "interval",
+      cadenceSpec: "300", nextRunAt: new Date("2026-06-10T11:55:00.000Z") });
+    await seedSchedule({ scheduleId: cronLate.scheduleId, jobType: cronLate.jobType, cadenceKind: "cron",
+      cadenceSpec: "0 2 * * *", nextRunAt: new Date("2026-06-08T02:00:00.000Z") });
+
+    // ALL THREE tick — the WARN is observability, never a gate on the enqueue/advance.
+    expect(await pollAndEnqueue({ repo, db, clock })).toBe(3);
+    for (const s of [wayLate, boundary, cronLate]) {
+      expect(await jobsFor(s.scheduleId)).toHaveLength(1);
+      expect((await readSchedule(s.scheduleId)).last_enqueued_at).toEqual(new Date("2026-06-10T12:00:00.000Z"));
+    }
+    expect((await readSchedule(wayLate.scheduleId)).next_run_at).toEqual(new Date("2026-06-10T12:05:00.000Z"));
+    expect((await readSchedule(cronLate.scheduleId)).next_run_at).toEqual(new Date("2026-06-11T02:00:00.000Z"));
+
+    // EXACTLY one structured WARN per late tick — the CS8 console-JSON idiom, parseable fields.
+    const cadenceWarns = warnSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((m) => m.startsWith("{"))
+      .map((m) => JSON.parse(m) as Record<string, unknown>)
+      .filter((w) => w.event === "scheduler.cadence_late");
+    expect(cadenceWarns).toHaveLength(2);
+    const forWayLate = cadenceWarns.find((w) => w.schedule_id === wayLate.scheduleId);
+    expect(forWayLate).toMatchObject({
+      event: "scheduler.cadence_late", schedule_id: wayLate.scheduleId, job_type: wayLate.jobType,
+      due_at: "2026-06-10T10:00:00.000Z", lateness_s: 7200, cadence_s: 300,
+    });
+    const forCronLate = cadenceWarns.find((w) => w.schedule_id === cronLate.scheduleId);
+    expect(forCronLate).toMatchObject({
+      event: "scheduler.cadence_late", schedule_id: cronLate.scheduleId, job_type: cronLate.jobType,
+      due_at: "2026-06-08T02:00:00.000Z", lateness_s: 208_800, cadence_s: 86_400,
+    });
+    // The exactly-one-cadence-late sibling stays QUIET (strictly-greater threshold), and lateness
+    // is LOGS ONLY — no error counter fires for a late-but-healthy tick (NO OTel by design).
+    expect(cadenceWarns.some((w) => w.schedule_id === boundary.scheduleId)).toBe(false);
+    expect(schedErrSpy).not.toHaveBeenCalled();
   });
 });

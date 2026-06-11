@@ -82,7 +82,15 @@ describe("OutboxDispatchActivities", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.payload).toEqual({ x: 1 });
     // installation_id is null for a bootstrap row; the context mirrors it (no DB touched).
-    expect(calls[0]!.context).toEqual({ deliveryId: null, installationId: null, runId: null });
+    // RM2/W3.2: the context carries the dispatching outbox ROW id — the destination-side
+    // idempotency key (a re-dispatch of the SAME row must be deduplicable at the destination
+    // even after a prior execution settled; the key has to exist at the sink boundary first).
+    expect(calls[0]!.context).toEqual({
+      deliveryId: null,
+      installationId: null,
+      runId: null,
+      outboxRowId: ROW_1,
+    });
   });
 
   it("dispatchRow REJECTS the tagged-union propagation-bug shape at the boundary (both installation_id + orphan_reason null)", async () => {

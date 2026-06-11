@@ -32,10 +32,19 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { cancellableSleep } from "#backend/runner/clock_async.js";
+import type { RunnerDisposable } from "#backend/runner/disposables.js";
+
+import type { Clock } from "#platform/clock.js";
+import { decryptField } from "#platform/crypto/aes_gcm_aad.js";
+import type { KeyRegistry } from "#platform/crypto/key_registry.js";
+import { SystemRandom, type Random } from "#platform/randomness.js";
+
 import {
   AUDIT_BEFORE_AAD,
   decryptAuditJsonBytea,
   encryptAuditJsonBytea,
+  encryptJsonByteaWithRegistry,
   setAuditKeyRegistry,
 } from "./audit_field_codec.js";
 import {
@@ -70,22 +79,9 @@ export async function installFieldKeyRegistryAtBoot(
   env: NodeJS.ProcessEnv,
   deps: BootFieldKeyDeps = {},
 ): Promise<"installed" | "skipped"> {
-  const isProduction = env["NODE_ENV"] === "production";
-  const rawSource = env["CODEMASTER_FIELD_KEY_SOURCE"];
-
-  let source: FieldKeySource;
-  if (rawSource === undefined || rawSource === "") {
-    if (!isProduction && deps.reader === undefined) {
-      return "skipped"; // dev/test with no explicit source: registry stays null, codec fail-closed
-    }
-    source = "vault"; // the production default — the registry MUST load
-  } else if ((VALID_SOURCES as ReadonlyArray<string>).includes(rawSource)) {
-    source = rawSource as FieldKeySource;
-  } else {
-    throw new FieldKeyBootError(
-      `field-encryption key source '${rawSource}' is not valid: CODEMASTER_FIELD_KEY_SOURCE must be ` +
-        `one of ${VALID_SOURCES.join(" | ")}`,
-    );
+  const source = resolveFieldKeySource(env, deps.reader !== undefined);
+  if (source === null) {
+    return "skipped"; // dev/test with no explicit source: registry stays null, codec fail-closed
   }
 
   try {
@@ -109,6 +105,31 @@ export async function installFieldKeyRegistryAtBoot(
       { cause: e },
     );
   }
+}
+
+/**
+ * Resolve the keyset source from env — the SHARED resolution {@link installFieldKeyRegistryAtBoot}
+ * and {@link refreshFieldKeyRegistryOnce} both ride, so boot and refresh can never disagree about
+ * where keys come from. Returns `null` for the dev/test no-source posture (skip), the production
+ * default "vault" when unset, the validated explicit source otherwise; throws
+ * {@link FieldKeyBootError} on a garbage value.
+ */
+function resolveFieldKeySource(env: NodeJS.ProcessEnv, hasReaderOverride: boolean): FieldKeySource | null {
+  const isProduction = env["NODE_ENV"] === "production";
+  const rawSource = env["CODEMASTER_FIELD_KEY_SOURCE"];
+  if (rawSource === undefined || rawSource === "") {
+    if (!isProduction && !hasReaderOverride) {
+      return null;
+    }
+    return "vault"; // the production default — the registry MUST load
+  }
+  if ((VALID_SOURCES as ReadonlyArray<string>).includes(rawSource)) {
+    return rawSource as FieldKeySource;
+  }
+  throw new FieldKeyBootError(
+    `field-encryption key source '${rawSource}' is not valid: CODEMASTER_FIELD_KEY_SOURCE must be ` +
+      `one of ${VALID_SOURCES.join(" | ")}`,
+  );
 }
 
 /** Build the keyset reader for the resolved source. Every reader satisfies the loader's
@@ -174,4 +195,142 @@ function selfCheck(): void {
   if (JSON.stringify(back) !== JSON.stringify(probe)) {
     throw new FieldKeyBootError("field-encryption startup self-check failed: probe did not round-trip");
   }
+}
+
+// ─── W3.7 (EH4): the periodic key-rotation refresh ───────────────────────────────────────────────
+//
+// ADR-0033 / CLAUDE.md require the field-encryption keyset "refreshed every 30 min" (the Python
+// worker lifespan ran this loop; the Confluence token provider's TS port got its 30-min loop —
+// token_provider.ts refreshLoop — but the field keys did not). Without it a rotated Vault keyset
+// (vN+1 added, current_version advanced) is invisible to long-lived pods: they keep ENCRYPTING
+// under the old current_version and cannot DECRYPT rows newer pods wrote under vN+1
+// (KeyNotFoundError → LocalKeyEncryptionError) until restarted — rotation becomes a fleet-wide
+// rolling-restart event instead of a hot operation.
+//
+// Posture (the inverse of boot): boot is FAIL-LOUD (no keys → no pod); refresh is FAIL-OPEN on the
+// REGISTRY (a refresh failure logs ONE structured WARN and KEEPS the previous, working registry —
+// a transient Vault blip must never degrade a pod that is encrypting fine). The swap is atomic: the
+// candidate registry is fully loaded AND probe-verified BEFORE the single setAuditKeyRegistry
+// reference assignment; no reader can observe a half-built keyset.
+
+/** The EH4 / ADR-0033 hot-rotation cadence: 30 minutes. */
+export const FIELD_KEY_REFRESH_INTERVAL_SECONDS = 1800;
+/** Anti-storm jitter (±5min uniform, the ConfluenceTokenProvider idiom) so a fleet of pods does
+ *  not stampede Vault on synchronized 30-minute boundaries. */
+export const FIELD_KEY_REFRESH_JITTER_SECONDS = 300;
+/** The interval sleep is taken in ticks of at most this many seconds: Clock.sleep hands out no
+ *  timer handle, so an aborted cancellableSleep leaves its underlying WallClock setTimeout pending
+ *  — a single 30-minute sleep would hold the SIGTERM'd process's event loop open for up to 30
+ *  minutes after dispose. Ticking bounds that residue to ≤60s (the runner loops' residue order). */
+const REFRESH_SLEEP_TICK_SECONDS = 60;
+
+/**
+ * ONE refresh pass: re-resolve the source (the SAME resolution boot used), re-load the keyset,
+ * probe-verify the CANDIDATE registry (never the global), and atomically swap it in via
+ * setAuditKeyRegistry. NEVER throws: every failure path returns "kept-previous" after one
+ * structured WARN — the previous registry stays installed untouched.
+ */
+export async function refreshFieldKeyRegistryOnce(
+  env: NodeJS.ProcessEnv,
+  deps: BootFieldKeyDeps = {},
+): Promise<"refreshed" | "kept-previous"> {
+  try {
+    const source = resolveFieldKeySource(env, deps.reader !== undefined);
+    if (source === null) {
+      // Boot only starts the loop after an "installed" result, so a null source here is env drift
+      // mid-flight — keep the working registry and say so.
+      throw new FieldKeyBootError(
+        "no field-encryption key source resolves anymore (CODEMASTER_FIELD_KEY_SOURCE drifted since boot)",
+      );
+    }
+    const reader = deps.reader ?? (await resolveReader(source, env));
+    const candidate = await loadFieldEncryptionKeyRegistry(reader);
+    probeRegistry(candidate); // verify BEFORE the swap — an unprobed keyset never gets installed
+    setAuditKeyRegistry(candidate); // ATOMIC: one reference assignment
+    return "refreshed";
+  } catch (e) {
+    // Fail-open ON THE REGISTRY, loud on the log: the keyset loader/boot errors carry sterile,
+    // content-free messages (the FileKvReader rule), so the message is safe to emit.
+    console.warn(
+      JSON.stringify({
+        event: "field_key_refresh.failed",
+        posture: "kept-previous-registry (a working registry is never degraded by a failed refresh)",
+        error: (e instanceof Error ? `${e.name}: ${e.message}` : String(e)).slice(0, 512),
+      }),
+    );
+    return "kept-previous";
+  }
+}
+
+/** Probe a CANDIDATE registry (explicit-registry round-trip — the global codec is not touched):
+ *  encrypt→decrypt one fixture under the audit AAD and require byte-faithful JSON. */
+function probeRegistry(candidate: KeyRegistry): void {
+  const probe = { field_key_refresh_self_check: true };
+  const ct = encryptJsonByteaWithRegistry(probe, AUDIT_BEFORE_AAD, candidate);
+  if (ct === null) {
+    throw new FieldKeyBootError("field-encryption refresh self-check failed: probe encrypt returned null");
+  }
+  const plaintext = decryptField({
+    ciphertext: ct.toString("ascii"),
+    registry: candidate,
+    aad: AUDIT_BEFORE_AAD,
+  });
+  if (Buffer.from(plaintext).toString("utf-8") !== JSON.stringify(probe)) {
+    throw new FieldKeyBootError("field-encryption refresh self-check failed: probe did not round-trip");
+  }
+}
+
+/**
+ * Start the supervised 30-minute refresh loop (W3.7 / EH4) and return its dispose handle — the
+ * {@link RunnerDisposable} shape the runner boot registers on its DisposableRegistry so SIGTERM
+ * teardown stops the loop (runner/disposables.ts). The loop sleeps `interval ± jitter` on the
+ * INJECTED Clock via cancellableSleep (the same seam every runner loop uses; dispose() interrupts
+ * an in-flight sleep immediately), then runs {@link refreshFieldKeyRegistryOnce} — which never
+ * throws, so one bad cycle can never kill the loop (supervision is built into the pass).
+ *
+ * Call ONLY after installFieldKeyRegistryAtBoot returned "installed": refreshing a never-installed
+ * registry is meaningless (dev/test no-source pods skip both).
+ */
+export function startFieldKeyRefreshLoop(o: {
+  env: NodeJS.ProcessEnv;
+  clock: Clock;
+  /** Default {@link FIELD_KEY_REFRESH_INTERVAL_SECONDS} (1800). Tests inject a tiny interval. */
+  intervalSeconds?: number;
+  /** Default {@link FIELD_KEY_REFRESH_JITTER_SECONDS} (300). Tests pass 0 for exact cadences. */
+  jitterSeconds?: number;
+  /** The jitter RNG — the platform {@link Random} seam (default {@link SystemRandom}). */
+  random?: Random;
+  /** Test seam, threaded into every refresh pass (see {@link BootFieldKeyDeps}). */
+  deps?: BootFieldKeyDeps;
+}): RunnerDisposable {
+  const intervalS = o.intervalSeconds ?? FIELD_KEY_REFRESH_INTERVAL_SECONDS;
+  const jitterS = o.jitterSeconds ?? FIELD_KEY_REFRESH_JITTER_SECONDS;
+  const rng = o.random ?? new SystemRandom();
+  const stop = new AbortController();
+  const loop = (async (): Promise<void> => {
+    while (!stop.signal.aborted) {
+      // interval ± jitter, floored (a degenerate jitter config must never busy-loop), slept in
+      // ≤REFRESH_SLEEP_TICK_SECONDS ticks on the monotonic axis (see the tick constant's doc).
+      const sleepS = Math.max(1e-3, intervalS + (rng.random() * 2 - 1) * jitterS);
+      const wakeAt = o.clock.monotonic() + sleepS;
+      while (!stop.signal.aborted) {
+        const remainingS = wakeAt - o.clock.monotonic();
+        if (remainingS <= 0) {
+          break;
+        }
+        await cancellableSleep(o.clock, Math.min(remainingS, REFRESH_SLEEP_TICK_SECONDS), stop.signal);
+      }
+      if (stop.signal.aborted) {
+        break;
+      }
+      await refreshFieldKeyRegistryOnce(o.env, o.deps ?? {}); // never throws (WARN + kept-previous)
+    }
+  })();
+  return {
+    name: "field-key-refresh-loop",
+    dispose: async (): Promise<void> => {
+      stop.abort();
+      await loop;
+    },
+  };
 }

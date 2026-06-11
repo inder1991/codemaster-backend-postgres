@@ -15,9 +15,13 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { WallClock } from "#platform/clock.js";
 import {
+  FIELD_KEY_REFRESH_INTERVAL_SECONDS,
   FieldKeyBootError,
   installFieldKeyRegistryAtBoot,
+  refreshFieldKeyRegistryOnce,
+  startFieldKeyRefreshLoop,
 } from "#backend/security/boot_field_keys.js";
 import {
   AUDIT_BEFORE_AAD,
@@ -137,6 +141,147 @@ describe("installFieldKeyRegistryAtBoot — dev/test posture", () => {
     expect(err).toBeInstanceOf(FieldKeyBootError);
     expect((err as Error).message).toContain("vault-agent");
   });
+});
+
+// ─── W3.7 (EH4): the periodic key-rotation refresh — a rotated Vault keyset is picked up WITHOUT a
+// pod restart. Keys still load ONCE at boot (CS6.1); the refresh loop re-loads the registry every
+// ~30min and swaps it atomically via setAuditKeyRegistry ON SUCCESS ONLY — on ANY failure it logs a
+// structured WARN and KEEPS the previous registry (a working registry is never degraded). ─────────
+describe("refreshFieldKeyRegistryOnce — hot rotation pickup (W3.7 / EH4)", () => {
+  const ROTATED_KEY_B64 = Buffer.alloc(32, 9).toString("base64");
+  const ROTATED_PAYLOAD = { current_version: "v2", keys: { v1: KEY_B64, v2: ROTATED_KEY_B64 } };
+
+  it("(10) a ROTATED keyset is reloaded and swapped atomically — new writes use v2, OLD v1 rows still decrypt", async () => {
+    await installFieldKeyRegistryAtBoot(
+      { NODE_ENV: "production" },
+      { reader: { kvReadRaw: async () => KEYSET_PAYLOAD } },
+    );
+    const oldCiphertext = encryptAuditJsonBytea({ probe: "pre-rotation" }, AUDIT_BEFORE_AAD);
+    expect(oldCiphertext!.toString("ascii").startsWith("kms2:v1:")).toBe(true);
+
+    // The operator rotates in Vault (adds v2, advances current_version) — the refresh must pick it
+    // up in-process: the EH4 class is long-lived pods encrypting under the OLD current_version
+    // forever (and failing to DECRYPT rows newer pods wrote under v2) until restarted.
+    const result = await refreshFieldKeyRegistryOnce(
+      { NODE_ENV: "production" },
+      { reader: { kvReadRaw: async () => ROTATED_PAYLOAD } },
+    );
+    expect(result).toBe("refreshed");
+
+    const newCiphertext = encryptAuditJsonBytea({ probe: "post-rotation" }, AUDIT_BEFORE_AAD);
+    expect(newCiphertext!.toString("ascii").startsWith("kms2:v2:")).toBe(true); // rotated current key
+    expect(decryptAuditJsonBytea(newCiphertext, AUDIT_BEFORE_AAD)).toEqual({ probe: "post-rotation" });
+    // Rotation continuity: the swapped keyset still carries v1, so pre-rotation rows stay readable.
+    expect(decryptAuditJsonBytea(oldCiphertext, AUDIT_BEFORE_AAD)).toEqual({ probe: "pre-rotation" });
+  });
+
+  it("(11) a refresh FAILURE (source unreachable) keeps the previous registry and WARNs structured — never degrade a working registry", async () => {
+    await installFieldKeyRegistryAtBoot(
+      { NODE_ENV: "production" },
+      { reader: { kvReadRaw: async () => KEYSET_PAYLOAD } },
+    );
+    const before = getAuditKeyRegistry();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await refreshFieldKeyRegistryOnce(
+        { NODE_ENV: "production" },
+        { reader: { kvReadRaw: async () => { throw new Error("vault sealed"); } } },
+      );
+      expect(result).toBe("kept-previous");
+      expect(getAuditKeyRegistry()).toBe(before); // the WORKING registry is untouched
+      // Still encrypting/decrypting under the boot keys — no degradation window.
+      const ct = encryptAuditJsonBytea({ probe: "still-v1" }, AUDIT_BEFORE_AAD);
+      expect(ct!.toString("ascii").startsWith("kms2:v1:")).toBe(true);
+      const warns = warnSpy.mock.calls.map((c) => String(c[0]));
+      const refreshWarns = warns.filter((m) => m.includes("field_key_refresh.failed"));
+      expect(refreshWarns).toHaveLength(1); // ONE structured WARN per failed refresh
+      expect(refreshWarns[0]).toContain("vault sealed");
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("(12) a keyset the loader REJECTS (malformed rotation) keeps the previous registry — same fail-open posture", async () => {
+    await installFieldKeyRegistryAtBoot(
+      { NODE_ENV: "production" },
+      { reader: { kvReadRaw: async () => KEYSET_PAYLOAD } },
+    );
+    const before = getAuditKeyRegistry();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await refreshFieldKeyRegistryOnce(
+        { NODE_ENV: "production" },
+        // current_version names a key that is NOT in the keyset — makeKeySet rejects it.
+        { reader: { kvReadRaw: async () => ({ current_version: "v9", keys: { v1: KEY_B64 } }) } },
+      );
+      expect(result).toBe("kept-previous");
+      expect(getAuditKeyRegistry()).toBe(before);
+      expect(
+        warnSpy.mock.calls.map((c) => String(c[0])).some((m) => m.includes("field_key_refresh.failed")),
+      ).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("(13) the refresh cadence is the ADR-0033 / EH4 30 minutes", () => {
+    expect(FIELD_KEY_REFRESH_INTERVAL_SECONDS).toBe(1800);
+  });
+});
+
+describe("startFieldKeyRefreshLoop — supervised interval loop with a dispose handle (W3.7 / EH4)", () => {
+  const ROTATED_KEY_B64 = Buffer.alloc(32, 9).toString("base64");
+
+  it("(14) the loop refreshes on its interval and dispose() stops it (RunnerDisposable shape)", async () => {
+    await installFieldKeyRegistryAtBoot(
+      { NODE_ENV: "production" },
+      { reader: { kvReadRaw: async () => KEYSET_PAYLOAD } },
+    );
+    let reads = 0;
+    const disposable = startFieldKeyRefreshLoop({
+      env: { NODE_ENV: "production" },
+      clock: new WallClock(), // tiny REAL interval — FakeClock.sleep resolves instantly (hot loop)
+      intervalSeconds: 0.02,
+      jitterSeconds: 0,
+      deps: {
+        reader: {
+          kvReadRaw: async () => {
+            reads += 1;
+            return { current_version: "v2", keys: { v1: KEY_B64, v2: ROTATED_KEY_B64 } };
+          },
+        },
+      },
+    });
+    expect(disposable.name).toBe("field-key-refresh-loop");
+    try {
+      const deadline = Date.now() + 5000;
+      while (reads === 0) {
+        if (Date.now() > deadline) throw new Error("refresh loop did not refresh within 5s");
+        await new Promise((r) => setTimeout(r, 10));
+      }
+    } finally {
+      await disposable.dispose();
+    }
+    // The loop actually swapped the registry (v2 is current now) …
+    const ct = encryptAuditJsonBytea({ probe: "loop" }, AUDIT_BEFORE_AAD);
+    expect(ct!.toString("ascii").startsWith("kms2:v2:")).toBe(true);
+    // … and dispose() STOPPED it: no further reads land after disposal settles.
+    const after = reads;
+    await new Promise((r) => setTimeout(r, 100));
+    expect(reads).toBe(after);
+  }, 10_000);
+
+  it("(15) dispose() interrupts the interval sleep immediately — no refresh ever fires", async () => {
+    let reads = 0;
+    const disposable = startFieldKeyRefreshLoop({
+      env: { NODE_ENV: "production" },
+      clock: new WallClock(),
+      intervalSeconds: 600, // without the interrupt this dispose would block the 10s test timeout
+      deps: { reader: { kvReadRaw: async () => { reads += 1; return KEYSET_PAYLOAD; } } },
+    });
+    await disposable.dispose();
+    expect(reads).toBe(0); // disposed before the first interval elapsed — the loop never refreshed
+  }, 10_000);
 });
 
 describe("installFieldKeyRegistryAtBoot — keyset file content never leaks into errors (review fix)", () => {

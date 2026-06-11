@@ -33,6 +33,7 @@ import { randomUUID } from "node:crypto"; // test/ is OUT of the clock/random ga
 import { Kysely, PostgresDialect, sql } from "kysely";
 import { Pool } from "pg";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 
 import { OutboxDispatchActivities } from "#backend/activities/outbox_dispatch.activity.js";
 import type { CacheGitCloner } from "#backend/activities/clone_repository.activity.js";
@@ -214,11 +215,17 @@ describeDb("SHADOW mode no-side-effects contract (CS1.2)", () => {
     const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
     const clock = new FakeClock({ now: new Date("2026-06-11T12:00:00.000Z") });
     const scheduleId = `cs12-sched-${randomUUID()}`;
-    await seedSchedule({ scheduleId, jobType: `cs12-job-${randomUUID()}`, cadenceSpec: "300",
+    const jobType = `cs12-job-${randomUUID()}`;
+    // W3.8 (RM7): pollOnce default-denies job_types outside the scheduled-contract registry, so the
+    // synthetic job_type rides the deps seam (zero-config — matching seedSchedule's `{}` input).
+    const scheduledInputContracts = new Map([[jobType, z.object({}).strict()]]);
+    await seedSchedule({ scheduleId, jobType, cadenceSpec: "300",
       nextRunAt: new Date("2026-06-11T11:59:00.000Z") });
 
     // SHADOW: the due schedule is OBSERVED, never acted on.
-    const shadowHandles = buildBackgroundRunner({ db, clock, config: TEST_CONFIG, shadow: true });
+    const shadowHandles = buildBackgroundRunner({
+      db, clock, config: TEST_CONFIG, shadow: true, scheduledInputContracts,
+    });
     expect(await shadowHandles.pollOnce()).toBe(0);
     expect(await jobsFor(scheduleId)).toHaveLength(0);          // NO background job enqueued
     const afterShadow = await readSchedule(scheduleId);
@@ -229,7 +236,9 @@ describeDb("SHADOW mode no-side-effects contract (CS1.2)", () => {
     expect(wouldLogs.some((c) => String(c[0]).includes(scheduleId))).toBe(true);
 
     // CONTRAST (shadow=false): the SAME drive performs the effects — the existing behavior.
-    const realHandles = buildBackgroundRunner({ db, clock, config: TEST_CONFIG, shadow: false });
+    const realHandles = buildBackgroundRunner({
+      db, clock, config: TEST_CONFIG, shadow: false, scheduledInputContracts,
+    });
     expect(await realHandles.pollOnce()).toBe(1);
     expect(await jobsFor(scheduleId)).toHaveLength(1);
     const afterReal = await readSchedule(scheduleId);

@@ -24,6 +24,7 @@ import { randomUUID } from "node:crypto"; // test/ is OUT of the clock/random ga
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import { Pool } from "pg";
+import { z } from "zod";
 import { FakeClock, WallClock } from "#platform/clock.js";
 import { describeDb, INTEGRATION_DSN } from "../_db.js";
 import { BackgroundJobsRepo } from "#backend/runner/background_jobs_repo.js";
@@ -102,9 +103,16 @@ describeDb("background_runner_main — buildBackgroundRunner composition (Phase 
   });
 
   it("(2) END-TO-END: one poll enqueues the due schedule's job; runner cycles dispatch BOTH jobs through the returned registry to 'done'", async () => {
-    const handles = buildBackgroundRunner({ db, clock: new WallClock(), config: TEST_CONFIG });
     const repo = new BackgroundJobsRepo(db); // producer-side seam (direct enqueue) + row assertions
     const { scheduleId, jobType } = mintIds();
+    // W3.8 (RM7): pollOnce default-denies job_types outside the scheduled-contract registry, so the
+    // synthetic job_type rides the deps seam with the contract its seeded `input` satisfies.
+    const handles = buildBackgroundRunner({
+      db, clock: new WallClock(), config: TEST_CONFIG,
+      scheduledInputContracts: new Map([
+        [jobType, z.object({ source: z.string(), n: z.number().int() }).strict()],
+      ]),
+    });
 
     // A fake handler registered on the RETURNED registry — the runner cycle must dispatch through it.
     const seen: Array<{ payload: unknown; jobId: string; abortedAtEntry: boolean }> = [];
