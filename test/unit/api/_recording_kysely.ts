@@ -20,16 +20,21 @@ export type RecordingDb = {
   queries: Array<CompiledQuery>;
 };
 
-/** Build a Kysely whose connection records each compiled query and answers with `results[i]` rows. */
-export function recordingKysely(results: ReadonlyArray<ReadonlyArray<unknown>>): RecordingDb {
+/** Build a Kysely whose connection records each compiled query and answers with `results[i]` rows.
+ *  An `Error` entry is THROWN instead (drives the unmapped-failure paths, e.g. the EH6 error-handler
+ *  tests, with a realistic driver-level Postgres error). */
+export function recordingKysely(results: ReadonlyArray<ReadonlyArray<unknown> | Error>): RecordingDb {
   const queries: Array<CompiledQuery> = [];
   let call = 0;
   const connection: DatabaseConnection = {
     async executeQuery<R>(compiledQuery: CompiledQuery): Promise<QueryResult<R>> {
       queries.push(compiledQuery);
-      const rows = (results[call] ?? []) as Array<R>;
+      const result = results[call] ?? [];
       call += 1;
-      return { rows };
+      if (result instanceof Error) {
+        throw result;
+      }
+      return { rows: result as Array<R> };
     },
     // eslint-disable-next-line require-yield
     async *streamQuery(): AsyncIterableIterator<QueryResult<never>> {
