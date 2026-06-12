@@ -19,7 +19,14 @@ export function makeScopedErrorHandler(
   scope: "admin" | "auth",
 ): (error: FastifyError, request: FastifyRequest, reply: FastifyReply) => Promise<void> {
   return async (error, request, reply) => {
-    const statusCode = typeof error.statusCode === "number" ? error.statusCode : undefined;
+    // A 4xx classification can arrive two ways: the error itself carries statusCode (Fastify's
+    // FST_ERR_* client errors), or the ROUTE already set a 4xx before sending an Error body (the
+    // `reply.code(422).send(zodError)` idiom — Fastify routes any Error body through this handler).
+    // Both are deliberate client-error classifications: honor them (Fastify-default semantics);
+    // only UNCLASSIFIED throws collapse to the generic 500 envelope.
+    const errorStatus = typeof error.statusCode === "number" ? error.statusCode : undefined;
+    const replyStatus = reply.statusCode >= 400 && reply.statusCode < 500 ? reply.statusCode : undefined;
+    const statusCode = errorStatus ?? replyStatus;
     if (statusCode !== undefined && statusCode >= 400 && statusCode < 500) {
       await reply.code(statusCode).send({ detail: error.message });
       return;
