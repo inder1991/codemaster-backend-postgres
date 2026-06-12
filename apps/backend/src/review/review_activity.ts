@@ -12,12 +12,12 @@
 // sanitize-and-continue branch are ported byte-faithfully.
 //
 // Temporal mapping: the Python raises `temporalio.exceptions.ApplicationError(msg, type=..., non_retryable=...)`.
-// The TS analogue is `ApplicationFailure.create({ message, type, nonRetryable })` from @temporalio/common
+// Faults are raised as ActivityError (review/activity_error.ts) carrying the type NAME the runner
 // (the same class the Python ApplicationError serializes to over the wire).
 
 import { createHash } from "node:crypto";
 
-import { ApplicationFailure } from "@temporalio/common";
+import { ActivityError } from "#backend/review/activity_error.js";
 
 import { BedrockBudgetExceededError } from "#backend/cost/enforcer.js";
 import {
@@ -91,13 +91,13 @@ export async function doReview(
   const role = "primary";
 
   // Resolve the platform-scoped LlmClient via the cache. LlmRoleNotConfigured/Disabled →
-  // ApplicationFailure(type="BedrockInvocationError", non_retryable=false) routing to graceful-degrade.
+  // ActivityError(type="BedrockInvocationError", non_retryable=false) routing to graceful-degrade.
   let llmClient: LlmClient;
   try {
     llmClient = await args.cache.forRole(role);
   } catch (e) {
     if (e instanceof LlmRoleNotConfiguredError || e instanceof LlmRoleDisabledError) {
-      throw ApplicationFailure.create({
+      throw new ActivityError({
         message: e.message,
         type: "BedrockInvocationError",
         nonRetryable: false,
@@ -157,7 +157,7 @@ export async function doReview(
   } catch (e) {
     // (a) Budget exceeded → non-retryable.
     if (e instanceof BedrockBudgetExceededError) {
-      throw ApplicationFailure.create({
+      throw new ActivityError({
         message: e.message,
         type: "BedrockBudgetExceededError",
         nonRetryable: true,
@@ -171,7 +171,7 @@ export async function doReview(
     }
     // (c) Any other bedrock invocation error → retryable.
     if (e instanceof LlmInvocationError) {
-      throw ApplicationFailure.create({
+      throw new ActivityError({
         message: e.message,
         type: "BedrockInvocationError",
         nonRetryable: false,
@@ -197,12 +197,12 @@ export async function doReview(
  * The output-safety sanitize-and-continue branch (Python 1067-1136). The EXACT condition: the decision
  * reasons must include `secret_leaked` AND carry secret findings; otherwise the block is terminal
  * (length / privileged_tag / tool_call_shape indicate a structurally-broken response, not a sanitizable
- * one) → non-retryable ApplicationFailure.
+ * one) → non-retryable ActivityError.
  */
 function sanitizeAndContinue(e: LlmOutputUnsafeError, context: ReviewContextV1): DoReviewResult {
   const decision = e.decision;
   if (!decision.reasons.includes("secret_leaked") || decision.findings.length === 0) {
-    throw ApplicationFailure.create({
+    throw new ActivityError({
       message: e.message,
       type: "BedrockOutputUnsafeError",
       nonRetryable: true,

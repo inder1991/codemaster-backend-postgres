@@ -1,12 +1,12 @@
 // Unit tests for posting.ts — the Step-9 post-review sub-functions (finding 8). Exercises the success
 // path (capture population + publication-outcome mapping), the H-2 dropped-state failure path (extract
 // details → map dropped indices → rfids → dispatch record_delivery_skipped inline → re-raise), and the
-// failure shapes the extractor must narrow (ActivityFailure-wrapped vs direct ApplicationFailure, wrong
+// failure shapes the extractor must narrow (cause-wrapped vs direct ActivityError, wrong
 // type, missing details).
 
 import { describe, it, expect } from "vitest";
 
-import { ActivityFailure, ApplicationFailure } from "@temporalio/common";
+import { ActivityError } from "#backend/review/activity_error.js";
 
 import {
   postReviewResults,
@@ -258,8 +258,8 @@ describe("extractDroppedStateFromPostFailure — failure-shape narrowing", () =>
     posted_review_pr_id: uuidFor(1),
   };
 
-  it("extracts the details from a direct ApplicationFailure of the dropped-state type", () => {
-    const err = ApplicationFailure.create({
+  it("extracts the details from a direct ActivityError of the dropped-state type", () => {
+    const err = new ActivityError({
       message: "github 422",
       type: POST_REVIEW_FAILED_WITH_DROPPED_STATE,
       details: [DETAILS],
@@ -267,27 +267,25 @@ describe("extractDroppedStateFromPostFailure — failure-shape narrowing", () =>
     expect(extractDroppedStateFromPostFailure(err)).toEqual(DETAILS);
   });
 
-  it("extracts the details from an ActivityFailure-wrapped ApplicationFailure", () => {
-    const app = ApplicationFailure.create({
+  it("extracts the details from a cause-wrapped ActivityError", () => {
+    const app = new ActivityError({
       message: "github 422",
       type: POST_REVIEW_FAILED_WITH_DROPPED_STATE,
       details: [DETAILS],
     });
-    // Construct an ActivityFailure with the ApplicationFailure as cause (the SDK's wrap shape).
-    const wrapped = Object.assign(Object.create(ActivityFailure.prototype) as ActivityFailure, {
-      cause: app,
-      message: "Activity task failed",
-    });
+    // asActivityError walks the `cause` chain (defensive against any future wrapping seam).
+    const wrapped = new Error("post wrapper");
+    wrapped.cause = app;
     expect(extractDroppedStateFromPostFailure(wrapped)).toEqual(DETAILS);
   });
 
-  it("returns null for an ApplicationFailure of a DIFFERENT type", () => {
-    const err = ApplicationFailure.create({ message: "x", type: "SomethingElse", details: [DETAILS] });
+  it("returns null for an ActivityError of a DIFFERENT type", () => {
+    const err = new ActivityError({ message: "x", type: "SomethingElse", details: [DETAILS] });
     expect(extractDroppedStateFromPostFailure(err)).toBeNull();
   });
 
   it("returns null for the dropped-state type but EMPTY details", () => {
-    const err = ApplicationFailure.create({
+    const err = new ActivityError({
       message: "x",
       type: POST_REVIEW_FAILED_WITH_DROPPED_STATE,
       details: [],
@@ -303,7 +301,7 @@ describe("extractDroppedStateFromPostFailure — failure-shape narrowing", () =>
 describe("postReviewResults — H-2 dropped-state failure path", () => {
   it("maps dropped indices → rfids, dispatches record_delivery_skipped inline, then re-raises", async () => {
     const state = new ReviewWorkflowState();
-    const failure = ApplicationFailure.create({
+    const failure = new ActivityError({
       message: "github 422 on inline",
       type: POST_REVIEW_FAILED_WITH_DROPPED_STATE,
       details: [
@@ -340,7 +338,7 @@ describe("postReviewResults — H-2 dropped-state failure path", () => {
 
   it("re-raises WITHOUT a skip dispatch when recordDeliverySkipped is not injected", async () => {
     const state = new ReviewWorkflowState();
-    const failure = ApplicationFailure.create({
+    const failure = new ActivityError({
       message: "github 422",
       type: POST_REVIEW_FAILED_WITH_DROPPED_STATE,
       details: [
@@ -360,7 +358,7 @@ describe("postReviewResults — H-2 dropped-state failure path", () => {
 
   it("re-raises a NON-dropped-state failure unchanged (no skip dispatch attempted)", async () => {
     const state = new ReviewWorkflowState();
-    const failure = ApplicationFailure.create({ message: "auth", type: "PostReviewPermissionError" });
+    const failure = new ActivityError({ message: "auth", type: "PostReviewPermissionError" });
     const ports = portsWith(async () => {
       throw failure;
     });
@@ -378,7 +376,7 @@ describe("postReviewResults — H-2 dropped-state failure path", () => {
 
   it("swallows a skip-dispatch failure and still re-raises the original post-review failure", async () => {
     const state = new ReviewWorkflowState();
-    const failure = ApplicationFailure.create({
+    const failure = new ActivityError({
       message: "github 422",
       type: POST_REVIEW_FAILED_WITH_DROPPED_STATE,
       details: [

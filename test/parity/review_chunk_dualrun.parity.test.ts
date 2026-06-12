@@ -266,7 +266,7 @@ describe("bedrock sub-part 3 — TS↔Python ReviewChunkResponseV1 dual-run", ()
     expect(pyErr.type).toBe("BedrockBudgetExceededError");
     expect(pyErr.non_retryable).toBe(true);
 
-    // TS side: drive bedrockReviewChunk with a kill-switch cost cap → ApplicationFailure non-retryable.
+    // TS side: drive bedrockReviewChunk with a kill-switch cost cap → a non-retryable ActivityError.
     const kill = new InMemoryCostCapEnforcer({ globalCapCents: 500_000, perOrgCapCents: 100_000 });
     kill.setKillSwitch(true);
     let captured: { type: string | undefined; nonRetryable: boolean | undefined } | null = null;

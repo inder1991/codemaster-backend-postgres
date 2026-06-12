@@ -1,6 +1,6 @@
 import { createHash, randomInt } from "node:crypto";
 
-import { ApplicationFailure } from "@temporalio/common";
+import { ActivityError } from "#backend/review/activity_error.js";
 import { Kysely, PostgresDialect } from "kysely";
 import { Pool } from "pg";
 import { afterAll, beforeAll, expect, it } from "vitest";
@@ -33,7 +33,7 @@ import { describeDb, INTEGRATION_DSN } from "../_db.js";
 // land on disk; (b) the activity returns the integer count of rows actually flipped (the Python `int`
 // return = len(flipped)); (c) the writes_enabled kill switch (CODEMASTER_LIFECYCLE_WRITES_ENABLED) gates
 // the write; (d) a repo invariant violation (ValueError analogue) is re-raised as a NON-RETRYABLE
-// ApplicationFailure with the Python type string.
+// ActivityError with the Python type string.
 
 const FIXED_CLOCK = new FakeClock({ now: new Date("2099-03-04T05:06:07.000Z") });
 
@@ -257,7 +257,7 @@ describeDb("recordDeliveryFinalized activity (integration, disposable PG)", () =
     }
   });
 
-  it("re-raises a length-mismatch (ValueError analogue) as a non-retryable ApplicationFailure", async () => {
+  it("re-raises a length-mismatch (ValueError analogue) as a non-retryable ActivityError", async () => {
     const seed = await seedTenant();
     try {
       const inp: FinalizedInputV1 = {
@@ -269,10 +269,10 @@ describeDb("recordDeliveryFinalized activity (integration, disposable PG)", () =
         comment_ids: [1], // mismatch
         posted_review_pr_id: seed.prId,
       };
-      await expect(recordDeliveryFinalized(inp)).rejects.toBeInstanceOf(ApplicationFailure);
+      await expect(recordDeliveryFinalized(inp)).rejects.toBeInstanceOf(ActivityError);
       await expect(recordDeliveryFinalized(inp)).rejects.toMatchObject({
         nonRetryable: true,
-        type: "FinalizedParityViolation",
+        name: "FinalizedParityViolation",
       });
     } finally {
       await cleanupTenant(seed);
@@ -331,7 +331,7 @@ describeDb("recordDeliverySkipped activity (integration, disposable PG)", () => 
     }
   });
 
-  it("re-raises an unknown eligibility_reason as a non-retryable ApplicationFailure", async () => {
+  it("re-raises an unknown eligibility_reason as a non-retryable ActivityError", async () => {
     const seed = await seedTenant();
     try {
       const ids = await seedFindings(seed, ["s2.py"]);
@@ -346,7 +346,7 @@ describeDb("recordDeliverySkipped activity (integration, disposable PG)", () => 
       };
       await expect(recordDeliverySkipped(inp)).rejects.toMatchObject({
         nonRetryable: true,
-        type: "SkippedParityViolation",
+        name: "SkippedParityViolation",
       });
     } finally {
       await cleanupTenant(seed);
@@ -380,7 +380,7 @@ describeDb("recordDeliveryDegraded activity (integration, disposable PG)", () =>
     }
   });
 
-  it("re-raises an out-of-set outcome as a non-retryable ApplicationFailure (even with writes off)", async () => {
+  it("re-raises an out-of-set outcome as a non-retryable ActivityError (even with writes off)", async () => {
     const seed = await seedTenant();
     const prev = process.env.CODEMASTER_LIFECYCLE_WRITES_ENABLED;
     try {
@@ -400,7 +400,7 @@ describeDb("recordDeliveryDegraded activity (integration, disposable PG)", () =>
       const bad = { ...inp, outcome: "inline_delivered" } as DegradedInputV1;
       await expect(recordDeliveryDegraded(bad)).rejects.toMatchObject({
         nonRetryable: true,
-        type: "DegradedOutcomeViolation",
+        name: "DegradedOutcomeViolation",
       });
     } finally {
       process.env.CODEMASTER_LIFECYCLE_WRITES_ENABLED = prev;

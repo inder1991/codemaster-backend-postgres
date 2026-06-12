@@ -4,7 +4,7 @@ import { Kysely, PostgresDialect } from "kysely";
 import { Pool } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
 
-import { ActivityFailure, ApplicationFailure } from "@temporalio/common";
+import { ActivityError } from "#backend/review/activity_error.js";
 
 import {
   doPost,
@@ -507,7 +507,7 @@ describeDb("post_review_results doPost (integration, disposable PG)", () => {
   it("WON ladder failure (non-422 create): raises PostReviewFailedWithDroppedState carrying classifier state", async () => {
     // Two findings: one in-window (kept) + one out-of-window (dropped). The classifier partitions them
     // BEFORE the atomic claim; the won-claim ladder then fails with a non-422 (5xx/network) error → the
-    // activity wraps it in the typed ApplicationFailure preserving { dropped, kept, posted_review_pr_id }.
+    // activity wraps it in the typed ActivityError preserving { dropped, kept, posted_review_pr_id }.
     // A non-422 on the inline create propagates immediately (the body-only retry is for 422 ONLY), so a
     // single scripted non-422 outcome suffices to drive the ladder's throw → the doPost H-2 wrap.
     const { client, calls } = makeStub({ createReview: ["non422"] });
@@ -523,16 +523,15 @@ describeDb("post_review_results doPost (integration, disposable PG)", () => {
     let thrown: unknown;
     try {
       await doPost(input, { ghClient: client, dsn: INTEGRATION_DSN!, clock: FIXED_CLOCK });
-      throw new Error("expected doPost to raise the dropped-state ApplicationFailure");
+      throw new Error("expected doPost to raise the dropped-state ActivityError");
     } catch (e) {
       thrown = e;
     }
 
-    // The raised failure is an ApplicationFailure with the contract type the workflow handler reads.
-    expect(thrown).toBeInstanceOf(ApplicationFailure);
-    expect(thrown).not.toBeInstanceOf(ActivityFailure);
-    const appErr = thrown as ApplicationFailure;
-    expect(appErr.type).toBe("PostReviewFailedWithDroppedState");
+    // The raised failure is an ActivityError with the contract NAME the dropped-state reader narrows on.
+    expect(thrown).toBeInstanceOf(ActivityError);
+    const appErr = thrown as ActivityError;
+    expect(appErr.name).toBe("PostReviewFailedWithDroppedState");
     // nonRetryable LEFT DEFAULT (false) — the workflow's retry policy controls the retry decision.
     expect(appErr.nonRetryable).toBe(false);
 
@@ -610,7 +609,7 @@ describeDb("post_review_results doPost (integration, disposable PG)", () => {
     // postReviewResults re-raises the activity's failure AFTER dispatching the skip.
     await expect(
       postReviewResults(ports, new ReviewWorkflowState(), input.walkthrough, input.aggregated, pr, deps),
-    ).rejects.toBeInstanceOf(ApplicationFailure);
+    ).rejects.toBeInstanceOf(ActivityError);
 
     // The workflow-body skip-dispatch fired for the dropped finding (index 1 → rfid1), with the
     // classifier-supplied reason + the PR-keyed posted_review_pr_id + the tenant installation_id.
@@ -636,8 +635,8 @@ describeDb("post_review_results doPost (integration, disposable PG)", () => {
       thrown = e;
     }
 
-    expect(thrown).toBeInstanceOf(ApplicationFailure);
-    expect((thrown as ApplicationFailure).type).toBe("PostReviewFailedWithDroppedState");
+    expect(thrown).toBeInstanceOf(ActivityError);
+    expect((thrown as ActivityError).name).toBe("PostReviewFailedWithDroppedState");
     const details = extractDroppedStateFromPostFailure(thrown);
     expect(details).not.toBeNull();
     expect(details!.kept_finding_indices).toEqual([0]);
@@ -648,7 +647,7 @@ describeDb("post_review_results doPost (integration, disposable PG)", () => {
 
   it("LOST update failure (non-422 update): raises PostReviewFailedWithDroppedState (update path)", async () => {
     // Pre-seed a winning row so doPost takes the lost-claim update path; the update_review then fails
-    // non-422 → the activity wraps it in the SAME typed ApplicationFailure (the "(update path)" variant).
+    // non-422 → the activity wraps it in the SAME typed ActivityError (the "(update path)" variant).
     await pool.query(
       `INSERT INTO core.posted_reviews (pr_id, marker, github_review_id, publication_outcome, posted_at)
        VALUES ($1, $2, $3, 'inline_posted', now())`,
@@ -667,14 +666,14 @@ describeDb("post_review_results doPost (integration, disposable PG)", () => {
     let thrown: unknown;
     try {
       await doPost(input, { ghClient: client, dsn: INTEGRATION_DSN!, clock: FIXED_CLOCK });
-      throw new Error("expected doPost to raise the dropped-state ApplicationFailure on the update path");
+      throw new Error("expected doPost to raise the dropped-state ActivityError on the update path");
     } catch (e) {
       thrown = e;
     }
 
-    expect(thrown).toBeInstanceOf(ApplicationFailure);
-    const appErr = thrown as ApplicationFailure;
-    expect(appErr.type).toBe("PostReviewFailedWithDroppedState");
+    expect(thrown).toBeInstanceOf(ActivityError);
+    const appErr = thrown as ActivityError;
+    expect(appErr.name).toBe("PostReviewFailedWithDroppedState");
     expect(appErr.message).toContain("(update path)");
     expect(appErr.nonRetryable).toBe(false);
 

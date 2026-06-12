@@ -19,7 +19,7 @@
  *     the count can legitimately be a subset of `rfids` (already-finalized rows are not re-counted).
  *   - Re-raises a repo INVARIANT VIOLATION (the Python `ValueError` analogue — rfids/comment_ids or
  *     rfids/reasons length mismatch, an unknown eligibility_reason, or an out-of-set degraded outcome) as
- *     a NON-RETRYABLE {@link ApplicationFailure} with the same `type` string the frozen Python uses, so
+ *     a NON-RETRYABLE {@link ActivityError} with the same `type` string the frozen Python uses, so
  *     Temporal surfaces the caller-side bug fast instead of burning retries. Any OTHER error (transient
  *     DB failure, stale-write guard, etc.) propagates unchanged so Temporal's retry policy still applies.
  *
@@ -39,7 +39,7 @@
  * so the Clock does not actually drive any column on these paths.
  */
 
-import { ApplicationFailure } from "@temporalio/common";
+import { ActivityError } from "#backend/review/activity_error.js";
 
 import { PostgresReviewFindingsRepo, tenantKyselyForDsn } from "#backend/domain/repos/review_findings_repo.js";
 
@@ -108,7 +108,7 @@ function isRepoInvariantViolation(err: unknown): err is Error {
 
 /**
  * Run a lifecycle setter, converting a repo invariant violation into a non-retryable
- * {@link ApplicationFailure} carrying the frozen-Python `type` string (so Temporal surfaces the bug fast
+ * {@link ActivityError} carrying the frozen-Python `type` string (so the runner surfaces the bug fast
  * and operators see the same failure type as the Python worker). Every other error propagates unchanged.
  */
 async function runSetter(args: {
@@ -120,7 +120,7 @@ async function runSetter(args: {
     return flipped.length;
   } catch (err) {
     if (isRepoInvariantViolation(err)) {
-      throw ApplicationFailure.create({
+      throw new ActivityError({
         message: err.message,
         type: args.failureType,
         nonRetryable: true,

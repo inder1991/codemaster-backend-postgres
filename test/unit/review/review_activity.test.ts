@@ -174,29 +174,29 @@ describe("doReview — happy path", () => {
 });
 
 describe("doReview — error paths", () => {
-  it("(a) role not configured → non-retryable BedrockInvocationError ApplicationFailure", async () => {
+  it("(a) role not configured → non-retryable BedrockInvocationError ActivityError", async () => {
     const cache: LlmClientCacheLike = {
       async forRole(): Promise<LlmClient> {
         throw new LlmRoleNotConfiguredError("no primary row");
       },
     };
     await expect(doReview(context(), { cache })).rejects.toMatchObject({
-      type: "BedrockInvocationError",
+      name: "BedrockInvocationError",
       nonRetryable: false,
     });
   });
 
-  it("(a) budget exceeded (pre-call cost-cap deny) → non-retryable BedrockBudgetExceededError ApplicationFailure", async () => {
+  it("(a) budget exceeded (pre-call cost-cap deny) → non-retryable BedrockBudgetExceededError ActivityError", async () => {
     await expect(doReview(context(), { cache: cacheWithBudgetDeny() })).rejects.toMatchObject({
-      type: "BedrockBudgetExceededError",
+      name: "BedrockBudgetExceededError",
       nonRetryable: true,
     });
   });
 
-  it("(c) generic invocation error → retryable BedrockInvocationError ApplicationFailure", async () => {
+  it("(c) generic invocation error → retryable BedrockInvocationError ActivityError", async () => {
     const cache = cacheThrowingFromSdk(new LlmInvocationError("upstream flake"));
     await expect(doReview(context(), { cache })).rejects.toMatchObject({
-      type: "BedrockInvocationError",
+      name: "BedrockInvocationError",
       nonRetryable: false,
     });
   });
@@ -256,7 +256,7 @@ describe("doReview — output-safety sanitize-and-continue", () => {
       stop_reason: "end_turn",
     };
     await expect(doReview(context(), { cache: cacheReturning(response) })).rejects.toMatchObject({
-      type: "BedrockOutputUnsafeError",
+      name: "BedrockOutputUnsafeError",
       nonRetryable: true,
     });
   });

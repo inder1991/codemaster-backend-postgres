@@ -4,14 +4,14 @@
 // (vendor/codemaster-py/codemaster/workflows/review_pull_request.py:2342-2840) — the parts that run AROUND
 // the `post_review_results` activity dispatch: the walkthrough markdown render (+ arbitration footer fold),
 // the PostedReviewV1 → `_PostReviewCapture` population, the publication-outcome stage-outcome mapping, and
-// the H-2 dropped-state failure path (extract dropped-state details from the ApplicationFailure, map
+// the H-2 dropped-state failure path (extract dropped-state details from the ActivityError, map
 // dropped indices → rfids, dispatch record_delivery_skipped INLINE, then re-raise).
 //
 // ── SANDBOX SAFETY (ADR-0065 / ADR-0066 / check_workflow_bundle + check_clock_random) ──
 // This module runs INSIDE the Temporal V8 workflow sandbox (the orchestrator imports it). It is
 // DETERMINISTIC + crypto/clock/network/DB FREE: NO node:crypto, NO Date.now / new Date(), NO Math.random,
 // NO fetch/http/DB. Every await is an activity-port dispatch (ports.*); the rest is pure string/array work.
-// The `@temporalio/common` failure types it reads (ActivityFailure / ApplicationFailure) are sandbox-safe.
+// The fault type it reads (ActivityError, review/activity_error.ts) is a plain Error subclass.
 //
 // ── ARBITRATION FOOTER (Stage 5 — collapse-on) ──
 // The Python `_post_review` folds `render_arbitration_footer_md(...)` onto the walkthrough markdown WHEN
@@ -21,10 +21,7 @@
 // (no applyArbitration port / sa null / fail-open swallow) `state.arbitration.result` stays null and the
 // fold is a no-op — the base markdown is returned unchanged.
 
-import {
-  ActivityFailure,
-  ApplicationFailure,
-} from "@temporalio/common";
+import { type ActivityError, asActivityError } from "#backend/review/activity_error.js";
 
 import { stageOutcomeForPublication, fixPromptStageOutcome } from "./helpers.js";
 import { stageOutcome, recordStage, type StageLogger } from "./degradation.js";
@@ -41,7 +38,7 @@ import type { PostedReviewV1 } from "#contracts/posted_review.v1.js";
 import type { SkippedInputV1 } from "#contracts/finding_lifecycle_inputs.v1.js";
 
 /**
- * The Temporal `type` string the `post_review_results` activity stamps on the {@link ApplicationFailure} it
+ * The Temporal `type` string the `post_review_results` activity stamps on the {@link ActivityError} it
  * raises when a GitHub publish fails AFTER the classifier already partitioned findings into kept/dropped
  * (so the workflow body can still flip the dropped rows to DELIVERY_FINALIZED-skipped). 1:1 with the frozen
  * Python `_POST_REVIEW_FAILED_WITH_DROPPED_STATE` constant. The on-failure handler below acts ONLY on a
@@ -141,7 +138,7 @@ export function captureFromPostedReview(
 }
 
 /**
- * The JSON-safe dropped-state details the post activity packs into {@link ApplicationFailure}.details[0] on
+ * The JSON-safe dropped-state details the post activity packs into {@link ActivityError}.details[0] on
  * the H-2 failure path. 1:1 with the Python `_build_dropped_state_details` shape: `posted_review_pr_id` as
  * a string, `kept_finding_indices` as int[], `dropped_classifications` as a list of `{index, eligibility_
  * reason}` dicts. Modelled loosely (the runtime narrowing below validates each field).
@@ -154,19 +151,13 @@ type DroppedStateDetails = {
 
 /**
  * Extract the dropped-state details dict from a post-review failure, OR null when the failure is not the
- * H-2 dropped-state shape. 1:1 with the workflow body's `_app_err` extraction: Temporal wraps an activity
- * exception in `ActivityFailure(cause=ApplicationFailure)`, but the `ApplicationFailure` can also surface
- * DIRECTLY; narrow either shape, require `type === PostReviewFailedWithDroppedState` and a non-empty
- * `details` array, and return `details[0]` as the JSON-safe payload.
+ * H-2 dropped-state shape. The in-process post call propagates the ActivityError DIRECTLY (no activity
+ * boundary wrapping); {@link asActivityError} also walks a `cause` chain defensively. Require
+ * `name === PostReviewFailedWithDroppedState` and a non-empty `details` array, returning `details[0]`.
  */
 export function extractDroppedStateFromPostFailure(err: unknown): DroppedStateDetails | null {
-  let appErr: ApplicationFailure | null = null;
-  if (err instanceof ApplicationFailure) {
-    appErr = err;
-  } else if (err instanceof ActivityFailure && err.cause instanceof ApplicationFailure) {
-    appErr = err.cause;
-  }
-  if (appErr === null || appErr.type !== POST_REVIEW_FAILED_WITH_DROPPED_STATE) {
+  const appErr: ActivityError | null = asActivityError(err);
+  if (appErr === null || appErr.name !== POST_REVIEW_FAILED_WITH_DROPPED_STATE) {
     return null;
   }
   const details = appErr.details;
@@ -227,6 +218,7 @@ async function dispatchInlineSkippedLifecycle(
   if (skippedPairs.length === 0 || deps.recordDeliverySkipped === undefined) {
     return;
   }
+  // silent-degradation:exempt reason=best-effort-skip-dispatch-inside-reraising-post-handler follow_up=PERMANENT-EXEMPTION-best-effort-emit-inside-reraising-handler
   try {
     await deps.recordDeliverySkipped({
       schema_version: 1,
@@ -304,7 +296,7 @@ export async function postReviewResults(
     });
   } catch (postReviewExc) {
     // H-2 dropped-state failure path: when the activity wrapped its underlying GitHub failure in an
-    // ApplicationFailure carrying the classifier output, flip the dropped rows to skipped BEFORE re-raising
+    // ActivityError carrying the classifier output, flip the dropped rows to skipped BEFORE re-raising
     // so they don't stay stuck at PERSISTED with delivery_outcome IS NULL forever. Any other failure (or a
     // failure without the dropped-state details) just re-raises unchanged.
     const details = extractDroppedStateFromPostFailure(postReviewExc);

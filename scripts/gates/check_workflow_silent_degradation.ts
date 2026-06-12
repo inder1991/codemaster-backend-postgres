@@ -163,16 +163,6 @@ export const EXEMPTED: Record<string, ExemptedEntry> = {
       "outbox_dispatcher.py::131). Cancellation re-propagates via the conditional throw above the " +
       "settle; the in-process twin (outbox_dispatcher_loop.ts) additionally console.warns per row.",
   },
-  "apps/backend/src/review/pipeline/posting.ts::230": {
-    symbol: "dispatchInlineSkippedLifecycle",
-    follow_up_story: "PERMANENT-EXEMPTION-best-effort-emit-inside-reraising-handler",
-    reason:
-      "B.12/H-2 — the inline skip dispatch is best-effort bookkeeping invoked from " +
-      "postReviewResults' catch, which ALWAYS re-raises the original post failure (top-level " +
-      "throw). A skip-dispatch failure must NOT shadow the dominant operator signal. Same shape as " +
-      "the Python's PERMANENT-EXEMPTION-cancellation-audit-inner-try family (best-effort emit " +
-      "inside an outer re-raising handler).",
-  },
   "apps/backend/src/runner/stage_log_sink.ts::62": {
     symbol: "makeStructuredStageLogger",
     follow_up_story: "PERMANENT-EXEMPTION-defensive-log-emit",

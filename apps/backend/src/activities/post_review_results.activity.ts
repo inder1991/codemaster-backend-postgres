@@ -58,7 +58,7 @@
 
 import { type Kysely, sql, type Transaction } from "kysely";
 
-import { ApplicationFailure } from "@temporalio/common";
+import { ActivityError } from "#backend/review/activity_error.js";
 
 import { tenantKysely } from "#platform/db/database.js";
 import { type Clock, WallClock } from "#platform/clock.js";
@@ -984,7 +984,7 @@ function parseStoredCommentIds(raw: string | null): Array<number> {
 // ─── doPost — the 2-phase atomic-claim state machine ─────────────────────────────────────────────
 
 /**
- * The JSON-safe dropped-state details packed into the {@link ApplicationFailure}.details[0] the publication
+ * The JSON-safe dropped-state details packed into the {@link ActivityError}.details[0] the publication
  * ladder raises when GitHub fails AFTER the classifier partitioned findings into kept/dropped (H-2). 1:1
  * with the frozen Python `_build_dropped_state_details` return shape: `dropped_classifications` as a list of
  * `{schema_version, index, eligibility_reason}` dicts, `kept_finding_indices` as int[], and
@@ -1187,7 +1187,7 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
     // ── WON the claim: run the publication ladder (HTTP, no DB tx held). ──
     // H-2 (1:1 with the Python `_do_post` won-claim try/except): wrap ONLY the publication ladder so a
     // non-422 failure (5xx after retries, network error, auth error, etc.) converts into a typed
-    // ApplicationFailure carrying the classifier output. The workflow body's `postReviewResults` closure
+    // ActivityError carrying the classifier output. The workflow body's `postReviewResults` closure
     // reads `appErr.details[0]` (via extractDroppedStateFromPostFailure) to dispatch
     // record_delivery_skipped for the dropped findings — without this payload-preservation the
     // classifier-dropped findings stay stuck at PERSISTED with delivery_outcome IS NULL forever.
@@ -1198,7 +1198,7 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
     // so it falls OUTSIDE this try — only a thrown non-422 ladder error is wrapped (matching Python).
     // W4.3 (gate ①): no NEW GitHub write starts after abort. Gate OUTSIDE the H-2 try so the
     // TerminalCancelError propagates as itself (it must NOT be rewrapped into the dropped-state
-    // ApplicationFailure). The claim row stays NULL (github_review_id never set) → W3.2 recovers it.
+    // ActivityError). The claim row stays NULL (github_review_id never set) → W3.2 recovers it.
     throwIfAborted(deps.signal);
     let attempt: PublicationAttempt;
     try {
@@ -1213,7 +1213,7 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
         prMeta,
       });
     } catch (e) {
-      throw ApplicationFailure.create({
+      throw new ActivityError({
         message: "post-review failed; classifier state preserved for skip-dispatch",
         type: POST_REVIEW_FAILED_WITH_DROPPED_STATE,
         // nonRetryable LEFT DEFAULT (false): the contract we OWN is the payload-preservation, NOT the
@@ -1469,12 +1469,12 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
 
   // A prior winner published. Dispatch the idempotent body-refresh update. H-2 (1:1 with the Python
   // lost-claim try/except): wrap ONLY the update_review call so a GitHub-side failure on the update path
-  // ALSO preserves classifier state via ApplicationFailure.details — same shape + same payload as the
+  // ALSO preserves classifier state via ActivityError.details — same shape + same payload as the
   // won-claim wrap above. The classifier output is IDENTICAL here: this branch uses the SAME
   // `keptIndices` + `droppedClassifications` computed at the top of doPost (BEFORE the atomic claim), so
   // the state survives both publication paths. The message carries the "(update path)" variant per Python.
   // W4.3 (gate ①): no NEW GitHub write starts after abort. Gate OUTSIDE the H-2 try so the
-  // TerminalCancelError propagates as itself (not rewrapped into the dropped-state ApplicationFailure).
+  // TerminalCancelError propagates as itself (not rewrapped into the dropped-state ActivityError).
   throwIfAborted(deps.signal);
   try {
     await ghClient.updateReview({
@@ -1485,7 +1485,7 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
       body,
     });
   } catch (e) {
-    throw ApplicationFailure.create({
+    throw new ActivityError({
       message: "post-review failed (update path); classifier state preserved for skip-dispatch",
       type: POST_REVIEW_FAILED_WITH_DROPPED_STATE,
       // nonRetryable LEFT DEFAULT (false) — same rationale as the won-claim wrap (1:1 with Python).
