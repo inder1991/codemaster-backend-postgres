@@ -42,6 +42,7 @@ import { type Kysely, sql } from "kysely";
 
 import type { ConfluenceRetrievedChunk } from "#backend/retrieval/confluence_source.js";
 import { MIN_COSINE_SIMILARITY_FLOOR } from "#backend/retrieval/constants.js";
+import { computeMatchSpecificity } from "#backend/retrieval/match_specificity.js";
 import { formatPgvectorLiteral } from "#backend/retrieval/pgvector_literal.js";
 
 /**
@@ -82,8 +83,10 @@ type ConfluenceRow = {
 // (retrieval/pgvector_literal.ts) — plain decimal (never exponential), value-exact round-trip,
 // fail-loud on non-finite components. The previous inline `String(x)` join could emit exponent notation.
 
-/** Map a SELECT row to a ConfluenceRetrievedChunk (1:1 with the Python `_row_to_chunk`). */
-function rowToChunk(row: ConfluenceRow): ConfluenceRetrievedChunk {
+/** Map a SELECT row to a ConfluenceRetrievedChunk (1:1 with the Python `_row_to_chunk`, PLUS the
+ *  W1.3/RH8 Stage-1.5 specificity computation — `search()` has the caller's effective_labels in scope,
+ *  so the score is computed HERE instead of the legacy hardcoded 0 every consumer used to see). */
+function rowToChunk(row: ConfluenceRow, effectiveLabels: ReadonlySet<string>): ConfluenceRetrievedChunk {
   const labels = row.labels === null ? [] : [...row.labels];
   return {
     chunk_id: row.chunk_id,
@@ -98,8 +101,9 @@ function rowToChunk(row: ConfluenceRow): ConfluenceRetrievedChunk {
     token_count: row.token_count === null ? 0 : Number(row.token_count),
     score: Number(row.score),
     source: "confluence",
-    // The adapter does not compute match_specificity_score (needs effective_labels from the caller).
-    match_specificity_score: 0,
+    // W1.3 (RH8): the label-overlap specificity score (spec §3.5) — floors sort on it (specificity
+    // DESC before freshness) and the prompt frame renders its bucket. Was hardcoded 0 (RH8).
+    match_specificity_score: computeMatchSpecificity(new Set(labels), effectiveLabels),
   };
 }
 
@@ -179,7 +183,7 @@ export class PostgresConfluenceRetrieval {
           ? await this.runPhaseC({ qvec, labelsBind, topK: args.topK, activeGeneration })
           : await this.runPhaseA({ qvec, labelsBind, topK: args.topK, activeGeneration });
     }
-    return rows.map(rowToChunk);
+    return rows.map((row) => rowToChunk(row, effectiveLabels));
   }
 
   /**

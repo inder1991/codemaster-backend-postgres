@@ -48,8 +48,10 @@ export const NEAR_DUPLICATE_THRESHOLD = 0.92;
  *   - `labels`: canonical labels persisted on the chunk row (Stage 1.5 match_specificity scoring).
  *   - `age_days`: days since `last_modified_at` (computed at retrieval time; Stage-3 freshness signal).
  *   - `token_count`: cached token count (default-pool budget reservation, T11 floors).
- *   - `match_specificity_score`: filled in by the HybridRetriever after retrieval; the adapter does NOT
- *     compute it (the formula needs effective_labels from the caller's KnowledgeQueryV1). Default 0.
+ *   - `match_specificity_score`: W1.3 (RH8) — computed by the PRODUCTION ADAPTER
+ *     (`PostgresConfluenceRetrieval.search`, which has the caller's effective_labels in scope) via
+ *     `computeMatchSpecificity`. The pre-W1.3 comment claimed the HybridRetriever fills it in; no code
+ *     path ever did (RH8) — every producer shipped the hardcoded 0. Test fakes may still default 0.
  */
 export type ConfluenceRetrievedChunk = {
   chunk_id: string;
