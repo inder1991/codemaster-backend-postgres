@@ -19,13 +19,18 @@
 
 import { describe, expect, it } from "vitest";
 
+import { readFileSync } from "node:fs";
+import * as path from "node:path";
+
 import { FakeClock } from "#platform/clock.js";
 import {
   StaticAnalysisActivity,
   MAX_FILES_PER_RUNNER,
   MAX_RAW_PER_TOOL,
+  TIER1_SOFT_BARRIER_SECONDS,
 } from "#backend/activities/static_analysis.activity.js";
 import type { CuratorPort } from "#backend/activities/static_analysis.activity.js";
+import { DEFAULT_TIMEOUT_SECONDS } from "#backend/analysis/in_worker_runner.js";
 import type { AnalysisRunner, RunnerRunInput } from "#backend/analysis/runner_port.js";
 
 import { AnalysisFindingV1 } from "#contracts/analysis_findings.v1.js";
@@ -174,6 +179,29 @@ describe("StaticAnalysisActivity (real runner orchestration)", () => {
     expect(eslint.ranWith?.files).toEqual(["b.ts", "c.tsx", "d.js", "e.jsx"]);
     // gitleaks scans the WHOLE file set (secret scanner; file-language irrelevant)
     expect(gitleaks.ranWith?.files).toEqual(files);
+  });
+
+  it("W2.6 (M4): the Tier-1 soft barrier is STRICTLY below the per-tool safety timeout", () => {
+    // The orchestrator is documented to own the authoritative deadline with per-tool timeouts as
+    // "only safety guards" — that is only true when the barrier preempts a hung tool.
+    expect(TIER1_SOFT_BARRIER_SECONDS).toBeLessThan(DEFAULT_TIMEOUT_SECONDS);
+  });
+
+  it("W2.6 (M4): both production composition roots wire the shared soft-barrier constant (no hardcoded 60)", () => {
+    // Source pin (the in_process_ports_wired_keys smoke idiom): the two production wirings must
+    // reference TIER1_SOFT_BARRIER_SECONDS so the M4 inequality holds wherever the orchestrator is
+    // constructed — a re-hardcoded literal would silently re-equalize barrier and guard.
+    const root = process.cwd();
+    const buildActivities = readFileSync(
+      path.join(root, "apps/backend/src/worker/build_activities.ts"),
+      "utf8",
+    );
+    const inProcessPorts = readFileSync(
+      path.join(root, "apps/backend/src/runner/in_process_ports.ts"),
+      "utf8",
+    );
+    expect(buildActivities).toContain("TIER1_SOFT_BARRIER_SECONDS");
+    expect(inProcessPorts).toContain("TIER1_SOFT_BARRIER_SECONDS");
   });
 
   it("W2.6 (M1): per-runner file lists are capped at MAX_FILES_PER_RUNNER so a monster PR can't E2BIG the spawn", async () => {
