@@ -100,6 +100,20 @@ const OUTBOX_TRIGGER_ACTIONS: ReadonlySet<string> = new Set([
   "ready_for_review",
 ]);
 
+/**
+ * XH6 (W4.3) — the draft-PR review policy, resolved per delivery. DEFAULT: drafts are SKIPPED
+ * (no run allocation, no outbox dispatch) for opened/synchronize/reopened, and the ONE review
+ * fires at `ready_for_review` (already a trigger action; GitHub stamps `draft:false` on it).
+ * Drafts are the highest-churn phase — pre-XH6 every draft push ran a full clone + Tier-1 +
+ * Tier-2-LLM + post review whose ONLY draft-awareness was a prompt tone-down line.
+ * `CODEMASTER_REVIEW_DRAFT_PRS=true` restores the legacy review-every-draft-push posture
+ * platform-wide (a per-repo `.codemaster.yaml` override is a deliberate follow-up: the repo config
+ * loads INSIDE the review, after this ingest-boundary decision).
+ */
+function reviewDraftPrsEnabled(): boolean {
+  return process.env.CODEMASTER_REVIEW_DRAFT_PRS === "true";
+}
+
 /** PR action → review-run trigger_type (1:1 with `_ACTION_TO_TRIGGER_TYPE`). */
 const ACTION_TO_TRIGGER_TYPE: Readonly<Record<string, string>> = {
   opened: "pr_opened",
@@ -648,6 +662,26 @@ export async function persistWebhook(args: {
             // STAGE-1 STUB: the pr.closed forensic audit (emitAuditEvent on the encrypted audit_events
             // table) wires in Stage 3 — it needs the pg-client AuditQueryClient seam, deferred under the
             // Kysely-native transaction model. No enqueue for closed PRs (correct).
+          } else if (
+            OUTBOX_TRIGGER_ACTIONS.has(prMeta.action) &&
+            prMeta.draft &&
+            prMeta.action !== "ready_for_review" &&
+            !reviewDraftPrsEnabled()
+          ) {
+            // XH6 (W4.3): a DRAFT trigger action is deliberately NOT review-dispatching (see
+            // reviewDraftPrsEnabled). The webhook is still fully persisted above (audit +
+            // idempotency + the S3 PR-metadata trio), so the eventual ready_for_review review has
+            // its rows. ready_for_review is exempt from the skip even if a (GHE-quirk) payload
+            // still carries draft:true — it IS the "review now" signal.
+            console.info(
+              JSON.stringify({
+                event: "webhook.draft_pr_review_skipped",
+                delivery_id: deliveryId,
+                action: prMeta.action,
+                pr_number: prMeta.prNumber,
+                github_repo_id: prMeta.githubRepoId,
+              }),
+            );
           } else if (OUTBOX_TRIGGER_ACTIONS.has(prMeta.action)) {
             const { outcome, reviewId } = await allocateRunForPrWebhook(tx, {
               body: args.body,
