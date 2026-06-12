@@ -19,7 +19,7 @@
 //   (3) FAIL-LOUD: a non-1-element / non-object `args` shape throws BEFORE any enqueue.
 //   (4) cancelWorkflow / signalWorkflow throw — the outbox sinks only ever call startWorkflow (the
 //       review supersede path is DB flipCurrentRun, not a Temporal signal; admin-console signals
-//       ride _admin_temporal_port.ts, a different port wiring entirely).
+//       are synchronous DB transitions in the admin routes, a different concern entirely).
 //   (6) END-TO-END CUTOVER PARITY: a seeded `temporal_workflow_start` outbox row → ONE drain pass
 //       (buildBackgroundRunner.drainOutboxOnce → the registered sink →
 //       BackgroundJobsTemporalPort.enqueue) → ONE runner cycle (runOneCycle → reconcile handler) →

@@ -58,8 +58,8 @@
 //
 // ## cancel / signal are structurally unreachable from the outbox sinks
 // makeTemporalWorkflowStartHandler only ever calls startWorkflow. The review supersede path is the
-// DB-side flipCurrentRun (ingest/_review_run_allocator.ts), not a Temporal cancel; admin-console
-// signals ride api/admin/_admin_temporal_port.ts — a different port wiring entirely. Both methods
+// DB-side flipCurrentRun (ingest/_review_run_allocator.ts), not a Temporal cancel; admin commands
+// (knowledge approve/reject) are now synchronous DB transitions in the admin routes, not signals. Both methods
 // therefore throw unconditionally: a future caller routing cancel/signal through THIS port is a
 // wiring bug to surface at the first call, not a capability to emulate.
 
@@ -273,7 +273,7 @@ export class BackgroundJobsTemporalPort implements TemporalClientPort {
   public async signalWorkflow(): Promise<void> {
     throw new Error(
       "signalWorkflow is not supported via BackgroundJobsTemporalPort — the outbox sinks only " +
-        "start; admin-console signals ride _admin_temporal_port.ts, not this port",
+        "start; admin commands are synchronous DB writes in the admin routes, not signals through this port",
     );
   }
 }

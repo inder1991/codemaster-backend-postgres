@@ -242,6 +242,11 @@ export async function validateRejectProposal(
  * approver identity + reject reason are NOT columns on core.learning_proposals — they are carried by the
  * admin audit event the route emits.
  */
+// FOLLOW-UP-proposal-expiry-sweep: the Python knowledge_approval workflow ALSO auto-expired a
+// proposal 7 days after it entered pending_approval (its durable timer). De-Temporal, that becomes
+// a janitor cron (UPDATE ... SET state='expired' WHERE state='pending_approval' AND state_changed_at
+// < now-7d) alongside the job_retention/run_id_retention sweeps — NOT yet wired. Until it lands, a
+// never-decided proposal stays pending_approval indefinitely (visible + decidable; no data loss).
 export async function transitionProposalToTerminal(
   db: Kysely<unknown>,
   args: {

@@ -143,7 +143,6 @@ import {
   toEmbeddingGenerationV1,
 } from "#backend/api/admin/embedder_write.js";
 import { buildMembersPage } from "#backend/api/admin/members_read.js";
-import type { AdminTemporalPort } from "#backend/api/admin/_admin_temporal_port.js";
 import {
   ReviewDetailNotFoundError,
   buildReviewDetail,
@@ -352,7 +351,6 @@ export type AdminRoutesOptions = {
   dnsResolver?: DnsResolver;
   /** Optional Temporal dispatch/signal seam for knowledge-proposal + embedder write endpoints.
    *  Undefined → those endpoints return 503. Mirrors opts.audit. */
-  temporal?: AdminTemporalPort;
   /** Status-page reader (pipeline + pilot aggregates). Optional — defaults to `new StatusRepo(opts.db)`
    *  so endpoint tests that don't inject a stub still exercise the real Postgres aggregates. */
   statusRepo?: StatusRepo;
@@ -665,25 +663,6 @@ export async function registerAdminRoutes(
           // Mirror the service fallback (source = active when caller omits) so the workflow input carries the
           // same value the service persisted; defensive '1' for the unreachable NULL branch.
           const sourceForWorkflow = gen.created_from_generation ?? 1;
-          if (opts.temporal) {
-            // FOLLOW-UP-embedder-maintenance-worker: this PascalCase type string diverges from the Python
-            // wire name (snake_case "reembed_generation_workflow"). No TS consumer exists yet; when the
-            // embedder-maintenance worker lands it MUST register the workflow under the EXACT type string
-            // dispatched here — reconcile the casing to the Python snake_case at that point.
-            await opts.temporal.dispatchWorkflow({
-              workflowType: "ReembedGenerationWorkflow",
-              workflowId: `reembed-generation-${gen.generation_id}`,
-              taskQueue: "embedder-maintenance",
-              input: {
-                schema_version: 1,
-                generation_id: gen.generation_id,
-                target_model_name: body.target_model_name,
-                source_generation_id: sourceForWorkflow,
-                triggered_by_email: actorEmail,
-              },
-              idReusePolicy: "REJECT_DUPLICATE",
-            });
-          }
           await opts.audit?.({
             actorUserId: principal.userId,
             installationId: principal.installationId,
@@ -729,16 +708,6 @@ export async function registerAdminRoutes(
         try {
           const updated = await cancelReembedGeneration(embedderService, body.generation_id, actorEmail);
           // Best-effort cancel signal AFTER persistence — swallow not-found / already-completed.
-          if (opts.temporal) {
-            try {
-              await opts.temporal.signalWorkflow({
-                workflowId: `reembed-generation-${body.generation_id}`,
-                signalName: "cancel",
-              });
-            } catch {
-              // Workflow may already be terminal + GC'd by Temporal; the DB row already says 'retired'.
-            }
-          }
           await opts.audit?.({
             actorUserId: principal.userId,
             installationId: principal.installationId,
@@ -796,30 +765,6 @@ export async function registerAdminRoutes(
         }
 
         // Dispatch AFTER the state-check. Default sample_size from the workflow contract when omitted.
-        if (opts.temporal) {
-          // 1:1 with the Python temporal_embedder_dispatcher: the validate workflow_id carries a UTC
-          // timestamp suffix (strftime "%Y%m%dT%H%M%SZ") so each re-validate under ALLOW_DUPLICATE lands
-          // as a DISTINCT execution rather than colliding with a prior run. Derive the suffix from the
-          // injected clock (never `new Date()` — the no-wall-clock gate is ERROR-mode in src).
-          const ts = opts.clock
-            .now()
-            .toISOString()
-            .replace(/[-:]/g, "")
-            .replace(/\.\d{3}Z$/, "Z");
-          // FOLLOW-UP-embedder-maintenance-worker: PascalCase here vs the Python snake_case wire name
-          // ("validate_generation_workflow"); no TS consumer yet — the future embedder-maintenance worker
-          // MUST register under the exact type string dispatched here (reconcile casing to snake_case then).
-          await opts.temporal.dispatchWorkflow({
-            workflowType: "ValidateGenerationWorkflow",
-            workflowId: `validate-generation-${body.generation_id}-${ts}`,
-            taskQueue: "embedder-maintenance",
-            input:
-              body.sample_size === null
-                ? { schema_version: 1, generation_id: body.generation_id }
-                : { schema_version: 1, generation_id: body.generation_id, sample_size: body.sample_size },
-            idReusePolicy: "ALLOW_DUPLICATE",
-          });
-        }
         await opts.audit?.({
           actorUserId: principal.userId,
           installationId: principal.installationId,
@@ -985,19 +930,6 @@ export async function registerAdminRoutes(
             actorEmail,
             opts.clock.now(),
           );
-          // Dispatch the GC workflow ONLY after a successful service.gc() (which set gc_started_at).
-          if (opts.temporal) {
-            // FOLLOW-UP-embedder-maintenance-worker: PascalCase here vs the Python snake_case wire name
-            // ("garbage_collect_generation_workflow"); no TS consumer yet — the future embedder-maintenance
-            // worker MUST register under the exact type string dispatched here (reconcile casing then).
-            await opts.temporal.dispatchWorkflow({
-              workflowType: "GarbageCollectGenerationWorkflow",
-              workflowId: `gc-generation-${body.generation_id}`,
-              taskQueue: "embedder-maintenance",
-              input: { schema_version: 1, generation_id: body.generation_id },
-              idReusePolicy: "ALLOW_DUPLICATE",
-            });
-          }
           await opts.audit?.({
             actorUserId: principal.userId,
             installationId: principal.installationId,

@@ -6,8 +6,9 @@
  * generation sequence (core.embedding_generations). These tests seed their own fixtures and reset the
  * shared singleton in beforeEach, so they are robust under pytest-randomly-style shuffle ordering.
  *
- * Temporal dispatch + signal are asserted against a RecordingTemporalClient (inner.calls / inner.signals);
- * audit events are asserted against a recording audit emitter.
+ * Audit events are asserted against a recording audit emitter. (The Temporal dispatch/signal these
+ * endpoints once emitted was removed with the Temporal runtime — the embedder-maintenance execution
+ * is a separate unported subsystem; these endpoints record state + audit only.)
  */
 
 import { Kysely, PostgresDialect, sql } from "kysely";
@@ -21,11 +22,6 @@ import { registerAdminRoutes } from "#backend/api/admin/admin_routes.js";
 import { SESSION_COOKIE_NAME } from "#backend/api/auth/auth_routes.js";
 import { issueCookie } from "#backend/api/auth/session.js";
 import type { Role } from "#backend/api/auth/roles.js";
-import { makeAdminTemporalPort } from "#backend/api/admin/_admin_temporal_port.js";
-import {
-  RecordingTemporalClient,
-  type StartWorkflowCall,
-} from "#backend/adapters/temporal_port.js";
 
 import { describeDb, INTEGRATION_DSN } from "../_db.js";
 
@@ -121,17 +117,14 @@ function mintCookie(role: Role): string {
 /** Build the app with the embedder write routes wired + recording temporal + recording audit. */
 async function makeApp(): Promise<{
   app: Awaited<ReturnType<typeof buildApp>>;
-  inner: RecordingTemporalClient;
   audited: Array<AuditEvent>;
 }> {
   const app = buildApp({});
-  const inner = new RecordingTemporalClient();
   const audited: Array<AuditEvent> = [];
   await registerAdminRoutes(app, {
     db,
     signingKey: SIGNING_KEY,
     clock: new FakeClock({ now: NOW }),
-    temporal: makeAdminTemporalPort(inner),
     // Mirror the Python: the handler always resolves the actor email (the bootstrap shim never returns the
     // bare UUID). Map ACTOR_USER → ACTOR_EMAIL so the persisted created_by_email / dispatched
     // triggered_by_email are deterministic.
@@ -145,7 +138,7 @@ async function makeApp(): Promise<{
     },
   });
   await app.ready();
-  return { app, inner, audited };
+  return { app, audited };
 }
 
 const owner = (): Record<string, string> => ({ [SESSION_COOKIE_NAME]: mintCookie("platform_owner") });
@@ -258,7 +251,7 @@ async function seedConfluenceCoverageGap(): Promise<string> {
 
 describeDb("embedder write lifecycle (disposable :5439)", () => {
   it("POST /reembed/start: inserts backfilling generation, sets pending, returns EmbeddingGenerationV1", async () => {
-    const { app, inner, audited } = await makeApp();
+    const { app, audited } = await makeApp();
     const res = await app.inject({
       method: "POST",
       url: "/api/admin/embedder/reembed/start",
@@ -279,15 +272,6 @@ describeDb("embedder write lifecycle (disposable :5439)", () => {
     // 1:1 with the Python: the service persists triggered_by_email (the RESOLVED actor email) to
     // created_by_email — NOT the bare UUID (which would coerce to null because it lacks an '@').
     expect(body.created_by_email).toBe(ACTOR_EMAIL);
-
-    // Workflow dispatched with REJECT_DUPLICATE + the right workflow id/type/queue.
-    const call = inner.calls.find((c: StartWorkflowCall) => c.workflowType === "ReembedGenerationWorkflow");
-    expect(call).toBeDefined();
-    expect(call!.workflowId).toBe(`reembed-generation-${body.generation_id}`);
-    expect(call!.taskQueue).toBe("embedder-maintenance");
-    expect(call!.idReusePolicy).toBe("REJECT_DUPLICATE");
-    // The dispatched workflow input (args[0]) carries the resolved actor email, not the UUID.
-    expect((call!.args[0] as { triggered_by_email: string }).triggered_by_email).toBe(ACTOR_EMAIL);
 
     // Audit emitted.
     expect(audited.some((a) => a.action === "embedder.generation.created")).toBe(true);
@@ -371,7 +355,7 @@ describeDb("embedder write lifecycle (disposable :5439)", () => {
   });
 
   it("POST /reembed/cancel: cancels pending backfill (signal recorded), 409 invalid_state_transition on re-cancel", async () => {
-    const { app, inner, audited } = await makeApp();
+    const { app, audited } = await makeApp();
 
     const startRes = await app.inject({
       method: "POST",
@@ -393,10 +377,6 @@ describeDb("embedder write lifecycle (disposable :5439)", () => {
     expect(cancelled.state).toBe("retired");
     expect(cancelled.retire_reason).toBe("cancelled");
 
-    // Best-effort cancel signal recorded against the reembed workflow id.
-    expect(
-      inner.signals.some(([wfId, signal]) => wfId === `reembed-generation-${genId}` && signal === "cancel"),
-    ).toBe(true);
     expect(audited.some((a) => a.action === "embedder.generation.cancelled")).toBe(true);
 
     // Re-cancel (already retired) → 409.
@@ -425,7 +405,7 @@ describeDb("embedder write lifecycle (disposable :5439)", () => {
   });
 
   it("POST /reembed/validate: 200 pre-validation snapshot + ALLOW_DUPLICATE dispatch on a 'ready' gen", async () => {
-    const { app, inner, audited } = await makeApp();
+    const { app, audited } = await makeApp();
     const genId = await seedReadyWithChunks("validate-test", 1);
 
     const res = await app.inject({
@@ -438,14 +418,6 @@ describeDb("embedder write lifecycle (disposable :5439)", () => {
     // Pre-validation snapshot: validation_completed_at is still null (caller polls /reembed/status).
     expect(res.json<{ validation_completed_at: string | null }>().validation_completed_at).toBeNull();
 
-    const call = inner.calls.find((c) => c.workflowType === "ValidateGenerationWorkflow");
-    expect(call).toBeDefined();
-    // 1:1 with the Python temporal_embedder_dispatcher: the validate workflow_id carries a UTC-timestamp
-    // suffix (strftime "%Y%m%dT%H%M%SZ") so each re-validate lands as a distinct execution under
-    // ALLOW_DUPLICATE. The suffix is clock-derived (FakeClock NOW=2026-06-08T12:00:00Z) → deterministic.
-    expect(call!.workflowId).toBe(`validate-generation-${genId}-20260608T120000Z`);
-    expect(call!.taskQueue).toBe("embedder-maintenance");
-    expect(call!.idReusePolicy).toBe("ALLOW_DUPLICATE");
     expect(audited.some((a) => a.action === "embedder.generation.validated")).toBe(true);
     await app.close();
   });
@@ -573,7 +545,7 @@ describeDb("embedder write lifecycle (disposable :5439)", () => {
   });
 
   it("POST /reembed/gc: 200 records gc_started_at + dispatches GC workflow on a retention-aged retired gen", async () => {
-    const { app, inner, audited } = await makeApp();
+    const { app, audited } = await makeApp();
     const genId = await seedRetiredAged("gc-aged", 40); // 40d > 30d retention window
 
     const res = await app.inject({
@@ -585,17 +557,12 @@ describeDb("embedder write lifecycle (disposable :5439)", () => {
     expect(res.statusCode).toBe(200);
     expect(res.json<{ gc_started_at: string | null }>().gc_started_at).not.toBeNull();
 
-    const call = inner.calls.find((c) => c.workflowType === "GarbageCollectGenerationWorkflow");
-    expect(call).toBeDefined();
-    expect(call!.workflowId).toBe(`gc-generation-${genId}`);
-    expect(call!.taskQueue).toBe("embedder-maintenance");
-    expect(call!.idReusePolicy).toBe("ALLOW_DUPLICATE");
     expect(audited.some((a) => a.action === "embedder.generation.gc_started")).toBe(true);
     await app.close();
   });
 
   it("POST /reembed/gc: 409 gc_retention_not_elapsed (no workflow dispatch)", async () => {
-    const { app, inner } = await makeApp();
+    const { app } = await makeApp();
     const genId = await seedRetiredAged("gc-fresh", 1); // 1d < 30d retention window
 
     const res = await app.inject({
@@ -606,8 +573,6 @@ describeDb("embedder write lifecycle (disposable :5439)", () => {
     });
     expect(res.statusCode).toBe(409);
     expect(res.json<{ detail: { error: string } }>().detail.error).toBe("gc_retention_not_elapsed");
-    // No GC workflow dispatched on the retention failure.
-    expect(inner.calls.some((c) => c.workflowType === "GarbageCollectGenerationWorkflow")).toBe(false);
     await app.close();
   });
 
