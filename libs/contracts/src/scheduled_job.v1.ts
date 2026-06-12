@@ -20,7 +20,7 @@ export type CadenceKind = z.infer<typeof CadenceKind>;
 // both coerce (the admin.v1.ts idiom; ZodNullable short-circuits null before coercion).
 export const ScheduledJobV1 = z
   .object({
-    // W4.1 (L8): a REAL column since migration 0045 (int NOT NULL DEFAULT 1) — the scheduler skips
+    // W4.1 (L8): a REAL column since migration 0046 (int NOT NULL DEFAULT 1) — the scheduler skips
     // rows stamped newer than SCHEDULED_JOB_ENVELOPE_SCHEMA_VERSION via the W4a.2 isolation.
     schema_version: z.number().int().default(1),
     schedule_id: z.string().min(1),

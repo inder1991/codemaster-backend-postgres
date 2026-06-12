@@ -28,7 +28,7 @@ export const PAYLOAD_SHA256_RE = /^[0-9a-f]{64}$/;
 // NULL column never becomes epoch-0.
 export const BackgroundJobV1 = z
   .object({
-    // W4.1 (L8): a REAL column since migration 0045 (int NOT NULL DEFAULT 1) — no longer a
+    // W4.1 (L8): a REAL column since migration 0046 (int NOT NULL DEFAULT 1) — no longer a
     // Zod-synthesized constant. The repo's enqueue stamps BACKGROUND_JOB_ENVELOPE_SCHEMA_VERSION;
     // the runner defers (never dead-letters) rows stamped newer than it supports (deploy skew).
     // The .default(1) stays for old wire shapes that pre-date the column.

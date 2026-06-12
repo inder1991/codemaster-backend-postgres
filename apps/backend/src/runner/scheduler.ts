@@ -156,7 +156,7 @@ export type SchedulerEnqueuePort = {
 
 /**
  * W4.1 (L8): the scheduled-row envelope version this scheduler build understands
- * (core.scheduled_jobs.schema_version — migration 0045). A row stamped NEWER (rolling-deploy skew /
+ * (core.scheduled_jobs.schema_version — migration 0046). A row stamped NEWER (rolling-deploy skew /
  * an operator pre-staging next-version config) is SKIPPED via the W4a.2 per-schedule isolation —
  * left unadvanced + WARN'd, re-attempted every poll until a scheduler that understands it polls.
  * Same two-phase bump discipline as the background-jobs envelope (background_jobs_repo.ts).

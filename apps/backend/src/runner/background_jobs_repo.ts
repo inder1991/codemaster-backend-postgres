@@ -28,7 +28,7 @@ import { BackgroundJobV1 } from "#contracts/background_job.v1.js";
 
 /**
  * W4.1 (L8 + OWNER-PAYLOAD-VERSIONING): the STORAGE-ENVELOPE version every enqueue stamps onto
- * `core.background_jobs.schema_version` (migration 0045; the review-jobs analogue is
+ * `core.background_jobs.schema_version` (migration 0046; the review-jobs analogue is
  * JOB_PAYLOAD_SCHEMA_VERSION on core.review_jobs). The job payload is an API CONTRACT with a
  * documented cross-deploy compat window:
  *
