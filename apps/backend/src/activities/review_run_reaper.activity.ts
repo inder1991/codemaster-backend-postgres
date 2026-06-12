@@ -93,7 +93,14 @@ export type ReviewRunReaperDeps = {
   /** Stale threshold in seconds; default from `CODEMASTER_REVIEW_RUN_REAPER_STALE_AFTER_SECONDS`, else
    *  {@link DEFAULT_STALE_AFTER_SECONDS}. Whatever the source, floored at {@link MIN_STALE_AFTER_SECONDS}. */
   staleAfterSeconds?: number;
+  /** W3.5 (OM7): per-invocation reap bound; default {@link DEFAULT_SWEEP_LIMIT}. The cron fires
+   *  every 10 min — a post-incident backlog drains across ticks instead of one unbounded CTE
+   *  UPDATE + per-row-audit transaction running past the job ceiling and rolling back whole. */
+  sweepLimit?: number;
 };
+
+/** OM7: runs per reaper invocation — bounded transaction duration, guaranteed forward progress. */
+const DEFAULT_SWEEP_LIMIT = 500;
 
 /** Resolve the DSN for the shared pool: the injected one, else `CODEMASTER_PG_CORE_DSN`. */
 function resolveDsn(deps: ReviewRunReaperDeps): string {
@@ -147,22 +154,32 @@ export async function reviewRunReaperActivity(
     // outer SELECT resolves installation_id via review_id → pull_request_reviews.repo_id (github_repo_id)
     // → repositories.installation_id. The LEFT JOIN yields NULL for an orphan (broken repo FK chain).
     // tenant:exempt reason=cross-tenant-liveness-reaper follow_up=PERMANENT-EXEMPTION-review-run-reaper
+    // OM7: the MATERIALIZED batch CTE pins ONE evaluation of the locking SELECT (the job_retention
+    // precedent — a bare IN (SELECT … LIMIT n FOR UPDATE SKIP LOCKED) subselect can be rescanned
+    // under some plans, breaking the bound), so at most sweepLimit runs flip per invocation;
+    // oldest-first so the longest-stuck runs drain first.
     const result = await client.query<ReapedRow>(
-      "WITH reaped AS ( " +
+      "WITH batch AS MATERIALIZED ( " +
+        "  SELECT run_id FROM core.review_runs " +
+        "   WHERE lifecycle_state = 'RUNNING' " +
+        "     AND started_at < now() - make_interval(secs => $1) " +
+        "     AND NOT EXISTS (SELECT 1 FROM core.review_jobs j WHERE j.run_id = review_runs.run_id AND j.state IN ('ready','leased')) " +
+        "   ORDER BY started_at " +
+        "   LIMIT $2 " +
+        "   FOR UPDATE SKIP LOCKED " +
+        "), reaped AS ( " +
         "  UPDATE core.review_runs " +
         "     SET lifecycle_state = 'CANCELLED', " +
         "         cancelled_at = now(), " +
         "         cancel_reason = 'timeout' " +
-        "   WHERE lifecycle_state = 'RUNNING' " +
-        "     AND started_at < now() - make_interval(secs => $1) " +
-        "     AND NOT EXISTS (SELECT 1 FROM core.review_jobs j WHERE j.run_id = review_runs.run_id AND j.state IN ('ready','leased')) " +
+        "   WHERE run_id IN (SELECT run_id FROM batch) " +
         "  RETURNING run_id, review_id " +
         ") " +
         "SELECT r.run_id, r.review_id, rep.installation_id " +
         "FROM reaped r " +
         "JOIN core.pull_request_reviews ppr ON ppr.review_id = r.review_id " +
         "LEFT JOIN core.repositories rep ON rep.github_repo_id = ppr.repo_id",
-      [staleAfterSeconds],
+      [staleAfterSeconds, deps.sweepLimit ?? DEFAULT_SWEEP_LIMIT],
     );
     const rows = result.rows;
 
