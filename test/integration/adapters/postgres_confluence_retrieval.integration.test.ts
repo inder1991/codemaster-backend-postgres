@@ -132,7 +132,13 @@ describeDb("PostgresConfluenceRetrieval against disposable PG (seeded vectors)",
     await seedChunk({ pageId: "p-other", labels: ["lang:python"], hotDim: 7 });
   });
 
-  const adapter = (): PostgresConfluenceRetrieval => new PostgresConfluenceRetrieval({ db });
+  // These suites assert the label-visibility WHERE-clause + cosine ORDERING using ORTHOGONAL hot
+  // vectors (cosine 1.0 for the exact hot-dim match, 0.0 for every other) — a scheme that predates
+  // the W1.3/RH10 similarity floor and is incompatible with it (every non-exact match is cosine 0 <
+  // 0.3 and would be filtered, masking the visibility/ordering this file tests). The floor itself is
+  // covered by test/unit/retrieval/similarity_floor.test.ts, so opt these out (minSimilarity: 0).
+  const adapter = (): PostgresConfluenceRetrieval =>
+    new PostgresConfluenceRetrieval({ db, minSimilarity: 0 });
   const EFFECTIVE = new Set(["default", "topic:security"]);
 
   it("approval-drift: approved default returned, unapproved + revoked default excluded", async ({ skip }) => {
@@ -188,7 +194,9 @@ describeDb("PostgresConfluenceRetrieval against disposable PG (seeded vectors)",
     expect(first.space_key).toBe(SPACE_KEY);
     expect(first.version).toBe(1);
     expect(first.labels).toContain("topic:security");
-    expect(first.match_specificity_score).toBe(0);
+    // W1.3/RH8: match_specificity_score is now the real label-overlap sum (was hardcoded 0 pre-wire).
+    // p-approved's labels {default, topic:security} ⊆ effective → default(1) + topic(4) = 5.
+    expect(first.match_specificity_score).toBe(5);
     expect(first.score).toBeGreaterThan(0.99); // identical vector → similarity ≈ 1
     expect(first.age_days).toBeGreaterThanOrEqual(0);
     // scores are non-increasing.

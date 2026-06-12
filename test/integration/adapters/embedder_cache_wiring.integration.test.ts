@@ -115,8 +115,11 @@ describeDb("embedder-cache wiring: fallback ≡ legacy parity (SAFE-DEFAULT proo
     // The REAL singleton cache over the live runtime_state (active gen 1, fallback mode, empty
     // chunk_embeddings for these chunks). Phase A's LEFT JOIN + COALESCE === the legacy direct query.
     const cache = await buildEmbedderCacheForDsn(dsn, { clock: new WallClock() });
-    const withCache = new PostgresConfluenceRetrieval({ db, embedderCache: cache });
-    const withoutCache = new PostgresConfluenceRetrieval({ db }); // embedderCache=null → runLegacy
+    // minSimilarity: 0 — this is a cache-vs-legacy PARITY proof over ORTHOGONAL hot vectors (cosine
+    // 0/1), incompatible with the W1.3/RH10 floor (it would drop the cosine-0 rows on BOTH sides and
+    // collapse the multi-result ordering the parity compares). The floor is covered by its own test.
+    const withCache = new PostgresConfluenceRetrieval({ db, embedderCache: cache, minSimilarity: 0 });
+    const withoutCache = new PostgresConfluenceRetrieval({ db, minSimilarity: 0 }); // embedderCache=null → runLegacy
 
     const query = { queryEmbedding: hotVector(10), topK: 50, effectiveLabels: EFFECTIVE };
     const a = await withCache.search(query);

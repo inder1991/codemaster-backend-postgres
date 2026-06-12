@@ -1,4 +1,4 @@
--- 0045_payload_schema_version.sql — W4.1 [L8 + OWNER-PAYLOAD-VERSIONING] (master-hardening-plan):
+-- 0046_payload_schema_version.sql — W4.1 [L8 + OWNER-PAYLOAD-VERSIONING] (master-hardening-plan):
 -- back the previously NOMINAL-ONLY `schema_version` contract fields (BackgroundJobV1 /
 -- ScheduledJobV1 carried a Zod `.default(1)` that synthesized a constant — nothing was persisted)
 -- with REAL columns, so a future payload-shape change has a queryable discriminator and the

@@ -454,6 +454,10 @@ export function makeInProcessPorts(deps: InProcessPortDeps, signal: AbortSignal)
     clone: pick("clone", cloneWithSignal),
     loadRepoConfig: pick("loadRepoConfig", baseFn("loadRepoConfigActivity")),
     computePolicyRules: pick("computePolicyRules", baseFn("computePolicyRules")),
+    // W2.4 (wave-2 integration): wire the corpus probe so the retrieval short-circuit actually fires
+    // in the Postgres runtime (the port is optional → without this line the orchestrator no-ops to
+    // legacy unconditional retrieval). The bundle registers it under "probeKnowledgeCorpus".
+    probeKnowledgeCorpus: pick("probeKnowledgeCorpus", baseFn("probeKnowledgeCorpus")),
     classify: pick("classify", baseFn("classifyFiles")),
     chunkAndRedact: pick("chunkAndRedact", baseFn("chunkAndRedact")),
     staticAnalysis: pick("staticAnalysis", (input) => staticAnalysis().staticAnalysis(input)),
