@@ -172,4 +172,17 @@ describeDb("PostgresConfluenceRetrieval — minimum-similarity floor (RH10)", ()
     });
     expect(hits.map((c) => c.page_id)).toEqual(["p-near", "p-far"]);
   });
+
+  it("computes the label-overlap match_specificity_score from effective_labels (RH8 — no longer hardcoded 0)", async () => {
+    const adapter = new PostgresConfluenceRetrieval({ db });
+    const hits = await adapter.search({
+      queryEmbedding: QUERY_VEC,
+      topK: 5,
+      effectiveLabels: new Set([LABEL, "topic:security"]),
+    });
+    expect(hits).toHaveLength(1);
+    // The seeded chunk carries labels=[lang:python]; overlap with the effective set = {lang:python}
+    // → the `lang` namespace weight (3), per spec §3.5 / the Python compute_match_specificity.
+    expect(hits[0]!.match_specificity_score).toBe(3);
+  });
 });
