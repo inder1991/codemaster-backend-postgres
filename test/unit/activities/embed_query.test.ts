@@ -62,13 +62,17 @@ describe("EmbedQueryActivity", () => {
     expect(result.schema_version).toBe(1);
   });
 
-  it("routes through the in_repo_doc purpose bucket", async () => {
+  it("routes through the ONE unified query purpose (W1.3 — RL-appendix embed-mode)", async () => {
+    // The frozen Python shipped INCONSISTENT query purposes — embed_query used "in_repo_doc" while
+    // AnnRetriever's per-chunk fallback used "review_query" — so a chunk whose memoized embed failed
+    // got a DIFFERENT query vector than its siblings (depressed cosine for the truly relevant chunk).
+    // W1.3 unifies both paths on QUERY_EMBED_PURPOSE ("review_query" — the query-mode bucket).
     const recording = new RecordingEmbeddingsClient();
     const activity = new EmbedQueryActivity({ embeddings: recording, modelName: "m" });
     await activity.embedQuery(EmbedQueryInputV1.parse({ query: "scope check" }));
 
     expect(recording.calls).toHaveLength(1);
-    expect(recording.calls[0]!.purpose).toBe("in_repo_doc");
+    expect(recording.calls[0]!.purpose).toBe("review_query");
     expect(recording.calls[0]!.texts).toEqual(["scope check"]);
   });
 
