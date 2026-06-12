@@ -178,6 +178,9 @@ type StubOverrides = {
   dedupSemanticSkipped?: boolean;
   reviewChunkThrows?: boolean;
   chunkCount?: number;
+  /** W1.3 (RC4): explicit chunk list (wins over chunkCount) — exercises the content-keyed query memo
+   *  with same-path-different-body chunks, which chunkFor cannot produce. */
+  chunksOverride?: ReadonlyArray<DiffChunkV1>;
   // ── Stage-3 wiring overrides ──
   /** When set, the citationValidate port is injected and drops this many findings (the rest survive). */
   withCitationValidate?: boolean;
@@ -224,6 +227,8 @@ type RecordingStub = {
   calls: Array<string>;
   reviewChunkInputs: Array<ReviewContextV1>;
   embedCalls: Array<string>;
+  /** W1.3 (RC4): the `query` each retrieveKnowledge dispatch carried (assert embed/retrieve share it). */
+  retrieveQueries: Array<string>;
   citationInputs: Array<CitationValidateInputV1>;
   auditEvents: Array<EmitOutputSafetyAuditEventInput>;
   buildEvidenceInputs: Array<BuildRetrievedEvidenceInputV1>;
@@ -252,6 +257,7 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
   const calls: Array<string> = [];
   const reviewChunkInputs: Array<ReviewContextV1> = [];
   const embedCalls: Array<string> = [];
+  const retrieveQueries: Array<string> = [];
   const citationInputs: Array<CitationValidateInputV1> = [];
   const auditEvents: Array<EmitOutputSafetyAuditEventInput> = [];
   const buildEvidenceInputs: Array<BuildRetrievedEvidenceInputV1> = [];
@@ -265,9 +271,12 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
   const reviewFiles = o.reviewFiles ?? ["src/a.ts", "src/b.ts"];
   const sandboxFiles = o.sandboxFiles ?? ["src/a.ts"];
   const chunkCount = o.chunkCount ?? 2;
-  const chunks: Array<DiffChunkV1> = Array.from({ length: chunkCount }, (_v, i) =>
-    chunkFor(reviewFiles[i % Math.max(1, reviewFiles.length)] ?? "src/a.ts", i),
-  );
+  const chunks: Array<DiffChunkV1> =
+    o.chunksOverride !== undefined
+      ? [...o.chunksOverride]
+      : Array.from({ length: chunkCount }, (_v, i) =>
+          chunkFor(reviewFiles[i % Math.max(1, reviewFiles.length)] ?? "src/a.ts", i),
+        );
 
   const ports: ReviewActivityPorts = {
     clone: async () => {
@@ -335,8 +344,9 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
       }
       return EmbedQueryResultV1.parse({ vector: [0.1, 0.2, 0.3] });
     },
-    retrieveKnowledge: async () => {
+    retrieveKnowledge: async (input) => {
       calls.push("retrieveKnowledge");
+      retrieveQueries.push(input.query);
       if (o.retrieveThrows) {
         throw new Error("retrieve boom");
       }
@@ -509,6 +519,7 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
     calls,
     reviewChunkInputs,
     embedCalls,
+    retrieveQueries,
     citationInputs,
     auditEvents,
     buildEvidenceInputs,
@@ -1234,6 +1245,57 @@ describe("FIX #6+#9 — orchestrator wires matchPathInstructions into ReviewCont
     const matched = stub.reviewChunkInputs[0]!.matched_path_instructions;
     // Both globs match "src/a.ts"; declaration order preserved.
     expect(matched.map((m) => m.instructions)).toEqual(["all ts", "all src"]);
+  });
+});
+
+describe("W1.3 (RC4) — code-bearing retrieval query + content-keyed embed memo", () => {
+  it("embeds a query carrying PR title + PR description + chunk path + the CHANGED CODE", async () => {
+    const stub = makeStub({ reviewFiles: ["src/a.ts"], chunkCount: 1 });
+    await orchestrate(makeCtx(stub));
+    expect(stub.embedCalls).toHaveLength(1);
+    const query = stub.embedCalls[0]!;
+    // PR_META fixture: title "Add widget", description "A widget."; chunkFor body "// src/a.ts".
+    expect(query).toContain("Add widget");
+    expect(query).toContain("A widget.");
+    expect(query).toContain("src/a.ts");
+    expect(query).toContain("// src/a.ts"); // the diff-chunk BODY — the code drives the search (RC4)
+  });
+
+  it("retrieveKnowledge receives the SAME code-bearing query the embed used", async () => {
+    const stub = makeStub({ reviewFiles: ["src/a.ts"], chunkCount: 1 });
+    await orchestrate(makeCtx(stub));
+    expect(stub.retrieveQueries).toHaveLength(1);
+    expect(stub.retrieveQueries[0]).toBe(stub.embedCalls[0]);
+  });
+
+  it("keys the embed memo on CONTENT, not path: same path + different body → two embeds (RC4)", async () => {
+    // Two chunks of the SAME file with DIFFERENT bodies (two hunks). The legacy path-keyed cache
+    // reused chunk #1's vector for chunk #2 even though the code differs — the RC4 defect. The
+    // content-keyed memo embeds each distinct query exactly once.
+    const sameA = DiffChunkV1.parse({
+      chunk_id: uuidFor(150),
+      path: "src/a.ts",
+      start_line: 1,
+      end_line: 10,
+      body: "const a = 1;",
+      chunk_kind: "hunk",
+      token_estimate: 5,
+    });
+    const sameB = DiffChunkV1.parse({
+      chunk_id: uuidFor(151),
+      path: "src/a.ts",
+      start_line: 20,
+      end_line: 30,
+      body: "const b = 2;",
+      chunk_kind: "hunk",
+      token_estimate: 5,
+    });
+    const stub = makeStub({ reviewFiles: ["src/a.ts"], chunksOverride: [sameA, sameB] });
+    const ctx = makeCtx(stub);
+    const seqCtx: ReviewPipelineContext = { ...ctx, limits: { chunkConcurrency: 1 } };
+    await orchestrate(seqCtx);
+    expect(stub.embedCalls).toHaveLength(2);
+    expect(new Set(stub.embedCalls).size).toBe(2);
   });
 });
 
