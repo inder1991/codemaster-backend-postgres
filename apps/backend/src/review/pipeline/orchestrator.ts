@@ -86,6 +86,8 @@ import {
 } from "./helpers.js";
 import { stageOutcome, recordStage, type StageLogger } from "./degradation.js";
 import { postReviewResults, type PostingLifecycleDeps } from "./posting.js";
+// W1.3 (RC4): the code-bearing retrieval query builder (pure string assembly — pipeline-spine safe).
+import { buildRetrievalQueryText } from "./retrieval_query.js";
 
 // FIX #6+#9 — the ONE ported gitignore-style glob matcher (apps/backend/src/config/path_match.ts) backs BOTH
 // path-config consumers, replacing the two Stage-1 placeholder implementations that used to live in this
@@ -319,10 +321,9 @@ const CLASSIFIER_FAILURE_THRESHOLD = 0.1;
  *  reserve hard-abort for the nothing-succeeded case; post the chunks that succeeded). */
 const CHUNK_FAILURE_ABORT_THRESHOLD = 1.0;
 
-/** The query-text cap the per-chunk closure applies (`[:8000]`, review_pull_request.py:1636). The
- *  RetrieveKnowledgeInputV1 query field is bounded max(8000); the embed query field is bounded max(8000)
- *  too — slice keeps both within bound regardless of path/title length. */
-const QUERY_TEXT_MAX = 8000;
+// The legacy QUERY_TEXT_MAX (`[:8000]`, review_pull_request.py:1636) moved into
+// retrieval_query.ts::RETRIEVAL_QUERY_MAX — the W1.3 (RC4) code-bearing query builder owns the cap
+// (short fields first, so the slice only ever truncates the chunk-body tail).
 
 /** The hard cap on the per-chunk retrieved-evidence manifest (the Python `_DEFAULT_ENTRY_CAP`). Matches
  *  `ReviewContextV1.retrieved_evidence` max_length (100) so the producer output never overflows the
@@ -1102,19 +1103,28 @@ async function buildChunkContext(
   // policy-engine-wiring collapse-on: per-chunk policy bundle lookup (null when no bundle for the path).
   const applicablePolicy = state.policyBundles.get(chunk.path) ?? null;
 
-  // retrieval-knowledge-wiring collapse-on: per-chunk knowledge retrieval. Query = chunk path + PR title
-  // (both deterministic projections of workflow input → replay-safe). Embed the query ONCE per unique path
-  // (state.queryVectorCache); reuse across subsequent chunks of the same path.
+  // retrieval-knowledge-wiring collapse-on: per-chunk knowledge retrieval. W1.3 (RC4) HARDENING
+  // DIVERGENCE from the frozen Python (which embedded only `chunk.path + pr_title`): the query is
+  // CODE-BEARING — PR title + PR description + chunk path + the chunk BODY itself — so the dense
+  // vector encodes the semantics of the change under review, not a path string. All four parts are
+  // deterministic projections of workflow input → replay-safe.
   let retrievedKnowledge: ReadonlyArray<KnowledgeChunkV1> = [];
   let retrievalDegraded = false;
   let retrievalDegradationReason = "";
 
-  const queryText = `${chunk.path} ${pr.prMeta.pr_title}`.slice(0, QUERY_TEXT_MAX);
+  const queryText = buildRetrievalQueryText({
+    prTitle: pr.prMeta.pr_title,
+    prDescription: pr.prMeta.pr_description,
+    chunkPath: chunk.path,
+    chunkBody: chunk.body,
+  });
 
-  // Embed-query: finding 10 — cache by stable chunk-path key + validate embedding dimension before the
-  // pgvector query + fail-open-with-degradation. On embed failure the override stays undefined and the
-  // retrieve activity's AnnRetriever embeds per-chunk as the legacy fallback.
-  let queryVectorOverride: ReadonlyArray<number> | null = state.queryVectorCache.get(chunk.path) ?? null;
+  // Embed-query: finding 10 + W1.3 (RC4) — the memo is keyed by the QUERY TEXT (the content key: two
+  // chunks of one file with different bodies embed separately; identical queries share one embed RPC),
+  // not the legacy chunk-path key that reused a stale vector across differing hunks. Validate the
+  // embedding dimension before the pgvector query + fail-open-with-degradation: on embed failure the
+  // override stays null and the retrieve activity's AnnRetriever embeds per-chunk as the legacy fallback.
+  let queryVectorOverride: ReadonlyArray<number> | null = state.queryVectorCache.get(queryText) ?? null;
   if (queryVectorOverride === null) {
     const embedResult = await stageOutcome(
       "embed_query",
@@ -1127,7 +1137,7 @@ async function buildChunkContext(
       // AnnRetriever embeds per-chunk) rather than poisoning the cache with an unusable vector.
       if (embedResult.vector.length > 0) {
         queryVectorOverride = embedResult.vector;
-        state.queryVectorCache.set(chunk.path, embedResult.vector);
+        state.queryVectorCache.set(queryText, embedResult.vector);
       } else {
         retrievalDegraded = true;
         retrievalDegradationReason = "embed_query returned an empty vector";

@@ -629,10 +629,10 @@ describe("orchestrate — happy-path stage order", () => {
 });
 
 describe("orchestrate — per-chunk context build", () => {
-  it("caches the query embedding per unique chunk PATH (one embed per path) under sequential fan-out", async () => {
-    // 3 chunks across 2 unique paths (a, b, a). The state.queryVectorCache dedups embeds across chunks of
-    // the SAME path that run AFTER an earlier same-path chunk filled the cache. With concurrency=1 the
-    // fan-out is strictly sequential, so chunk #3 (path a) sees chunk #1's cached vector → 2 embeds, not 3.
+  it("caches the query embedding per unique QUERY (one embed per identical query) under sequential fan-out", async () => {
+    // 3 chunks across 2 unique paths (a, b, a) with IDENTICAL bodies per path (the chunkFor fixture), so
+    // the W1.3 content-keyed cache yields 2 unique queries. With concurrency=1 the fan-out is strictly
+    // sequential, so chunk #3 (path a, same body) sees chunk #1's cached vector → 2 embeds, not 3.
     // (Under full parallelism the cache is best-effort, exactly as the Python anyio fan-out — the check+set
     // is not atomic across concurrent tasks; the cache is an RPC reducer, not a hard dedup guarantee.)
     const stub = makeStub({ reviewFiles: ["src/a.ts", "src/b.ts"], chunkCount: 3 });
