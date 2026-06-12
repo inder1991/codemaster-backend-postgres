@@ -20,8 +20,35 @@ import type {
   TaxonomyGapEntryV1,
 } from "#contracts/admin.v1.js";
 
-import { keysetSlice } from "#backend/api/admin/_keyset_cursor.js";
+import { decodeTsIdCursor, encodeTsIdCursor } from "#backend/api/admin/_keyset_cursor.js";
 import { SUPER_ADMIN_PLATFORM_VIEW_UUID } from "#backend/infra/sentinels.js";
+
+// ─── Keyset pushdown plumbing (W2.7 / EH9) ────────────────────────────────────────────────────────
+//
+// The list reads page in SQL — keyset predicate + ORDER BY + `LIMIT size+1` (the listFindings /
+// listPullRequests idiom) — never fetch-all-then-slice in Node. Cursor `ts` values carry the RAW
+// Postgres `::text` rendering of the timestamp (microsecond precision). Encoding a JS-Date-derived
+// ISO string instead would truncate to milliseconds and silently skip/duplicate rows at page seams
+// whose timestamps differ only in microseconds (the EM7 defect class on the audit-events read).
+
+/** Clamp a page size to [1, 200] (the shared admin list contract). */
+function clampPageSize(size: number): number {
+  return Math.min(Math.max(size, 1), 200);
+}
+
+/** Page rows fetched with `LIMIT size+1`: emit at most `size`, next cursor iff the over-fetch hit. */
+function pageWithCursor<T>(
+  rows: ReadonlyArray<T>,
+  size: number,
+  keyOf: (row: T) => { ts: string; id: string },
+): { page: Array<T>; nextCursor: string | null } {
+  const hasMore = rows.length > size;
+  const page = rows.slice(0, size);
+  const last = page[page.length - 1];
+  const nextCursor =
+    hasMore && last !== undefined ? encodeTsIdCursor(keyOf(last).ts, keyOf(last).id) : null;
+  return { page, nextCursor };
+}
 
 /**
  * Distinct GitHub orgs (core.installations.account_login) visible to the session, ordered. 1:1 with
@@ -72,10 +99,16 @@ type ReviewSearchRow = {
 };
 
 /**
- * Page/size-paginated reviews list — 1:1 with postgres_reviews_repo.search. A CTE aggregates per-PR
- * finding_count + max-severity (non-suppressed), the main query maps lifecycle_state → the UI state
- * vocabulary, COALESCEs the title + started_at, and COUNT(*) OVER () yields the total. Honors the
- * platform-view bypass + repo/q/state/org filters. An unknown UI state short-circuits to an empty page.
+ * Page/size-paginated reviews list — 1:1 in OUTPUT with postgres_reviews_repo.search. Honors the
+ * platform-view bypass + repo/q/state/org filters; an unknown UI state short-circuits to an empty page.
+ *
+ * W2.7 / EH10 query shape: the inner `page` subquery applies every filter, the ORDER BY, the windowed
+ * COUNT(*) OVER () (the locked `total` wire field — computed over the SLIM pull_request_reviews join,
+ * findings never enter it), and the LIMIT/OFFSET. Only THEN does a LEFT JOIN LATERAL aggregate per-PR
+ * finding_count + max-severity (non-suppressed) for the ≤ size rows of the current page — the legacy
+ * `counted` CTE aggregated core.review_findings over the ENTIRE matching set (for the platform view,
+ * every finding across every repo) on every request. The route additionally caps `page` (REVIEWS_MAX_PAGE)
+ * so the OFFSET scan-discard is bounded.
  */
 export async function searchReviews(
   db: Kysely<unknown>,
@@ -103,49 +136,62 @@ export async function searchReviews(
         )})`;
 
   const r = await sql<ReviewSearchRow>`
-    WITH counted AS (
-      SELECT rf.pr_id, COUNT(*) AS finding_count,
+    SELECT
+      page.review_id,
+      page.repo,
+      page.pr_number,
+      page.pr_title,
+      page.state,
+      CASE agg.severity_rank WHEN 4 THEN 'blocker' WHEN 3 THEN 'issue'
+                             WHEN 2 THEN 'suggestion' WHEN 1 THEN 'nit' ELSE NULL END AS severity_max,
+      agg.finding_count,
+      page.started_at,
+      page.completed_at,
+      page.total_count
+    FROM (
+      SELECT
+        pr.review_id,
+        repo.full_name AS repo,
+        pr.pr_number,
+        COALESCE(prr.title, 'PR #' || pr.pr_number::text) AS pr_title,
+        CASE
+          WHEN rr.lifecycle_state IS NULL                        THEN 'queued'
+          WHEN rr.lifecycle_state = 'PENDING'                    THEN 'queued'
+          WHEN rr.lifecycle_state IN ('RUNNING','WAITING_RETRY') THEN 'in_progress'
+          WHEN rr.lifecycle_state IN ('COMPLETED','PARTIAL')     THEN 'complete'
+          WHEN rr.lifecycle_state IN ('FAILED','CANCELLED')      THEN 'failed'
+          ELSE 'queued'
+        END AS state,
+        COALESCE(rr.started_at, pr.created_at) AS started_at,
+        rr.completed_at,
+        pr.created_at AS order_created_at,
+        prr.pr_id,
+        COUNT(*) OVER () AS total_count
+      FROM core.pull_request_reviews pr
+      JOIN core.repositories repo ON repo.github_repo_id = pr.repo_id
+      LEFT JOIN core.installations inst ON inst.installation_id = repo.installation_id
+      LEFT JOIN core.pull_requests prr ON prr.repository_id = repo.repository_id AND prr.pr_number = pr.pr_number
+      LEFT JOIN core.review_runs rr ON rr.run_id = pr.current_run_id
+      WHERE (${args.installationId} = CAST(${SUPER_ADMIN_PLATFORM_VIEW_UUID} AS uuid)
+             OR repo.installation_id = ${args.installationId})
+        AND (CAST(${repoFilter} AS text) IS NULL OR repo.full_name ILIKE '%' || CAST(${repoFilter} AS text) || '%')
+        AND (${stateClause})
+        AND (CAST(${qFilter} AS text) IS NULL OR prr.title ILIKE '%' || CAST(${qFilter} AS text) || '%')
+        AND (CAST(${orgFilter} AS text) IS NULL OR inst.account_login = ${orgFilter})
+      ORDER BY pr.created_at DESC, pr.review_id DESC
+      LIMIT ${args.size} OFFSET ${offset}
+    ) page
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*) AS finding_count,
              MAX(CASE rf.severity WHEN 'blocker' THEN 4 WHEN 'issue' THEN 3
                                   WHEN 'suggestion' THEN 2 WHEN 'nit' THEN 1 ELSE 0 END) AS severity_rank
       FROM core.review_findings rf
-      WHERE (${args.installationId} = CAST(${SUPER_ADMIN_PLATFORM_VIEW_UUID} AS uuid)
+      WHERE rf.pr_id = page.pr_id
+        AND (${args.installationId} = CAST(${SUPER_ADMIN_PLATFORM_VIEW_UUID} AS uuid)
              OR rf.installation_id = ${args.installationId})
         AND rf.suppression_state = 'NONE'
-      GROUP BY rf.pr_id
-    )
-    SELECT
-      pr.review_id,
-      repo.full_name AS repo,
-      pr.pr_number,
-      COALESCE(prr.title, 'PR #' || pr.pr_number::text) AS pr_title,
-      CASE
-        WHEN rr.lifecycle_state IS NULL                        THEN 'queued'
-        WHEN rr.lifecycle_state = 'PENDING'                    THEN 'queued'
-        WHEN rr.lifecycle_state IN ('RUNNING','WAITING_RETRY') THEN 'in_progress'
-        WHEN rr.lifecycle_state IN ('COMPLETED','PARTIAL')     THEN 'complete'
-        WHEN rr.lifecycle_state IN ('FAILED','CANCELLED')      THEN 'failed'
-        ELSE 'queued'
-      END AS state,
-      CASE counted.severity_rank WHEN 4 THEN 'blocker' WHEN 3 THEN 'issue'
-                                 WHEN 2 THEN 'suggestion' WHEN 1 THEN 'nit' ELSE NULL END AS severity_max,
-      COALESCE(counted.finding_count, 0) AS finding_count,
-      COALESCE(rr.started_at, pr.created_at) AS started_at,
-      rr.completed_at,
-      COUNT(*) OVER () AS total_count
-    FROM core.pull_request_reviews pr
-    JOIN core.repositories repo ON repo.github_repo_id = pr.repo_id
-    LEFT JOIN core.installations inst ON inst.installation_id = repo.installation_id
-    LEFT JOIN core.pull_requests prr ON prr.repository_id = repo.repository_id AND prr.pr_number = pr.pr_number
-    LEFT JOIN core.review_runs rr ON rr.run_id = pr.current_run_id
-    LEFT JOIN counted ON counted.pr_id = prr.pr_id
-    WHERE (${args.installationId} = CAST(${SUPER_ADMIN_PLATFORM_VIEW_UUID} AS uuid)
-           OR repo.installation_id = ${args.installationId})
-      AND (CAST(${repoFilter} AS text) IS NULL OR repo.full_name ILIKE '%' || CAST(${repoFilter} AS text) || '%')
-      AND (${stateClause})
-      AND (CAST(${qFilter} AS text) IS NULL OR prr.title ILIKE '%' || CAST(${qFilter} AS text) || '%')
-      AND (CAST(${orgFilter} AS text) IS NULL OR inst.account_login = ${orgFilter})
-    ORDER BY pr.created_at DESC, pr.review_id DESC
-    LIMIT ${args.size} OFFSET ${offset}
+    ) agg ON TRUE
+    ORDER BY page.order_created_at DESC, page.review_id DESC
   `.execute(db);
 
   const items = r.rows.map((row) => ({
@@ -163,7 +209,7 @@ export async function searchReviews(
   return { items, total };
 }
 
-// ─── Knowledge (learnings; tenant-scoped; in-memory keyset by (last_fired_at, learning_id)) ───────
+// ─── Knowledge (learnings; tenant-scoped; SQL keyset by (last_fired_at, learning_id)) ─────────────
 
 type LearningDbRow = {
   learning_id: string;
@@ -176,6 +222,9 @@ type LearningDbRow = {
   accepted_count: string | number;
   feedback_count: string | number;
   last_fired_at: Date | null;
+  /** Raw `last_fired_at::text` (µs precision) for cursor encoding; null when last_fired_at is NULL.
+   *  Only the paginated list SELECTs it; the single-row detail read leaves it undefined. */
+  cursor_ts?: string | null;
 };
 
 const LEARNING_SELECT = sql`l.learning_id, l.title, l.body_markdown, l.version, r.full_name AS repo, l.state,
@@ -200,28 +249,41 @@ function mapLearningListItem(row: LearningDbRow): LearningListItemV1 {
 }
 
 /** GET /api/admin/knowledge — learnings for the session's installation, keyset-paginated DESC by
- *  (last_fired_at, learning_id); NULL last_fired_at sorts last. size clamped [1,200]. */
+ *  (last_fired_at, learning_id); NULL last_fired_at sorts last. size clamped [1,200].
+ *
+ *  W2.7 / EH9: the keyset predicate + ORDER BY + LIMIT are pushed into SQL (the legacy port fetched
+ *  the whole tenant table and sliced in memory). A cursor with ts="" (the NULLS-LAST tail) resumes
+ *  inside the NULL run by id; a concrete ts resumes by (last_fired_at, learning_id) and still admits
+ *  the NULL tail. Cursor ts carries the raw µs `::text` value (see the pushdown-plumbing note). */
 export async function listLearningsPage(
   db: Kysely<unknown>,
   installationId: string,
   cursor: string | null,
   size: number,
 ): Promise<{ rows: Array<LearningListItemV1>; nextCursor: string | null }> {
-  const clamped = Math.min(Math.max(size, 1), 200);
+  const clamped = clampPageSize(size);
+  let cursorClause = sql`TRUE`;
+  if (cursor !== null) {
+    const c = decodeTsIdCursor(cursor);
+    cursorClause =
+      c.ts === ""
+        ? sql`(l.last_fired_at IS NULL AND l.learning_id < ${c.id})`
+        : sql`(l.last_fired_at < CAST(${c.ts} AS timestamptz)
+               OR (l.last_fired_at = CAST(${c.ts} AS timestamptz) AND l.learning_id < ${c.id})
+               OR l.last_fired_at IS NULL)`;
+  }
   const r = await sql<LearningDbRow>`
-    SELECT ${LEARNING_SELECT}
+    SELECT ${LEARNING_SELECT}, l.last_fired_at::text AS cursor_ts
     FROM core.learnings l LEFT JOIN core.repositories r ON r.repository_id = l.repo_id
-    WHERE l.installation_id = ${installationId}
-    ORDER BY l.updated_at DESC
+    WHERE l.installation_id = ${installationId} AND ${cursorClause}
+    ORDER BY l.last_fired_at DESC NULLS LAST, l.learning_id DESC
+    LIMIT ${clamped + 1}
   `.execute(db);
-  const all = r.rows.map(mapLearningListItem);
-  const { page, nextCursor } = keysetSlice(
-    all,
-    (row) => ({ ts: row.last_fired_at ?? "", id: row.learning_id }),
-    cursor,
-    clamped,
-  );
-  return { rows: page, nextCursor };
+  const { page, nextCursor } = pageWithCursor(r.rows, clamped, (row) => ({
+    ts: row.cursor_ts ?? "",
+    id: row.learning_id,
+  }));
+  return { rows: page.map(mapLearningListItem), nextCursor };
 }
 
 type ProposalDbRow = {
@@ -231,29 +293,42 @@ type ProposalDbRow = {
   repo: string | null;
   proposed_by_user_id: string;
   created_at: Date;
+  /** Raw `created_at::text` (µs precision) for cursor encoding. */
+  cursor_ts: string;
 };
 
-/** GET /api/admin/knowledge/proposals — 1:1 with PostgresProposalsRepo.list_pending + the router's keyset
- *  slice. Tenant-scoped to state='pending_approval'; in-memory keyset DESC by (created_at, proposal_id).
- *  created_at is NOT NULL here, so the keyset's null-ts branch is never exercised. `state` is dropped from
- *  the wire shape (the queue only shows pending rows). size clamped [1,200]. */
+/** GET /api/admin/knowledge/proposals — 1:1 with PostgresProposalsRepo.list_pending. Tenant-scoped to
+ *  state='pending_approval'; SQL keyset DESC by (created_at, proposal_id) — W2.7/EH9 pushed the predicate +
+ *  LIMIT down (the legacy port fetched all pending rows and sliced in memory). created_at is NOT NULL here,
+ *  so the cursor's null-ts branch never arises. `state` is dropped from the wire shape (the queue only shows
+ *  pending rows). size clamped [1,200]. */
 export async function listProposalsPage(
   db: Kysely<unknown>,
   installationId: string,
   cursor: string | null,
   size: number,
 ): Promise<{ rows: Array<ProposalListItemV1>; nextCursor: string | null }> {
-  const clamped = Math.min(Math.max(size, 1), 200);
+  const clamped = clampPageSize(size);
+  let cursorClause = sql`TRUE`;
+  if (cursor !== null) {
+    const c = decodeTsIdCursor(cursor);
+    cursorClause = sql`(p.created_at, p.proposal_id) < (CAST(${c.ts} AS timestamptz), CAST(${c.id} AS uuid))`;
+  }
   // body column → body_markdown field; repo from a LEFT JOIN to repositories.
   const r = await sql<ProposalDbRow>`
     SELECT p.proposal_id, p.title, p.body AS body_markdown, r.full_name AS repo,
-           p.proposed_by_user_id, p.created_at
+           p.proposed_by_user_id, p.created_at, p.created_at::text AS cursor_ts
     FROM core.learning_proposals p
     LEFT JOIN core.repositories r ON r.repository_id = p.repo_id
-    WHERE p.installation_id = ${installationId} AND p.state = 'pending_approval'
-    ORDER BY p.created_at DESC
+    WHERE p.installation_id = ${installationId} AND p.state = 'pending_approval' AND ${cursorClause}
+    ORDER BY p.created_at DESC, p.proposal_id DESC
+    LIMIT ${clamped + 1}
   `.execute(db);
-  const all: Array<ProposalListItemV1> = r.rows.map((row) => ({
+  const { page, nextCursor } = pageWithCursor(r.rows, clamped, (row) => ({
+    ts: row.cursor_ts,
+    id: row.proposal_id,
+  }));
+  const rows: Array<ProposalListItemV1> = page.map((row) => ({
     proposal_id: row.proposal_id,
     title: row.title,
     body_markdown: row.body_markdown,
@@ -261,13 +336,7 @@ export async function listProposalsPage(
     proposed_by_user_id: row.proposed_by_user_id,
     created_at: row.created_at.toISOString(),
   }));
-  const { page, nextCursor } = keysetSlice(
-    all,
-    (row) => ({ ts: row.created_at, id: row.proposal_id }),
-    cursor,
-    clamped,
-  );
-  return { rows: page, nextCursor };
+  return { rows, nextCursor };
 }
 
 /** GET /api/admin/knowledge/{learning_id} — the learning + its 10 most-recent revisions; null when the
@@ -319,7 +388,7 @@ export async function getLearningWithRevisions(
   };
 }
 
-// ─── Integrations (platform-scope; in-memory keyset over all rows) ────────────────────────────────
+// ─── Integrations (platform-scope; SQL keyset by (created_at, integration_id)) ────────────────────
 
 type IntegrationDbRow = {
   integration_id: string;
@@ -334,6 +403,8 @@ type IntegrationDbRow = {
   default_governance_ack_at: Date | null;
   visibility: string;
   strict_label_mode: boolean;
+  /** Raw `created_at::text` (µs precision) for cursor encoding. */
+  cursor_ts: string;
 };
 
 function mapIntegration(row: IntegrationDbRow): IntegrationListItemV1 {
@@ -354,29 +425,35 @@ function mapIntegration(row: IntegrationDbRow): IntegrationListItemV1 {
   };
 }
 
-/** GET /api/admin/integrations — all integrations, paginated in-memory by the (created_at, integration_id)
- *  keyset (1:1 with the Python's fetch-all + _apply_keyset_slice_integrations). size clamped to [1, 200]. */
+/** GET /api/admin/integrations — integrations paginated by the (created_at, integration_id) keyset,
+ *  pushed into SQL (W2.7/EH9 — the legacy port fetched every platform integration then sliced in
+ *  memory, 1:1 with the Python's fetch-all + _apply_keyset_slice_integrations). size clamped [1,200]. */
 export async function listIntegrationsPage(
   db: Kysely<unknown>,
   cursor: string | null,
   size: number,
 ): Promise<{ rows: Array<IntegrationListItemV1>; nextCursor: string | null }> {
-  const clamped = Math.min(Math.max(size, 1), 200);
+  const clamped = clampPageSize(size);
+  let cursorClause = sql`TRUE`;
+  if (cursor !== null) {
+    const c = decodeTsIdCursor(cursor);
+    cursorClause = sql`(created_at, integration_id) < (CAST(${c.ts} AS timestamptz), CAST(${c.id} AS uuid))`;
+  }
   // tenant:exempt reason=integrations-table-platform-shared-no-installation_id-column follow_up=PERMANENT-EXEMPTION-platform-shared-integrations
   const r = await sql<IntegrationDbRow>`
     SELECT integration_id, kind, config_json::text AS config_json, enabled, last_validated_at,
            last_validation_error, created_at, updated_at, trust_tier, default_governance_ack_at,
-           visibility, strict_label_mode
-    FROM core.integrations ORDER BY created_at DESC
+           visibility, strict_label_mode, created_at::text AS cursor_ts
+    FROM core.integrations
+    WHERE ${cursorClause}
+    ORDER BY created_at DESC, integration_id DESC
+    LIMIT ${clamped + 1}
   `.execute(db);
-  const all = r.rows.map(mapIntegration);
-  const { page, nextCursor } = keysetSlice(
-    all,
-    (row) => ({ ts: row.created_at, id: row.integration_id }),
-    cursor,
-    clamped,
-  );
-  return { rows: page, nextCursor };
+  const { page, nextCursor } = pageWithCursor(r.rows, clamped, (row) => ({
+    ts: row.cursor_ts,
+    id: row.integration_id,
+  }));
+  return { rows: page.map(mapIntegration), nextCursor };
 }
 
 // ─── Notification rules (platform-scope; no installation_id column post-migration-0061) ───────────

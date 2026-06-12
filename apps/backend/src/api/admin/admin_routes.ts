@@ -261,6 +261,8 @@ import {
   searchAuditEvents,
 } from "#backend/api/admin/audit_events_read.js";
 import { makeRequireRole } from "#backend/api/admin/_authz.js";
+import { makeCsrfProtect } from "#backend/api/auth/csrf.js";
+import { makeScopedErrorHandler } from "#backend/api/auth/error_envelope.js";
 import {
   KnowledgeStaleWriteError,
   ProposalAlreadyDecidedError,
@@ -281,6 +283,10 @@ const PR_DEFAULT_LIMIT = 50;
 const PR_MAX_LIMIT = 200;
 const REVIEWS_DEFAULT_SIZE = 50;
 const REVIEWS_MAX_SIZE = 100;
+/** W2.7 / EH10 — upper bound on ?page so the OFFSET scan-discard cost is bounded (≤ 500×100 rows).
+ *  The Python left page unbounded; deep-OFFSET dashboards are a scalability hazard, so the TS port
+ *  422s beyond the cap instead of silently clamping (an honest contract for the frontend). */
+const REVIEWS_MAX_PAGE = 500;
 
 type AdminQuery = Record<string, unknown>;
 
@@ -322,6 +328,10 @@ export type AdminRoutesOptions = {
   db: Kysely<unknown>;
   signingKey: Buffer | Uint8Array;
   clock: Clock;
+  /** W4.7 / EC4 — when present, the CSRF double-submit verification hook mounts on this scope (every
+   *  non-GET admin route 403s without a matching csrf_token cookie + X-CSRF-Token header). server.ts
+   *  always provides it; optional only so read-only endpoint tests need no CSRF plumbing. */
+  csrfSecret?: Buffer | Uint8Array;
   /** Field-encryption registry for decrypting core.users.email in the members read. server.ts always
    *  provides it; the field is optional only so endpoint tests that don't exercise members need no crypto. */
   registry?: KeyRegistry;
@@ -387,6 +397,17 @@ export async function registerAdminRoutes(
 
   await app.register(async (scope) => {
     await scope.register(cookie);
+
+    // W4.7 / EH6 — unmapped throws (the bare `throw e;` tails after each handler's typed-error
+    // mapping) must never echo raw Postgres/internal error text to the client.
+    scope.setErrorHandler(makeScopedErrorHandler("admin"));
+
+    // W4.7 / EC4 — CSRF verification on every unsafe method of the admin scope (no exemptions: every
+    // admin route is session-cookie-authenticated). Mounted iff the csrf secret is wired (server.ts
+    // always wires it; endpoint tests that drive only reads may omit it).
+    if (opts.csrfSecret !== undefined) {
+      scope.addHook("onRequest", makeCsrfProtect());
+    }
 
     scope.get(
       "/api/admin/orgs",
@@ -2218,10 +2239,11 @@ export async function registerAdminRoutes(
             now: rotatedAt,
           });
         }
-        // Re-read the PRIMARY slot unconditionally — 1:1 with Python read_metadata_for_ui() (no role arg →
-        // defaults role='primary'; docstring "Return the primary slot's metadata"). So a role='secondary'
-        // PUT returns the primary slot's body (a Python latent quirk), and 500s when no primary row exists.
-        const meta = await getLlmProviderConfig(opts.db);
+        // W4.7 / EL1 — re-read the slot just WRITTEN (deliberate fix of the Python read_metadata_for_ui()
+        // quirk, which re-read role='primary' unconditionally: a secondary PUT echoed the primary slot's
+        // body and 500'd when no primary row existed even though the secondary write succeeded — inviting
+        // a duplicate rotation retry). The row was just written, so a null read is a real inconsistency.
+        const meta = await getLlmProviderConfig(opts.db, body.role);
         if (meta === null) {
           return reply.code(500).send({ detail: "internal: write succeeded but read returned no row" });
         }
@@ -2540,6 +2562,9 @@ export async function registerAdminRoutes(
       async (request, reply) => {
         const q = request.query as AdminQuery;
         const page = Math.max(1, Math.floor(Number(q.page ?? 1)) || 1);
+        if (page > REVIEWS_MAX_PAGE) {
+          return reply.code(422).send({ detail: `page must be <= ${REVIEWS_MAX_PAGE}` });
+        }
         const size = clampLimit(q.size, REVIEWS_DEFAULT_SIZE, REVIEWS_MAX_SIZE);
         const { items, total } = await searchReviews(opts.db, {
           installationId: request.authPrincipal!.installationId,

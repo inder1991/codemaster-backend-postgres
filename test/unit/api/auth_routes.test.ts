@@ -80,7 +80,7 @@ describe("auth routes (Fastify inject)", () => {
       const sessionCookie = res.cookies.find((c) => c.name === SESSION_COOKIE_NAME);
       expect(sessionCookie?.value).toBeTruthy();
       expect(sessionCookie?.httpOnly).toBe(true);
-      expect(sessionCookie?.sameSite).toBe("Lax");
+      expect(sessionCookie?.sameSite).toBe("Strict"); // W4.7/EC4 — tightened from Lax
       await app.close();
     });
 
@@ -170,6 +170,46 @@ describe("auth routes (Fastify inject)", () => {
         payload: loginPayload("root", PW),
       });
       expect(second.statusCode).toBe(429);
+      await app.close();
+    });
+
+    // W4.7 / EM5 — the limiter key must be the TRUSTED client IP. The legacy port bucketed on the
+    // leftmost X-Forwarded-For (client-controlled): a sprayer rotating fake XFF values landed in a
+    // fresh bucket per attempt and the limit never tripped. Default (0 trusted hops) ignores XFF.
+    it("EM5: a rotating spoofed X-Forwarded-For does NOT bypass the rate limiter", async () => {
+      const clock = new FakeClock({ now: new Date("2026-06-07T12:00:00.000Z") });
+      const limiter = new LoginRateLimiter({
+        maxAttempts: 1,
+        windowMs: 5 * 60 * 1000,
+        lockoutMs: 5 * 60 * 1000,
+        clock,
+      });
+      const localRepo = new InMemoryLocalUserRepo();
+      await localRepo.insert(superAdmin());
+      const app = buildApp({});
+      await registerAuthRoutes(app, {
+        localRepo,
+        ldap: new NoOpLdapClient(),
+        clock,
+        signingKey: SIGNING_KEY,
+        secureCookies: false,
+        rateLimiter: limiter,
+      });
+      await app.ready();
+      const first = await app.inject({
+        method: "POST",
+        url: "/api/auth/login",
+        headers: { "content-type": "application/json", "x-forwarded-for": "6.6.6.1" },
+        payload: loginPayload("root", "wrong"),
+      });
+      expect(first.statusCode).toBe(401);
+      const second = await app.inject({
+        method: "POST",
+        url: "/api/auth/login",
+        headers: { "content-type": "application/json", "x-forwarded-for": "6.6.6.2" },
+        payload: loginPayload("root", PW),
+      });
+      expect(second.statusCode).toBe(429); // same socket peer → same bucket, spoofed XFF ignored
       await app.close();
     });
   });

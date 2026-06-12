@@ -12,16 +12,16 @@
 // Integration-test teardown legitimately deletes across tenants (it owns its fixture rows), so test/
 // (and tools/, scripts/, migrations/) are NOT scanned.
 //
-// ## ERROR-mode (W4.2 / RH1 — the tracked FOLLOW-UP-gf3-error-mode promotion, CLOSED 2026-06-11)
+// ## ERROR-mode (W4.2 / RH1 opened it; W4.7 finished it — FOLLOW-UP-gf3-error-mode fully CLOSED)
 //
 // The de-Temporal runner data plane is raw-SQL-only, INVISIBLE to the runtime Kysely TenancyPlugin
 // (it sees only query-builder ASTs) — so this gate is the ONLY automated tenancy backstop there.
-// Findings on the runner data plane + review pipeline + platform libs (everything
-// {@link isErrorModePath} matches) are BLOCKING: `[ERROR]` + exit 1. ONLY the admin/auth HTTP
-// surface (`apps/backend/src/api/**`) stays WARN — it is session/role-gated at the route layer and
-// is hardened by its own wave (W4.7); promote it there. Every pre-existing finding was triaged in
-// W4.2 (2 real fixes + per-site by-design markers — see the triage commit), so a NEW finding in an
-// ERROR path is a regression, not backlog: add the installation_id filter, or justify a
+// W4.2 made the runner data plane + review pipeline + platform libs BLOCKING and left the admin/auth
+// HTTP surface (`apps/backend/src/api/**`) as the one WARN holdout for its own hardening wave.
+// W4.7 (2026-06-12) completed that promotion: the api surface had ZERO findings (every read is
+// tenancy-filtered or carries a per-site exempt marker, including the W2.7 keyset-pushdown reads),
+// so EVERY production finding is now `[ERROR]` + exit 1. A NEW finding anywhere is a regression,
+// not backlog: add the installation_id filter, or justify a
 // `// tenant:exempt reason=<honest-reason> follow_up=<story-or-PERMANENT-EXEMPTION-*>` marker.
 import { type Node, Project, SyntaxKind } from "ts-morph";
 
@@ -47,13 +47,13 @@ export function isProductionSource(absPath: string): boolean {
 }
 
 /**
- * ERROR-mode scope (W4.2 / RH1): the runner data plane + review pipeline + platform libs — every
- * production path EXCEPT the admin/auth HTTP surface (`apps/backend/src/api/**`), which stays WARN
- * until its own hardening wave (W4.7). A finding here exits 1.
+ * ERROR-mode scope: EVERY production path. W4.2 / RH1 flipped the runner data plane + review
+ * pipeline + platform libs; W4.7 promoted the final WARN holdout (the admin/auth HTTP surface,
+ * `apps/backend/src/api/**`) once its reads were tenancy-correct. Any finding exits 1.
  */
 export function isErrorModePath(absPath: string): boolean {
-  const posix = absPath.split("\\").join("/");
-  return !/(?:^|\/)apps\/[^/]+\/src\/api\//.test(posix);
+  void absPath; // every production source path is blocking since the W4.7 promotion.
+  return true;
 }
 
 /** Pure exit-code policy: 1 iff ANY finding sits on an ERROR-mode path (else 0 — WARN-only). */
@@ -98,8 +98,8 @@ function hasExemptMarker(node: Node, lines: Array<string>): boolean {
   return MARKER_RE.test(sameLine) || MARKER_RE.test(prevLine);
 }
 
-/** CLI entry: H-16-format lines — `[ERROR]` (blocking) on the runner/review data plane + libs,
- *  `[WARN]` on the api surface. Exit per {@link exitCodeFor}. */
+/** CLI entry: H-16-format lines — `[ERROR]` (blocking) on every production surface since the
+ *  W4.7 promotion. Exit per {@link exitCodeFor}. */
 export function main(): number {
   const project = new Project({ tsConfigFilePath: "tsconfig.json" });
   const violations = findTenancyViolations(project);
@@ -115,7 +115,7 @@ export function main(): number {
   }
   const rc = exitCodeFor(violations);
   process.stderr.write(
-    `[INFO] tenant-scoped raw-SQL gate (ERROR-mode on runner/review surfaces): ` +
+    `[INFO] tenant-scoped raw-SQL gate (ERROR-mode on ALL production surfaces): ` +
       `${errors} blocking + ${violations.length - errors} warn finding(s). Exit ${rc}.\n`,
   );
   return rc;
