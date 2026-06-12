@@ -16,7 +16,6 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:integration": "vitest run test/integration --no-file-parallelism",
-    "test:magika": "CODEMASTER_TEST_MAGIKA=1 vitest run test/parity/magika_agreement.parity.test.ts",
     "gates": "tsx scripts/gates/run_all.ts",
     "validate-fast": "git submodule update --init && npm run gates && npm run lint && npm run typecheck && npm run test",
     "migrate:up": "node-pg-migrate up -m migrations -d CODEMASTER_PG_CORE_DSN --no-check-order",
