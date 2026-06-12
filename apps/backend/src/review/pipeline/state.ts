@@ -21,6 +21,7 @@
 // type-only where they would otherwise transitively pull crypto into the bundle.
 
 import type { ResolvedGuidanceBundleV1 } from "#contracts/resolved_guidance.v1.js";
+import type { RetrieveKnowledgeResultV1 } from "#contracts/retrieve_knowledge.v1.js";
 import type { CodemasterConfigV1 } from "#contracts/codemaster_config.v1.js";
 import { CodemasterConfigV1 as CodemasterConfigV1Schema } from "#contracts/codemaster_config.v1.js";
 import type { DroppedClassificationV1 } from "#contracts/dropped_classification.v1.js";
@@ -167,11 +168,33 @@ export class ReviewWorkflowState {
    *  policy_bundles.get(chunk.path) per chunk. Map preserves the dict semantics. */
   readonly policyBundles = new Map<string, ResolvedGuidanceBundleV1>();
 
-  /** query_vector_cache (~1189) — finding 10: per-PR cache of Qwen3 query embeddings keyed by chunk path.
-   *  First chunk per unique path embeds; subsequent chunks reuse the cached vector. ReadonlyArray<number>
-   *  is the JSON wire form of the Python tuple[float, ...] (bare floats live only inside the vector, never
-   *  surfaced through a canonical-JSON compare). */
+  /** query_vector_cache (~1189) — finding 10: per-PR cache of Qwen3 query embeddings. W1.3 (RC4)
+   *  HARDENING DIVERGENCE: keyed by the full QUERY TEXT (the content key — the Python keyed by chunk
+   *  path, silently reusing a stale vector across same-file hunks with different bodies). Identical
+   *  queries share one embed RPC; distinct hunks embed separately. The key is the query itself rather
+   *  than a hash: the spine is crypto-free (no node:crypto), the map is bounded by the chunk cap
+   *  (≤100 × ≤8000 chars), and identity keying is collision-free where a hash is not.
+   *  ReadonlyArray<number> is the JSON wire form of the Python tuple[float, ...]. */
   readonly queryVectorCache = new Map<string, ReadonlyArray<number>>();
+
+  /**
+   * W2.4 (XH13) — the once-per-review retrieval short-circuit decision, resolved by orchestrate()
+   * BEFORE the chunk fan-out (probeKnowledgeCorpus + repo_config.knowledge.enabled + the full-PR
+   * effective-labels check) and consulted by buildChunkContext per chunk. `null` = not resolved (probe
+   * port unwired / pre-fan-out) → NO short-circuit (the fail-open default). `skip=true` is only set
+   * when retrieval PROVABLY cannot contribute (both the repo and confluence sides dead), so skipping
+   * never drops a retrieval that would have helped. `reason` is the operator-greppable WARN payload.
+   */
+  retrievalShortCircuit: { readonly skip: boolean; readonly reason: string } | null = null;
+
+  /**
+   * W2.4 (XH13) — per-review memo of retrieve_knowledge results keyed by the SAME content key as
+   * {@link queryVectorCache} (the full query text). Two chunks with identical queries (same file,
+   * same hunk body) issue ONE retrieval instead of two. ONLY non-degraded results are memoized — a
+   * degraded (transient-failure) result must not poison its same-query siblings, which retry instead
+   * (fail-open). Bounded by the chunk cap (≤100 entries).
+   */
+  readonly retrievalResultCache = new Map<string, RetrieveKnowledgeResultV1>();
 
   /**
    * Union of retrieved knowledge chunk IDs across ALL chunks, accumulated as each chunk's

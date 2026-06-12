@@ -14,22 +14,21 @@
 // column width). This activity defensively rejects a wrong-shape vector — a contract violation from the
 // embed service — rather than returning it and poisoning the downstream ANN cosine search.
 //
-// ── Purpose alignment ──
-// `purpose="in_repo_doc"` is aligned with AnnRetriever's per-chunk fallback so the embed service routes
-// both calls (per-PR memoized + legacy per-chunk fallback) through the same metering / quota bucket.
+// ── Purpose alignment (W1.3 — RL-appendix embed-mode) ──
+// HARDENING DIVERGENCE from the frozen Python: the Python used `_QUERY_PURPOSE = "in_repo_doc"` here
+// while AnnRetriever's per-chunk fallback used "review_query" — so a chunk whose memoized embed failed
+// got a DIFFERENT query vector than its siblings (depressed cosine for the truly relevant chunk). Both
+// paths now share the ONE {@link QUERY_EMBED_PURPOSE} ("review_query") + the flag-gated Qwen
+// query-instruction seam ({@link buildQueryEmbedText}) from retrieval/query_embed.ts.
 
 import {
   type EmbeddingsPort,
   EMBEDDING_DIM,
 } from "#backend/adapters/embeddings_port.js";
+import { buildQueryEmbedText, QUERY_EMBED_PURPOSE } from "#backend/retrieval/query_embed.js";
 
 import { CURRENT_SCHEMA_VERSION } from "#contracts/embed_query.v1.js";
 import type { EmbedQueryInputV1, EmbedQueryResultV1 } from "#contracts/embed_query.v1.js";
-
-// Aligned with AnnRetriever's per-chunk fallback purpose so the embed service routes both calls
-// (per-PR memoized + legacy per-chunk fallback) through the same metering / quota bucket. The Python
-// module uses `_QUERY_PURPOSE = "in_repo_doc"` here.
-const QUERY_PURPOSE = "in_repo_doc";
 
 export type EmbedQueryActivityOptions = {
   embeddings: EmbeddingsPort;
@@ -58,9 +57,10 @@ export class EmbedQueryActivity {
    */
   public async embedQuery(input: EmbedQueryInputV1): Promise<EmbedQueryResultV1> {
     const result = await this.embeddings.embed({
-      texts: [input.query],
+      // W1.3: every QUERY embed routes through the shared seam (instruction prefix when flagged on).
+      texts: [buildQueryEmbedText(input.query)],
       model_name: this.modelName,
-      purpose: QUERY_PURPOSE,
+      purpose: QUERY_EMBED_PURPOSE,
     });
     const first = result.vectors[0];
     // The port invariant is `vectors.length === texts.length` (one input → one vector); guard the

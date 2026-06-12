@@ -78,6 +78,11 @@ export const STAGE_NAMES = new Set<string>([
   // of discarding every chunk's paid-for LLM work). The Python ran dedup inline inside the aggregate
   // path and never dispatched it through stage_outcome, so its frozenset has no such stage.
   "dedup",
+  // W2.4 (XH13): the once-per-review retrieval short-circuit probe (probeKnowledgeCorpus). Logger-only
+  // stageOutcome (no degradation note): a probe failure fail-OPENS to "no short-circuit" — retrieval
+  // proceeds and nothing the walkthrough should report was lost. The Python had no such stage (it ran
+  // retrieval unconditionally — the XH13 defect).
+  "probe_knowledge_corpus",
 ]);
 
 /** A stage name guaranteed (at runtime) to be in STAGE_NAMES. The branded check happens in stageOutcome. */

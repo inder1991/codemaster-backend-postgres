@@ -56,9 +56,16 @@ beforeAll(async () => {
   db = tenantKysely<unknown>(INTEGRATION_DSN);
 
   // A regular confluence chunk (lang:python) hot at dim 0.
-  await seedChunk({ pageId: "p-conf", labels: ["lang:python"], hotDim: 0 });
-  // A SECURITY_POLICY confluence chunk hot at dim 1 → must be FLOOR-reserved before rerank.
-  await seedChunk({ pageId: "p-sec", labels: ["topic:security_policy"], hotDim: 1 });
+  await seedChunk({ pageId: "p-conf", labels: ["lang:python"], vector: blendVector({ 0: 1 }) });
+  // A SECURITY_POLICY confluence chunk NEAREST dim 1 → must be FLOOR-reserved before rerank. W1.3
+  // (RH10): blended with a 0.5-cosine component toward dim 0 so it still clears the new
+  // minimum-similarity floor under the dim-0 query of the composition test (a pure-orthogonal vector
+  // would now be CORRECTLY filtered instead of padded in).
+  await seedChunk({
+    pageId: "p-sec",
+    labels: ["topic:security_policy"],
+    vector: blendVector({ 0: 0.5, 1: Math.sqrt(0.75) }),
+  });
 });
 
 afterAll(async () => {
@@ -75,6 +82,15 @@ function hotVector(dim: number): ReadonlyArray<number> {
   return v;
 }
 
+/** A 1024-dim vector with the given (dim → weight) components (unit length when weights are). */
+function blendVector(components: Readonly<Record<number, number>>): ReadonlyArray<number> {
+  const v = new Array<number>(DIM).fill(0);
+  for (const [dim, weight] of Object.entries(components)) {
+    v[Number(dim)] = weight;
+  }
+  return v;
+}
+
 function toPgVectorLiteral(vec: ReadonlyArray<number>): string {
   return `[${vec.map((x) => String(x)).join(",")}]`;
 }
@@ -82,7 +98,7 @@ function toPgVectorLiteral(vec: ReadonlyArray<number>): string {
 async function seedChunk(c: {
   pageId: string;
   labels: ReadonlyArray<string>;
-  hotDim: number;
+  vector: ReadonlyArray<number>;
 }): Promise<void> {
   const labelsLit = sql`${[...c.labels]}::text[]`;
   await sql`
@@ -92,7 +108,7 @@ async function seedChunk(c: {
     VALUES
       (${randomUUID()}, ${SPACE_KEY}, ${c.pageId}, ${"Page " + c.pageId}, 1, 0, ${"body " + c.pageId},
        ${"0".repeat(64)}, ${labelsLit}, false, ${sql`ARRAY[]::text[]`},
-       ${toPgVectorLiteral(hotVector(c.hotDim))}::vector)
+       ${toPgVectorLiteral(c.vector)}::vector)
   `.execute(db);
 }
 

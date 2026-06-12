@@ -86,6 +86,8 @@ import {
 } from "./helpers.js";
 import { stageOutcome, recordStage, type StageLogger } from "./degradation.js";
 import { postReviewResults, type PostingLifecycleDeps } from "./posting.js";
+// W1.3 (RC4): the code-bearing retrieval query builder (pure string assembly — pipeline-spine safe).
+import { buildRetrievalQueryText } from "./retrieval_query.js";
 
 // FIX #6+#9 — the ONE ported gitignore-style glob matcher (apps/backend/src/config/path_match.ts) backs BOTH
 // path-config consumers, replacing the two Stage-1 placeholder implementations that used to live in this
@@ -109,8 +111,12 @@ import { recordInvariantViolationAttempted } from "#backend/observability/workfl
 // DB): pr_context_builder is pure data construction over the enrichment result; PLATFORM_EXPOSED_LABELS
 // is a frozen const computed at module load over static detector tables. The confluence retrieval itself
 // runs in the retrieve_knowledge ACTIVITY (Node, DB OK) — the orchestrator only builds the gated INPUT.
-import { pickPrContext } from "#backend/retrieval/pr_context_builder.js";
+import { buildPrContextFull, pickPrContext } from "#backend/retrieval/pr_context_builder.js";
 import { PLATFORM_EXPOSED_LABELS } from "#backend/retrieval/platform_labels.js";
+// W2.4 (XH13): the full-PR effective-labels computation backing the retrieval short-circuit decision
+// (pure function over PRContext + yaml_config + the platform ceiling — the SAME T9 resolver the
+// retrieve_knowledge activity runs per chunk, evaluated once at the PR level).
+import { computeEffectiveLabels } from "#backend/retrieval/effective_labels.js";
 
 import type { PrMetaV1, WalkthroughV1 } from "#contracts/walkthrough.v1.js";
 import type { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
@@ -128,6 +134,7 @@ import type { ReviewContextV1 } from "#contracts/review_context.v1.js";
 import type { ReviewChunkResponseV1 } from "#contracts/review_chunk_response.v1.js";
 import type { PRTopologyEntryV1 } from "#contracts/pr_topology.v1.js";
 import type { KnowledgeChunkV1 } from "#contracts/knowledge_chunks.v1.js";
+import type { RetrieveKnowledgeResultV1 } from "#contracts/retrieve_knowledge.v1.js";
 import type { WorkspaceHandle } from "#contracts/workspace_handle.v1.js";
 import type { LinkedIssueV1 } from "#contracts/walkthrough.v1.js";
 // TYPE-ONLY — RetrievedEvidenceV1 lives in retrieved_evidence.v1.ts which imports node:crypto (the ev_id
@@ -319,10 +326,9 @@ const CLASSIFIER_FAILURE_THRESHOLD = 0.1;
  *  reserve hard-abort for the nothing-succeeded case; post the chunks that succeeded). */
 const CHUNK_FAILURE_ABORT_THRESHOLD = 1.0;
 
-/** The query-text cap the per-chunk closure applies (`[:8000]`, review_pull_request.py:1636). The
- *  RetrieveKnowledgeInputV1 query field is bounded max(8000); the embed query field is bounded max(8000)
- *  too — slice keeps both within bound regardless of path/title length. */
-const QUERY_TEXT_MAX = 8000;
+// The legacy QUERY_TEXT_MAX (`[:8000]`, review_pull_request.py:1636) moved into
+// retrieval_query.ts::RETRIEVAL_QUERY_MAX — the W1.3 (RC4) code-bearing query builder owns the cap
+// (short fields first, so the slice only ever truncates the chunk-body tail).
 
 /** The hard cap on the per-chunk retrieved-evidence manifest (the Python `_DEFAULT_ENTRY_CAP`). Matches
  *  `ReviewContextV1.retrieved_evidence` max_length (100) so the producer output never overflows the
@@ -672,6 +678,12 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
       toolStatuses: toolStatusesForFanout,
       prTopologyManifest,
     };
+
+    // W2.4 (XH13) — resolve the once-per-review retrieval short-circuit BEFORE the fan-out. The
+    // decision is stored on state so every buildChunkContext consults it without re-probing. Fail-OPEN
+    // by construction: probe port unwired / probe failure / any uncertainty → skip=false (retrieval
+    // runs exactly as before). skip=true only when retrieval PROVABLY cannot contribute.
+    state.retrievalShortCircuit = await resolveRetrievalShortCircuit(ctx);
 
     const invokeChunk: InvokeChunkFn = async (chunk, chunkThreading) => {
       const context = await buildChunkContext(ctx, chunk, chunkThreading);
@@ -1102,99 +1114,128 @@ async function buildChunkContext(
   // policy-engine-wiring collapse-on: per-chunk policy bundle lookup (null when no bundle for the path).
   const applicablePolicy = state.policyBundles.get(chunk.path) ?? null;
 
-  // retrieval-knowledge-wiring collapse-on: per-chunk knowledge retrieval. Query = chunk path + PR title
-  // (both deterministic projections of workflow input → replay-safe). Embed the query ONCE per unique path
-  // (state.queryVectorCache); reuse across subsequent chunks of the same path.
+  // retrieval-knowledge-wiring collapse-on: per-chunk knowledge retrieval. W1.3 (RC4) HARDENING
+  // DIVERGENCE from the frozen Python (which embedded only `chunk.path + pr_title`): the query is
+  // CODE-BEARING — PR title + PR description + chunk path + the chunk BODY itself — so the dense
+  // vector encodes the semantics of the change under review, not a path string. All four parts are
+  // deterministic projections of workflow input → replay-safe.
   let retrievedKnowledge: ReadonlyArray<KnowledgeChunkV1> = [];
   let retrievalDegraded = false;
   let retrievalDegradationReason = "";
 
-  const queryText = `${chunk.path} ${pr.prMeta.pr_title}`.slice(0, QUERY_TEXT_MAX);
+  const queryText = buildRetrievalQueryText({
+    prTitle: pr.prMeta.pr_title,
+    prDescription: pr.prMeta.pr_description,
+    chunkPath: chunk.path,
+    chunkBody: chunk.body,
+  });
 
-  // Embed-query: finding 10 — cache by stable chunk-path key + validate embedding dimension before the
-  // pgvector query + fail-open-with-degradation. On embed failure the override stays undefined and the
-  // retrieve activity's AnnRetriever embeds per-chunk as the legacy fallback.
-  let queryVectorOverride: ReadonlyArray<number> | null = state.queryVectorCache.get(chunk.path) ?? null;
-  if (queryVectorOverride === null) {
-    const embedResult = await stageOutcome(
-      "embed_query",
-      { logger: ctx.logger ?? NULL_LOGGER, headSha, runId },
-      async () => ports.embedQuery({ schema_version: 1, query: queryText }),
-    );
-    if (embedResult !== undefined) {
-      // finding 10 — validate embedding dimension before caching / handing to the pgvector query. A
-      // zero-length vector cannot anchor an ANN search; fail-open-with-degradation (skip the override,
-      // AnnRetriever embeds per-chunk) rather than poisoning the cache with an unusable vector.
-      if (embedResult.vector.length > 0) {
-        queryVectorOverride = embedResult.vector;
-        state.queryVectorCache.set(chunk.path, embedResult.vector);
-      } else {
-        retrievalDegraded = true;
-        retrievalDegradationReason = "embed_query returned an empty vector";
+  // W2.4 (XH13) — the once-per-review short-circuit + the per-query retrieval memo:
+  //   * skip: orchestrate() resolved (pre-fan-out) that retrieval PROVABLY contributes nothing (both
+  //     the repo and confluence sides dead) — the chunk proceeds with empty retrieved_knowledge and NO
+  //     degradation flag, because the skipped retrieval would have returned [] anyway.
+  //   * memo: a sibling chunk with the IDENTICAL query already retrieved — replay its NON-degraded
+  //     result without re-dispatching embed or retrieve (degraded results are never memoized, so a
+  //     transient failure on one chunk cannot poison its same-query siblings).
+  const skipRetrieval = state.retrievalShortCircuit?.skip === true;
+  let retrieveResult: RetrieveKnowledgeResultV1 | undefined = skipRetrieval
+    ? undefined
+    : state.retrievalResultCache.get(queryText);
+
+  if (!skipRetrieval && retrieveResult === undefined) {
+    // Embed-query: finding 10 + W1.3 (RC4) — the memo is keyed by the QUERY TEXT (the content key: two
+    // chunks of one file with different bodies embed separately; identical queries share one embed RPC),
+    // not the legacy chunk-path key that reused a stale vector across differing hunks. Validate the
+    // embedding dimension before the pgvector query + fail-open-with-degradation: on embed failure the
+    // override stays null and the retrieve activity's AnnRetriever embeds per-chunk as the legacy fallback.
+    let queryVectorOverride: ReadonlyArray<number> | null = state.queryVectorCache.get(queryText) ?? null;
+    if (queryVectorOverride === null) {
+      const embedResult = await stageOutcome(
+        "embed_query",
+        { logger: ctx.logger ?? NULL_LOGGER, headSha, runId },
+        async () => ports.embedQuery({ schema_version: 1, query: queryText }),
+      );
+      if (embedResult !== undefined) {
+        // finding 10 — validate embedding dimension before caching / handing to the pgvector query. A
+        // zero-length vector cannot anchor an ANN search; fail-open-with-degradation (skip the override,
+        // AnnRetriever embeds per-chunk) rather than poisoning the cache with an unusable vector.
+        if (embedResult.vector.length > 0) {
+          queryVectorOverride = embedResult.vector;
+          state.queryVectorCache.set(queryText, embedResult.vector);
+        } else {
+          retrievalDegraded = true;
+          retrievalDegradationReason = "embed_query returned an empty vector";
+        }
       }
+      // embedResult === undefined: the embed activity raised, stageOutcome swallowed it; override stays null.
     }
-    // embedResult === undefined: the embed activity raised, stageOutcome swallowed it; override stays null.
+
+    // Retrieve-knowledge: fail-open via stageOutcome. On the activity raising — OR the in-block confluence-
+    // context build raising — stageOutcome swallows and the local marker flips retrievalDegraded.
+    //
+    // CONFLUENCE collapse-on (Sub-spec B T17; review_pull_request.py:1710-1799): the confluence-supporting
+    // fields are built INSIDE the stage_outcome block (exactly as the Python `pick_pr_context(...)` +
+    // `RetrieveKnowledgeInputV1(...)` construction sits inside the `async with stage_outcome(...)`), so a
+    // PRContext validation failure (e.g. a malformed head_sha) is fail-open — the review proceeds with empty
+    // retrieved_knowledge + retrieval_degraded, never crashing the chunk. The ORCHESTRATOR ALWAYS passes the
+    // gated values (collapse-on — the Python workflow body's `if patched(...)` branch is straight-line in the
+    // historyless TS port); the ACTIVITY's `_shouldUseHybrid` gate decides legacy-vs-hybrid per chunk (it
+    // falls through to BM25+ANN+RRF unless ALL five fields are present, including a non-null
+    // query_vector_override). So a chunk whose query embed failed (queryVectorOverride === null) still routes
+    // through the activity, which takes the legacy path for THAT chunk — exactly the Python behaviour.
+    retrieveResult = await stageOutcome(
+      "retrieve_knowledge",
+      { logger: ctx.logger ?? NULL_LOGGER, headSha, runId },
+      async () => {
+        // pr_context: pick_pr_context(use_full=true, ...) — the full-PR context (every changed file in the
+        // diff) from the enrichment result; falls back to the MVP per-chunk single-file context when
+        // enrichment is null/undefined (the Python fail-open). repo_default_branch="main" (1:1 with the
+        // hardcoded Python kwarg; FOLLOW-UP-confluence-repo-default-branch to thread the real default branch).
+        const confluencePrContext = pickPrContext({
+          useFull: true,
+          prId: pr.prMeta.pr_id,
+          headSha,
+          repoDefaultBranch: "main",
+          enrichment: ctx.enrichment,
+          chunkPath: chunk.path,
+          manifestSnapshots: [...(ctx.manifestSnapshots ?? [])],
+        });
+        const confluencePlatformLabels: ReadonlyArray<string> = [
+          ...(ctx.platformExposedLabels ?? PLATFORM_EXPOSED_LABELS),
+        ];
+        return ports.retrieveKnowledge({
+          schema_version: 1,
+          installation_id: pr.prMeta.installation_id,
+          // FIX #2 (part 2) — repo_id is the internal repository UUID sourced from the workflow payload's
+          // `repository_id` (1:1 with the frozen Python `repo_id=typed_payload.repository_id`,
+          // review_pull_request.py:1756/1768). The WorkflowBody phase threaded it onto ReviewPipelinePrCtx as
+          // `repositoryId`; this rewires the dispatch off the `pr_id` stand-in the Stage-1 port used (the
+          // FOLLOW-UP-thread-repository-id marker is now closed). RetrieveKnowledgeInputV1.repo_id is a UUID
+          // wire string, which `repositoryId` already is.
+          repo_id: pr.repositoryId,
+          query: queryText,
+          top_k: 5,
+          query_vector_override: queryVectorOverride === null ? null : [...queryVectorOverride],
+          // CONFLUENCE collapse-on: include_confluence flips false → true; the supporting fields are threaded.
+          include_confluence: true,
+          pr_context: confluencePrContext,
+          yaml_config: state.repoConfig,
+          platform_exposed_labels: [...confluencePlatformLabels],
+        });
+      },
+    );
+    // W2.4 (XH13): memoize ONLY a non-degraded result for same-query siblings (degraded results retry).
+    if (retrieveResult !== undefined && !retrieveResult.retrieval_degraded) {
+      state.retrievalResultCache.set(queryText, retrieveResult);
+    }
   }
 
-  // Retrieve-knowledge: fail-open via stageOutcome. On the activity raising — OR the in-block confluence-
-  // context build raising — stageOutcome swallows and the local marker flips retrievalDegraded.
-  //
-  // CONFLUENCE collapse-on (Sub-spec B T17; review_pull_request.py:1710-1799): the confluence-supporting
-  // fields are built INSIDE the stage_outcome block (exactly as the Python `pick_pr_context(...)` +
-  // `RetrieveKnowledgeInputV1(...)` construction sits inside the `async with stage_outcome(...)`), so a
-  // PRContext validation failure (e.g. a malformed head_sha) is fail-open — the review proceeds with empty
-  // retrieved_knowledge + retrieval_degraded, never crashing the chunk. The ORCHESTRATOR ALWAYS passes the
-  // gated values (collapse-on — the Python workflow body's `if patched(...)` branch is straight-line in the
-  // historyless TS port); the ACTIVITY's `_shouldUseHybrid` gate decides legacy-vs-hybrid per chunk (it
-  // falls through to BM25+ANN+RRF unless ALL five fields are present, including a non-null
-  // query_vector_override). So a chunk whose query embed failed (queryVectorOverride === null) still routes
-  // through the activity, which takes the legacy path for THAT chunk — exactly the Python behaviour.
-  const retrieveResult = await stageOutcome(
-    "retrieve_knowledge",
-    { logger: ctx.logger ?? NULL_LOGGER, headSha, runId },
-    async () => {
-      // pr_context: pick_pr_context(use_full=true, ...) — the full-PR context (every changed file in the
-      // diff) from the enrichment result; falls back to the MVP per-chunk single-file context when
-      // enrichment is null/undefined (the Python fail-open). repo_default_branch="main" (1:1 with the
-      // hardcoded Python kwarg; FOLLOW-UP-confluence-repo-default-branch to thread the real default branch).
-      const confluencePrContext = pickPrContext({
-        useFull: true,
-        prId: pr.prMeta.pr_id,
-        headSha,
-        repoDefaultBranch: "main",
-        enrichment: ctx.enrichment,
-        chunkPath: chunk.path,
-        manifestSnapshots: [...(ctx.manifestSnapshots ?? [])],
-      });
-      const confluencePlatformLabels: ReadonlyArray<string> = [
-        ...(ctx.platformExposedLabels ?? PLATFORM_EXPOSED_LABELS),
-      ];
-      return ports.retrieveKnowledge({
-        schema_version: 1,
-        installation_id: pr.prMeta.installation_id,
-        // FIX #2 (part 2) — repo_id is the internal repository UUID sourced from the workflow payload's
-        // `repository_id` (1:1 with the frozen Python `repo_id=typed_payload.repository_id`,
-        // review_pull_request.py:1756/1768). The WorkflowBody phase threaded it onto ReviewPipelinePrCtx as
-        // `repositoryId`; this rewires the dispatch off the `pr_id` stand-in the Stage-1 port used (the
-        // FOLLOW-UP-thread-repository-id marker is now closed). RetrieveKnowledgeInputV1.repo_id is a UUID
-        // wire string, which `repositoryId` already is.
-        repo_id: pr.repositoryId,
-        query: queryText,
-        top_k: 5,
-        query_vector_override: queryVectorOverride === null ? null : [...queryVectorOverride],
-        // CONFLUENCE collapse-on: include_confluence flips false → true; the supporting fields are threaded.
-        include_confluence: true,
-        pr_context: confluencePrContext,
-        yaml_config: state.repoConfig,
-        platform_exposed_labels: [...confluencePlatformLabels],
-      });
-    },
-  );
   if (retrieveResult !== undefined) {
     retrievedKnowledge = retrieveResult.items;
     // Accumulate the retrieved knowledge chunk IDs into the PR-level union so the post-aggregate
     // citationValidate can enforce knowledge-citation membership (strict mode) instead of skip mode. Each
     // chunk contributes the IDs IT retrieved; the union is the full "retrieved set for this review".
+    // (Memo hits re-add the same IDs — Set semantics make that a no-op.)
     for (const item of retrievedKnowledge) {
       state.retrievedKnowledgeChunkIds.add(item.chunk_id);
     }
@@ -1202,9 +1243,11 @@ async function buildChunkContext(
     if (retrieveResult.degradation_reason !== "") {
       retrievalDegradationReason = retrieveResult.degradation_reason;
     }
-  } else {
+  } else if (!skipRetrieval) {
     // retrieve_knowledge raised → stageOutcome swallowed → flip degraded (the Python
     // `if "retrieve_knowledge_failed" in _retrieve_failed: retrieval_degraded = True`).
+    // The W2.4 short-circuit branch is EXCLUDED: a deliberate skip of a provably-empty retrieval is
+    // NOT a degradation — nothing that could have helped was dropped.
     retrievalDegraded = true;
   }
 
@@ -1285,6 +1328,89 @@ async function buildChunkContext(
     // enrichment / no changed paths / no github_installation_id) or failed (fail-open).
     manifests: [...(ctx.manifestSnapshots ?? [])],
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// resolveRetrievalShortCircuit — the W2.4 (XH13) once-per-review retrieval short-circuit decision.
+//
+// XH13 (docs/audits/2026-06-11-cross-cutting-characteristics-audit.md): the per-chunk hybrid retrieval
+// (embed RPC + BM25 + ANN + Confluence + RRF) ran UNCONDITIONALLY — a brand-new repo with zero indexed
+// chunks still paid N embed RPCs + N retrievals per PR. Per the W2.4 plan gating ("skip embedQuery +
+// retrieveKnowledge when knowledge is disabled AND no Confluence labels apply; cheap cached
+// knowledge_chunks count → short-circuit empty repos"), retrieval is skipped for the WHOLE fan-out iff
+// BOTH sides are provably dead:
+//
+//   repo side dead       = repo_config.knowledge.enabled === false  (the customer turned knowledge off)
+//                          OR no ACTIVE core.knowledge_chunks row exists for (installation, repo)
+//                          (BM25 + ANN both read ONLY that table — empty corpus ⇒ both return []);
+//   confluence side dead = no live core.confluence_chunks row exists (the platform corpus is empty)
+//                          OR the FULL-PR effective-labels set is empty (the adapter's own
+//                          empty-labels short-circuit returns [] for every chunk).
+//
+// FAIL-OPEN (the W2.4 invariant — "a short-circuit must never drop a retrieval that WOULD have
+// helped"): the probe port unwired, the probe throwing, or labels being UNKNOWABLE at the PR level
+// (no enrichment → per-chunk MVP contexts whose labels can vary by chunk) all resolve to skip=false.
+// The probe dispatch + label computation share ONE logger-only stageOutcome (no degradation note: a
+// failed probe degrades nothing — retrieval simply proceeds as before).
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+async function resolveRetrievalShortCircuit(
+  ctx: ReviewPipelineContext,
+): Promise<{ readonly skip: boolean; readonly reason: string }> {
+  const { activities: ports, pr, state } = ctx;
+  const probePort = ports.probeKnowledgeCorpus;
+  if (probePort === undefined) {
+    return { skip: false, reason: "probe port not wired (legacy unconditional retrieval)" };
+  }
+  const outcome = await stageOutcome(
+    "probe_knowledge_corpus",
+    { logger: ctx.logger ?? NULL_LOGGER, headSha: pr.headSha, runId: pr.runId },
+    async () => {
+      const probe = await probePort({
+        schema_version: 1,
+        installation_id: pr.prMeta.installation_id,
+        repo_id: pr.repositoryId,
+      });
+      // The labels condition is decidable ONLY from the chunk-invariant FULL-PR context (same
+      // builder + "main" default-branch kwarg the per-chunk dispatch uses). enrichment null → the
+      // per-chunk MVP contexts could each detect different labels → null = "cannot conclude".
+      const fullPrContext = buildPrContextFull({
+        prId: pr.prMeta.pr_id,
+        headSha: pr.headSha,
+        repoDefaultBranch: "main",
+        enrichment: ctx.enrichment,
+        manifestSnapshots: [...(ctx.manifestSnapshots ?? [])],
+      });
+      let confluenceLabelsApply = true;
+      if (fullPrContext !== null) {
+        const [effectiveLabels] = computeEffectiveLabels({
+          prContext: fullPrContext,
+          yamlConfig: state.repoConfig,
+          platformExposedLabels: new Set(ctx.platformExposedLabels ?? PLATFORM_EXPOSED_LABELS),
+        });
+        confluenceLabelsApply = effectiveLabels.size > 0;
+      }
+      return { probe, confluenceLabelsApply };
+    },
+  );
+  if (outcome === undefined) {
+    // Probe (or the pure label computation) failed → stageOutcome swallowed → FAIL-OPEN: retrieve.
+    return { skip: false, reason: "corpus probe failed (fail-open: retrieval proceeds)" };
+  }
+  const knowledgeEnabled = state.repoConfig.knowledge.enabled;
+  const repoSideDead = !knowledgeEnabled || !outcome.probe.has_repo_knowledge;
+  const confluenceSideDead =
+    !outcome.probe.has_confluence_knowledge || !outcome.confluenceLabelsApply;
+  if (repoSideDead && confluenceSideDead) {
+    const reason =
+      `retrieval short-circuit: repo side dead (knowledge.enabled=${String(knowledgeEnabled)}, ` +
+      `has_repo_knowledge=${String(outcome.probe.has_repo_knowledge)}); confluence side dead ` +
+      `(has_confluence_knowledge=${String(outcome.probe.has_confluence_knowledge)}, ` +
+      `labels_apply=${String(outcome.confluenceLabelsApply)})`;
+    // Operator-greppable WARN (the skip is deliberate + provably lossless — NOT a degradation note).
+    (ctx.logger ?? NULL_LOGGER).warning(`review_pipeline.retrieval_short_circuit: ${reason}`);
+    return { skip: true, reason };
+  }
+  return { skip: false, reason: "knowledge corpus available (retrieval proceeds)" };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────

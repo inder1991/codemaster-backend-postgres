@@ -41,6 +41,9 @@
 import { type Kysely, sql } from "kysely";
 
 import type { ConfluenceRetrievedChunk } from "#backend/retrieval/confluence_source.js";
+import { MIN_COSINE_SIMILARITY_FLOOR } from "#backend/retrieval/constants.js";
+import { computeMatchSpecificity } from "#backend/retrieval/match_specificity.js";
+import { formatPgvectorLiteral } from "#backend/retrieval/pgvector_literal.js";
 
 /**
  * The EmbedderCache seam (Python `codemaster.embedder.cache.EmbedderCache`). NOT yet ported to TS
@@ -76,16 +79,14 @@ type ConfluenceRow = {
   score: number | string;
 };
 
-/**
- * Format the query vector as the pgvector text literal `"[f1,f2,...]"` (1:1 with the Python `qvec`
- * bind). pg cannot encode a raw array for the `vector` column, so we bind this text + CAST AS vector.
- */
-function toPgVectorLiteral(vec: ReadonlyArray<number>): string {
-  return `[${vec.map((x) => String(x)).join(",")}]`;
-}
+// W1.3 (RL3): the pgvector text literal is built by the SHARED parser-safe formatter
+// (retrieval/pgvector_literal.ts) — plain decimal (never exponential), value-exact round-trip,
+// fail-loud on non-finite components. The previous inline `String(x)` join could emit exponent notation.
 
-/** Map a SELECT row to a ConfluenceRetrievedChunk (1:1 with the Python `_row_to_chunk`). */
-function rowToChunk(row: ConfluenceRow): ConfluenceRetrievedChunk {
+/** Map a SELECT row to a ConfluenceRetrievedChunk (1:1 with the Python `_row_to_chunk`, PLUS the
+ *  W1.3/RH8 Stage-1.5 specificity computation — `search()` has the caller's effective_labels in scope,
+ *  so the score is computed HERE instead of the legacy hardcoded 0 every consumer used to see). */
+function rowToChunk(row: ConfluenceRow, effectiveLabels: ReadonlySet<string>): ConfluenceRetrievedChunk {
   const labels = row.labels === null ? [] : [...row.labels];
   return {
     chunk_id: row.chunk_id,
@@ -100,8 +101,9 @@ function rowToChunk(row: ConfluenceRow): ConfluenceRetrievedChunk {
     token_count: row.token_count === null ? 0 : Number(row.token_count),
     score: Number(row.score),
     source: "confluence",
-    // The adapter does not compute match_specificity_score (needs effective_labels from the caller).
-    match_specificity_score: 0,
+    // W1.3 (RH8): the label-overlap specificity score (spec §3.5) — floors sort on it (specificity
+    // DESC before freshness) and the prompt frame renders its bucket. Was hardcoded 0 (RH8).
+    match_specificity_score: computeMatchSpecificity(new Set(labels), effectiveLabels),
   };
 }
 
@@ -113,6 +115,12 @@ export type PostgresConfluenceRetrievalOptions = {
    * the legacy `cc.embedding` direct query is used.
    */
   embedderCache?: EmbedderCache | null;
+  /**
+   * W1.3 (RH10) — minimum cosine-similarity floor applied in every SQL variant (legacy / Phase A /
+   * Phase C). Default {@link MIN_COSINE_SIMILARITY_FLOOR}; the wiring resolves the
+   * `CODEMASTER_RETRIEVAL_MIN_SIMILARITY` env knob into this option. Pass `0`/`-1` to opt out.
+   */
+  minSimilarity?: number;
 };
 
 /**
@@ -122,10 +130,12 @@ export type PostgresConfluenceRetrievalOptions = {
 export class PostgresConfluenceRetrieval {
   private readonly db: Kysely<unknown>;
   private readonly embedderCache: EmbedderCache | null;
+  private readonly minSimilarity: number;
 
   public constructor(opts: PostgresConfluenceRetrievalOptions) {
     this.db = opts.db;
     this.embedderCache = opts.embedderCache ?? null;
+    this.minSimilarity = opts.minSimilarity ?? MIN_COSINE_SIMILARITY_FLOOR;
   }
 
   /**
@@ -151,7 +161,7 @@ export class PostgresConfluenceRetrieval {
       return [];
     }
 
-    const qvec = toPgVectorLiteral(args.queryEmbedding);
+    const qvec = formatPgvectorLiteral(args.queryEmbedding);
     const labelsArray = [...effectiveLabels];
     // Bind a REAL pg text[] for the `&&` overlap (NOT a CSV string) — `${labelsArray}::text[]` lets
     // node-pg encode the JS array to a Postgres array literal.
@@ -173,7 +183,7 @@ export class PostgresConfluenceRetrieval {
           ? await this.runPhaseC({ qvec, labelsBind, topK: args.topK, activeGeneration })
           : await this.runPhaseA({ qvec, labelsBind, topK: args.topK, activeGeneration });
     }
-    return rows.map(rowToChunk);
+    return rows.map((row) => rowToChunk(row, effectiveLabels));
   }
 
   /**
@@ -214,6 +224,7 @@ export class PostgresConfluenceRetrieval {
               NOT ('default' = ANY(cc.labels))
               OR cpa.approval_id IS NOT NULL
           )
+          AND (1 - (cc.embedding <=> ${args.qvec}::vector)) >= ${this.minSimilarity}
       ORDER BY cc.embedding <=> ${args.qvec}::vector
       LIMIT ${args.topK}
     `.execute(this.db);
@@ -264,6 +275,7 @@ export class PostgresConfluenceRetrieval {
               NOT ('default' = ANY(cc.labels))
               OR cpa.approval_id IS NOT NULL
           )
+          AND (1 - (COALESCE(ce.embedding, cc.embedding) <=> ${args.qvec}::vector)) >= ${this.minSimilarity}
       ORDER BY COALESCE(ce.embedding, cc.embedding) <=> ${args.qvec}::vector
       LIMIT ${args.topK}
     `.execute(this.db);
@@ -313,6 +325,7 @@ export class PostgresConfluenceRetrieval {
               NOT ('default' = ANY(cc.labels))
               OR cpa.approval_id IS NOT NULL
           )
+          AND (1 - (ce.embedding <=> ${args.qvec}::vector)) >= ${this.minSimilarity}
       ORDER BY ce.embedding <=> ${args.qvec}::vector
       LIMIT ${args.topK}
     `.execute(this.db);

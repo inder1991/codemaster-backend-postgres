@@ -21,9 +21,11 @@
 // frozen Python emits an OTel histogram here; that observability module is not ported yet, so this port
 // keeps the timing seam intact but omits the (absent) metric emission.
 //
-// ── Purpose ──
-// `purpose="review_query"` (1:1 with the Python `_QUERY_PURPOSE`) — DISTINCT from EmbedQueryActivity's
-// `"in_repo_doc"`: the activity is the per-PR memoized path; this is the legacy per-chunk fallback.
+// ── Purpose (W1.3 — RL-appendix embed-mode) ──
+// HARDENING DIVERGENCE from the frozen Python: the Python used "review_query" here but "in_repo_doc"
+// in embed_query.py — two different purposes for the SAME query, so a chunk whose memoized embed
+// failed got a different query vector than its siblings. Both paths now share the ONE
+// QUERY_EMBED_PURPOSE + the flag-gated Qwen query-instruction seam (retrieval/query_embed.ts).
 
 import {
   type EmbeddingsPort,
@@ -33,6 +35,9 @@ import {
 
 import { type Clock, WallClock } from "#platform/clock.js";
 
+import { MIN_COSINE_SIMILARITY_FLOOR } from "./constants.js";
+import { buildQueryEmbedText, QUERY_EMBED_PURPOSE } from "./query_embed.js";
+
 import type { AnnPort } from "./ann_port.js";
 import type {
   KnowledgeQueryV1,
@@ -40,13 +45,17 @@ import type {
   ScoredKnowledgeChunkV1,
 } from "#contracts/knowledge_chunks.v1.js";
 
-const QUERY_PURPOSE = "review_query";
-
 export type AnnRetrieverOptions = {
   port: AnnPort;
   embeddings: EmbeddingsPort;
   modelName: string;
   clock?: Clock;
+  /**
+   * W1.3 (RH10) — minimum cosine-similarity floor threaded into every port search. Default
+   * {@link MIN_COSINE_SIMILARITY_FLOOR}; the wiring resolves the `CODEMASTER_RETRIEVAL_MIN_SIMILARITY`
+   * env knob into this option.
+   */
+  minSimilarity?: number;
 };
 
 /** Embed query, delegate to {@link AnnPort}, wrap in {@link RetrievedKnowledgeV1}. */
@@ -55,14 +64,16 @@ export class AnnRetriever {
   private readonly embeddings: EmbeddingsPort;
   private readonly modelName: string;
   private readonly clock: Clock;
+  private readonly minSimilarity: number;
 
-  public constructor({ port, embeddings, modelName, clock }: AnnRetrieverOptions) {
+  public constructor({ port, embeddings, modelName, clock, minSimilarity }: AnnRetrieverOptions) {
     this.port = port;
     this.embeddings = embeddings;
     this.modelName = modelName;
     // Clock injection replaces the inline monotonic call that would violate the no-wall-clock gate;
     // WallClock() default keeps zero-arg compat (1:1 with the Python R-7 fix).
     this.clock = clock ?? new WallClock();
+    this.minSimilarity = minSimilarity ?? MIN_COSINE_SIMILARITY_FLOOR;
   }
 
   public async retrieve(query: KnowledgeQueryV1): Promise<RetrievedKnowledgeV1> {
@@ -73,9 +84,10 @@ export class AnnRetriever {
     } else {
       try {
         const result = await this.embeddings.embed({
-          texts: [query.query],
+          // W1.3: every QUERY embed routes through the shared seam (instruction prefix when flagged on).
+          texts: [buildQueryEmbedText(query.query)],
           model_name: this.modelName,
-          purpose: QUERY_PURPOSE,
+          purpose: QUERY_EMBED_PURPOSE,
         });
         const first = result.vectors[0];
         queryVector = first === undefined ? [] : first;
@@ -97,6 +109,8 @@ export class AnnRetriever {
       repoId: query.repo_id,
       queryVector,
       topK: query.top_k,
+      // W1.3 (RH10): thread the configured minimum-similarity floor into the port.
+      minSimilarity: this.minSimilarity,
     });
     this.clock.monotonic();
 

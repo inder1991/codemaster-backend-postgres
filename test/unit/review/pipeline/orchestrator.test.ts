@@ -43,6 +43,8 @@ import { StaticAnalysisResultV1 } from "#contracts/static_analysis_result.v1.js"
 import { CarryForwardSelectionV1 } from "#contracts/carry_forward.v1.js";
 import { EmbedQueryResultV1 } from "#contracts/embed_query.v1.js";
 import { RetrieveKnowledgeResultV1 } from "#contracts/retrieve_knowledge.v1.js";
+import type { KnowledgeCorpusProbeInputV1 } from "#contracts/knowledge_corpus_probe.v1.js";
+import { PrFilesEnrichmentResultV1 } from "#contracts/pr_files_enrichment.v1.js";
 import {
   ReviewChunkResponseV1,
   OutputSafetySanitizationEventV1,
@@ -178,6 +180,9 @@ type StubOverrides = {
   dedupSemanticSkipped?: boolean;
   reviewChunkThrows?: boolean;
   chunkCount?: number;
+  /** W1.3 (RC4): explicit chunk list (wins over chunkCount) — exercises the content-keyed query memo
+   *  with same-path-different-body chunks, which chunkFor cannot produce. */
+  chunksOverride?: ReadonlyArray<DiffChunkV1>;
   // ── Stage-3 wiring overrides ──
   /** When set, the citationValidate port is injected and drops this many findings (the rest survive). */
   withCitationValidate?: boolean;
@@ -217,6 +222,17 @@ type StubOverrides = {
   generateFixPromptThrows?: boolean;
   /** When true, reviewChunk emits a SECURITY finding at severity 'nit' (drives the SI-001 severity floor). */
   securityNitFinding?: boolean;
+  // ── W2.4 (XH13) retrieval short-circuit overrides ──
+  /** When set, the probeKnowledgeCorpus port is injected (the orchestrator's short-circuit probe). */
+  withProbeKnowledgeCorpus?: boolean;
+  /** The probe's has_repo_knowledge answer (default false — empty repo corpus). */
+  probeHasRepoKnowledge?: boolean;
+  /** The probe's has_confluence_knowledge answer (default false — empty confluence corpus). */
+  probeHasConfluenceKnowledge?: boolean;
+  /** When true, the injected probe THROWS (asserts the fail-OPEN: retrieval must proceed). */
+  probeThrows?: boolean;
+  /** The repo_config.knowledge.enabled flag the loadRepoConfig stub returns (default true). */
+  knowledgeEnabled?: boolean;
 };
 
 type RecordingStub = {
@@ -224,6 +240,10 @@ type RecordingStub = {
   calls: Array<string>;
   reviewChunkInputs: Array<ReviewContextV1>;
   embedCalls: Array<string>;
+  /** W1.3 (RC4): the `query` each retrieveKnowledge dispatch carried (assert embed/retrieve share it). */
+  retrieveQueries: Array<string>;
+  /** W2.4 (XH13): the inputs the probeKnowledgeCorpus port received (asserts identity threading). */
+  probeInputs: Array<KnowledgeCorpusProbeInputV1>;
   citationInputs: Array<CitationValidateInputV1>;
   auditEvents: Array<EmitOutputSafetyAuditEventInput>;
   buildEvidenceInputs: Array<BuildRetrievedEvidenceInputV1>;
@@ -252,6 +272,8 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
   const calls: Array<string> = [];
   const reviewChunkInputs: Array<ReviewContextV1> = [];
   const embedCalls: Array<string> = [];
+  const retrieveQueries: Array<string> = [];
+  const probeInputs: Array<KnowledgeCorpusProbeInputV1> = [];
   const citationInputs: Array<CitationValidateInputV1> = [];
   const auditEvents: Array<EmitOutputSafetyAuditEventInput> = [];
   const buildEvidenceInputs: Array<BuildRetrievedEvidenceInputV1> = [];
@@ -265,9 +287,12 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
   const reviewFiles = o.reviewFiles ?? ["src/a.ts", "src/b.ts"];
   const sandboxFiles = o.sandboxFiles ?? ["src/a.ts"];
   const chunkCount = o.chunkCount ?? 2;
-  const chunks: Array<DiffChunkV1> = Array.from({ length: chunkCount }, (_v, i) =>
-    chunkFor(reviewFiles[i % Math.max(1, reviewFiles.length)] ?? "src/a.ts", i),
-  );
+  const chunks: Array<DiffChunkV1> =
+    o.chunksOverride !== undefined
+      ? [...o.chunksOverride]
+      : Array.from({ length: chunkCount }, (_v, i) =>
+          chunkFor(reviewFiles[i % Math.max(1, reviewFiles.length)] ?? "src/a.ts", i),
+        );
 
   const ports: ReviewActivityPorts = {
     clone: async () => {
@@ -285,6 +310,8 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
         config: CodemasterConfigV1.parse({
           path_filters: o.pathFilters ?? [],
           path_instructions: o.pathInstructions ?? [],
+          // W2.4 (XH13): the knowledge.enabled flag drives the retrieval short-circuit decision.
+          knowledge: { enabled: o.knowledgeEnabled ?? true },
         }),
         config_status: o.configStatus ?? "valid", // M6: drives the malformed-config notice
       });
@@ -335,8 +362,9 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
       }
       return EmbedQueryResultV1.parse({ vector: [0.1, 0.2, 0.3] });
     },
-    retrieveKnowledge: async () => {
+    retrieveKnowledge: async (input) => {
       calls.push("retrieveKnowledge");
+      retrieveQueries.push(input.query);
       if (o.retrieveThrows) {
         throw new Error("retrieve boom");
       }
@@ -425,6 +453,21 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
   };
 
   // ── Stage-3 optional ports (only attached when the override requests them) ──
+  if (o.withProbeKnowledgeCorpus) {
+    ports.probeKnowledgeCorpus = async (input) => {
+      calls.push("probeKnowledgeCorpus");
+      probeInputs.push(input);
+      if (o.probeThrows) {
+        throw new Error("probe boom");
+      }
+      return {
+        schema_version: 1,
+        has_repo_knowledge: o.probeHasRepoKnowledge ?? false,
+        has_confluence_knowledge: o.probeHasConfluenceKnowledge ?? false,
+      };
+    };
+  }
+
   if (o.withCitationValidate) {
     const dropCount = o.citationDropCount ?? 0;
     ports.citationValidate = async (input: CitationValidateInputV1) => {
@@ -509,6 +552,8 @@ function makeStub(o: StubOverrides = {}): RecordingStub {
     calls,
     reviewChunkInputs,
     embedCalls,
+    retrieveQueries,
+    probeInputs,
     citationInputs,
     auditEvents,
     buildEvidenceInputs,
@@ -618,10 +663,10 @@ describe("orchestrate — happy-path stage order", () => {
 });
 
 describe("orchestrate — per-chunk context build", () => {
-  it("caches the query embedding per unique chunk PATH (one embed per path) under sequential fan-out", async () => {
-    // 3 chunks across 2 unique paths (a, b, a). The state.queryVectorCache dedups embeds across chunks of
-    // the SAME path that run AFTER an earlier same-path chunk filled the cache. With concurrency=1 the
-    // fan-out is strictly sequential, so chunk #3 (path a) sees chunk #1's cached vector → 2 embeds, not 3.
+  it("caches the query embedding per unique QUERY (one embed per identical query) under sequential fan-out", async () => {
+    // 3 chunks across 2 unique paths (a, b, a) with IDENTICAL bodies per path (the chunkFor fixture), so
+    // the W1.3 content-keyed cache yields 2 unique queries. With concurrency=1 the fan-out is strictly
+    // sequential, so chunk #3 (path a, same body) sees chunk #1's cached vector → 2 embeds, not 3.
     // (Under full parallelism the cache is best-effort, exactly as the Python anyio fan-out — the check+set
     // is not atomic across concurrent tasks; the cache is an RPC reducer, not a hard dedup guarantee.)
     const stub = makeStub({ reviewFiles: ["src/a.ts", "src/b.ts"], chunkCount: 3 });
@@ -1234,6 +1279,226 @@ describe("FIX #6+#9 — orchestrator wires matchPathInstructions into ReviewCont
     const matched = stub.reviewChunkInputs[0]!.matched_path_instructions;
     // Both globs match "src/a.ts"; declaration order preserved.
     expect(matched.map((m) => m.instructions)).toEqual(["all ts", "all src"]);
+  });
+});
+
+describe("W1.3 (RC4) — code-bearing retrieval query + content-keyed embed memo", () => {
+  it("embeds a query carrying PR title + PR description + chunk path + the CHANGED CODE", async () => {
+    const stub = makeStub({ reviewFiles: ["src/a.ts"], chunkCount: 1 });
+    await orchestrate(makeCtx(stub));
+    expect(stub.embedCalls).toHaveLength(1);
+    const query = stub.embedCalls[0]!;
+    // PR_META fixture: title "Add widget", description "A widget."; chunkFor body "// src/a.ts".
+    expect(query).toContain("Add widget");
+    expect(query).toContain("A widget.");
+    expect(query).toContain("src/a.ts");
+    expect(query).toContain("// src/a.ts"); // the diff-chunk BODY — the code drives the search (RC4)
+  });
+
+  it("retrieveKnowledge receives the SAME code-bearing query the embed used", async () => {
+    const stub = makeStub({ reviewFiles: ["src/a.ts"], chunkCount: 1 });
+    await orchestrate(makeCtx(stub));
+    expect(stub.retrieveQueries).toHaveLength(1);
+    expect(stub.retrieveQueries[0]).toBe(stub.embedCalls[0]);
+  });
+
+  it("keys the embed memo on CONTENT, not path: same path + different body → two embeds (RC4)", async () => {
+    // Two chunks of the SAME file with DIFFERENT bodies (two hunks). The legacy path-keyed cache
+    // reused chunk #1's vector for chunk #2 even though the code differs — the RC4 defect. The
+    // content-keyed memo embeds each distinct query exactly once.
+    const sameA = DiffChunkV1.parse({
+      chunk_id: uuidFor(150),
+      path: "src/a.ts",
+      start_line: 1,
+      end_line: 10,
+      body: "const a = 1;",
+      chunk_kind: "hunk",
+      token_estimate: 5,
+    });
+    const sameB = DiffChunkV1.parse({
+      chunk_id: uuidFor(151),
+      path: "src/a.ts",
+      start_line: 20,
+      end_line: 30,
+      body: "const b = 2;",
+      chunk_kind: "hunk",
+      token_estimate: 5,
+    });
+    const stub = makeStub({ reviewFiles: ["src/a.ts"], chunksOverride: [sameA, sameB] });
+    const ctx = makeCtx(stub);
+    const seqCtx: ReviewPipelineContext = { ...ctx, limits: { chunkConcurrency: 1 } };
+    await orchestrate(seqCtx);
+    expect(stub.embedCalls).toHaveLength(2);
+    expect(new Set(stub.embedCalls).size).toBe(2);
+  });
+});
+
+describe("W2.4 (XH13) — retrieval short-circuit", () => {
+  const countOf = (stub: RecordingStub, name: string): number =>
+    stub.calls.filter((c) => c === name).length;
+
+  it("skips embedQuery + retrieveKnowledge for the whole PR when BOTH corpora are provably empty", async () => {
+    const stub = makeStub({
+      chunkCount: 2,
+      withProbeKnowledgeCorpus: true,
+      probeHasRepoKnowledge: false,
+      probeHasConfluenceKnowledge: false,
+    });
+    const result = await orchestrate(makeCtx(stub));
+    expect(result.status).toBe("accepted");
+    expect(countOf(stub, "probeKnowledgeCorpus")).toBe(1); // ONE probe per review, not per chunk
+    expect(countOf(stub, "embedQuery")).toBe(0);
+    expect(countOf(stub, "retrieveKnowledge")).toBe(0);
+    // The skip is NOT a degradation: retrieval would provably have returned [] anyway.
+    expect(stub.reviewChunkInputs[0]!.retrieved_knowledge).toEqual([]);
+    expect(stub.reviewChunkInputs[0]!.retrieval_degraded).toBe(false);
+    expect(result.degradationNotes).toEqual([]);
+    // The probe got the SAME tenancy identity retrieveKnowledge would have (installation + repo UUIDs).
+    expect(stub.probeInputs[0]!.installation_id).toBe(PR_META.installation_id);
+    expect(stub.probeInputs[0]!.repo_id).toBe(uuidFor(6));
+  });
+
+  it("skips when repo knowledge is DISABLED by config and the confluence corpus is empty (plan: 'knowledge disabled AND no Confluence labels apply')", async () => {
+    const stub = makeStub({
+      chunkCount: 1,
+      knowledgeEnabled: false,
+      withProbeKnowledgeCorpus: true,
+      probeHasRepoKnowledge: true, // indexed chunks EXIST — but the customer disabled knowledge
+      probeHasConfluenceKnowledge: false,
+    });
+    await orchestrate(makeCtx(stub));
+    expect(countOf(stub, "embedQuery")).toBe(0);
+    expect(countOf(stub, "retrieveKnowledge")).toBe(0);
+  });
+
+  it("does NOT skip when the confluence corpus could contribute (fail-open)", async () => {
+    const stub = makeStub({
+      chunkCount: 1,
+      withProbeKnowledgeCorpus: true,
+      probeHasRepoKnowledge: false,
+      probeHasConfluenceKnowledge: true,
+    });
+    await orchestrate(makeCtx(stub));
+    expect(countOf(stub, "embedQuery")).toBe(1);
+    expect(countOf(stub, "retrieveKnowledge")).toBe(1);
+  });
+
+  it("does NOT skip when enabled repo knowledge exists", async () => {
+    const stub = makeStub({
+      chunkCount: 1,
+      withProbeKnowledgeCorpus: true,
+      probeHasRepoKnowledge: true,
+      probeHasConfluenceKnowledge: false,
+    });
+    await orchestrate(makeCtx(stub));
+    expect(countOf(stub, "retrieveKnowledge")).toBe(1);
+  });
+
+  it("fail-OPEN: a probe failure must NEVER suppress retrieval", async () => {
+    const stub = makeStub({ chunkCount: 1, withProbeKnowledgeCorpus: true, probeThrows: true });
+    const result = await orchestrate(makeCtx(stub));
+    expect(result.status).toBe("accepted");
+    expect(countOf(stub, "embedQuery")).toBe(1);
+    expect(countOf(stub, "retrieveKnowledge")).toBe(1);
+  });
+
+  it("skips when the repo side is dead AND no confluence labels apply at the PR level (full-PR effective labels empty)", async () => {
+    // Confluence corpus EXISTS, but the platform ceiling excludes every detectable label for this PR
+    // → effective_labels = ∅ → the confluence adapter provably returns [] (its empty-labels
+    // short-circuit). Repo side: corpus empty. Both sides dead → skip.
+    const enrichment = PrFilesEnrichmentResultV1.parse({
+      files: [
+        {
+          pr_file_id: uuidFor(900),
+          pr_id: uuidFor(1),
+          installation_id: uuidFor(2),
+          repository_id: uuidFor(6),
+          file_path: "src/a.ts",
+          status: "modified",
+          additions: 1,
+          deletions: 0,
+        },
+      ],
+      changed_line_ranges: { "src/a.ts": [[1, 10]] },
+      truncated_at: null,
+    });
+    const stub = makeStub({
+      chunkCount: 1,
+      withProbeKnowledgeCorpus: true,
+      probeHasRepoKnowledge: false,
+      probeHasConfluenceKnowledge: true,
+    });
+    const ctx: ReviewPipelineContext = {
+      ...makeCtx(stub),
+      enrichment,
+      // Non-empty ceiling (the hybrid gate's precondition) that matches NOTHING this PR can detect —
+      // not even "default" — so the full-PR effective set is provably empty.
+      platformExposedLabels: new Set(["org:never-detected"]),
+    };
+    await orchestrate(ctx);
+    expect(countOf(stub, "embedQuery")).toBe(0);
+    expect(countOf(stub, "retrieveKnowledge")).toBe(0);
+  });
+});
+
+describe("W2.4 (XH13) — retrieveKnowledge memoization per unique query", () => {
+  const sameQueryChunks = [
+    DiffChunkV1.parse({
+      chunk_id: uuidFor(160),
+      path: "src/a.ts",
+      start_line: 1,
+      end_line: 10,
+      body: "const a = 1;",
+      chunk_kind: "hunk",
+      token_estimate: 5,
+    }),
+    DiffChunkV1.parse({
+      chunk_id: uuidFor(161),
+      path: "src/a.ts",
+      start_line: 1,
+      end_line: 10,
+      body: "const a = 1;",
+      chunk_kind: "hunk",
+      token_estimate: 5,
+    }),
+  ];
+
+  it("two chunks with the SAME query issue ONE retrieveKnowledge dispatch (sequential fan-out)", async () => {
+    const stub = makeStub({
+      reviewFiles: ["src/a.ts"],
+      chunksOverride: sameQueryChunks,
+      retrievedKnowledgeItems: [
+        {
+          chunk_id: uuidFor(800),
+          installation_id: uuidFor(2),
+          repo_id: uuidFor(3),
+          relative_path: "docs/guide.md",
+          chunk_index: 0,
+          body: "knowledge body",
+          doc_kind: "other",
+        },
+      ],
+    });
+    const ctx = makeCtx(stub);
+    await orchestrate({ ...ctx, limits: { chunkConcurrency: 1 } });
+    expect(stub.calls.filter((c) => c === "retrieveKnowledge")).toHaveLength(1);
+    // BOTH chunks still carry the retrieved knowledge (the memo replays the result).
+    expect(stub.reviewChunkInputs).toHaveLength(2);
+    for (const input of stub.reviewChunkInputs) {
+      expect(input.retrieved_knowledge.map((k) => k.chunk_id)).toEqual([uuidFor(800)]);
+      expect(input.retrieval_degraded).toBe(false);
+    }
+  });
+
+  it("a DEGRADED result is NOT memoized — the next same-query chunk retries (fail-open)", async () => {
+    const stub = makeStub({
+      reviewFiles: ["src/a.ts"],
+      chunksOverride: sameQueryChunks,
+      retrieveDegraded: true,
+    });
+    const ctx = makeCtx(stub);
+    await orchestrate({ ...ctx, limits: { chunkConcurrency: 1 } });
+    expect(stub.calls.filter((c) => c === "retrieveKnowledge")).toHaveLength(2);
   });
 });
 

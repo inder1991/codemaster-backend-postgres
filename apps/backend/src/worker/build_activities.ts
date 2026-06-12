@@ -71,6 +71,7 @@ import {
 import { computePolicyRules } from "#backend/activities/compute_policy_rules.activity.js";
 import { DedupFindingsActivity } from "#backend/activities/dedup_findings.activity.js";
 import { EmbedQueryActivity } from "#backend/activities/embed_query.activity.js";
+import { ProbeKnowledgeCorpusActivity } from "#backend/activities/probe_knowledge_corpus.activity.js";
 import { loadRepoConfigActivity } from "#backend/activities/load_repo_config.activity.js";
 import { persistReviewFindings } from "#backend/activities/persist_review_findings.activity.js";
 import { persistReviewWalkthrough } from "#backend/activities/persist_review_walkthrough.activity.js";
@@ -724,6 +725,10 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
   // CODEMASTER_LLM_RERANK_ENABLED — wired here so an operator can enable it without a code change).
   const llmCache = makeLazyLlmClientCache(dsn);
   const retrieveKnowledgeActivity = buildRetrieveKnowledgeActivity({ embedder, rerankCache: llmCache });
+  // W2.4 (XH13) — the once-per-review retrieval short-circuit probe (cheap EXISTS pair over the shared
+  // ADR-0062 pool). The orchestrator dispatches it BEFORE the chunk fan-out and fail-opens to "no
+  // short-circuit" when it errors; arrow property → stays bound when destructured into the map.
+  const probeKnowledgeCorpusActivity = ProbeKnowledgeCorpusActivity.fromDsn(dsn);
   // dedup_findings — the Temporal-activity port of the frozen Python `dedup_linter_with_llm` (the
   // semantic dedup stage embeds over the network, so it CANNOT run in the workflow sandbox; ADR-0065/0066).
   // Shares the same real embedder as the aggregate stage. FOLLOW-UP-dedup-findings-orchestrator-wiring:
@@ -943,6 +948,8 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     dedupFindings: dedupFindingsActivity.dedupFindings,
     embedQuery: embedQueryActivity.embedQuery.bind(embedQueryActivity),
     retrieveKnowledge: retrieveKnowledgeActivity.retrieveKnowledge.bind(retrieveKnowledgeActivity),
+    // W2.4 (XH13) — the retrieval short-circuit probe (bound arrow property over the shared pool).
+    probeKnowledgeCorpus: probeKnowledgeCorpusActivity.probeKnowledgeCorpus,
     // generate_walkthrough — bound arrow property holding the shared ledger-wired LlmClientCache.
     generateWalkthrough: walkthroughActivities.generateWalkthrough,
     // ── #4 manifest fetch/parse + #6 carry-forward loader (camelCase keys = the workflow-body proxy names) ──

@@ -37,6 +37,10 @@ import type {
   RetrieveKnowledgeInputV1,
   RetrieveKnowledgeResultV1,
 } from "#contracts/retrieve_knowledge.v1.js";
+import type {
+  KnowledgeCorpusProbeInputV1,
+  KnowledgeCorpusProbeResultV1,
+} from "#contracts/knowledge_corpus_probe.v1.js";
 import type { ReviewContextV1 } from "#contracts/review_context.v1.js";
 import type { ReviewChunkResponseV1 } from "#contracts/review_chunk_response.v1.js";
 import type { AggregatedFindingsV1 } from "#contracts/aggregated_findings.v1.js";
@@ -105,6 +109,13 @@ export type ReviewActivityPorts = {
   selectCarryForward(input: SelectCarryForwardInputV1): Promise<CarryForwardSelectionV1>;
   embedQuery(input: EmbedQueryInputV1): Promise<EmbedQueryResultV1>;
   retrieveKnowledge(input: RetrieveKnowledgeInputV1): Promise<RetrieveKnowledgeResultV1>;
+  // ── W2.4 (XH13) retrieval short-circuit probe ──
+  // OPTIONAL: when omitted, the orchestrator never short-circuits (legacy unconditional retrieval).
+  //   * probeKnowledgeCorpus — ONE cheap EXISTS pair per review (active repo knowledge_chunks for the
+  //     (installation, repo); any live platform-shared confluence_chunks). The orchestrator dispatches
+  //     it once BEFORE the chunk fan-out, wrapped in a logger-only stageOutcome: probe failure means
+  //     "no short-circuit" (fail-OPEN — retrieval proceeds), never a degradation note.
+  probeKnowledgeCorpus?(input: KnowledgeCorpusProbeInputV1): Promise<KnowledgeCorpusProbeResultV1>;
   reviewChunk(input: ReviewContextV1): Promise<ReviewChunkResponseV1>;
   dedupFindings(input: DedupFindingsInputV1): Promise<DedupedFindingsV1>;
   aggregate(input: AggregateFindingsInputV1): Promise<AggregatedFindingsV1>;
@@ -237,6 +248,15 @@ export const RETRY_POLICIES = {
       backoffCoefficient: 2.0,
       maximumAttempts: 3,
     },
+  },
+
+  // probe_knowledge_corpus — NEW activity introduced DURING W2.4 (XH13); no Python dispatch-site
+  // policy to transcribe. ONE read-only EXISTS pair per review on the retrieval critical path, and the
+  // orchestrator fail-opens to "no short-circuit" when it errors — so it gets the loadRepoConfig-style
+  // fail-open curve: tight timeout, NO retry (a retry would just delay the fan-out to save pennies).
+  probeKnowledgeCorpus: {
+    startToCloseTimeout: "10s",
+    retry: { initialInterval: "2s", maximumAttempts: 1 },
   },
 
   // retrieve_knowledge_activity (review_pull_request.py:1777-1791): start_to_close 20s,
