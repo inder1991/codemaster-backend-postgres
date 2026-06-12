@@ -133,7 +133,7 @@ export class GitleaksInWorkerRunner implements AnalysisRunner {
       return parseGitleaksOutput(result, scanRoot);
     } finally {
       if (staged) {
-        // eslint-disable-next-line security/detect-non-literal-fs-filename -- stagingRoot is workspace + a const dirname, never user-derived
+         
         await fs.rm(stagingRoot, { recursive: true, force: true }).catch((e: unknown) => {
           console.warn(
             JSON.stringify({
@@ -176,7 +176,7 @@ async function stageChangedFiles(
   stagingRoot: string,
   files: ReadonlyArray<string>,
 ): Promise<void> {
-  // eslint-disable-next-line security/detect-non-literal-fs-filename -- stagingRoot is workspace + a const dirname
+   
   await fs.rm(stagingRoot, { recursive: true, force: true });
   // eslint-disable-next-line security/detect-non-literal-fs-filename -- stagingRoot is workspace + a const dirname
   await fs.mkdir(stagingRoot, { recursive: true });
@@ -198,7 +198,7 @@ async function stageChangedFiles(
         // eslint-disable-next-line security/detect-non-literal-fs-filename -- src/dest verified under workspace/staging roots above
         await fs.link(src, dest);
       } catch {
-        // eslint-disable-next-line security/detect-non-literal-fs-filename -- src/dest verified under workspace/staging roots above
+         
         await fs.copyFile(src, dest);
       }
     } catch (e) {
