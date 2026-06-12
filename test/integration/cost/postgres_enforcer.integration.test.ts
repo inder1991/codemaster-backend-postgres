@@ -142,6 +142,83 @@ describeDb("PostgresCostCapEnforcer (production, Kysely seam, disposable PG)", (
     }
   });
 
+  it("W2.1: a global-cap denial is decided lock-free — no wait behind a held per-org row lock", async () => {
+    const today = uniqueToday();
+    const installationId = randomUUID();
+    const enforcer = new PostgresCostCapEnforcer({
+      db,
+      clock: FIXED_CLOCK,
+      globalCapCents: 100,
+      perOrgCapCents: 1_000_000,
+    });
+    try {
+      // Seed both rows at 60 (caps land at the constructor values, so the cap refresh is a no-op).
+      await enforcer.checkOrRaise({ installationId, estimatedCents: 60, today });
+
+      // A competing transaction holds the PER-ORG row lock. The global-cap refusal below must come
+      // from the atomic conditional-UPDATE gate (0 rows ⇒ over cap) — NOT from a FOR-UPDATE
+      // read-then-decide that would queue behind this held per-org lock and surface as
+      // CostCapLockTimeoutError only after lock_timeout (the XC4 hot-row lock storm).
+      const holder = await pool.connect();
+      try {
+        await holder.query("BEGIN");
+        await holder.query(
+          "SELECT 1 FROM telemetry.cost_daily WHERE today = $1 AND scope = 'per_org' AND scope_id = $2 FOR UPDATE",
+          [today, installationId],
+        );
+
+        // 60 + 50 > 100 → refused on the GLOBAL scope, while the per-org lock is still held.
+        try {
+          await enforcer.checkOrRaise({ installationId, estimatedCents: 50, today });
+          throw new Error("expected BedrockBudgetExceededError");
+        } catch (err) {
+          expect(err).toBeInstanceOf(BedrockBudgetExceededError);
+          expect((err as BedrockBudgetExceededError).scope).toBe("global");
+        }
+
+        await holder.query("ROLLBACK");
+      } finally {
+        holder.release();
+      }
+
+      // The refusal leaked nothing on EITHER row.
+      expect(await dailyTotal(today, "global")).toBe(60);
+      expect(await dailyTotal(today, "per_org")).toBe(60);
+    } finally {
+      await cleanupToday(today);
+    }
+  }, 15_000);
+
+  it("W2.1: a per-org denial leaves NO partial global increment (both gates commit-or-rollback as one)", async () => {
+    const today = uniqueToday();
+    const installationId = randomUUID();
+    const enforcer = new PostgresCostCapEnforcer({
+      db,
+      clock: FIXED_CLOCK,
+      globalCapCents: 1_000_000, // global generous → per_org is the binding cap
+      perOrgCapCents: 100,
+    });
+    try {
+      await enforcer.checkOrRaise({ installationId, estimatedCents: 60, today });
+      // 60 + 50 > 100 on the per-org cap. The global gate passes FIRST (conditional UPDATE applied),
+      // then the per-org gate refuses — the whole transaction must roll back so the global increment
+      // never partially applies.
+      try {
+        await enforcer.checkOrRaise({ installationId, estimatedCents: 50, today });
+        throw new Error("expected BedrockBudgetExceededError");
+      } catch (err) {
+        expect(err).toBeInstanceOf(BedrockBudgetExceededError);
+        const e = err as BedrockBudgetExceededError;
+        expect(e.scope).toBe("per_org");
+        expect(e.scopeId).toBe(installationId);
+      }
+      expect(await dailyTotal(today, "global")).toBe(60);
+      expect(await dailyTotal(today, "per_org")).toBe(60);
+    } finally {
+      await cleanupToday(today);
+    }
+  });
+
   it("recordCallCost applies the (actual - estimated) diff — top-up then refund", async () => {
     const today = uniqueToday();
     const installationId = randomUUID();
@@ -251,6 +328,128 @@ describeDb("PostgresCostCapEnforcer (production, Kysely seam, disposable PG)", (
       await cleanupToday(today);
     }
   });
+
+  it("W2.1 LOAD-BEARING: concurrent reserves against the binding PER-ORG cap never overshoot it, and the global row matches the org row exactly (atomic two-gate)", async () => {
+    const today = uniqueToday();
+    const installationId = randomUUID();
+    const ORG_CAP = 500;
+    const PER_CALL = 100;
+    const CONCURRENCY = 20;
+    const enforcer = new PostgresCostCapEnforcer({
+      db,
+      clock: FIXED_CLOCK,
+      globalCapCents: 1_000_000, // global generous → per_org is the binding cap
+      perOrgCapCents: ORG_CAP,
+    });
+    try {
+      const results = await Promise.allSettled(
+        Array.from({ length: CONCURRENCY }, () =>
+          enforcer.checkOrRaise({ installationId, estimatedCents: PER_CALL, today }),
+        ),
+      );
+      const allowed = results.filter((r) => r.status === "fulfilled").length;
+      const refused = results.filter(
+        (r) => r.status === "rejected" && r.reason instanceof BedrockBudgetExceededError,
+      ).length;
+
+      // (a) NO overshoot: exactly ORG_CAP/PER_CALL accepted; (b) every other call is a clean
+      // budget refusal (never a lock timeout / partial state).
+      expect(allowed).toBe(ORG_CAP / PER_CALL);
+      expect(allowed + refused).toBe(CONCURRENCY);
+
+      // (c) ATOMICITY UNDER CONTENTION: a refused per-org gate must roll back the already-applied
+      // global gate, so the two rows agree EXACTLY. A partial leak shows up as global > per_org.
+      const orgTotal = await dailyTotal(today, "per_org");
+      const globalTotal = await dailyTotal(today, "global");
+      expect(orgTotal).toBe(ORG_CAP);
+      expect(globalTotal).toBe(orgTotal);
+    } finally {
+      await cleanupToday(today);
+    }
+  }, 20_000);
+
+  it("W2.1 LOAD-BEARING: two orgs racing the binding GLOBAL cap — accepted sum == global row == sum of org rows; refusals are budget errors", async () => {
+    const today = uniqueToday();
+    const orgA = randomUUID();
+    const orgB = randomUUID();
+    const GLOBAL_CAP = 1000;
+    const PER_CALL = 100;
+    const PER_ORG_CONCURRENCY = 15; // 30 calls total race a cap that admits 10
+    const enforcer = new PostgresCostCapEnforcer({
+      db,
+      clock: FIXED_CLOCK,
+      globalCapCents: GLOBAL_CAP,
+      perOrgCapCents: 10_000, // per-org generous → global is the binding cap
+    });
+    try {
+      const calls = [
+        ...Array.from({ length: PER_ORG_CONCURRENCY }, () => orgA),
+        ...Array.from({ length: PER_ORG_CONCURRENCY }, () => orgB),
+      ];
+      const results = await Promise.allSettled(
+        calls.map((installationId) =>
+          enforcer.checkOrRaise({ installationId, estimatedCents: PER_CALL, today }),
+        ),
+      );
+      const allowed = results.filter((r) => r.status === "fulfilled").length;
+      const refused = results.filter(
+        (r) => r.status === "rejected" && r.reason instanceof BedrockBudgetExceededError,
+      ).length;
+
+      expect(allowed).toBe(GLOBAL_CAP / PER_CALL);
+      expect(allowed + refused).toBe(2 * PER_ORG_CONCURRENCY);
+
+      // The global row carries EXACTLY the accepted sum, and the per-org rows partition it — a
+      // global-gate pass whose per-org gate refused (or vice versa) would break this equality.
+      const globalTotal = await dailyTotal(today, "global");
+      expect(globalTotal).toBe(GLOBAL_CAP);
+      const orgRows = await sql<{ scope_id: string; daily_total_cents: string }>`
+        SELECT scope_id, daily_total_cents FROM telemetry.cost_daily
+         WHERE today = ${today} AND scope = 'per_org'
+      `.execute(db);
+      const orgSum = orgRows.rows.reduce((acc, r) => acc + Number(r.daily_total_cents), 0);
+      expect(orgSum).toBe(globalTotal);
+      for (const r of orgRows.rows) {
+        expect(Number(r.daily_total_cents) % PER_CALL).toBe(0);
+      }
+    } finally {
+      await cleanupToday(today);
+    }
+  }, 20_000);
+
+  it("W2.1 LOAD-BEARING: a near-full cap admits at most the remaining headroom under a concurrent burst (no overshoot, headroom < 2×estimate)", async () => {
+    const today = uniqueToday();
+    const installationId = randomUUID();
+    const GLOBAL_CAP = 1000;
+    const enforcer = new PostgresCostCapEnforcer({
+      db,
+      clock: FIXED_CLOCK,
+      globalCapCents: GLOBAL_CAP,
+      perOrgCapCents: 10_000,
+    });
+    try {
+      // Pre-spend to 850: headroom 150 fits exactly ONE more 100-cent reservation.
+      await enforcer.checkOrRaise({ installationId, estimatedCents: 850, today });
+
+      const results = await Promise.allSettled(
+        Array.from({ length: 10 }, () =>
+          enforcer.checkOrRaise({ installationId, estimatedCents: 100, today }),
+        ),
+      );
+      const allowed = results.filter((r) => r.status === "fulfilled").length;
+      const refused = results.filter(
+        (r) => r.status === "rejected" && r.reason instanceof BedrockBudgetExceededError,
+      ).length;
+      expect(allowed).toBe(1);
+      expect(refused).toBe(9);
+
+      const total = await dailyTotal(today, "global");
+      expect(total).toBe(950);
+      expect(total).toBeLessThanOrEqual(GLOBAL_CAP);
+    } finally {
+      await cleanupToday(today);
+    }
+  }, 20_000);
 
   it("maps a contended FOR UPDATE row lock to CostCapLockTimeoutError (SQLSTATE 55P03)", async () => {
     const today = uniqueToday();

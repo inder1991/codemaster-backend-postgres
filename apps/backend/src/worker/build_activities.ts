@@ -496,7 +496,8 @@ function buildLlmClientCache(dsn: string): LlmClientCache {
   // is the same process-wide memo the default factory uses (cost-cap, blob, telemetry, Langfuse, clock),
   // so every role's client shares the spine singletons — exactly the Python `_client_factory` closure.
   const ledgerClientFactory: ClientFactory = ({ sdk }) => {
-    const { costCap, blobStore, telemetry, langfuse, clock } = sharedClientCollaborators(dsn);
+    const { costCap, blobStore, telemetry, langfuse, clock, costJournal } =
+      sharedClientCollaborators(dsn);
     return new LlmClient({
       sdk,
       costCap,
@@ -505,6 +506,9 @@ function buildLlmClientCache(dsn: string): LlmClientCache {
       langfuse,
       clock,
       ledger: LlmInvocationLedger.fromDsn(dsn),
+      // de-Temporal Phase 0 — shadow cost journal, env-gated DEFAULT OFF in the collaborators memo
+      // (spread-when-present: exactOptionalPropertyTypes forbids an explicit `undefined`).
+      ...(costJournal !== undefined ? { costJournal } : {}),
     });
   };
 

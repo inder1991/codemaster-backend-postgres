@@ -9,19 +9,31 @@
  * `LlmClient` is the cassette-test default that the production `LlmClientCache` REPLACES with an
  * instance of THIS class.)
  *
- * ## What it does
+ * ## What it does (W2.1 — lock-free conditional-UPDATE gate; closes XC4)
  *
  * `checkOrRaise` opens a transaction, sets `lock_timeout`, ensures the global + per-org rows exist
- * (idempotent `INSERT ... ON CONFLICT DO NOTHING`), takes a row lock via `SELECT ... FOR UPDATE` on
- * both, validates that `daily_total + estimatedCents` fits inside each cap, and then atomically
- * reserves the spend with an `UPDATE` that adds `estimatedCents` to both rows. Commit (the
- * transaction-callback returning) releases the row lock; a throw rolls back, releasing it without
- * leaking the reservation.
+ * (idempotent `INSERT ... ON CONFLICT DO NOTHING`), then reserves via ONE atomic conditional
+ * `UPDATE ... SET daily_total_cents = daily_total_cents + :est WHERE ... AND daily_total_cents +
+ * :est <= cap_cents RETURNING daily_total_cents` per cap (global first, then per-org). A returned
+ * row ⇒ reserved under that cap; 0 rows ⇒ over cap ⇒ `BedrockBudgetExceededError`. The row lock is
+ * statement-internal — Postgres' READ COMMITTED predicate re-check after a lock wait re-sees a
+ * competitor's committed increment before applying, so the cap can never be overshot — and is NOT
+ * held across the read→app-decide→write round-trips the pre-W2.1 `SELECT ... FOR UPDATE` enforcer
+ * serialized every paid call on (the XC4 hot-row lock storm). Both gates run in ONE transaction; a
+ * refusal at either throws and rolls back BOTH, so a partial increment never leaks.
  *
- * `recordCallCost` applies the `actual - estimated` diff to both rows under the same row lock so the
- * daily total tracks reality. Refunds (actual < estimated) are negative diffs that correctly walk the
- * total down; the DB `daily_total_cents >= 0` CHECK faults loudly if a coding bug ever drives it
- * negative. ALL arithmetic is INTEGER cents — no float, no division.
+ * `recordCallCost` applies the `actual - estimated` diff to both rows as single unconditional
+ * UPDATEs (no pre-locking read) so the daily total tracks reality. Refunds (actual < estimated) are
+ * negative diffs that correctly walk the total down; the DB `daily_total_cents >= 0` CHECK faults
+ * loudly if a coding bug ever drives it negative. ALL arithmetic is INTEGER cents — no float, no
+ * division.
+ *
+ * Residual hot spot + documented FOLLOW-UP (master-hardening-plan W2.1 fallback): every reservation
+ * still touches the single global row, now only for the microseconds the statement holds it. If that
+ * residual contention ever shows (watch `codemaster_cost_cap_lock_timeout_total`), the plan's
+ * fallback is to shard the global counter K-ways (gate on a random shard; cap/K per shard) or a
+ * per-pod token bucket with DB reconciliation. NOT implemented — the conditional UPDATE alone
+ * removes the held-lock serialization, and sharding would trade exactness at the cap boundary.
  *
  * Caps are stored on the daily row (not just on the instance) so an admin override is visible to all
  * worker pods immediately, without a redeploy. When `readCapsFromDb` is true (the production path
@@ -33,9 +45,9 @@
  *
  * Each call runs inside `db.transaction().execute(trx => …)` over the SHARED single-pool Kysely seam
  * ({@link tenantKysely} / {@link getPool}). Kysely pins ONE checked-out connection for the whole
- * transaction callback, so `SET LOCAL lock_timeout`, the idempotent INSERTs, the `FOR UPDATE`
- * SELECTs, and the reserve `UPDATE` all run on the same connection — exactly the single-connection
- * contract the Python `async with session.begin()` provides. The `pg.Pool` is NEVER created per call.
+ * transaction callback, so `SET LOCAL lock_timeout`, the idempotent INSERTs, and the conditional
+ * reserve-gate `UPDATE`s all run on the same connection — exactly the single-connection contract
+ * the Python `async with session.begin()` provides. The `pg.Pool` is NEVER created per call.
  *
  * ## Tenancy (telemetry.cost_daily is scope-discriminated, NOT per-installation)
  *
@@ -63,6 +75,7 @@ import { type Kysely, sql } from "kysely";
 
 import { type Clock, WallClock } from "#platform/clock.js";
 import { tenantKysely } from "#platform/db/database.js";
+import { type Counter, getMeter } from "#platform/observability/metrics.js";
 
 import {
   BedrockBudgetExceededError,
@@ -97,6 +110,29 @@ const LOCK_TIMEOUT = "2s";
 /** A Kysely/pg transaction connection — what `db.transaction().execute((trx) => …)` hands the callback. */
 type Trx = Kysely<unknown>;
 
+// ─── W2.1 lock_timeout alert metric — one bounded-cardinality counter, label `op` only ──────────────
+//
+// The conditional-UPDATE gate removed the held-across-round-trips row lock, but every reservation
+// still touches the single hot global row for the statement's duration — so the plan mandates the
+// 55P03 rate be observable ("Alert on cost-cap lock_timeout rate"). Module-scoped meter + instrument
+// cached once at import (the metrics.ts convention); every emit is fail-safe. Cardinality
+// discipline: the ONLY label is `op` (bounded to {reserve, settle}) — NEVER per-tenant / per-call.
+
+/** Grafana-query-stable counter name (renaming requires ADR). */
+export const COST_CAP_LOCK_TIMEOUT_TOTAL_NAME = "codemaster_cost_cap_lock_timeout_total";
+
+const COST_CAP_METER = getMeter("codemaster.cost.postgres_enforcer");
+
+const LOCK_TIMEOUT_COUNTER: Counter = COST_CAP_METER.createCounter(
+  COST_CAP_LOCK_TIMEOUT_TOTAL_NAME,
+  {
+    description:
+      "Count of cost-cap cost_daily statements that hit SET LOCAL lock_timeout (SQLSTATE 55P03) — " +
+      "the residual-contention signal on the hot global row after the W2.1 lock-free gate. " +
+      "Bounded label `op` (reserve|settle).",
+  },
+);
+
 /** Narrow the unknown thrown value to a node-postgres error carrying a SQLSTATE `.code`. */
 function pgSqlstate(err: unknown): string | undefined {
   if (typeof err === "object" && err !== null && "code" in err) {
@@ -110,10 +146,16 @@ function pgSqlstate(err: unknown): string | undefined {
  * Map a thrown error to {@link CostCapLockTimeoutError} when it is the Postgres lock-timeout (55P03),
  * else re-throw it unchanged. `BedrockBudgetExceededError` (a refusal, not a DB error) carries no
  * `.code`, so it falls through to the re-throw and surfaces to the caller verbatim — exactly the
- * Python `except DBAPIError` branch, which only intercepts driver errors.
+ * Python `except DBAPIError` branch, which only intercepts driver errors. Every mapped timeout
+ * increments {@link LOCK_TIMEOUT_COUNTER} (op-labelled, fail-safe) — the W2.1 alert seam.
  */
-function mapLockTimeout(err: unknown, context: string): never {
+function mapLockTimeout(err: unknown, op: "reserve" | "settle", context: string): never {
   if (pgSqlstate(err) === PG_LOCK_TIMEOUT_SQLSTATE) {
+    try {
+      LOCK_TIMEOUT_COUNTER.add(1, { op });
+    } catch {
+      // telemetry never perturbs the paid path
+    }
     throw new CostCapLockTimeoutError(context);
   }
   throw err;
@@ -121,10 +163,15 @@ function mapLockTimeout(err: unknown, context: string): never {
 
 // ─── Row shapes the raw `sql<T>` reads materialize ──────────────────────────────────────────────────
 
-/** `daily_total_cents` + `cap_cents` from a `cost_daily` `FOR UPDATE` SELECT (pg returns bigint as string). */
+/** `daily_total_cents` + `cap_cents` from a lock-free `cost_daily` SELECT (pg returns bigint as string). */
 type DailyRow = {
   readonly daily_total_cents: string;
   readonly cap_cents: string;
+};
+
+/** The `RETURNING daily_total_cents` row of a conditional reserve-gate UPDATE (the POST-update total). */
+type GateRow = {
+  readonly daily_total_cents: string;
 };
 
 /** `cap_cents` from a `cost_cap_overrides` / `cost_cap_settings` cap-resolution read. */
@@ -252,75 +299,72 @@ export class PostgresCostCapEnforcer implements CostCapEnforcer {
           configuredCap: effectiveOrgCap,
         });
 
-        // SELECT FOR UPDATE on the global row. The lock blocks any concurrent reservation against the
-        // same (today, 'global') until commit.
+        // ── The lock-free reserve gate (W2.1, closes XC4) ─────────────────────────────────────────
+        // ONE atomic conditional UPDATE per cap: Postgres locks the row only INSIDE the statement
+        // (lock → re-evaluate the predicate against the latest committed version → apply or skip),
+        // never across a read→app-decide→write round-trip. Row returned ⇒ reserved under the cap;
+        // 0 rows ⇒ over cap ⇒ refused. Under READ COMMITTED the predicate re-check after a lock wait
+        // is exactly what makes concurrent gates correct: a competitor's committed increment is
+        // re-seen before this UPDATE applies, so the cap can NEVER be overshot.
+        //
+        // Gate order is global→per_org, matching the cap-refresh write order above and the settle
+        // order in recordCallCost — every cost_daily writer acquires row locks in the same order, so
+        // writers cannot deadlock. A refusal at EITHER gate throws, rolling back the WHOLE
+        // transaction: a passed global gate never leaks a partial increment when the per-org gate
+        // refuses.
         // tenant:exempt reason=scope-discriminated-cost-daily follow_up=PERMANENT-EXEMPTION-cost-daily-scope
-        const grow = await sql<DailyRow>`
-          SELECT daily_total_cents, cap_cents
-            FROM telemetry.cost_daily
+        const gGate = await sql<GateRow>`
+          UPDATE telemetry.cost_daily
+             SET daily_total_cents = daily_total_cents + ${estimatedCents},
+                 updated_at = ${this.clock.now()}
            WHERE today = ${today} AND scope = 'global'
-           FOR UPDATE
+             AND daily_total_cents + ${estimatedCents} <= cap_cents
+           RETURNING daily_total_cents
         `.execute(trx);
-        const gRow = grow.rows[0];
+        const gRow = gGate.rows[0];
         if (gRow === undefined) {
-          throw new Error("global cost_daily row missing after idempotent insert");
-        }
-        const globalTotal = Number(gRow.daily_total_cents);
-        const globalCap = Number(gRow.cap_cents);
-
-        // per_org SELECT FOR UPDATE skipped for platform-scope calls (symmetric with the INSERT gate).
-        let orgTotal = 0;
-        let orgCap = 0;
-        if (!isPlatformScope) {
-          // tenant:exempt reason=scope-discriminated-cost-daily follow_up=PERMANENT-EXEMPTION-cost-daily-scope
-          const orow = await sql<DailyRow>`
-            SELECT daily_total_cents, cap_cents
-              FROM telemetry.cost_daily
-             WHERE today = ${today} AND scope = 'per_org' AND scope_id = ${installationId}::uuid
-             FOR UPDATE
-          `.execute(trx);
-          const oRow = orow.rows[0];
-          if (oRow === undefined) {
-            throw new Error("per_org cost_daily row missing after idempotent insert");
-          }
-          orgTotal = Number(oRow.daily_total_cents);
-          orgCap = Number(oRow.cap_cents);
-        }
-
-        // Budget checks. Throwing here rolls back the tx, which releases the row lock — no reservation
-        // leaks for refused calls.
-        if (globalTotal + estimatedCents > globalCap) {
+          // Over cap (the row EXISTS — the idempotent INSERT above ran in THIS transaction; a
+          // missing row is a programmer error readDailyRow faults on). Lock-free message read; the
+          // throw rolls back, so a refused call reserves nothing.
+          const g = await this.readDailyRow(trx, { today, scope: "global", scopeId: null });
           throw new BedrockBudgetExceededError({
             reason:
-              `global spend ${globalTotal} + estimated ${estimatedCents} ` +
-              `would exceed cap ${globalCap} cents/day`,
+              `global spend ${g.total} + estimated ${estimatedCents} ` +
+              `would exceed cap ${g.cap} cents/day`,
             scope: "global",
           });
         }
-        if (!isPlatformScope && orgTotal + estimatedCents > orgCap) {
-          throw new BedrockBudgetExceededError({
-            reason:
-              `org ${installationId} spend ${orgTotal} + estimated ` +
-              `${estimatedCents} would exceed per-org cap ${orgCap} cents/day`,
-            scope: "per_org",
-            scopeId: installationId,
-          });
-        }
+        // RETURNING carries the POST-update total; the decision contract reports the PRIOR spend.
+        const globalTotal = Number(gRow.daily_total_cents) - estimatedCents;
 
-        // Reserve under the same row lock.
-        // tenant:exempt reason=scope-discriminated-cost-daily follow_up=PERMANENT-EXEMPTION-cost-daily-scope
-        await sql`
-          UPDATE telemetry.cost_daily
-             SET daily_total_cents = daily_total_cents + ${estimatedCents}, updated_at = ${this.clock.now()}
-           WHERE today = ${today} AND scope = 'global'
-        `.execute(trx);
+        // per_org gate skipped for platform-scope calls (symmetric with the INSERT gate).
+        let orgTotal = 0;
         if (!isPlatformScope) {
           // tenant:exempt reason=scope-discriminated-cost-daily follow_up=PERMANENT-EXEMPTION-cost-daily-scope
-          await sql`
+          const oGate = await sql<GateRow>`
             UPDATE telemetry.cost_daily
-               SET daily_total_cents = daily_total_cents + ${estimatedCents}, updated_at = ${this.clock.now()}
+               SET daily_total_cents = daily_total_cents + ${estimatedCents},
+                   updated_at = ${this.clock.now()}
              WHERE today = ${today} AND scope = 'per_org' AND scope_id = ${installationId}::uuid
+               AND daily_total_cents + ${estimatedCents} <= cap_cents
+             RETURNING daily_total_cents
           `.execute(trx);
+          const oRow = oGate.rows[0];
+          if (oRow === undefined) {
+            const o = await this.readDailyRow(trx, {
+              today,
+              scope: "per_org",
+              scopeId: installationId,
+            });
+            throw new BedrockBudgetExceededError({
+              reason:
+                `org ${installationId} spend ${o.total} + estimated ` +
+                `${estimatedCents} would exceed per-org cap ${o.cap} cents/day`,
+              scope: "per_org",
+              scopeId: installationId,
+            });
+          }
+          orgTotal = Number(oRow.daily_total_cents) - estimatedCents;
         }
 
         return CostCapDecisionV1.parse({
@@ -333,6 +377,7 @@ export class PostgresCostCapEnforcer implements CostCapEnforcer {
     } catch (err) {
       mapLockTimeout(
         err,
+        "reserve",
         `cost_daily row lock timed out after ${LOCK_TIMEOUT} ` +
           `(SQLSTATE ${PG_LOCK_TIMEOUT_SQLSTATE}); BedrockClient will retry once`,
       );
@@ -384,20 +429,10 @@ export class PostgresCostCapEnforcer implements CostCapEnforcer {
           configuredCap: effectiveOrgCap,
         });
 
-        // SELECT FOR UPDATE on both rows so the diff is applied under the same lock as the original
-        // reservation — no torn read between this UPDATE and a concurrent checkOrRaise.
-        // tenant:exempt reason=scope-discriminated-cost-daily follow_up=PERMANENT-EXEMPTION-cost-daily-scope
-        await sql`
-          SELECT daily_total_cents FROM telemetry.cost_daily
-           WHERE today = ${today} AND scope = 'global' FOR UPDATE
-        `.execute(trx);
-        if (!isPlatformScope) {
-          // tenant:exempt reason=scope-discriminated-cost-daily follow_up=PERMANENT-EXEMPTION-cost-daily-scope
-          await sql`
-            SELECT daily_total_cents FROM telemetry.cost_daily
-             WHERE today = ${today} AND scope = 'per_org' AND scope_id = ${installationId}::uuid FOR UPDATE
-          `.execute(trx);
-        }
+        // Settle = unconditional single-statement adjust per row (W2.1): `daily_total_cents + diff`
+        // is computed row-locally INSIDE each UPDATE, so no pre-locking FOR-UPDATE read is needed —
+        // the statement's own row lock makes the read-modify-write atomic, and nothing is held
+        // across round-trips. Write order global→per_org matches the reserve gates (deadlock-free).
         // tenant:exempt reason=scope-discriminated-cost-daily follow_up=PERMANENT-EXEMPTION-cost-daily-scope
         await sql`
           UPDATE telemetry.cost_daily
@@ -416,10 +451,43 @@ export class PostgresCostCapEnforcer implements CostCapEnforcer {
     } catch (err) {
       mapLockTimeout(
         err,
+        "settle",
         `cost_daily row lock timed out during recordCallCost ` +
           `(SQLSTATE ${PG_LOCK_TIMEOUT_SQLSTATE})`,
       );
     }
+  }
+
+  /**
+   * Lock-free read of one `(today, scope[, scope_id])` daily row — the refusal-message values for a
+   * denied gate, plus the row-missing guard (the idempotent INSERT ran in the same transaction, so
+   * a missing row is a programmer error, faulted loudly like the pre-W2.1 FOR-UPDATE read did).
+   */
+  private async readDailyRow(
+    trx: Trx,
+    args: { today: string; scope: "global" | "per_org"; scopeId: string | null },
+  ): Promise<{ total: number; cap: number }> {
+    const { today, scope, scopeId } = args;
+    let row: DailyRow | undefined;
+    if (scope === "global") {
+      // tenant:exempt reason=scope-discriminated-cost-daily follow_up=PERMANENT-EXEMPTION-cost-daily-scope
+      const r = await sql<DailyRow>`
+        SELECT daily_total_cents, cap_cents FROM telemetry.cost_daily
+         WHERE today = ${today} AND scope = 'global'
+      `.execute(trx);
+      row = r.rows[0];
+    } else {
+      // tenant:exempt reason=scope-discriminated-cost-daily follow_up=PERMANENT-EXEMPTION-cost-daily-scope
+      const r = await sql<DailyRow>`
+        SELECT daily_total_cents, cap_cents FROM telemetry.cost_daily
+         WHERE today = ${today} AND scope = 'per_org' AND scope_id = ${scopeId}::uuid
+      `.execute(trx);
+      row = r.rows[0];
+    }
+    if (row === undefined) {
+      throw new Error(`${scope} cost_daily row missing after idempotent insert`);
+    }
+    return { total: Number(row.daily_total_cents), cap: Number(row.cap_cents) };
   }
 
   /**

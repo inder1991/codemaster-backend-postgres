@@ -1,7 +1,7 @@
 -- 0044_review_jobs_claim_indexes.sql — W4.6 (master-hardening-plan, audit L3): backport the 0042
 -- split-partial-claim-index treatment from core.background_jobs to core.review_jobs.
 --
--- NUMBERING NOTE: 0043 is taken by telemetry.cost_journal on the parallel feat/phase0-cost-journal
+-- NUMBERING NOTE: cost_journal merged post-wave-2 as 0047 (was 0043 on the parallel feat/phase0-cost-journal
 -- branch; this migration deliberately starts at 0044 to avoid a collision at merge time.
 --
 -- COLD-ONLY GUARD (the 0042 pattern — CS5/XH7/L16/RT6): the index swap below builds

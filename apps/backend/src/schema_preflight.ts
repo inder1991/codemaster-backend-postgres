@@ -29,14 +29,14 @@ export const EXPECTED_MIGRATIONS = [
   "0040_scheduled_jobs",
   "0041_background_jobs_deadletter_cols",
   "0042_background_jobs_state_and_indexes",
-  // 0043 is reserved by telemetry.cost_journal (parallel feat/phase0-cost-journal branch) — at merge
-  // time it slots in here; this branch deliberately numbered its migration 0044 to avoid collision.
   "0044_review_jobs_claim_indexes",
-  // Wave-2 merge: w2-admin's login-rate-limit migration and w2-scale's payload-version migration both
-  // landed as 0045 on their branches; reconciled here — login keeps 0045 (lexically first), payload
-  // renumbered to 0046 (the migrations/ files were renamed to match; this list IS the dir-pin).
+  // Wave-2: w2-admin's login-rate-limit + w2-scale's payload-version both landed as 0045 on their
+  // branches; reconciled — login keeps 0045 (lexically first), payload renumbered to 0046.
   "0045_login_rate_limit",
   "0046_payload_schema_version",
+  // Phase 0 cost-journal merged AFTER wave-2: its migration was 0043 on its branch, but 0044–0046
+  // already landed, so it renumbers to 0047 — purely additive on top (the file was renamed to match).
+  "0047_cost_journal",
 ] as const satisfies ReadonlyArray<string>;
 
 /** The DB's applied migration sequence diverges from the image's compiled-in expectation — the pod
