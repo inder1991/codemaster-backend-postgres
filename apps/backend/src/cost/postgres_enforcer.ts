@@ -75,6 +75,7 @@ import { type Kysely, sql } from "kysely";
 
 import { type Clock, WallClock } from "#platform/clock.js";
 import { tenantKysely } from "#platform/db/database.js";
+import { type Counter, getMeter } from "#platform/observability/metrics.js";
 
 import {
   BedrockBudgetExceededError,
@@ -109,6 +110,29 @@ const LOCK_TIMEOUT = "2s";
 /** A Kysely/pg transaction connection — what `db.transaction().execute((trx) => …)` hands the callback. */
 type Trx = Kysely<unknown>;
 
+// ─── W2.1 lock_timeout alert metric — one bounded-cardinality counter, label `op` only ──────────────
+//
+// The conditional-UPDATE gate removed the held-across-round-trips row lock, but every reservation
+// still touches the single hot global row for the statement's duration — so the plan mandates the
+// 55P03 rate be observable ("Alert on cost-cap lock_timeout rate"). Module-scoped meter + instrument
+// cached once at import (the metrics.ts convention); every emit is fail-safe. Cardinality
+// discipline: the ONLY label is `op` (bounded to {reserve, settle}) — NEVER per-tenant / per-call.
+
+/** Grafana-query-stable counter name (renaming requires ADR). */
+export const COST_CAP_LOCK_TIMEOUT_TOTAL_NAME = "codemaster_cost_cap_lock_timeout_total";
+
+const COST_CAP_METER = getMeter("codemaster.cost.postgres_enforcer");
+
+const LOCK_TIMEOUT_COUNTER: Counter = COST_CAP_METER.createCounter(
+  COST_CAP_LOCK_TIMEOUT_TOTAL_NAME,
+  {
+    description:
+      "Count of cost-cap cost_daily statements that hit SET LOCAL lock_timeout (SQLSTATE 55P03) — " +
+      "the residual-contention signal on the hot global row after the W2.1 lock-free gate. " +
+      "Bounded label `op` (reserve|settle).",
+  },
+);
+
 /** Narrow the unknown thrown value to a node-postgres error carrying a SQLSTATE `.code`. */
 function pgSqlstate(err: unknown): string | undefined {
   if (typeof err === "object" && err !== null && "code" in err) {
@@ -122,10 +146,16 @@ function pgSqlstate(err: unknown): string | undefined {
  * Map a thrown error to {@link CostCapLockTimeoutError} when it is the Postgres lock-timeout (55P03),
  * else re-throw it unchanged. `BedrockBudgetExceededError` (a refusal, not a DB error) carries no
  * `.code`, so it falls through to the re-throw and surfaces to the caller verbatim — exactly the
- * Python `except DBAPIError` branch, which only intercepts driver errors.
+ * Python `except DBAPIError` branch, which only intercepts driver errors. Every mapped timeout
+ * increments {@link LOCK_TIMEOUT_COUNTER} (op-labelled, fail-safe) — the W2.1 alert seam.
  */
-function mapLockTimeout(err: unknown, context: string): never {
+function mapLockTimeout(err: unknown, op: "reserve" | "settle", context: string): never {
   if (pgSqlstate(err) === PG_LOCK_TIMEOUT_SQLSTATE) {
+    try {
+      LOCK_TIMEOUT_COUNTER.add(1, { op });
+    } catch {
+      // telemetry never perturbs the paid path
+    }
     throw new CostCapLockTimeoutError(context);
   }
   throw err;
@@ -347,6 +377,7 @@ export class PostgresCostCapEnforcer implements CostCapEnforcer {
     } catch (err) {
       mapLockTimeout(
         err,
+        "reserve",
         `cost_daily row lock timed out after ${LOCK_TIMEOUT} ` +
           `(SQLSTATE ${PG_LOCK_TIMEOUT_SQLSTATE}); BedrockClient will retry once`,
       );
@@ -420,6 +451,7 @@ export class PostgresCostCapEnforcer implements CostCapEnforcer {
     } catch (err) {
       mapLockTimeout(
         err,
+        "settle",
         `cost_daily row lock timed out during recordCallCost ` +
           `(SQLSTATE ${PG_LOCK_TIMEOUT_SQLSTATE})`,
       );
