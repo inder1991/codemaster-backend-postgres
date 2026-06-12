@@ -264,7 +264,13 @@ temporal_not_registered_scan() {
 }
 pg_not_registered_scan() {
   local ANR
-  ANR="$(kubectl -n "$NS" logs "$BACKEND_POD" --since=10m 2>/dev/null | grep -ciE "no handler for|outbox.dispatch_failed|dead_letter")"
+  # Match REAL handler-miss / dispatch-failure / dead-letter EVENTS. The W3.5 workspace-retention sweep
+  # legitimately logs dead-letter VISIBILITY counters (dead_letter_failed_cleanup=N
+  # dead_letter_orphaned_aged=M); the all-zero healthy case is NOT a failure, so exclude it (a
+  # non-zero counter still trips the scan — that IS a real stuck-dead-letter signal worth flagging).
+  ANR="$(kubectl -n "$NS" logs "$BACKEND_POD" --since=10m 2>/dev/null \
+    | grep -iE "no handler for|outbox.dispatch_failed|dead_letter" \
+    | grep -vcE "dead_letter_failed_cleanup=0 dead_letter_orphaned_aged=0")"
   [[ "${ANR:-0}" -eq 0 ]] && ok "no handler-miss/dispatch-failure/dead-letter lines in the last 10m of runner logs" || bad "$ANR dispatch-failure line(s) in runner logs — handler/registry drift LIVE"
 }
 
