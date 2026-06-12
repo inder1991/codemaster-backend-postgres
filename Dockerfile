@@ -1,7 +1,7 @@
 # Multi-stage build for the codemaster TypeScript backend. ONE image, ONE process: the combined entrypoint
-# (apps/backend/src/main.ts) runs the HTTP API + review worker + outbox-dispatcher worker in a single
-# fail-loud process (the production single-pod architecture). The migrate Job overrides `command`.
-# Debian base (NOT alpine) — @node-rs/argon2 + @temporalio/* gRPC core are native (glibc) addons.
+# (apps/backend/src/main.ts) runs the HTTP API + the Postgres background runtime (review-job runner +
+# scheduler + outbox-drain loops) in a single fail-loud process. The migrate Job overrides `command`.
+# Debian base (NOT alpine) — @node-rs/argon2 is a native (glibc) addon.
 # syntax=docker/dockerfile:1
 
 FROM node:22-bookworm-slim AS build
@@ -21,6 +21,11 @@ COPY apps ./apps
 COPY scripts ./scripts
 # tsc -> dist/, then copy the vendored tree-sitter .wasm grammars into dist (tsc emits only .js).
 RUN npm run build
+# Prune devDependencies HERE (after the build that needs them) so the runtime stage COPYs an
+# already-slim node_modules — one layer, not the old COPY-full-then-prune which left BOTH the full
+# tree AND the prune-rewrite layer in the image (~800MB of duplicated node_modules). prune is offline
+# (no registry round-trip), deterministic against the same lockfile.
+RUN npm prune --omit=dev
 
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
@@ -67,35 +72,35 @@ RUN set -eux; \
 # review repo's own eslint is a devDependency that `npm ci --omit=dev` strips.
 RUN npm install -g "eslint@${ESLINT_VERSION}" \
   && eslint --version
-COPY package.json package-lock.json ./
-# Reuse the BUILD stage's already-installed node_modules and prune devDependencies in place instead
-# of a second full `npm ci` registry download: BuildKit runs the two stages CONCURRENTLY, and the
-# doubled traffic through Docker Desktop's NAT reliably ECONNRESETs one of them ~10 min in (observed
-# twice, 2026-06-11). prune is offline (no registry), deterministic against the same lockfile, and
-# also serializes this stage behind the builder's single download. Native addons (@node-rs/argon2,
-# @temporalio gRPC core) were compiled in the SAME base image, so the copied tree is ABI-identical.
-COPY --from=build /app/node_modules ./node_modules
-RUN npm prune --omit=dev && npm cache clean --force
+# All /app COPYs use --chown=1001:1001 to set runtime-user ownership AT COPY TIME. A separate
+# `chown -R /app` would instead REWRITE every file (the 812MB node_modules + dist) into a NEW layer
+# — duplicating /app in the image (~800MB). Numeric --chown needs no pre-existing user. The process
+# never writes to /app at runtime (read-only root FS); only the volume-mounted scratch dirs below.
+COPY --chown=1001:1001 package.json package-lock.json ./
+# Reuse the BUILD stage's node_modules — already devDep-pruned there (above) — instead of a second
+# full `npm ci`: BuildKit would otherwise run the two stages CONCURRENTLY and the doubled registry
+# traffic through Docker Desktop's NAT reliably ECONNRESETs one ~10 min in (observed 2026-06-11).
+# COPYing the pruned tree gives a SINGLE slim node_modules layer. The native addon (@node-rs/argon2)
+# was compiled in the SAME base image, so the copied tree is ABI-identical.
+COPY --from=build --chown=1001:1001 /app/node_modules ./node_modules
 # Flatten the compiled tree into /app so the package.json "imports" map (#backend/* -> ./apps/backend/src/*,
 # which tsc keeps VERBATIM in the emitted .js) resolves against the compiled .js. node_modules at /app
 # resolves by walk-up from /app/apps/backend/src/*.js.
-COPY --from=build /app/dist/ ./
+COPY --from=build --chown=1001:1001 /app/dist/ ./
 # Raw SQL migrations for the node-pg-migrate job (tsc does not process .sql).
-COPY migrations ./migrations
+COPY --chown=1001:1001 migrations ./migrations
 # ── Non-root runtime user (uid/gid 1001) ──────────────────────────────────────
-# The process writes ONLY to CODEMASTER_WORKSPACE_ROOT, CODEMASTER_CLONE_CACHE_ROOT
-# and (transiently) /tmp — never to /app, $HOME or the tool dirs. So the image can
-# run as a non-root user with a read-only root filesystem; the Helm chart mounts
-# those three paths as writable emptyDir volumes. We pre-create the default
-# workspace + clone-cache paths and a $HOME (git reads $HOME/.gitconfig; nothing
-# writes there at runtime). Done AFTER all COPYs so the chown covers the dist tree.
+# The process writes ONLY to CODEMASTER_WORKSPACE_ROOT, CODEMASTER_CLONE_CACHE_ROOT and (transiently)
+# /tmp — never to /app, $HOME or the tool dirs. So it runs as a non-root user with a read-only root
+# filesystem; the Helm chart mounts those scratch paths as writable emptyDir volumes. /app is already
+# 1001-owned (the --chown COPYs above); here we only create + own the small writable dirs + $HOME.
 RUN groupadd --gid 1001 codemaster \
   && useradd --uid 1001 --gid 1001 --home-dir /home/codemaster --create-home --shell /usr/sbin/nologin codemaster \
   && mkdir -p /var/lib/codemaster/workspaces /clone-cache \
-  && chown -R 1001:1001 /app /home/codemaster /var/lib/codemaster /clone-cache
+  && chown -R 1001:1001 /home/codemaster /var/lib/codemaster /clone-cache
 ENV HOME=/home/codemaster
 USER 1001
 EXPOSE 8080
-# Default = the combined entrypoint (HTTP API + review worker + outbox-dispatcher worker, fail-loud, one
+# Default = the combined entrypoint (HTTP API + the Postgres background runtime, fail-loud, one
 # process). The migrate Job overrides `command` with `npm run migrate:up`.
 CMD ["node", "apps/backend/src/main.js"]
