@@ -21,6 +21,7 @@ import {
   runIdRetireOldRunsActivity,
 } from "#backend/activities/run_id_retention.activity.js";
 import {
+  runWorkspaceDeadLetterSweepActivity,
   runWorkspaceOrphanSweepActivity,
   runWorkspaceReapActivity,
   runWorkspaceReleasedRetentionActivity,
@@ -548,11 +549,26 @@ export function registerCronHandlers(registry: HandlerRegistry, deps: CronHandle
     // Step 3 — retention purge: hard-delete RELEASED rows past the 7d retention window.
     const purge = await runWorkspaceReleasedRetentionActivity({ ...dsnPart, clock: handlerDeps.clock });
 
+    // Step 4 (W3.5 OH6) — dead-letter visibility: count + gauge the permanently-stuck lease classes
+    // (FAILED_CLEANUP at the attempt ceiling; ORPHANED aged >24h). Pure observability — fail-OPEN:
+    // a fault here must never fail the janitor chain that just did real recovery work.
+    let deadLetter = { failed_cleanup_stuck: -1, orphaned_aged: -1 };
+    try {
+      deadLetter = await runWorkspaceDeadLetterSweepActivity({ ...dsnPart, clock: handlerDeps.clock });
+    } catch (e) {
+      console.warn(
+        `workspace_retention: dead-letter sweep failed (observability only; the janitor chain ` +
+          `completed): ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+
     // The workflow body's { orphaned, reaped, retention_deleted } result counters, as the log tally
     // (the platform persists job OUTCOME, not results — same posture as every cron handler above).
     console.info(
       `workspace_retention swept: orphaned=${orphan.orphaned_count} reaped=${reaped} ` +
-        `retention_deleted=${purge.deleted_count} job_id=${handlerDeps.job.job_id}`,
+        `retention_deleted=${purge.deleted_count} ` +
+        `dead_letter_failed_cleanup=${deadLetter.failed_cleanup_stuck} ` +
+        `dead_letter_orphaned_aged=${deadLetter.orphaned_aged} job_id=${handlerDeps.job.job_id}`,
     );
   });
 

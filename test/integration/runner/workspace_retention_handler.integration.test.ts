@@ -150,6 +150,7 @@ async function insertLease(
     releasedAt?: Date | null;
     cleanupAttempts?: number;
     createdAt?: Date;
+    cleanupFailedAt?: Date | null;
   },
 ): Promise<void> {
   const releaseRequestedAt = args.releaseRequestedAt ?? null;
@@ -158,10 +159,10 @@ async function insertLease(
        (workspace_id, run_id, review_id, installation_id, state,
         pod_name, pod_namespace, node_name, worker_id,
         orphan_check_after, release_requested_at, release_requested_by, released_at,
-        cleanup_attempts, created_at)
+        cleanup_attempts, created_at, cleanup_failed_at)
      VALUES ($1, $2, $3, $4, $5::core.workspace_lease_state,
              'worker-pod-0', 'codemaster', 'node-a', $6, $7, $8, $9, $10,
-             $11, COALESCE($12, now()))`,
+             $11, COALESCE($12, now()), $13)`,
     [
       seed.workspaceId,
       seed.runId,
@@ -175,6 +176,7 @@ async function insertLease(
       args.releasedAt ?? null,
       args.cleanupAttempts ?? 0,
       args.createdAt ?? null,
+      args.cleanupFailedAt ?? null,
     ],
   );
 }
@@ -366,6 +368,7 @@ describeDb("workspace_retention handler — multi-step cron on the background-jo
       await insertLease(stuck, {
         state: "FAILED_CLEANUP", workerId: `w-${stuck.workspaceId.slice(0, 8)}`,
         orphanCheckAfter: ago({ days: 2 }), cleanupAttempts: 5, createdAt: ago({ days: 2 }),
+        releaseRequestedAt: ago({ days: 1 }), cleanupFailedAt: ago({ days: 1 }),
       });
       await insertLease(agedOrphan, {
         state: "ORPHANED", workerId: `w-${agedOrphan.workspaceId.slice(0, 8)}`,
@@ -374,6 +377,7 @@ describeDb("workspace_retention handler — multi-step cron on the background-jo
       await insertLease(freshFailed, {
         state: "FAILED_CLEANUP", workerId: `w-${freshFailed.workspaceId.slice(0, 8)}`,
         orphanCheckAfter: ago({ minutes: 30 }), cleanupAttempts: 2, createdAt: ago({ minutes: 30 }),
+        releaseRequestedAt: ago({ minutes: 20 }), cleanupFailedAt: ago({ minutes: 10 }),
       });
       await insertLease(freshOrphan, {
         state: "ORPHANED", workerId: `w-${freshOrphan.workspaceId.slice(0, 8)}`,

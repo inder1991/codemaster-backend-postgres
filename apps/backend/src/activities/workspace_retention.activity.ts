@@ -77,6 +77,10 @@
 
 import { CompiledQuery, type Transaction } from "kysely";
 
+import {
+  recordOrphanSweepNoHeartbeats,
+  updateWorkspaceDeadLetterGauges,
+} from "#backend/observability/workspace_retention_metrics.js";
 import { StateDrift } from "#backend/workspace/errors.js";
 import { transitionLease } from "#backend/workspace/transition.js";
 
@@ -166,6 +170,27 @@ export async function runWorkspaceOrphanSweepActivity(
 
   const now = clock.now();
   const workerDeadCutoff = new Date(now.getTime() - WORKER_DEAD_AFTER_MS);
+
+  // W3.5 (OH5): the heartbeat PRODUCER is unported (FOLLOW-UP-port-workspace-manager-heartbeat).
+  // With ZERO heartbeat rows the dead_workers CTE matches nothing and this sweep is a guaranteed
+  // orphaned_count=0 no-op — dead-worker reclamation is OFFLINE, which must be SAID (structured
+  // WARN + bounded counter), never reported as a falsely-green zero.
+  // tenant:exempt reason=platform-liveness-probe-on-heartbeat-table follow_up=PERMANENT-EXEMPTION-workspace-retention
+  const heartbeatProbe = await db.executeQuery<{ one: number }>(
+    CompiledQuery.raw("SELECT 1 AS one FROM core.worker_heartbeats LIMIT 1", []),
+  );
+  if (heartbeatProbe.rows.length === 0) {
+    recordOrphanSweepNoHeartbeats();
+    console.warn(
+      JSON.stringify({
+        event: "workspace_orphan_sweep.no_heartbeat_producer",
+        detail:
+          "core.worker_heartbeats is empty — the heartbeat producer is unported, so dead-worker " +
+          "lease reclamation cannot fire; orphaned_count=0 is OFFLINE, not healthy " +
+          "(FOLLOW-UP-port-workspace-manager-heartbeat)",
+      }),
+    );
+  }
 
   let orphaned = 0;
   await db.transaction().execute(async (tx: Transaction<unknown>) => {
@@ -328,4 +353,69 @@ export async function runWorkspaceReleasedRetentionActivity(
   });
 
   return WorkspaceRetentionPurgeResultV1.parse({ deleted_count: deleted });
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════════
+//  Activity 4 — dead-letter visibility sweep (W3.5 / OH6 — TS-NET-NEW, no Python predecessor)
+// ════════════════════════════════════════════════════════════════════════════════════════════════════
+
+/** An ORPHANED lease still un-reaped this long after allocation means the reap path is NOT
+ *  converging (a healthy cycle reaps orphans within minutes; lease lifetimes are minutes). */
+const ORPHANED_AGED_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+
+/** The OH6 snapshot: rows no sweep will ever recover (operator dead-letter queue). */
+export type WorkspaceDeadLetterSweepResult = {
+  /** FAILED_CLEANUP leases at/over {@link CLEANUP_MAX_ATTEMPTS} — reap permanently skips them;
+   *  each is a leaked on-disk workspace until an operator intervenes. */
+  readonly failed_cleanup_stuck: number;
+  /** ORPHANED leases older than {@link ORPHANED_AGED_THRESHOLD_MS} since allocation. */
+  readonly orphaned_aged: number;
+};
+
+/**
+ * `runWorkspaceDeadLetterSweepActivity` — the dead-letter visibility the
+ * "FAILED_CLEANUP rows at/over this are NOT reaped (operator alert)" comment PROMISED but never
+ * delivered (OH6): a read-only count of the two permanently-stuck lease classes, published as
+ * observable gauges (workspace_retention_metrics.ts) + a structured WARN whenever either is
+ * non-zero. Runs as the workspace_retention handler's final step, fail-open (pure observability —
+ * it must never fail the janitor chain).
+ */
+export async function runWorkspaceDeadLetterSweepActivity(
+  deps: WorkspaceRetentionDeps = {},
+): Promise<WorkspaceDeadLetterSweepResult> {
+  const dsn = resolveDsn(deps);
+  const clock: Clock = deps.clock ?? new WallClock();
+  const pool = getPool(dsn);
+
+  const agedCutoff = new Date(clock.now().getTime() - ORPHANED_AGED_THRESHOLD_MS);
+  // tenant:exempt reason=cross-tenant-dead-letter-count-read-only follow_up=PERMANENT-EXEMPTION-workspace-retention
+  const r = await pool.query<{ failed_cleanup_stuck: string; orphaned_aged: string }>(
+    "SELECT " +
+      "  COUNT(*) FILTER (WHERE state = 'FAILED_CLEANUP' AND cleanup_attempts >= $1) AS failed_cleanup_stuck, " +
+      "  COUNT(*) FILTER (WHERE state = 'ORPHANED' AND created_at < $2) AS orphaned_aged " +
+      "FROM core.workspace_leases",
+    [CLEANUP_MAX_ATTEMPTS, agedCutoff],
+  );
+  const result: WorkspaceDeadLetterSweepResult = {
+    failed_cleanup_stuck: Number(r.rows[0]?.failed_cleanup_stuck ?? 0),
+    orphaned_aged: Number(r.rows[0]?.orphaned_aged ?? 0),
+  };
+
+  updateWorkspaceDeadLetterGauges({
+    failedCleanupStuck: result.failed_cleanup_stuck,
+    orphanedAged: result.orphaned_aged,
+  });
+  if (result.failed_cleanup_stuck > 0 || result.orphaned_aged > 0) {
+    console.warn(
+      JSON.stringify({
+        event: "workspace_retention.dead_letter_leases",
+        failed_cleanup_stuck: result.failed_cleanup_stuck,
+        orphaned_aged: result.orphaned_aged,
+        detail:
+          "leases NO sweep will recover (FAILED_CLEANUP at the attempt ceiling / ORPHANED aged " +
+          ">24h) — leaked disk until an operator clears them",
+      }),
+    );
+  }
+  return result;
 }
