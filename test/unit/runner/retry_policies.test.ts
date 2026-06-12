@@ -197,3 +197,19 @@ describe("applyInProcessRetry — behavior of the wrapped/unwrapped port fns", (
     expect(n).toBe(0);
   });
 });
+
+// ─── Wave-1 adversarial-review fix: the nonRetryable vocabulary must match the REAL TS classes ───
+// RETRY_POLICIES transcribes the PYTHON ApplicationError type names ('BedrockOutputUnsafeError',
+// 'BedrockInvalidRequestError'); the TS classes are named LlmOutputUnsafeError (and invalid
+// requests surface as LlmInvocationError today). Matching only the transcribed names means a
+// DETERMINISTIC output-unsafe fault burns the full 4-attempt curve instead of failing fast.
+describe("toRetryPolicy — nonRetryable matches the real TS error classes (review fix)", () => {
+  it("LlmOutputUnsafeError is non-retryable under the reviewChunk policy", async () => {
+    const { LlmOutputUnsafeError } = await import("#backend/integrations/llm/errors.js");
+    const { IN_PROCESS_RETRY_POLICIES, toRetryPolicy } = await import(
+      "#backend/runner/retry_policies.js"
+    );
+    const policy = toRetryPolicy(IN_PROCESS_RETRY_POLICIES.reviewChunk);
+    expect(policy.nonRetryable(new LlmOutputUnsafeError("unsafe output"))).toBe(true);
+  });
+});

@@ -613,3 +613,55 @@ describe("fanOutReview — failure-isolation slot (W1.9a fail-soft; C2)", () => 
     expect(failures).toEqual([]);
   });
 });
+
+// ─── Wave-1 adversarial-review fixes: abort-class faults must PROPAGATE out of the fail-soft slot ─
+// (1) THROTTLE faults (GitHubRateLimitExceeded / LlmRateLimitError): the CS4.4/W1.9c layering parks
+// the JOB attempt-free at the reset hint via the runner's deferRetry — recording a throttle as a
+// chunk degradation instead permanently loses the chunk and settles the review 'done' (the merged
+// W1.9a slot silently defeated that contract). (2) the SHELL's abort fault (TerminalCancelError):
+// the de-Temporal composed abort surfaces with that name, not Temporal's CancelledFailure/AbortError
+// — recording it drains every remaining chunk into false degradation notes.
+describe("fanOutReview — abort-class faults propagate even with a failureSlot", () => {
+  function namedError(name: string, msg: string): Error {
+    const e = new Error(msg);
+    e.name = name;
+    return e;
+  }
+
+  for (const [name, msg] of [
+    ["LlmRateLimitError", "rate limited mid-fan-out"],
+    ["GitHubRateLimitExceeded", "secondary limit mid-fan-out"],
+    ["TerminalCancelError", "mutex lost mid-fan-out"],
+  ] as const) {
+    it(`${name} ABORTS the fan-out and propagates verbatim — never recorded as a degradation`, async () => {
+      const chunks = [chunk(0), chunk(1), chunk(2)];
+      const failures: Array<ChunkDispatchFailure> = [];
+      const invoke: InvokeChunkFn = async (c) => {
+        const idx = Number(c.path.replace(/\D/g, ""));
+        if (idx === 1) {
+          throw namedError(name, msg);
+        }
+        return envelope(idx);
+      };
+      await expect(
+        fanOutReview(chunks, invoke, {
+          concurrency: 1,
+          failureSlot: { recordFailure: (f) => failures.push(f) },
+        }),
+      ).rejects.toThrow(msg);
+      // NOT recorded: abort-class faults are the JOB's concern (deferRetry / terminal settle).
+      expect(failures).toHaveLength(0);
+    });
+  }
+
+  it("the abort-class name set stays in LOCKSTEP with the runner's canonical THROTTLE_ERROR_NAMES", async () => {
+    const { THROTTLE_ERROR_NAMES } = await import("#backend/runner/retry_hints.js");
+    const { FANOUT_ABORT_CLASS_ERROR_NAMES } = await import(
+      "#backend/review/pipeline/parallelism.js"
+    );
+    for (const name of THROTTLE_ERROR_NAMES) {
+      expect(FANOUT_ABORT_CLASS_ERROR_NAMES.has(name)).toBe(true);
+    }
+    expect(FANOUT_ABORT_CLASS_ERROR_NAMES.has("TerminalCancelError")).toBe(true);
+  });
+});
