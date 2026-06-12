@@ -43,8 +43,9 @@ import { makeScopedErrorHandler } from "#backend/api/auth/error_envelope.js";
 import type { LdapClientPort } from "#backend/api/auth/ldap_client.js";
 import type { LocalUserRepo } from "#backend/api/auth/local_user_repo.js";
 import { type AuditCallbackFactory, type LoginOutcome, authenticate } from "#backend/api/auth/login.js";
+import { trustedClientIp } from "#backend/api/auth/client_ip.js";
 import { recordLoginAttempt } from "#backend/api/auth/metrics.js";
-import { LoginRateLimiter } from "#backend/api/auth/rate_limit.js";
+import { LoginRateLimiter, type LoginRateLimiterPort } from "#backend/api/auth/rate_limit.js";
 import type { RoleResolver } from "#backend/api/auth/role_resolver.js";
 import {
   SESSION_LIFETIME_MS,
@@ -66,7 +67,12 @@ export type AuthRoutesOptions = {
   secureCookies?: boolean;
   /** CSRF double-submit secret; the /csrf endpoint returns its hex. 503 when absent. */
   csrfSecret?: Buffer | Uint8Array;
-  rateLimiter?: LoginRateLimiter;
+  /** W4.7 / EM5 — production wires PostgresLoginRateLimiter (cross-replica); the in-process
+   *  LoginRateLimiter remains the unwired default for test/dev. */
+  rateLimiter?: LoginRateLimiterPort;
+  /** W4.7 / EM5 — trusted reverse-proxy hop count for client-IP derivation (default 0: bucket on
+   *  the socket peer; X-Forwarded-For ignored). See client_ip.ts. */
+  trustedProxyHops?: number;
   /** core.users dispatch step (the ENABLE_CORE_USERS_LOCAL_AUTH flag); both required to activate it. */
   coreRepo?: CoreUserRepo;
   roleResolver?: RoleResolver;
@@ -85,17 +91,14 @@ const OUTCOME_ERRORS = new Map<LoginOutcome, { status: number; detail: string }>
   ["ldap_unreachable", { status: 503, detail: "ldap unreachable" }],
 ]);
 
-/** Leftmost X-Forwarded-For entry (the original client) for rate-limit bucketing, else the socket IP. */
-function clientIp(request: FastifyRequest): string {
-  const xff = request.headers["x-forwarded-for"];
-  const raw = Array.isArray(xff) ? xff[0] : xff;
-  if (raw !== undefined && raw !== "") {
-    const leftmost = raw.split(",")[0]?.trim();
-    if (leftmost !== undefined && leftmost !== "") {
-      return leftmost;
-    }
-  }
-  return request.ip || "unknown";
+/** W4.7 / EM5 — TRUSTED client IP for rate-limit bucketing (replaces the spoofable leftmost-XFF
+ *  derivation; see client_ip.ts for the hop-count contract). */
+function clientIp(request: FastifyRequest, trustedProxyHops: number): string {
+  return trustedClientIp({
+    xff: request.headers["x-forwarded-for"],
+    socketIp: request.ip || "",
+    trustedProxyHops,
+  });
 }
 
 export async function registerAuthRoutes(
@@ -103,7 +106,8 @@ export async function registerAuthRoutes(
   opts: AuthRoutesOptions,
 ): Promise<void> {
   const secureCookies = opts.secureCookies ?? true;
-  const rateLimiter =
+  const trustedProxyHops = opts.trustedProxyHops ?? 0;
+  const rateLimiter: LoginRateLimiterPort =
     opts.rateLimiter ??
     new LoginRateLimiter({
       maxAttempts: 10,
@@ -154,12 +158,12 @@ export async function registerAuthRoutes(
         return reply.code(422).send({ detail: "invalid login request" });
       }
       const now = opts.clock.now();
-      const ip = clientIp(request);
+      const ip = clientIp(request, trustedProxyHops);
       const tStart = opts.clock.monotonic();
 
       // Pre-auth per-IP rate-limit gate — defends against credential spraying (which per-account lockout
       // misses, since each username only sees one failure).
-      if (!rateLimiter.checkAllowed(ip)) {
+      if (!(await rateLimiter.checkAllowed(ip))) {
         recordLoginAttempt({
           authSource: null,
           outcome: "rate_limited",
@@ -240,9 +244,9 @@ export async function registerAuthRoutes(
 
       // Success clears the IP's history; any non-ok outcome (incl. ldap_unreachable) records a failure.
       if (result.outcome === "ok") {
-        rateLimiter.recordSuccess(ip);
+        await rateLimiter.recordSuccess(ip);
       } else {
-        rateLimiter.recordFailure(ip);
+        await rateLimiter.recordFailure(ip);
       }
 
       if (result.outcome === "ok") {

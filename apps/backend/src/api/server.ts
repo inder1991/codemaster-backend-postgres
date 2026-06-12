@@ -11,6 +11,7 @@ import { registerAuthRoutes } from "#backend/api/auth/auth_routes.js";
 import { makeAuthSecretsProvider } from "#backend/api/auth/auth_secrets_provider.js";
 import { PostgresLocalUserRepo } from "#backend/api/auth/local_user_repo.js";
 import { NoOpLdapClient } from "#backend/api/auth/noop_ldap.js";
+import { PostgresLoginRateLimiter } from "#backend/api/auth/rate_limit.js";
 import { persistWebhook } from "#backend/ingest/github_webhook_persistence.js";
 import { makeWebhookSecretProvider } from "#backend/ingest/webhook_secret_provider.js";
 import { setAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
@@ -82,6 +83,15 @@ export async function runServer(deps: RunServerDeps = {}): Promise<void> {
     ]);
     const coreDb = tenantKysely(dsn);
     const clock = new WallClock();
+    // W4.7 / EM5 — trusted proxy depth for client-IP derivation (0 = socket peer; the OpenShift
+    // router edge sets 1). Fail-loud on a malformed value: a silently-wrong hop count either
+    // disables spray protection or buckets every client into the proxy's IP.
+    const trustedProxyHops = Number(process.env["CODEMASTER_TRUSTED_PROXY_HOPS"] ?? "0");
+    if (!Number.isInteger(trustedProxyHops) || trustedProxyHops < 0) {
+      throw new Error(
+        `CODEMASTER_TRUSTED_PROXY_HOPS must be a non-negative integer, got ${JSON.stringify(process.env["CODEMASTER_TRUSTED_PROXY_HOPS"])}.`,
+      );
+    }
     await registerAuthRoutes(app, {
       localRepo: new PostgresLocalUserRepo({ db: coreDb, registry }),
       ldap: new NoOpLdapClient(),
@@ -92,6 +102,16 @@ export async function runServer(deps: RunServerDeps = {}): Promise<void> {
       // W4.7 / EH7 — login.success/.failure audit emission (same-TX via authenticate; fail-safe
       // elsewhere). audit.audit_events shares the core DSN (the Python bootstrap's G7 note).
       auditDb: coreDb,
+      // W4.7 / EM5 — cross-replica Postgres rate limiter keyed on the trusted client IP (the
+      // in-process Map default is defeated by multi-replica deployments + spoofed XFF).
+      rateLimiter: new PostgresLoginRateLimiter({
+        db: coreDb,
+        maxAttempts: 10,
+        windowMs: 5 * 60 * 1000,
+        lockoutMs: 5 * 60 * 1000,
+        clock,
+      }),
+      trustedProxyHops,
     });
     // D2 — admin READ + WRITE endpoints, behind the same makeRequireRole gate + signing key. vault +
     // getPreflightValidator make the LLM credential-rotation routes (llm-provider-config / bedrock-config /
