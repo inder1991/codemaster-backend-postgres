@@ -41,14 +41,23 @@ import { RetrieveKnowledgeActivity } from "#backend/activities/retrieve_knowledg
 import { PostgresConfluenceRetrieval } from "#backend/adapters/postgres_confluence_retrieval.js";
 import { makeLazyEmbedderCache } from "#backend/adapters/embedder_cache.js";
 import { type EmbeddingsPort } from "#backend/adapters/embeddings_port.js";
+import { VaultHttpPort } from "#backend/adapters/vault_http.js";
+import { readRerankSettings } from "#backend/api/admin/llm_catalog_write.js";
+import { PostgresLlmProviderSettingsRepo } from "#backend/integrations/llm/llm_provider_settings_repo.js";
 import { AnnRetriever } from "#backend/retrieval/ann_retriever.js";
 import { type AnnPort, PostgresAnnPort } from "#backend/retrieval/ann_port.js";
+import {
+  type BedrockRerankCredentialsSource,
+  type BedrockRerankOverrideResolver,
+  buildBedrockRerankOverrideResolver,
+} from "#backend/retrieval/bedrock_rerank.js";
 import { type Bm25Port, PostgresBm25Port } from "#backend/retrieval/bm25_port.js";
 import { Bm25Retriever } from "#backend/retrieval/bm25_retriever.js";
 import type { ConfluenceRetrievalPort } from "#backend/retrieval/confluence_source.js";
 import { HybridRetriever } from "#backend/retrieval/hybrid_retriever.js";
 import { IdentityRerankPort, LlmRerank } from "#backend/retrieval/llm_rerank.js";
 import type { RerankLlmCacheLike } from "#backend/retrieval/llm_backed_rerank.js";
+import { type RerankEnv, parseRerankEnv } from "#backend/retrieval/rerank_config.js";
 
 import { MIN_COSINE_SIMILARITY_FLOOR } from "#backend/retrieval/constants.js";
 
@@ -142,6 +151,33 @@ export function buildConfluencePort(): ConfluenceRetrievalPort {
   });
 }
 
+/**
+ * W1.3 RH9 — the PRODUCTION Bedrock-rerank resolver over `dsn`: per-retrieval admin-row read (the
+ * REAL {@link readRerankSettings} over the shared core pool) + the boot-parsed Helm env baseline
+ * ({@link parseRerankEnv} — FAIL-LOUD here, at build time, on a malformed CODEMASTER_RERANK_*) + the
+ * platform Bedrock bearer credentials. The credential read reuses the SAME pattern as the review
+ * path: `PostgresLlmProviderSettingsRepo.readDecryptedForProvider("bedrock")` with a deferred-Vault
+ * `VaultHttpPort.fromEnv()` built lazily on first use (the buildStrictLedgerCache idiom) — no
+ * enabled bedrock row (or an unreachable Vault) makes the rerank port FAIL OPEN, never the review.
+ */
+export function buildBedrockRerankResolverFromDsn(
+  dsn: string,
+  env: RerankEnv = process.env,
+): BedrockRerankOverrideResolver {
+  const parsedEnv = parseRerankEnv(env);
+  let repo: PostgresLlmProviderSettingsRepo | undefined;
+  const credentials: BedrockRerankCredentialsSource = async () => {
+    repo ??= PostgresLlmProviderSettingsRepo.fromDsn({ dsn, vault: VaultHttpPort.fromEnv() });
+    const settings = await repo.readDecryptedForProvider("bedrock");
+    return settings === null ? null : { apiKey: settings.apiKey, region: settings.region };
+  };
+  return buildBedrockRerankOverrideResolver({
+    readSettings: () => readRerankSettings(tenantKysely<unknown>(dsn)),
+    credentials,
+    env: parsedEnv,
+  });
+}
+
 export type BuildRetrieveKnowledgeActivityOptions = {
   /** The production {@link EmbeddingsPort} (resolved by `resolveEmbeddingsConsumer`). */
   embedder: EmbeddingsPort;
@@ -155,6 +191,12 @@ export type BuildRetrieveKnowledgeActivityOptions = {
    * of the static IdentityRerankPort no-op. Omitted → identity rerank (1:1 with Python).
    */
   rerankCache?: RerankLlmCacheLike;
+  /**
+   * W1.3 RH9 — test seam for the Bedrock rerank override resolver. Omitted → the PRODUCTION resolver
+   * ({@link buildBedrockRerankResolverFromDsn} over `CODEMASTER_PG_CORE_DSN`), whose effective config
+   * (admin row > Helm env > default) is DISABLED unless an operator opted in.
+   */
+  bedrockRerankResolver?: BedrockRerankOverrideResolver;
 };
 
 /**
@@ -174,6 +216,7 @@ export function buildRetrieveKnowledgeActivity({
   modelName = "qwen3-embed-0.6b",
   topK = 5,
   rerankCache,
+  bedrockRerankResolver,
 }: BuildRetrieveKnowledgeActivityOptions): RetrieveKnowledgeActivity {
   const bm25Retriever = new Bm25Retriever({ port: buildBm25Port() });
   const annRetriever = new AnnRetriever({
@@ -199,5 +242,9 @@ export function buildRetrieveKnowledgeActivity({
     hybridRetriever,
     // exactOptionalPropertyTypes: only pass the key when defined (never an explicit `undefined`).
     ...(rerankCache !== undefined ? { rerankCache } : {}),
+    // W1.3 RH9 — the production Bedrock-rerank resolver (DEFAULT OFF until an operator opts in via
+    // the admin API or the Helm config.rerank block). The injected seam wins in tests.
+    bedrockRerankResolver:
+      bedrockRerankResolver ?? buildBedrockRerankResolverFromDsn(resolveCoreDsn()),
   });
 }

@@ -623,6 +623,48 @@ export type LlmConnectionTestResultV1 = z.infer<typeof LlmConnectionTestResultV1
 export const BedrockConfigV1 = LlmProviderConfigV1;
 export type BedrockConfigV1 = z.infer<typeof BedrockConfigV1>;
 
+// ─── W1.3 RH9 — the optional Bedrock re-ranker config (GET/PUT /api/admin/rerank-config) ─────────
+
+/**
+ * GET + PUT /api/admin/rerank-config response — the EFFECTIVE Bedrock-reranker config plus its
+ * provenance. `source` tells the UI whether an explicit admin save (`database`), the Helm
+ * `config.rerank` baseline (`environment`), or nothing (`default`, DEFAULT OFF) is in force.
+ * `model_id` is null ONLY in the unconfigured default (then `enabled` is false); `updated_at` /
+ * `updated_by_user_id` are non-null only for `source=database`. NO credential fields — the rerank
+ * call reuses the platform Bedrock token from /api/admin/llm-provider-config.
+ */
+export const RerankConfigV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    enabled: z.boolean(),
+    model_id: z.string().min(1).max(128).nullable(),
+    region: z.string().min(1).max(32).nullable(),
+    top_n: z.number().int().min(1).max(100),
+    source: z.enum(["database", "environment", "default"]),
+    updated_at: z.string().datetime({ offset: true }).nullable(),
+    updated_by_user_id: z.string().uuid().nullable(),
+  })
+  .strict();
+export type RerankConfigV1 = z.infer<typeof RerankConfigV1>;
+
+/**
+ * PUT /api/admin/rerank-config request body — a full-state upsert of the platform-singleton rerank
+ * row (idempotent; the UI sends the complete desired state, mirroring llm-provider-config). The
+ * route additionally enforces `model_id ∈ RERANK_MODELS` (422 rerank_model_not_supported) — kept
+ * out of the Zod enum so a model-list change stays a one-place edit (rerank_config.ts). `region`
+ * null → the platform Bedrock credential row's region applies at call time.
+ */
+export const RerankConfigUpdateV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    enabled: z.boolean(),
+    model_id: z.string().min(1).max(128),
+    region: z.string().min(1).max(32).regex(LLM_REGION_RE).nullable().default(null),
+    top_n: z.number().int().min(1).max(100).default(25),
+  })
+  .strict();
+export type RerankConfigUpdateV1 = z.infer<typeof RerankConfigUpdateV1>;
+
 /**
  * PUT /api/admin/bedrock-config request body — the LEGACY shim shape (Python: _LegacyBedrockConfigUpdateBody,
  * bedrock_config.py:53-84). NOT a cross-process contract: provider/role are hardcoded by the shim to

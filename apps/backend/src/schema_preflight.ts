@@ -34,9 +34,11 @@ export const EXPECTED_MIGRATIONS = [
   // branches; reconciled — login keeps 0045 (lexically first), payload renumbered to 0046.
   "0045_login_rate_limit",
   "0046_payload_schema_version",
-  // Phase 0 cost-journal merged AFTER wave-2: its migration was 0043 on its branch, but 0044–0046
-  // already landed, so it renumbers to 0047 — purely additive on top (the file was renamed to match).
+  // Phase 0 cost-journal (was 0043 on its branch; renumbered to 0047 — 0044–0046 landed first).
   "0047_cost_journal",
+  // W1.3 RH9 re-ranker config row. Was 0047 on feat/w2-rerank (collided with cost_journal); the two
+  // were built off the same wave-2 base, so at final integration it renumbers to 0048 (file renamed).
+  "0048_rerank_settings",
 ] as const satisfies ReadonlyArray<string>;
 
 /** The DB's applied migration sequence diverges from the image's compiled-in expectation — the pod

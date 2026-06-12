@@ -57,6 +57,84 @@ export async function upsertPurposeModel(
   `.execute(db);
 }
 
+// ─── W1.3 RH9 — the optional Bedrock re-ranker's platform-singleton config (core.rerank_settings) ───
+
+/** The Bedrock RERANK-API models the engine can invoke (the rerank analogue of {@link BEDROCK_MODELS}).
+ *  A PUT /api/admin/rerank-config naming any other model_id is rejected — the adapter only speaks the
+ *  Cohere/Amazon rerank request shapes. Single-sourced from the retrieval-side config contract so the
+ *  admin PUT, the env parse, and the adapter can never disagree on the accepted set. */
+export { RERANK_MODELS } from "#backend/retrieval/rerank_config.js";
+
+/** The stored rerank settings row (camelCase view of core.rerank_settings; migration 0048). */
+export type RerankSettingsRow = {
+  readonly enabled: boolean;
+  readonly modelId: string;
+  readonly region: string | null;
+  readonly topN: number;
+  readonly updatedAt: Date;
+  readonly updatedByUserId: string;
+};
+
+type RerankSettingsDbRow = {
+  readonly enabled: boolean;
+  readonly model_id: string;
+  readonly region: string | null;
+  readonly top_n: number;
+  readonly updated_at: Date;
+  readonly updated_by_user_id: string;
+};
+
+/** Read the platform-singleton rerank settings row, or null when the operator never saved one (the
+ *  DEFAULT-OFF posture — retrieval then falls back to the Helm/env config, then to disabled). */
+export async function readRerankSettings(db: Kysely<unknown>): Promise<RerankSettingsRow | null> {
+  // tenant:exempt reason=platform-config follow_up=PERMANENT-EXEMPTION-platform-llm-config
+  const result = await sql<RerankSettingsDbRow>`
+    SELECT enabled, model_id, region, top_n, updated_at, updated_by_user_id
+      FROM core.rerank_settings
+     WHERE scope = 'platform'
+  `.execute(db);
+  const row = result.rows[0];
+  if (row === undefined) {
+    return null;
+  }
+  return {
+    enabled: row.enabled,
+    modelId: row.model_id,
+    region: row.region,
+    topN: row.top_n,
+    updatedAt: row.updated_at,
+    updatedByUserId: row.updated_by_user_id,
+  };
+}
+
+/** UPSERT the platform-singleton rerank settings row (the PUT /api/admin/rerank-config write). The
+ *  scope PK makes the second save an UPDATE — exactly one row can ever exist. */
+export async function upsertRerankSettings(
+  db: Kysely<unknown>,
+  args: {
+    enabled: boolean;
+    modelId: string;
+    region: string | null;
+    topN: number;
+    updatedAt: Date;
+    updatedByUserId: string;
+  },
+): Promise<void> {
+  // tenant:exempt reason=platform-config follow_up=PERMANENT-EXEMPTION-platform-llm-config
+  await sql`
+    INSERT INTO core.rerank_settings (scope, enabled, model_id, region, top_n, updated_at, updated_by_user_id)
+    VALUES ('platform', ${args.enabled}, ${args.modelId}, ${args.region}, ${args.topN},
+            ${args.updatedAt}, ${args.updatedByUserId})
+    ON CONFLICT (scope) DO UPDATE SET
+      enabled = EXCLUDED.enabled,
+      model_id = EXCLUDED.model_id,
+      region = EXCLUDED.region,
+      top_n = EXCLUDED.top_n,
+      updated_at = EXCLUDED.updated_at,
+      updated_by_user_id = EXCLUDED.updated_by_user_id
+  `.execute(db);
+}
+
 /** Record the outcome of a model-credential validation probe (llm-models /test). Bare UPDATE keyed by
  *  (provider, model_id) — no rowcount check, no raise (1:1 with Python set_validation): a /test on an
  *  unregistered model_id no-ops. `status` is narrowed to ok|failed (untested is the DDL default only). */

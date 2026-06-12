@@ -39,6 +39,17 @@ data:
   CODEMASTER_EMBEDDER_API_KEY: {{ . | quote }}
   {{- end }}
   {{- end }}
+  # ---- Optional Bedrock re-ranker (W1.3 RH9; default OFF). The app's env parse is fail-loud, so
+  # model/region are only rendered when non-empty. An admin save via PUT /api/admin/rerank-config
+  # overrides this baseline at runtime (database > environment > default).
+  CODEMASTER_RERANK_ENABLED: {{ .Values.config.rerank.enabled | ternary "true" "false" | quote }}
+  {{- if .Values.config.rerank.model }}
+  CODEMASTER_RERANK_MODEL_ID: {{ .Values.config.rerank.model | quote }}
+  {{- end }}
+  {{- if .Values.config.rerank.region }}
+  CODEMASTER_RERANK_REGION: {{ .Values.config.rerank.region | quote }}
+  {{- end }}
+  CODEMASTER_RERANK_TOP_N: {{ .Values.config.rerank.topN | quote }}
   CODEMASTER_WORKSPACE_ROOT: {{ .Values.config.workspaceRoot | quote }}
   CODEMASTER_CLONE_CACHE_ROOT: {{ .Values.config.cloneCacheRoot | quote }}
   CODEMASTER_OUTBOX_MAX_ATTEMPTS: {{ .Values.config.outbox.maxAttempts | quote }}
