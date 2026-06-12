@@ -16,8 +16,6 @@ import { Kysely, PostgresDialect, sql } from "kysely";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { makeAdminTemporalPort } from "#backend/api/admin/_admin_temporal_port.js";
-import { RecordingTemporalClient } from "#backend/adapters/temporal_port.js";
 import { buildApp } from "#backend/api/app.js";
 import { registerAdminRoutes } from "#backend/api/admin/admin_routes.js";
 import { SESSION_COOKIE_NAME } from "#backend/api/auth/auth_routes.js";
@@ -38,7 +36,6 @@ const PROPOSER_ID = "b2b2b2b2-0000-0000-0000-000000000002";
 
 let pool: Pool;
 let db: Kysely<unknown>;
-let temporal: RecordingTemporalClient;
 
 async function reseed(): Promise<void> {
   await sql`DELETE FROM core.learnings_revisions WHERE learning_id = ${LEARNING_ID}`.execute(db);
@@ -57,11 +54,15 @@ async function reseed(): Promise<void> {
   );
 }
 
+async function proposalState(): Promise<string> {
+  const r = await sql<{ state: string }>`SELECT state FROM core.learning_proposals WHERE proposal_id = ${PROPOSAL_ID}`.execute(db);
+  return r.rows[0]!.state;
+}
+
 beforeAll(async () => {
   if (!INTEGRATION_DSN) return;
   pool = new Pool({ connectionString: INTEGRATION_DSN, max: 4 });
   db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) });
-  temporal = new RecordingTemporalClient();
 
   // Seed the parent installation (FK target for learnings / proposals); idempotent.
   await sql`INSERT INTO core.installations
@@ -102,7 +103,6 @@ async function makeApp(): Promise<Awaited<ReturnType<typeof buildApp>>> {
     db,
     signingKey: SIGNING_KEY,
     clock: new FakeClock({ now: NOW }),
-    temporal: makeAdminTemporalPort(temporal),
   });
   await app.ready();
   return app;
@@ -229,9 +229,8 @@ describeDb("admin knowledge writes (disposable :5439)", () => {
     await app.close();
   });
 
-  it("POST /api/admin/knowledge/proposals/{proposal_id}/approve — 204 emits signal", async () => {
+  it("POST /api/admin/knowledge/proposals/{proposal_id}/approve — 204 transitions the proposal to approved (no Temporal)", async () => {
     await reseed();
-    temporal = new RecordingTemporalClient();
     const app = await makeApp();
     const res = await app.inject({
       method: "POST",
@@ -239,18 +238,14 @@ describeDb("admin knowledge writes (disposable :5439)", () => {
       cookies: { [SESSION_COOKIE_NAME]: mintCookie("platform_owner") },
     });
     expect(res.statusCode).toBe(204);
-    expect(temporal.signals).toHaveLength(1);
-    expect(temporal.signals[0]).toEqual([
-      `knowledge-approval-${PROPOSAL_ID}`,
-      "approve",
-      { approver_user_id: APPROVER_ID },
-    ]);
+    // The de-Temporal effect: the proposal's terminal state is persisted SYNCHRONOUSLY (the Python
+    // knowledge_approval workflow did nothing but this transition_state).
+    expect(await proposalState()).toBe("approved");
     await app.close();
   });
 
   it("POST /api/admin/knowledge/proposals/{proposal_id}/approve — 403 self-approval", async () => {
     await reseed();
-    temporal = new RecordingTemporalClient();
     const app = await makeApp();
     const res = await app.inject({
       method: "POST",
@@ -258,13 +253,12 @@ describeDb("admin knowledge writes (disposable :5439)", () => {
       cookies: { [SESSION_COOKIE_NAME]: mintCookie("platform_owner", PROPOSER_ID) },
     });
     expect(res.statusCode).toBe(403);
-    expect(temporal.signals).toHaveLength(0);
+    expect(await proposalState()).toBe("pending_approval"); // self-approval never transitions
     await app.close();
   });
 
-  it("POST /api/admin/knowledge/proposals/{proposal_id}/reject — 204 emits signal + validates reason", async () => {
+  it("POST /api/admin/knowledge/proposals/{proposal_id}/reject — 204 transitions to rejected + validates reason (no Temporal)", async () => {
     await reseed();
-    temporal = new RecordingTemporalClient();
     const app = await makeApp();
     const res = await app.inject({
       method: "POST",
@@ -273,18 +267,12 @@ describeDb("admin knowledge writes (disposable :5439)", () => {
       payload: { reason: "This proposal needs more detail" },
     });
     expect(res.statusCode).toBe(204);
-    expect(temporal.signals).toHaveLength(1);
-    expect(temporal.signals[0]).toEqual([
-      `knowledge-approval-${PROPOSAL_ID}`,
-      "reject",
-      { approver_user_id: APPROVER_ID, reason: "This proposal needs more detail" },
-    ]);
+    expect(await proposalState()).toBe("rejected");
     await app.close();
   });
 
   it("POST /api/admin/knowledge/proposals/{proposal_id}/reject — 422 reason too short", async () => {
     await reseed();
-    temporal = new RecordingTemporalClient();
     const app = await makeApp();
     const res = await app.inject({
       method: "POST",
