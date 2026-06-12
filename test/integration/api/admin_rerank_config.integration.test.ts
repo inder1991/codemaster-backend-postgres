@@ -3,7 +3,7 @@
  * Postgres (NEVER the cluster). Two layers, mirroring admin_llm_config.integration.test.ts:
  *
  *   1. storage — readRerankSettings / upsertRerankSettings over core.rerank_settings (migration
- *      0047): the platform-singleton row the admin PUT persists and the retrieval wiring reads.
+ *      0048): the platform-singleton row the admin PUT persists and the retrieval wiring reads.
  *   2. routes — GET/PUT /api/admin/rerank-config (added in the routes slice).
  *
  * Runs ONLY when CODEMASTER_PG_CORE_DSN is set; SKIPS otherwise (the _db.ts gate).

@@ -1,3 +1,9 @@
+// FOLLOW-UP (opus delta-review notes, refuted-but-acknowledged; revisit only if the reranker goes
+// default-ON): (1) rerank spend is NOT counted against the W2.1 cost cap — the rerank API is a
+// separate, cheap, opt-in cost outside the per-review LLM budget; (2) the Bedrock credential is
+// decrypted per-retrieval (no TTL cache) when enabled — one Vault Transit decrypt per review-retrieval,
+// acceptable for an opt-in default-OFF feature. Both fine while default-OFF; cap + cache if it ships on.
+//
 // BedrockRerankPort — W1.3 RH9 (master-hardening-plan): the OPTIONAL production reranker. Calls the
 // AWS Bedrock RERANK API — the native rerank models (cohere.rerank-v3-5:0 / amazon.rerank-v1:0)
 // invoked over the bedrock-runtime `/model/{modelId}/invoke` HTTP endpoint with their NATIVE
