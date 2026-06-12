@@ -281,6 +281,10 @@ const PR_DEFAULT_LIMIT = 50;
 const PR_MAX_LIMIT = 200;
 const REVIEWS_DEFAULT_SIZE = 50;
 const REVIEWS_MAX_SIZE = 100;
+/** W2.7 / EH10 — upper bound on ?page so the OFFSET scan-discard cost is bounded (≤ 500×100 rows).
+ *  The Python left page unbounded; deep-OFFSET dashboards are a scalability hazard, so the TS port
+ *  422s beyond the cap instead of silently clamping (an honest contract for the frontend). */
+const REVIEWS_MAX_PAGE = 500;
 
 type AdminQuery = Record<string, unknown>;
 
@@ -2540,6 +2544,9 @@ export async function registerAdminRoutes(
       async (request, reply) => {
         const q = request.query as AdminQuery;
         const page = Math.max(1, Math.floor(Number(q.page ?? 1)) || 1);
+        if (page > REVIEWS_MAX_PAGE) {
+          return reply.code(422).send({ detail: `page must be <= ${REVIEWS_MAX_PAGE}` });
+        }
         const size = clampLimit(q.size, REVIEWS_DEFAULT_SIZE, REVIEWS_MAX_SIZE);
         const { items, total } = await searchReviews(opts.db, {
           installationId: request.authPrincipal!.installationId,

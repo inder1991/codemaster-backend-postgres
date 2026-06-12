@@ -99,10 +99,16 @@ type ReviewSearchRow = {
 };
 
 /**
- * Page/size-paginated reviews list — 1:1 with postgres_reviews_repo.search. A CTE aggregates per-PR
- * finding_count + max-severity (non-suppressed), the main query maps lifecycle_state → the UI state
- * vocabulary, COALESCEs the title + started_at, and COUNT(*) OVER () yields the total. Honors the
- * platform-view bypass + repo/q/state/org filters. An unknown UI state short-circuits to an empty page.
+ * Page/size-paginated reviews list — 1:1 in OUTPUT with postgres_reviews_repo.search. Honors the
+ * platform-view bypass + repo/q/state/org filters; an unknown UI state short-circuits to an empty page.
+ *
+ * W2.7 / EH10 query shape: the inner `page` subquery applies every filter, the ORDER BY, the windowed
+ * COUNT(*) OVER () (the locked `total` wire field — computed over the SLIM pull_request_reviews join,
+ * findings never enter it), and the LIMIT/OFFSET. Only THEN does a LEFT JOIN LATERAL aggregate per-PR
+ * finding_count + max-severity (non-suppressed) for the ≤ size rows of the current page — the legacy
+ * `counted` CTE aggregated core.review_findings over the ENTIRE matching set (for the platform view,
+ * every finding across every repo) on every request. The route additionally caps `page` (REVIEWS_MAX_PAGE)
+ * so the OFFSET scan-discard is bounded.
  */
 export async function searchReviews(
   db: Kysely<unknown>,
@@ -130,49 +136,62 @@ export async function searchReviews(
         )})`;
 
   const r = await sql<ReviewSearchRow>`
-    WITH counted AS (
-      SELECT rf.pr_id, COUNT(*) AS finding_count,
+    SELECT
+      page.review_id,
+      page.repo,
+      page.pr_number,
+      page.pr_title,
+      page.state,
+      CASE agg.severity_rank WHEN 4 THEN 'blocker' WHEN 3 THEN 'issue'
+                             WHEN 2 THEN 'suggestion' WHEN 1 THEN 'nit' ELSE NULL END AS severity_max,
+      agg.finding_count,
+      page.started_at,
+      page.completed_at,
+      page.total_count
+    FROM (
+      SELECT
+        pr.review_id,
+        repo.full_name AS repo,
+        pr.pr_number,
+        COALESCE(prr.title, 'PR #' || pr.pr_number::text) AS pr_title,
+        CASE
+          WHEN rr.lifecycle_state IS NULL                        THEN 'queued'
+          WHEN rr.lifecycle_state = 'PENDING'                    THEN 'queued'
+          WHEN rr.lifecycle_state IN ('RUNNING','WAITING_RETRY') THEN 'in_progress'
+          WHEN rr.lifecycle_state IN ('COMPLETED','PARTIAL')     THEN 'complete'
+          WHEN rr.lifecycle_state IN ('FAILED','CANCELLED')      THEN 'failed'
+          ELSE 'queued'
+        END AS state,
+        COALESCE(rr.started_at, pr.created_at) AS started_at,
+        rr.completed_at,
+        pr.created_at AS order_created_at,
+        prr.pr_id,
+        COUNT(*) OVER () AS total_count
+      FROM core.pull_request_reviews pr
+      JOIN core.repositories repo ON repo.github_repo_id = pr.repo_id
+      LEFT JOIN core.installations inst ON inst.installation_id = repo.installation_id
+      LEFT JOIN core.pull_requests prr ON prr.repository_id = repo.repository_id AND prr.pr_number = pr.pr_number
+      LEFT JOIN core.review_runs rr ON rr.run_id = pr.current_run_id
+      WHERE (${args.installationId} = CAST(${SUPER_ADMIN_PLATFORM_VIEW_UUID} AS uuid)
+             OR repo.installation_id = ${args.installationId})
+        AND (CAST(${repoFilter} AS text) IS NULL OR repo.full_name ILIKE '%' || CAST(${repoFilter} AS text) || '%')
+        AND (${stateClause})
+        AND (CAST(${qFilter} AS text) IS NULL OR prr.title ILIKE '%' || CAST(${qFilter} AS text) || '%')
+        AND (CAST(${orgFilter} AS text) IS NULL OR inst.account_login = ${orgFilter})
+      ORDER BY pr.created_at DESC, pr.review_id DESC
+      LIMIT ${args.size} OFFSET ${offset}
+    ) page
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*) AS finding_count,
              MAX(CASE rf.severity WHEN 'blocker' THEN 4 WHEN 'issue' THEN 3
                                   WHEN 'suggestion' THEN 2 WHEN 'nit' THEN 1 ELSE 0 END) AS severity_rank
       FROM core.review_findings rf
-      WHERE (${args.installationId} = CAST(${SUPER_ADMIN_PLATFORM_VIEW_UUID} AS uuid)
+      WHERE rf.pr_id = page.pr_id
+        AND (${args.installationId} = CAST(${SUPER_ADMIN_PLATFORM_VIEW_UUID} AS uuid)
              OR rf.installation_id = ${args.installationId})
         AND rf.suppression_state = 'NONE'
-      GROUP BY rf.pr_id
-    )
-    SELECT
-      pr.review_id,
-      repo.full_name AS repo,
-      pr.pr_number,
-      COALESCE(prr.title, 'PR #' || pr.pr_number::text) AS pr_title,
-      CASE
-        WHEN rr.lifecycle_state IS NULL                        THEN 'queued'
-        WHEN rr.lifecycle_state = 'PENDING'                    THEN 'queued'
-        WHEN rr.lifecycle_state IN ('RUNNING','WAITING_RETRY') THEN 'in_progress'
-        WHEN rr.lifecycle_state IN ('COMPLETED','PARTIAL')     THEN 'complete'
-        WHEN rr.lifecycle_state IN ('FAILED','CANCELLED')      THEN 'failed'
-        ELSE 'queued'
-      END AS state,
-      CASE counted.severity_rank WHEN 4 THEN 'blocker' WHEN 3 THEN 'issue'
-                                 WHEN 2 THEN 'suggestion' WHEN 1 THEN 'nit' ELSE NULL END AS severity_max,
-      COALESCE(counted.finding_count, 0) AS finding_count,
-      COALESCE(rr.started_at, pr.created_at) AS started_at,
-      rr.completed_at,
-      COUNT(*) OVER () AS total_count
-    FROM core.pull_request_reviews pr
-    JOIN core.repositories repo ON repo.github_repo_id = pr.repo_id
-    LEFT JOIN core.installations inst ON inst.installation_id = repo.installation_id
-    LEFT JOIN core.pull_requests prr ON prr.repository_id = repo.repository_id AND prr.pr_number = pr.pr_number
-    LEFT JOIN core.review_runs rr ON rr.run_id = pr.current_run_id
-    LEFT JOIN counted ON counted.pr_id = prr.pr_id
-    WHERE (${args.installationId} = CAST(${SUPER_ADMIN_PLATFORM_VIEW_UUID} AS uuid)
-           OR repo.installation_id = ${args.installationId})
-      AND (CAST(${repoFilter} AS text) IS NULL OR repo.full_name ILIKE '%' || CAST(${repoFilter} AS text) || '%')
-      AND (${stateClause})
-      AND (CAST(${qFilter} AS text) IS NULL OR prr.title ILIKE '%' || CAST(${qFilter} AS text) || '%')
-      AND (CAST(${orgFilter} AS text) IS NULL OR inst.account_login = ${orgFilter})
-    ORDER BY pr.created_at DESC, pr.review_id DESC
-    LIMIT ${args.size} OFFSET ${offset}
+    ) agg ON TRUE
+    ORDER BY page.order_created_at DESC, page.review_id DESC
   `.execute(db);
 
   const items = r.rows.map((row) => ({
