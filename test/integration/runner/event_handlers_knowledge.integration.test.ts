@@ -34,7 +34,10 @@ import { Kysely, PostgresDialect, sql } from "kysely";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import type { CacheGitCloner } from "#backend/activities/clone_repository.activity.js";
+import {
+  CloneSizeCapExceeded,
+  type CacheGitCloner,
+} from "#backend/activities/clone_repository.activity.js";
 import type { CodeOwnersFilePort } from "#backend/activities/sync_code_owners.activity.js";
 import type { EmbeddingsPort } from "#backend/adapters/embeddings_port.js";
 import { RecordingEmbeddingsClient } from "#backend/adapters/embeddings_port.js";
@@ -547,6 +550,59 @@ describeDb("event_handlers — nonRetryableErrorTypes parity (CS4.3 / T2)", () =
       expect(mints).toBe(1);
       expect(job!.dead_reason).toContain("GitHubNotFoundError");
       expect(job!.dead_reason).toContain("installation gone");
+    } finally {
+      if (priorCacheRoot === undefined) {
+        delete process.env.CODEMASTER_CLONE_CACHE_ROOT;
+      } else {
+        process.env.CODEMASTER_CLONE_CACHE_ROOT = priorCacheRoot;
+      }
+      rmSync(cacheRoot, { recursive: true, force: true });
+      await cleanup({ installationId, repositoryId });
+    }
+  });
+
+  it("(P2c/OM3) refresh_semantic_docs clone step: CloneSizeCapExceeded dead-letters after ONE attempt (no repeated full clones)", async () => {
+    // W3.6 (OM3): an over-cap repo is DETERMINISTICALLY over cap — every retry re-pays the full
+    // clone (bandwidth + disk + up to 5 min) only to be rejected at the end again. Classify it
+    // permanent so the oversize repo dead-letters on attempt 1 instead of burning the curve on
+    // every push.
+    const installationId = randomUUID();
+    const repositoryId = randomUUID();
+    await seedParents({ installationId, repositoryId });
+    const cacheRoot = mkdtempSync(join(tmpdir(), "om3-clone-cache-"));
+    const priorCacheRoot = process.env.CODEMASTER_CLONE_CACHE_ROOT;
+    process.env.CODEMASTER_CLONE_CACHE_ROOT = cacheRoot;
+    try {
+      let clones = 0;
+      const getToken = async (): Promise<string> => "tok";
+      const cloner: CacheGitCloner = {
+        clone: async (): Promise<void> => {
+          clones += 1;
+          throw new CloneSizeCapExceeded("clone exceeded the 1 GiB cap after full fetch");
+        },
+      };
+      const registry = new HandlerRegistry();
+      registerEventHandlers(registry, {
+        dsn: INTEGRATION_DSN!,
+        refreshCloner: cloner,
+        refreshGetToken: getToken,
+        refreshEmbeddings: new RecordingEmbeddingsClient(),
+      });
+      const repo = new BackgroundJobsRepo(db);
+
+      const jobId = await repo.enqueue({
+        jobType: "refresh_semantic_docs",
+        payload: refreshPayload(installationId, repositoryId),
+        maxAttempts: 3,
+      });
+      const r = await runOne(registry, repo);
+      expect(r.outcome).toBe("failed");
+
+      const job = await repo.getById(jobId);
+      expect(job!.state).toBe("dead"); // terminal DESPITE attempts remaining (1 < max 3)
+      expect(job!.attempts).toBe(1);
+      expect(clones).toBe(1); // the full clone was paid exactly ONCE
+      expect(job!.dead_reason).toContain("CloneSizeCapExceeded");
     } finally {
       if (priorCacheRoot === undefined) {
         delete process.env.CODEMASTER_CLONE_CACHE_ROOT;
