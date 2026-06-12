@@ -33,7 +33,12 @@
 import { transportAbortSignal } from "#platform/transport_timeout.js";
 import { type Counter, getMeter } from "#platform/observability/metrics.js";
 
-import { LlmRerankUnavailableError, type LlmRerankerPort } from "#backend/retrieval/llm_rerank.js";
+import { LlmRerank, LlmRerankUnavailableError, type LlmRerankerPort } from "#backend/retrieval/llm_rerank.js";
+import {
+  type RerankConfig,
+  type RerankStoredSettings,
+  resolveEffectiveRerankConfig,
+} from "#backend/retrieval/rerank_config.js";
 
 import type { KnowledgeChunkV1 } from "#contracts/knowledge_chunks.v1.js";
 
@@ -297,6 +302,70 @@ export class BedrockRerankPort implements LlmRerankerPort {
     }
     return scores;
   }
+}
+
+// ─── The per-retrieval override resolver (the rerankOverride-seam producer) ──────────────────────
+
+/** Reads the persisted admin config row (production: api/admin/llm_catalog_write.readRerankSettings
+ *  over the shared core pool; the wiring injects it so retrieval never imports the api layer). */
+export type RerankSettingsReader = () => Promise<RerankStoredSettings | null>;
+
+/** Produces the per-retrieval rerank override, or undefined when the effective config is disabled
+ *  (the IdentityRerankPort pass-through then stands). */
+export type BedrockRerankOverrideResolver = () => Promise<LlmRerank | undefined>;
+
+/**
+ * Build the per-retrieval Bedrock rerank resolver: re-reads the admin row EVERY retrieval (an admin
+ * save/kill-flip takes effect on the next review, no redeploy — one single-row PK SELECT), resolves
+ * the DB > env > default precedence ({@link resolveEffectiveRerankConfig}), and when enabled returns
+ * a fresh {@link LlmRerank} over a {@link BedrockRerankPort} carrying that config.
+ *
+ * FAIL-OPEN: a settings-read fault degrades to the env baseline (WARN + fault counter) — a DB blip
+ * neither fails retrieval nor silently diverges from the Helm intent.
+ */
+export function buildBedrockRerankOverrideResolver(args: {
+  readSettings: RerankSettingsReader;
+  credentials: BedrockRerankCredentialsSource;
+  /** The boot-parsed Helm baseline (rerank_config.parseRerankEnv — fail-loud at parse, not here). */
+  env: RerankConfig;
+  http?: RerankHttpClient;
+  timeoutMs?: number;
+}): BedrockRerankOverrideResolver {
+  return async (): Promise<LlmRerank | undefined> => {
+    let row: RerankStoredSettings | null;
+    try {
+      row = await args.readSettings();
+    } catch (e) {
+      console.warn(
+        JSON.stringify({
+          event: "bedrock_rerank_failed",
+          rule: "bedrock-rerank-fail-open",
+          reason: "resolver_failed",
+          detail: `rerank settings read failed; using the env baseline: ${errMsg(e)}`,
+        }),
+      );
+      try {
+        RERANK_FAULT_COUNTER.add(1, { reason: "resolver_failed" });
+      } catch {
+        // Telemetry never perturbs retrieval.
+      }
+      row = null;
+    }
+    const { config } = resolveEffectiveRerankConfig({ row, env: args.env });
+    if (!config.enabled || config.modelId === null) {
+      return undefined;
+    }
+    return new LlmRerank({
+      port: new BedrockRerankPort({
+        modelId: config.modelId,
+        region: config.region,
+        topN: config.topN,
+        credentials: args.credentials,
+        ...(args.http !== undefined ? { http: args.http } : {}),
+        ...(args.timeoutMs !== undefined ? { timeoutMs: args.timeoutMs } : {}),
+      }),
+    });
+  };
 }
 
 /** Read the response body defensively (a failed body read is a transport-class fault → ""). */

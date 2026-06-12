@@ -40,6 +40,7 @@ import { PRE_FUSION_TOP_K } from "#backend/retrieval/constants.js";
 import { rrfCombine } from "#backend/retrieval/rrf.js";
 
 import type { AnnRetriever } from "#backend/retrieval/ann_retriever.js";
+import type { BedrockRerankOverrideResolver } from "#backend/retrieval/bedrock_rerank.js";
 import type { Bm25Retriever } from "#backend/retrieval/bm25_retriever.js";
 import type { HybridRetriever } from "#backend/retrieval/hybrid_retriever.js";
 import { LlmBackedRerankPort, type RerankLlmCacheLike } from "#backend/retrieval/llm_backed_rerank.js";
@@ -68,6 +69,15 @@ export type RetrieveKnowledgeActivityOptions = {
    * flag-off → identity rerank (1:1 with the frozen Python, which ships only the no-op).
    */
   rerankCache?: RerankLlmCacheLike;
+  /**
+   * W1.3 RH9 — optional Bedrock rerank override resolver (the production reranker; DEFAULT OFF). When
+   * wired, the hybrid path asks it per retrieval for an {@link LlmRerank} built from the EFFECTIVE
+   * rerank config (admin DB row > Helm env > disabled). A non-undefined result REPLACES the identity
+   * pass-through ahead of the legacy flag-gated LLM-backed reranker; undefined (the default-OFF
+   * answer) leaves behavior byte-identical to pre-RH9. A resolver FAULT is swallowed with a WARN —
+   * a rerank fault must never fail the review.
+   */
+  bedrockRerankResolver?: BedrockRerankOverrideResolver;
 };
 
 /** Read the `CODEMASTER_LLM_RERANK_ENABLED` rollout flag (default OFF) — operator-flippable, replay-safe. */
@@ -120,6 +130,7 @@ export class RetrieveKnowledgeActivity {
   private readonly topK: number;
   private readonly hybrid: HybridRetriever | undefined;
   private readonly rerankCache: RerankLlmCacheLike | undefined;
+  private readonly bedrockRerankResolver: BedrockRerankOverrideResolver | undefined;
 
   public constructor({
     bm25Retriever,
@@ -127,12 +138,14 @@ export class RetrieveKnowledgeActivity {
     topK = 5,
     hybridRetriever,
     rerankCache,
+    bedrockRerankResolver,
   }: RetrieveKnowledgeActivityOptions) {
     this.bm25 = bm25Retriever;
     this.ann = annRetriever;
     this.topK = topK;
     this.hybrid = hybridRetriever;
     this.rerankCache = rerankCache;
+    this.bedrockRerankResolver = bedrockRerankResolver;
   }
 
   /**
@@ -271,13 +284,35 @@ export class RetrieveKnowledgeActivity {
       default_pool_token_reservation_pct: 0.15,
     };
 
+    // W1.3 RH9 — the Bedrock rerank override wins the seam when its effective config (admin row >
+    // Helm env > default-OFF) is enabled. FAIL-OPEN: a resolver fault is logged and retrieval
+    // proceeds un-reranked — a rerank fault must never fail the review.
+    let bedrockOverride: LlmRerank | undefined;
+    if (this.bedrockRerankResolver !== undefined) {
+      try {
+        bedrockOverride = await this.bedrockRerankResolver();
+      } catch (e) {
+        console.warn(
+          JSON.stringify({
+            event: "bedrock_rerank_failed",
+            rule: "bedrock-rerank-fail-open",
+            reason: "resolver_failed",
+            detail: e instanceof Error ? e.message : String(e),
+          }),
+        );
+        bedrockOverride = undefined;
+      }
+    }
+
     // E: per-invocation LLM rerank override (flag-gated; carries the query's installation_id). Undefined
     // when off → the hybrid retriever's static IdentityRerankPort no-op runs (1:1 with Python).
-    const rerankOverride = buildRerankOverride({
-      enabled: rerankEnabled(),
-      cache: this.rerankCache,
-      installationId: query.installation_id,
-    });
+    const rerankOverride =
+      bedrockOverride ??
+      buildRerankOverride({
+        enabled: rerankEnabled(),
+        cache: this.rerankCache,
+        installationId: query.installation_id,
+      });
     const result = await this.hybrid.retrieve(query, rerankOverride);
 
     const items: Array<KnowledgeChunkV1> = result.items.map((item) => item.chunk);
