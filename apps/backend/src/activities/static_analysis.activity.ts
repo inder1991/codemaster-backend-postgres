@@ -83,6 +83,18 @@ import type { PrMetaV1 } from "#contracts/walkthrough.v1.js";
  */
 export const MAX_RAW_PER_TOOL = 500;
 
+/**
+ * Per-runner FILE-LIST cap applied at routing time (W2.6 / M1). Ruff + ESLint spread the routed
+ * files onto the spawn argv; with no cap a monster PR (vendored-dep bump, generated code, mass
+ * rename — 1000+ files) builds an argv past ARG_MAX (~2 MiB) → spawn fails E2BIG → `failed_startup`
+ * for ruff, eslint AND gitleaks: the largest, highest-risk PRs silently lose ALL Tier-1 analysis
+ * including the secret scan. 1000 files × ~100-byte paths ≈ 100 KiB of argv — a ~20× margin.
+ * The cap keeps the FIRST N files (deterministic — sandbox_files order) and the drop is VISIBLE:
+ * `ToolStatusV1.files_total` carries the full routed count (files_scanned < files_total) and a
+ * structured WARN names the tool + drop count. Fail-OPEN, never crash the review (W1.9b posture).
+ */
+export const MAX_FILES_PER_RUNNER = 1000;
+
 /** ESLint-eligible extensions (1:1 with the Python `_ProductionPipeline` `.endswith((".ts", ".tsx",
  *  ".js", ".jsx"))` routing). */
 const ESLINT_EXTENSIONS: ReadonlyArray<string> = [".ts", ".tsx", ".js", ".jsx"];
@@ -157,14 +169,15 @@ export class StaticAnalysisActivity {
       return StaticAnalysisResultV1.parse({});
     }
 
-    // 2. Route files by language → the RunnerSpec list (1:1 with `_ProductionPipeline.run`).
+    // 2. Route files by language → the RunnerSpec list (1:1 with `_ProductionPipeline.run`),
+    //    each list bounded at MAX_FILES_PER_RUNNER (W2.6 / M1 — see the constant's doc).
     const pyFiles = files.filter((f) => f.endsWith(".py"));
     const tsJsFiles = files.filter((f) => ESLINT_EXTENSIONS.some((ext) => f.endsWith(ext)));
     const runners: ReadonlyArray<RunnerSpec> = [
-      { name: "ruff", runner: this.runners.ruff, files: pyFiles },
-      { name: "eslint", runner: this.runners.eslint, files: tsJsFiles },
+      capRunnerFiles({ name: "ruff", runner: this.runners.ruff, files: pyFiles }),
+      capRunnerFiles({ name: "eslint", runner: this.runners.eslint, files: tsJsFiles }),
       // Gitleaks scans the WHOLE file set (secret scanner; file-language irrelevant).
-      { name: "gitleaks", runner: this.runners.gitleaks, files },
+      capRunnerFiles({ name: "gitleaks", runner: this.runners.gitleaks, files }),
     ];
 
     // 3. Run the orchestrator → RAW findings (uncapped, unfiltered) + per-tool statuses. Never throws.
@@ -205,6 +218,33 @@ export class StaticAnalysisActivity {
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Bound one runner's routed file list at {@link MAX_FILES_PER_RUNNER} (W2.6 / M1). Keeps the FIRST
+ * N (sandbox_files order — deterministic); `filesTotal` carries the full routed count so the
+ * orchestrator's ToolStatusV1 surfaces the partial coverage (files_scanned < files_total) instead
+ * of silently re-baselining. A structured WARN names the tool + drop count (skip-with-degradation-
+ * note, the W1.9b posture — the spawn must never E2BIG away the whole tool).
+ */
+function capRunnerFiles(spec: RunnerSpec): RunnerSpec {
+  if (spec.files.length <= MAX_FILES_PER_RUNNER) {
+    return spec;
+  }
+  console.warn(
+    JSON.stringify({
+      event: "static_analysis.files_capped",
+      tool: spec.name,
+      files_total: spec.files.length,
+      files_kept: MAX_FILES_PER_RUNNER,
+      files_dropped: spec.files.length - MAX_FILES_PER_RUNNER,
+    }),
+  );
+  return {
+    ...spec,
+    files: spec.files.slice(0, MAX_FILES_PER_RUNNER),
+    filesTotal: spec.files.length,
+  };
+}
 
 /**
  * Cap each tool's findings at {@link MAX_RAW_PER_TOOL}, preserving registration order. Per-tool drop

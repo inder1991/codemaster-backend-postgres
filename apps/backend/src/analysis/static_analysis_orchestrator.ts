@@ -56,6 +56,13 @@ export type RunnerSpec = {
   readonly runner: AnalysisRunner;
   /** Files (workspace-relative) routed to this runner. Empty ⇒ marked `skipped`, never spawned. */
   readonly files: ReadonlyArray<string>;
+  /**
+   * The FULL routed file count BEFORE any caller-side cap (W2.6 / M1: the activity bounds `files`
+   * at MAX_FILES_PER_RUNNER so a monster PR can't E2BIG the spawn). When present it feeds
+   * `ToolStatusV1.files_total`, so capped coverage is VISIBLE (files_scanned < files_total) instead
+   * of silently re-baselined. Defaults to `files.length` (no cap engaged).
+   */
+  readonly filesTotal?: number;
 };
 
 /**
@@ -273,7 +280,7 @@ function completedStatus(spec: RunnerSpec, startedAt: Date, finishedAt: Date, fi
     tool_name: spec.name,
     status: "completed",
     files_scanned: spec.files.length,
-    files_total: spec.files.length,
+    files_total: spec.filesTotal ?? spec.files.length,
     started_at: startedAt.toISOString(),
     finished_at: finishedAt.toISOString(),
     duration_ms: durationMs(startedAt, finishedAt),
@@ -288,7 +295,7 @@ function timedOutStatus(spec: RunnerSpec, startedAt: Date, deadlineSeconds: numb
     // later refinement, out of scope).
     status: "timed_out",
     files_scanned: 0,
-    files_total: spec.files.length,
+    files_total: spec.filesTotal ?? spec.files.length,
     started_at: startedAt.toISOString(),
     finished_at: null,
     duration_ms: Math.round(deadlineSeconds * 1000),
@@ -308,7 +315,7 @@ function failedStatus(
     tool_name: spec.name,
     status: statusLabel,
     files_scanned: 0,
-    files_total: spec.files.length,
+    files_total: spec.filesTotal ?? spec.files.length,
     started_at: startedAt.toISOString(),
     finished_at: finishedAt.toISOString(),
     duration_ms: durationMs(startedAt, finishedAt),
