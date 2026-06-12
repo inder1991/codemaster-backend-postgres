@@ -892,6 +892,219 @@ function priorFindingLine(f: ReviewFindingV1): string {
   return `- [${f.severity}] ${f.file}:${f.start_line}-${f.end_line}: ${f.title}`;
 }
 
+// ── W2.2 — cache-ordered prompt split (Anthropic/Bedrock prompt caching) ─────────────────────────
+//
+// The Anthropic prompt cache is a PREFIX match over the rendered request (tools → system → messages):
+// any per-chunk byte invalidates everything after it. buildUserMessage interleaves PR-constant and
+// per-chunk content (the chunk body is near the TOP), so nothing beyond the system prompt was ever
+// cacheable across the N parallel chunk calls of one review — the XM1/XM6 cost finding.
+//
+// buildCachedReviewPrompt splits the SAME blocks into:
+//
+//   stablePrefix — PR-level content ONLY: PR header (repo/title/description), the chunk-INDEPENDENT
+//                  PR-scope manifest (no "← THIS CHUNK" markers, no per-chunk cited-path retention —
+//                  both would leak per-chunk bytes into the cached prefix and zero the hit rate), and
+//                  the project-manifests block. BYTE-IDENTICAL across every chunk of one review: it
+//                  is a pure function of PR-level ReviewContextV1 fields, and every multi-entry render
+//                  is code-point-sorted (no map-iteration-order nondeterminism). Pinned by
+//                  test/unit/review/prompt_cache_split.test.ts.
+//   chunkSuffix  — everything per-chunk/per-file, ordered guidance → retrieved context → Tier-1
+//                  appendix → the chunk DIFF LAST (policy, knowledge, consumers, evidence, tier-1
+//                  findings, tool statuses, arbitration, then path instructions + prior findings +
+//                  the chunk header/body inside one untrusted wrapper).
+//
+// doReview sends [system, stablePrefix, chunkSuffix] and marks the stable/variable boundary with
+// cache_control:{type:"ephemeral"} (plumbed via LlmClient.invokeModel → the SDK adapters), so the
+// tools + system + stablePrefix prefix is billed full-price ONCE per review and at ~10% (cache read)
+// on the remaining chunk calls.
+//
+// The legacy buildUserMessage stays byte-frozen above for the Python parity oracle
+// (test/parity/review_prompt.parity.test.ts); this split builder deliberately REORDERS blocks (it
+// re-renders the same content — nothing gained or lost) and therefore has NO Python analogue.
+//
+// Deliberate divergences from the legacy render, both forced by byte-stability:
+//   * No "← THIS CHUNK" / "← contains THIS CHUNK" markers — the current chunk is identified by the
+//     `## chunk: <path> (lines …)` header in the suffix instead.
+//   * Tier-3 (>80 chunks) renders a pure directory+extension aggregation of ALL paths — the legacy
+//     per-chunk retention of retrieval-cited paths depends on per-chunk retrieval results and cannot
+//     live in a byte-stable prefix.
+
+/** The cache-ordered review prompt: a PR-stable prefix + the per-chunk remainder. */
+export type CachedReviewPrompt = {
+  /** PR-level blocks only — byte-identical across every chunk call of one review (the cacheable prefix). */
+  readonly stablePrefix: string;
+  /** Per-chunk/per-file blocks, the chunk diff LAST. */
+  readonly chunkSuffix: string;
+};
+
+// Chunk-INDEPENDENT variant of renderPrScopeSection: same three compression tiers, same header and
+// authoritative-inventory clause, but no per-chunk markers and no retrieval-cited-path retention.
+function renderPrScopeSectionStable(manifest: ReadonlyArray<PRTopologyEntryV1>): string {
+  if (manifest.length === 0) {
+    return "";
+  }
+
+  const chunksTotal = manifest.length;
+  const pathsToEntries = new Map<string, Array<PRTopologyEntryV1>>();
+  for (const entry of manifest) {
+    const existing = pathsToEntries.get(entry.path);
+    if (existing) {
+      existing.push(entry);
+    } else {
+      pathsToEntries.set(entry.path, [entry]);
+    }
+  }
+  const distinctPathsCount = pathsToEntries.size;
+
+  const header =
+    `## PR scope (you are reviewing 1 chunk of ${chunksTotal}; ` +
+    "others reviewed by parallel LLM calls)";
+  let lines: Array<string>;
+
+  if (chunksTotal <= PATH_LEVEL_THRESHOLD) {
+    // Tier 1: per-path listing with chunk count + kind. The per-path entry list preserves manifest
+    // order (entries[0].kind = first-seen kind, as in the legacy render); the PATHS are sorted, so
+    // the bytes do not depend on manifest array order across same-kind entries.
+    lines = [header];
+    for (const path of sortedStrings([...pathsToEntries.keys()])) {
+      const entries = pathsToEntries.get(path)!;
+      const kind = entries[0]!.kind;
+      const count = entries.length;
+      const countSuffix = count > 1 ? ` (${count} chunks)` : "";
+      lines.push(`- ${path} [${kind}]${countSuffix}`);
+    }
+  } else if (chunksTotal <= DIRECTORY_LEVEL_THRESHOLD) {
+    // Tier 2: file inventory (path-only), sorted.
+    lines = [header, "", "File inventory:"];
+    for (const path of sortedStrings([...pathsToEntries.keys()])) {
+      lines.push(`- ${path}`);
+    }
+  } else {
+    // Tier 3: directory+extension aggregation over ALL distinct paths (no per-chunk retention).
+    const byDirExt = new Map<string, number>();
+    for (const path of pathsToEntries.keys()) {
+      const top = path.includes("/") ? path.split("/")[0]! : ".";
+      const ext = path.includes(".") ? path.slice(path.lastIndexOf(".") + 1) : "noext";
+      const key = `${top}/*.${ext}`;
+      byDirExt.set(key, (byDirExt.get(key) ?? 0) + 1);
+    }
+    lines = [
+      header,
+      "",
+      `Files in PR (${distinctPathsCount} total, grouped by directory + ` +
+        "extension for prompt budget):",
+    ];
+    for (const key of sortedStrings([...byDirExt.keys()])) {
+      lines.push(`- ${key} — ${byDirExt.get(key)!} files`);
+    }
+  }
+
+  lines.push("");
+  lines.push(
+    "Do NOT infer absence of code, files, or PR scope from the " +
+      "bounds of YOUR chunk. Other chunks may carry the code your " +
+      "knowledge citations reference. The inventory above is " +
+      "authoritative for PR file existence.",
+  );
+  return lines.join("\n");
+}
+
+/** Build the cache-ordered review prompt (see the module note above). */
+export function buildCachedReviewPrompt(context: ReviewContextV1): CachedReviewPrompt {
+  const chunk = context.chunk;
+
+  // ── stable prefix: PR header + chunk-independent PR scope (one untrusted wrapper) + manifests ──
+  const headerParts: Array<string> = [
+    `# pull request: ${context.repo}`,
+    `## title\n${context.pr_title}`,
+    `## description\n${context.pr_description}`,
+  ];
+  const stableScope = renderPrScopeSectionStable(context.pr_topology_manifest);
+  if (stableScope) {
+    headerParts.push("");
+    headerParts.push(stableScope);
+  }
+  const stableParts: Array<string> = [wrapUntrusted(headerParts.join("\n"))];
+  const manifestBlock = renderManifestsBlock(context.manifests);
+  if (manifestBlock) {
+    stableParts.push(manifestBlock);
+  }
+  const stablePrefix = stableParts.join("\n\n");
+
+  // ── per-chunk suffix: guidance → retrieved context → Tier-1 appendix → the diff LAST ──
+  const { policyForRender, knowledgeForRender } = applyBudget(context);
+
+  const suffixParts: Array<string> = [];
+  if (policyForRender !== null) {
+    const policyBlock = renderPolicyBlocks(policyForRender);
+    if (policyBlock) {
+      suffixParts.push(policyBlock);
+    }
+  }
+  const knowledgeBlock = renderRetrievedKnowledge(knowledgeForRender, {
+    degraded: context.retrieval_degraded,
+    degradationReason: context.retrieval_degradation_reason,
+  });
+  if (knowledgeBlock) {
+    suffixParts.push(knowledgeBlock);
+  }
+  const consumersBlock = renderConsumersBlock(
+    context.removed_or_changed_symbols,
+    context.consumer_hits,
+    { truncated: context.consumer_hits_truncated },
+  );
+  if (consumersBlock) {
+    suffixParts.push(consumersBlock);
+  }
+  const evidenceBlock = renderEvidenceManifest(context.retrieved_evidence);
+  if (evidenceBlock) {
+    suffixParts.push(evidenceBlock);
+  }
+
+  // Tier-1 appendix — same per-file filter + block order as buildLinterAwareReviewPrompt.
+  let tier1 = context.tier1_findings;
+  if (tier1.length > 0) {
+    tier1 = tier1.filter((f) => f.file === chunk.path);
+  }
+  const tier1Block = renderTier1FindingsBlock(tier1);
+  if (tier1Block) {
+    suffixParts.push(tier1Block);
+  }
+  const statusesBlock = renderToolStatusesBlock(context.tool_statuses);
+  if (statusesBlock) {
+    suffixParts.push(statusesBlock);
+  }
+  const arbBlock = renderArbitrationInstructions(context.tool_statuses);
+  if (arbBlock) {
+    suffixParts.push(arbBlock);
+  }
+
+  // The per-chunk diff LAST: file guidance + prior findings + the chunk header/body in ONE
+  // untrusted wrapper, ending the prompt on the chunk body.
+  const tailSections: Array<string> = [];
+  const pathLines = renderPathInstructions(context.matched_path_instructions);
+  if (pathLines.length > 0) {
+    // Drop the leading "" separator line — it exists to blank-separate from a preceding section,
+    // and here the section boundary is the \n\n join below.
+    tailSections.push(pathLines.slice(1).join("\n"));
+  }
+  if (context.prior_findings.length > 0) {
+    tailSections.push(
+      ["## prior findings (do not repeat)", ...context.prior_findings.map(priorFindingLine)].join(
+        "\n",
+      ),
+    );
+  }
+  tailSections.push(
+    `## chunk: ${chunk.path} (lines ${chunk.start_line}-${chunk.end_line}, ` +
+      `language=${chunk.language ?? "unknown"}, kind=${chunk.chunk_kind})\n` +
+      chunk.body,
+  );
+  suffixParts.push(wrapUntrusted(tailSections.join("\n\n")));
+
+  return { stablePrefix, chunkSuffix: suffixParts.join("\n\n") };
+}
+
 // ── JSON encoding helpers (mirror Python json.dumps semantics) ──────────────────────────────────
 type JsonObject = Record<string, JsonValue>;
 type JsonValue =
