@@ -7,7 +7,6 @@
 //   * skipOutcome suppresses the success-path record_stage(ok) emit only
 //   * the degradation note `<stage>_failed` (+ handle.note extras) is recorded on the error path
 //   * unknown stage name raises synchronously before the body runs
-import { CancelledFailure } from "@temporalio/common";
 import { describe, it, expect, vi } from "vitest";
 
 import {
@@ -63,20 +62,6 @@ describe("stageOutcome — swallow / re-raise matrix", () => {
     // The note + log still happened before the re-raise.
     expect(notes).toEqual(["post_review_failed"]);
     expect(logger.warning).toHaveBeenCalledTimes(1);
-  });
-
-  it("CancelledFailure ALWAYS re-raises even without raiseAfterLog — no log, no note", async () => {
-    const logger = makeLogger();
-    const notes: Array<string> = [];
-    const cancel = new CancelledFailure("cancelled");
-    await expect(
-      stageOutcome("review_chunk", { logger, degradationNotes: notes }, async () => {
-        throw cancel;
-      }),
-    ).rejects.toBe(cancel);
-    // Cancellation is NOT a degradation: no WARN line, no degradation-notes append.
-    expect(logger.warning).not.toHaveBeenCalled();
-    expect(notes).toEqual([]);
   });
 
   it("an AbortError (cancellation-shaped) ALWAYS re-raises even without raiseAfterLog", async () => {

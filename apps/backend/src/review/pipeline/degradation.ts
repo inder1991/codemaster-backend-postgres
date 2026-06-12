@@ -27,8 +27,7 @@
 // is installed the `.add()` calls are no-ops (safe). The Python's traceback.format_exc() truncation + 2KB
 // error-message truncation are mirrored on the log line.
 
-import { CancelledFailure } from "@temporalio/common";
-import { metricMeter, inWorkflowContext } from "@temporalio/workflow";
+import { type Counter, getMeter } from "#platform/observability/metrics.js";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // STAGE_NAMES — the locked stage-name set. Transcription of pipeline_metrics.py::STAGE_NAMES, PLUS the
@@ -113,8 +112,15 @@ export const OUTCOMES = new Set<string>(["ok", "error", "fallback", "skipped"]);
 export const REVIEW_STAGE_COUNTER_NAME = "codemaster_review_stage_total";
 
 const REVIEW_STAGE_COUNTER_DESCRIPTION =
-  "Number of review-pipeline stages completed, by stage name and outcome. Replay-safe: emitted via the " +
-  "Temporal workflow metricMeter.";
+  "Number of review-pipeline stages completed, by stage name and outcome.";
+
+// EMIT SEAM (de-Temporal): the Python sourced this from `workflow.metric_meter()`; the runner runs the
+// pipeline in-process (no workflow context, no replay), so it emits through the platform OTel meter
+// ({@link getMeter}), cached at module scope. No-op until a MeterProvider is installed (deferred exporter).
+const REVIEW_STAGE_COUNTER: Counter = getMeter("codemaster.review").createCounter(
+  REVIEW_STAGE_COUNTER_NAME,
+  { description: REVIEW_STAGE_COUNTER_DESCRIPTION },
+);
 
 export function recordStage(args: { stage: string; outcome: string }): void {
   if (!OUTCOMES.has(args.outcome)) {
@@ -123,14 +129,7 @@ export function recordStage(args: { stage: string; outcome: string }): void {
         "Grafana panels filter by outcome label — a typo'd outcome silently drops the metric.",
     );
   }
-  // metricMeter is workflow-context-only; no-op outside a workflow (unit tests drive the pure pipeline
-  // directly). The outcome-allowlist guard above still runs regardless (a typo'd outcome is a caller bug).
-  if (!inWorkflowContext()) {
-    return;
-  }
-  metricMeter
-    .createCounter(REVIEW_STAGE_COUNTER_NAME, undefined, REVIEW_STAGE_COUNTER_DESCRIPTION)
-    .add(1, { stage: args.stage, outcome: args.outcome });
+  REVIEW_STAGE_COUNTER.add(1, { stage: args.stage, outcome: args.outcome });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -272,9 +271,6 @@ export async function stageOutcome<T>(
  *  NEVER recorded as a chunk degradation; it re-raises so the workflow body's cancellation handler
  *  observes it. One predicate, two seams — the discipline cannot drift. */
 export function isCancellation(exc: unknown): boolean {
-  if (exc instanceof CancelledFailure) {
-    return true;
-  }
   if (exc instanceof Error && (exc.name === "AbortError" || exc.name === "TerminalCancelError")) {
     // TerminalCancelError is the de-Temporal shell's composed-abort fault (mutex loss / supersede /
     // hard timeout — review_job_runner.ts). Name-matched so this workflow-bundle-safe module never

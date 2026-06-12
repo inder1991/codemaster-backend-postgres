@@ -662,7 +662,7 @@ describe("orchestrate — STATIC-ANALYSIS activity raising FAILS OPEN (W1.9b/C1)
 //   * ALL chunks failing must NOT settle as a healthy zero-finding 'done' — the first (input-order)
 //     chunk failure re-raises (mirrors the classifier-failure-ratio threshold idiom).
 //   * Cancellation (a lost-lease/supersede abort, name === "AbortError", or a Temporal
-//     CancelledFailure) is NOT a degradation — it re-raises immediately (degradation.ts discipline).
+//     AbortError/TerminalCancelError) is NOT a degradation — it re-raises immediately (degradation.ts discipline).
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 describe("orchestrate — LLM single-chunk failure DEGRADES; surviving chunks still post (W1.9a/C2)", () => {
   it("continues to post when ONE of 3 chunks throws — the other 2 chunks' findings flow through", async () => {

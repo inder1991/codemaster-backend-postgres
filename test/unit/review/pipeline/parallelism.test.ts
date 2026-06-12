@@ -20,7 +20,6 @@
 //     RECORDED (chunk-INPUT order) and its peers complete; cancellation STILL propagates.
 import { describe, it, expect } from "vitest";
 
-import { CancelledFailure } from "@temporalio/common";
 
 import {
   fanOutReview,
@@ -465,7 +464,7 @@ describe("fanOutReview — cancel-peers on first hard failure (anyio task-group 
 // slot (in chunk-INPUT order — replay-deterministic regardless of completion order) and its peers
 // COMPLETE; the failed chunk simply contributes zero findings to the fan-in.
 //
-// CANCELLATION DISCIPLINE (the degradation.ts isCancellation contract): a Temporal CancelledFailure
+// CANCELLATION DISCIPLINE (the degradation.ts isCancellation contract): an AbortError-shaped cancellation
 // or an abort-shaped error (name === "AbortError" — the lost-lease/supersede abort) is NEVER
 // recorded as a chunk failure — it propagates immediately and stops the peers (the FIX #11
 // cancel-peers behaviour is preserved for cancellation).
@@ -594,13 +593,15 @@ describe("fanOutReview — failure-isolation slot (W1.9a fail-soft; C2)", () => 
     expect(dispatched).not.toContain(4);
   });
 
-  it("still propagates a Temporal CancelledFailure — cancellation is never fail-soft", async () => {
+  it("still propagates a cancellation (AbortError) — cancellation is never fail-soft", async () => {
     const chunks = [chunk(0), chunk(1)];
     const failures: Array<ChunkDispatchFailure> = [];
     const invoke: InvokeChunkFn = async (c) => {
       const idx = Number(c.path.replace(/\D/g, ""));
       if (idx === 1) {
-        throw new CancelledFailure("workflow cancelled");
+        const abort = new Error("aborted mid-fan-out");
+        abort.name = "AbortError"; // isCancellation recognizes the abort-shaped cancellation by name
+        throw abort;
       }
       return envelope(idx);
     };
@@ -609,7 +610,7 @@ describe("fanOutReview — failure-isolation slot (W1.9a fail-soft; C2)", () => 
         concurrency: 2,
         failureSlot: { recordFailure: (f) => failures.push(f) },
       }),
-    ).rejects.toBeInstanceOf(CancelledFailure);
+    ).rejects.toThrow("aborted mid-fan-out"); // propagated, NOT recorded as a degradation
     expect(failures).toEqual([]);
   });
 });
@@ -619,7 +620,7 @@ describe("fanOutReview — failure-isolation slot (W1.9a fail-soft; C2)", () => 
 // the JOB attempt-free at the reset hint via the runner's deferRetry — recording a throttle as a
 // chunk degradation instead permanently loses the chunk and settles the review 'done' (the merged
 // W1.9a slot silently defeated that contract). (2) the SHELL's abort fault (TerminalCancelError):
-// the de-Temporal composed abort surfaces with that name, not Temporal's CancelledFailure/AbortError
+// the de-Temporal composed abort surfaces with that name (TerminalCancelError); AbortError
 // — recording it drains every remaining chunk into false degradation notes.
 describe("fanOutReview — abort-class faults propagate even with a failureSlot", () => {
   function namedError(name: string, msg: string): Error {

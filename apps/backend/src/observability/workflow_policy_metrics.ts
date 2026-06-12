@@ -26,7 +26,7 @@
 // SANDBOX SAFETY (ADR-0065/0066): imports ONLY `@temporalio/workflow` (sandbox-legal) — NO node:crypto, NO
 // clock, NO RNG, NO uuid, NO env, NO I/O.
 
-import { metricMeter, inWorkflowContext } from "@temporalio/workflow";
+import { type Counter, getMeter } from "#platform/observability/metrics.js";
 
 // Counter NAMES — copied VERBATIM from the Python policy_metrics module constants.
 export const INVARIANT_VIOLATION_ATTEMPTED_NAME =
@@ -36,12 +36,27 @@ export const INVARIANT_ENFORCEMENT_ERROR_NAME =
 export const POLICY_BUNDLE_HIT_NAME = "codemaster_policy_bundle_hit_total";
 export const POLICY_BUNDLE_TOTAL_NAME = "codemaster_policy_bundle_total";
 
-// Instruments are created PER-EMIT (1:1 with the Python `meter.create_counter(...)` per call) — NOT cached
-// at module scope. Temporal's `metricMeter` can only be touched while a workflow context is active; touching
-// it outside one throws `IllegalStateError`. Each emit GUARDS on `inWorkflowContext()` and no-ops outside a
-// workflow — faithful to the Python (whose `workflow.metric_meter()` requires a workflow loop) AND lets the
-// orchestrator unit tests drive the pure pipeline directly without the emit throwing. The Temporal
-// MetricMeter.createCounter is idempotent by name, so per-call creation inside the context is cheap.
+// EMIT SEAM (de-Temporal): the Python sourced these from `workflow.metric_meter()`; with Temporal removed
+// the policy post-filter runs in-process (no workflow context, no replay), so the counters emit through the
+// platform OTel meter ({@link getMeter}) — cached at MODULE scope per the getMeter convention. Strictly
+// better than the old `inWorkflowContext()` guard, which no-op'd entirely in the Postgres runtime. Until a
+// MeterProvider is installed the `.add()` calls are no-ops (safe — deferred exporter wiring).
+const METER = getMeter("codemaster.review.policy");
+const VIOLATION_ATTEMPTED: Counter = METER.createCounter(INVARIANT_VIOLATION_ATTEMPTED_NAME, {
+  description:
+    "Count of policy-engine invariant fires per review. Low-cardinality labels only (no installation_id).",
+});
+const ENFORCEMENT_ERROR: Counter = METER.createCounter(INVARIANT_ENFORCEMENT_ERROR_NAME, {
+  description:
+    "Count of invariant enforcement exceptions (fail-CLOSED path). Non-zero rate triggers SRE alert.",
+});
+const BUNDLE_HIT: Counter = METER.createCounter(POLICY_BUNDLE_HIT_NAME, {
+  description:
+    "Reviews where the policy_bundles dict contained >=1 applicable rule. Numerator for adoption ratio.",
+});
+const BUNDLE_TOTAL: Counter = METER.createCounter(POLICY_BUNDLE_TOTAL_NAME, {
+  description: "Total reviews where the policy engine ran. Denominator for the adoption-ratio metric.",
+});
 
 /**
  * Workflow-body counter — emitted from the Step 7.2 inline post-filter when an invariant fires (the current
@@ -54,17 +69,7 @@ export function recordInvariantViolationAttempted(args: {
   invariantId: string;
   category: string;
 }): void {
-  if (!inWorkflowContext()) {
-    return;
-  }
-  metricMeter
-    .createCounter(
-      INVARIANT_VIOLATION_ATTEMPTED_NAME,
-      undefined,
-      "Count of policy-engine invariant fires per review. Low-cardinality labels only (no installation_id; " +
-        "per-installation drill-down is via Tempo traces).",
-    )
-    .add(1, { invariant_id: args.invariantId, category: args.category });
+  VIOLATION_ATTEMPTED.add(1, { invariant_id: args.invariantId, category: args.category });
 }
 
 /**
@@ -74,16 +79,7 @@ export function recordInvariantViolationAttempted(args: {
  * `PolicyInvariantEnforcementError` alert (any non-zero increase over 5min).
  */
 export function recordInvariantEnforcementError(args: { invariantId: string }): void {
-  if (!inWorkflowContext()) {
-    return;
-  }
-  metricMeter
-    .createCounter(
-      INVARIANT_ENFORCEMENT_ERROR_NAME,
-      undefined,
-      "Count of invariant enforcement exceptions (fail-CLOSED path). Non-zero rate triggers SRE alert.",
-    )
-    .add(1, { invariant_id: args.invariantId });
+  ENFORCEMENT_ERROR.add(1, { invariant_id: args.invariantId });
 }
 
 /**
@@ -92,17 +88,7 @@ export function recordInvariantEnforcementError(args: { invariantId: string }): 
  * {@link recordPolicyBundleTotal} for Grafana to compute the ratio.
  */
 export function recordPolicyBundleHit(): void {
-  if (!inWorkflowContext()) {
-    return;
-  }
-  metricMeter
-    .createCounter(
-      POLICY_BUNDLE_HIT_NAME,
-      undefined,
-      "Reviews where the policy_bundles dict contained >=1 applicable rule. Numerator for the " +
-        "adoption-ratio metric (denominator is POLICY_BUNDLE_TOTAL_NAME).",
-    )
-    .add(1);
+  BUNDLE_HIT.add(1);
 }
 
 /**
@@ -111,14 +97,5 @@ export function recordPolicyBundleHit(): void {
  * `record_policy_bundle_total`.
  */
 export function recordPolicyBundleTotal(): void {
-  if (!inWorkflowContext()) {
-    return;
-  }
-  metricMeter
-    .createCounter(
-      POLICY_BUNDLE_TOTAL_NAME,
-      undefined,
-      "Total reviews where the policy engine ran (FF on + patched). Denominator for the adoption-ratio metric.",
-    )
-    .add(1);
+  BUNDLE_TOTAL.add(1);
 }
