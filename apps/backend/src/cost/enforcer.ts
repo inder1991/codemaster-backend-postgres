@@ -4,9 +4,10 @@
  * `InMemoryCostCapEnforcer` (unit-test double), and the `todayUtc` clock→date helper.
  *
  * The REAL production enforcer — `PostgresCostCapEnforcer` (the atomic, optimistic-reservation
- * `SELECT ... FOR UPDATE` enforcer over `telemetry.cost_daily`, 1:1 with the Python
- * `codemaster/cost/postgres_enforcer.py`) — lives in the sibling `./postgres_enforcer.ts`, matching
- * the Python file split. It implements the `CostCapEnforcer` interface exported here; the production
+ * enforcer over `telemetry.cost_daily`; since W2.1 a LOCK-FREE conditional-UPDATE gate rather than
+ * the Python `codemaster/cost/postgres_enforcer.py` `SELECT ... FOR UPDATE` — same decisions, no
+ * held hot-row lock) — lives in the sibling `./postgres_enforcer.ts`, matching the Python file
+ * split. It implements the `CostCapEnforcer` interface exported here; the production
  * `LlmClientCache` injects it. ALL cost arithmetic is INTEGER cents — no float, no division.
  *
  * Workers call `enforcer.checkOrRaise({ installationId, estimatedCents, today })` before every
