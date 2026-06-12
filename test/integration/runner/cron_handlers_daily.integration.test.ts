@@ -483,6 +483,54 @@ describeDb("cron_handlers — daily crons on the background-jobs platform (Phase
       await cleanupRetentionFixtures(seed);
     }
   });
+
+  it("(5) OH7: a close-sweep fault does NOT abort retire + delete — both pure-DB sweeps still run; the attempt still fails for redrive", async () => {
+    const seed = await seedRetentionFixtures();
+    // The close sweep's GitHub egress hard-fails — pre-OH7 this aborted the WHOLE chain, so retire
+    // + delete (pure-DB, zero dependency on close) silently skipped for the day and terminal runs
+    // + aged events accumulated unbounded.
+    const failingGithub = {
+      get: async (): Promise<never> => {
+        throw new Error("synthetic GitHub outage (OH7)");
+      },
+      patch: async (): Promise<never> => {
+        throw new Error("synthetic GitHub outage (OH7)");
+      },
+    } as unknown as GitHubApiClient;
+
+    try {
+      const registry = new HandlerRegistry();
+      registerCronHandlers(registry, { dsn: INTEGRATION_DSN!, retentionGithubClient: failingGithub });
+      const repo = new BackgroundJobsRepo(db);
+      const jobId = await repo.enqueue({
+        jobType: "run_id_retention",
+        payload: { prTtlDays: 7, runTtlDays: 30, eventTtlDays: 90 },
+      });
+      const r = await runOneBackgroundJob({
+        repo, registry, clock: new WallClock(),
+        owner: TEST_CONFIG.owner, leaseS: TEST_CONFIG.leaseS, heartbeatS: TEST_CONFIG.heartbeatS,
+        maxRuntimeS: TEST_CONFIG.maxRuntimeS,
+      });
+      // The attempt FAILS (the redrive keeps re-attempting the close sweep on the backoff curve) …
+      expect(r.outcome).toBe("failed");
+      const job = await repo.getById(jobId);
+      expect(job!.state).toBe("ready"); // re-enqueued, not dead (attempts remain)
+      expect(job!.last_error).toContain("close");
+
+      // … but the RETIRE sweep still ran: the 40d terminal run was soft-deleted …
+      const old = await sql<{ retired_at: Date | null; retention_reason: string | null }>`
+        SELECT retired_at, retention_reason FROM core.review_runs WHERE run_id = ${seed.oldRunId}`.execute(db);
+      expect(old.rows[0]!.retired_at).not.toBeNull();
+      expect(old.rows[0]!.retention_reason).toBe("ttl_expired");
+
+      // … and the DELETE sweep still ran: the 100d workflow_event is gone.
+      const evt = await sql<{ n: string }>`
+        SELECT COUNT(*) AS n FROM audit.workflow_events WHERE event_id = ${seed.agedEventId}`.execute(db);
+      expect(Number(evt.rows[0]!.n)).toBe(0);
+    } finally {
+      await cleanupRetentionFixtures(seed);
+    }
+  });
 });
 
 // ─── CRON_SCHEDULES literal shape + cadence-vocabulary fit (pure — no DB) ──────────────────────────
