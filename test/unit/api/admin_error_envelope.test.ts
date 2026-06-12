@@ -70,6 +70,22 @@ describe("W4.7/EH6 admin-scope error envelope", () => {
     await app.close();
   });
 
+  it("a route-classified 4xx that sends an Error body (the zod `send(body.error)` idiom) keeps its status", async () => {
+    // POST reject with a too-short reason: the route does reply.code(422).send(zodError) — an Error
+    // instance, which Fastify routes through the error handler. The handler must honor the
+    // route-set 4xx (Fastify-default semantics), not clamp it to a generic 500.
+    const app = await makeAdminApp([[]]);
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/admin/knowledge/proposals/aaaaaaaa-1111-2222-3333-444444444444/reject",
+      headers: { "content-type": "application/json" },
+      cookies: { [SESSION_COOKIE_NAME]: cookie() },
+      payload: JSON.stringify({ reason: 42 }), // wrong type → zod parse failure → send(body.error)
+    });
+    expect(res.statusCode).toBe(422);
+    await app.close();
+  });
+
   it("framework-classified client errors keep their 4xx status (malformed JSON body → 400)", async () => {
     const app = await makeAdminApp([[]]);
     const res = await app.inject({
