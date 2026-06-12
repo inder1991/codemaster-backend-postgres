@@ -2239,10 +2239,11 @@ export async function registerAdminRoutes(
             now: rotatedAt,
           });
         }
-        // Re-read the PRIMARY slot unconditionally — 1:1 with Python read_metadata_for_ui() (no role arg →
-        // defaults role='primary'; docstring "Return the primary slot's metadata"). So a role='secondary'
-        // PUT returns the primary slot's body (a Python latent quirk), and 500s when no primary row exists.
-        const meta = await getLlmProviderConfig(opts.db);
+        // W4.7 / EL1 — re-read the slot just WRITTEN (deliberate fix of the Python read_metadata_for_ui()
+        // quirk, which re-read role='primary' unconditionally: a secondary PUT echoed the primary slot's
+        // body and 500'd when no primary row existed even though the secondary write succeeded — inviting
+        // a duplicate rotation retry). The row was just written, so a null read is a real inconsistency.
+        const meta = await getLlmProviderConfig(opts.db, body.role);
         if (meta === null) {
           return reply.code(500).send({ detail: "internal: write succeeded but read returned no row" });
         }
