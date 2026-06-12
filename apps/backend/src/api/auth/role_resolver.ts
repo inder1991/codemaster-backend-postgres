@@ -8,9 +8,11 @@
 // Fail-CLOSED contract: on DB error (timeout, connection loss, query failure) the Postgres resolver returns
 // null — the caller maps null to a 403. A transient DB hiccup denies ONE login, it does not 500 the auth path.
 //
-// FAITHFUL-PORT NOTE: like the frozen Python, the query does NOT filter `revoked_at IS NULL` — revocation is
-// not honored at resolve time in either implementation. Matching the frozen behavior is intentional; a
-// revocation-honoring change would be a separate, parity-breaking decision.
+// PARITY-BREAK (W4.7 / EM4, 2026-06-12): unlike the frozen Python, the query filters `revoked_at IS NULL`,
+// so revoking a grant takes effect at the NEXT login instead of being honored for up to a full 12h session
+// lifetime. The Python's revocation-blind resolve was a privilege-revocation-doesn't-take gap; the security
+// cost of honoring stale grants outweighs byte-parity here (the deliberate decision the old faithful-port
+// note deferred).
 
 import { type Kysely, sql } from "kysely";
 
@@ -31,12 +33,14 @@ function highestPrecedence(candidates: ReadonlyArray<Role>): Role | null {
   return candidates.reduce((a, b) => (rolePrecedence(a) <= rolePrecedence(b) ? a : b));
 }
 
-/** A single role grant for the in-memory resolver. `installationId` is null for platform-scope grants. */
+/** A single role grant for the in-memory resolver. `installationId` is null for platform-scope grants.
+ *  `revokedAt` non-null marks a revoked grant — ignored at resolve time (EM4 parity with Postgres). */
 export type RoleGrant = {
   userId: string;
   installationId: string | null;
   scope: "platform" | "installation";
   role: Role;
+  revokedAt?: Date | null;
 };
 
 /** Test-only resolver backed by an in-memory grant list. */
@@ -52,6 +56,9 @@ export class InMemoryRoleResolver implements RoleResolver {
     for (const g of this.#grants) {
       if (g.userId !== args.userId) {
         continue;
+      }
+      if (g.revokedAt != null) {
+        continue; // EM4: revoked grants never authenticate.
       }
       if (g.scope === "platform") {
         candidates.push(g.role);
@@ -79,6 +86,7 @@ export class PostgresRoleResolver implements RoleResolver {
         SELECT role FROM core.role_grants
         WHERE subject_kind = 'user'
           AND subject_id = ${args.userId}
+          AND revoked_at IS NULL
           AND (scope = 'platform' OR (scope = 'installation' AND installation_id = ${args.installationId}))
       `.execute(this.#db);
       roles = r.rows.map((row) => row.role);
