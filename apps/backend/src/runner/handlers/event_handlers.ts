@@ -314,9 +314,18 @@ function requireDsn(deps: EventHandlersDeps, jobType: string): string {
 
 // CS4.3 / T2 — the per-step nonRetryableErrorTypes lists, byte-1:1 with the Temporal proxies they
 // replace (sync_code_owners.workflow.ts:65; refresh_semantic_docs.workflow.ts:82 = the clone step,
-// :107 = the refresh/embed step — clone and sync share one list, the same two GitHub faults).
+// :107 = the refresh/embed step — the same two GitHub faults on both).
+//
+// + CloneSizeCapExceeded on the CLONE step (W3.6 / OM3 — a DELIBERATE widening over the Temporal
+// list): the size cap is evaluated only AFTER the full clone completes, so an over-cap monorepo is
+// DETERMINISTICALLY over cap on every retry — each attempt re-pays the full clone (bandwidth, disk,
+// up to 5 min) only to be wiped + rejected again. Dead-letter on attempt 1; the cheap GitHub
+// `size` pre-check that would skip the clone entirely is tracked in the plan (OM3, second half).
 const SYNC_CODE_OWNERS_NON_RETRYABLE = ["GitHubAppUnauthorized", "GitHubNotFoundError"] as const;
-const REFRESH_CLONE_NON_RETRYABLE = SYNC_CODE_OWNERS_NON_RETRYABLE;
+const REFRESH_CLONE_NON_RETRYABLE = [
+  ...SYNC_CODE_OWNERS_NON_RETRYABLE,
+  "CloneSizeCapExceeded",
+] as const;
 const REFRESH_EMBED_NON_RETRYABLE = ["WrongVectorDimensionError"] as const;
 
 /**
