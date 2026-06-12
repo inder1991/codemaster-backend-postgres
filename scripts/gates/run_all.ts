@@ -14,6 +14,8 @@ import { main as unsafeMigrationPattern } from "./check_unsafe_migration_pattern
 import { main as activityInputJsonSafe } from "./check_activity_input_json_safe.js";
 import { main as llmOutputParsersUseCoercion } from "./check_llm_output_parsers_use_coercion.js";
 import { main as workflowSilentDegradation } from "./check_workflow_silent_degradation.js";
+// Teardown lock — fails if any @temporalio module reference reappears after the de-Temporal removal.
+import { main as noTemporalImports } from "./check_no_temporal_imports.js";
 
 const gates: Array<() => number> = [
   tenantScopedRawSql,
@@ -25,6 +27,7 @@ const gates: Array<() => number> = [
   activityInputJsonSafe,
   llmOutputParsersUseCoercion,
   workflowSilentDegradation,
+  noTemporalImports,
 ];
 
 let rc = 0;
