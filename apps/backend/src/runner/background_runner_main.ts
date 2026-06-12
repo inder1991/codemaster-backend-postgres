@@ -794,25 +794,12 @@ export async function runBackgroundRunner(
 }
 
 // Main-module entrypoint guard — fires ONLY under a direct `node .../background_runner_main.js`
-// invocation (no prod manifest does this yet; see the module doc), never on import. Fail LOUD on
-// any startup error (same idiom as worker/main.ts / outbox_dispatcher_main.ts). CS1.1: the mode is
-// parsed from env HERE too, so even a direct invocation cannot boot the Postgres runtime while
-// CODEMASTER_RUNTIME_MODE is 'temporal' (the default) — mutual exclusivity holds on every boot
-// path, not only through main.ts's resolveBootTasks.
+// invocation, never on import. Fail LOUD on any startup error. parseRuntimeMode validates the env
+// HERE too (it throws on a stale CODEMASTER_RUNTIME_MODE=temporal or a removed cutover boolean), so
+// even a direct invocation refuses boot on bad env before the runner starts a loop.
 if (process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`) {
   Promise.resolve()
-    .then(() => {
-      const mode = parseRuntimeMode(process.env);
-      if (mode === "temporal") {
-        throw new Error(
-          `refusing to boot the background runner: ${RUNTIME_MODE_ENV} is 'temporal' (the ` +
-            `default) — in that mode the Temporal runtime owns the crons and the outbox, and ` +
-            `booting this runner alongside would double-run them (CS1.1 mutual exclusivity). ` +
-            `Set ${RUNTIME_MODE_ENV}=postgres or ${RUNTIME_MODE_ENV}=shadow.`,
-        );
-      }
-      return runBackgroundRunner(mode);
-    })
+    .then(() => runBackgroundRunner(parseRuntimeMode(process.env)))
     .catch((err: unknown) => {
       process.stderr.write(
         `background runner FAILED: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,

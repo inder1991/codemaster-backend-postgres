@@ -1,140 +1,23 @@
-/**
- * Coverage test for the Temporal worker composition root (`apps/backend/src/worker/build_activities.ts`).
- *
- * This is the regression guard for two defect classes the composition root closes:
- *
- *   1. MISSING ACTIVITIES — the pre-`buildActivities` static registry registered only a partial slice of
- *      the review-pipeline surface (no chunk/redact, embed, retrieve, workspace, or review-chunk
- *      activities). A workflow dispatching one of the absent activities crashes at runtime with
- *      `ActivityNotRegistered`. This test asserts EVERY expected activity NAME is present in the map.
- *
- *   2. THE 2-ARG LATENT CRASH — Temporal dispatches an activity with a SINGLE positional argument. A bare
- *      2-arg function (e.g. `cloneRepoIntoWorkspace(req, deps)`) registered directly receives `deps ===
- *      undefined` and crashes (or silently runs with a hole). The composition root CURRIES every such
- *      activity into a 1-arg `(input) => …` closure. A curried activity has `.length === 1`; a bare 2-arg
- *      function has `.length === 2`. This test asserts `fn.length <= 1` for EVERY registered value, so a
- *      future regression that registers a bare 2-arg function FAILS HERE rather than at dispatch time.
- *
- * ## No DB, no network
- *
- * `buildActivities()` constructs the real collaborators but the `*.fromDsn(...)` constructors build a
- * LAZY pool (no connection at construction), and the LlmClientCache + Vault wiring is deferred to first
- * `bedrockReviewChunk` invocation (the same production-deferred-Vault pattern the sibling post_* activities
- * use). So construction is cheap: it reads `CODEMASTER_PG_CORE_DSN` (+ `CODEMASTER_QWEN_DSN` for the
- * embedder), which this test sets to dummy values; it never connects. Per-review routing: it NO LONGER
- * reads `CODEMASTER_GITHUB_INSTALLATION_ID` (the per-PR id is threaded through each activity input).
- */
+// buildActivities() composition-root coverage (post-Temporal-teardown).
+//
+// buildActivities() is the SOURCE OF TRUTH for the real activity surface the Postgres runner dispatches
+// in-process: runner/in_process_ports.ts (the orchestrate ports, by baseFn key), review_job_shell's
+// lifecycle bundle (camelCase keys), and the cron/event handlers (snake_case keys). A key the runner wires
+// but buildActivities does NOT register is a runtime `base(...)[name] is not a function` crash — exactly the
+// live PR #137 failure (now also pinned statically by test/smoke/in_process_ports_wired_keys.smoke.test.ts).
+//
+// This file pins TWO buildActivities invariants:
+//   (1) it registers EVERY name the runtime dispatches by (the hand-maintained EXPECTED set below);
+//   (2) every registered value is callable with a SINGLE positional argument (arity <= 1) — a bare 2-arg
+//       function would receive `undefined` for its 2nd arg when dispatched with one positional input.
 
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it, beforeAll, afterAll } from "vitest";
 
 import { buildActivities } from "#backend/worker/build_activities.js";
 
-// ── The two modules that proxy activities (the AUTHORITATIVE source of "what the workflow dispatches") ──
-// The workflow body proxies the Stage-2/3/4 lifecycle + enrichment activities DIRECTLY; the orchestrator's
-// activity_proxy bridge proxies the 18 pipeline activities + the Stage-3/4/5 orchestrator-side ports. Every
-// `proxyActivities<{ <name>(...) }>(...)` block names a REGISTERED activity Temporal will dispatch by name —
-// so the union of those names is exactly the set buildActivities() MUST register or the workflow dies with
-// ActivityNotRegistered at dispatch. We parse this set from source so the coverage assertion is self-updating
-// (a new proxied activity that is NOT registered fails the test below, rather than silently drifting).
-const WORKFLOW_BODY_PATH = fileURLToPath(
-  new URL("../../../apps/backend/src/workflows/review_pull_request.workflow.ts", import.meta.url),
-);
-const ACTIVITY_PROXY_PATH = fileURLToPath(
-  new URL("../../../apps/backend/src/workflows/activity_proxy.ts", import.meta.url),
-);
-// Wave-1 liveness-backstop cron workflows (ADR-0074 / ADR-0064). Each proxies ONE snake_case activity
-// (mutex_janitor_activity / review_run_reaper_activity); registering by-name must hold or the 5-min/10-min
-// cron dies with ActivityNotRegistered at fire time — exactly when the backstop is needed. Parsed here so
-// the source-derived coverage assertion below PINS those registrations against a future drop.
-const MUTEX_JANITOR_WORKFLOW_PATH = fileURLToPath(
-  new URL("../../../apps/backend/src/workflows/mutex_janitor.workflow.ts", import.meta.url),
-);
-const REVIEW_RUN_REAPER_WORKFLOW_PATH = fileURLToPath(
-  new URL("../../../apps/backend/src/workflows/review_run_reaper.workflow.ts", import.meta.url),
-);
-// Wave-4 Confluence ingest workflows (combined-pod worker reuse — ADR-0075). The full-sync fan-out proxies
-// 7 confluence activities; the stale-sweep proxies the 8th; the single-page resync proxies 4 of the 7. Each
-// is bundled into the SAME pod's `all_workflows.ts` and dispatches its activities by their REGISTERED
-// snake_case Temporal names — registering by-name must hold or the schedule (6h/24h) dies with
-// ActivityNotRegistered at fire time. Parsed here so the source-derived coverage assertion PINS them.
-const CONFLUENCE_INGEST_WORKFLOW_PATH = fileURLToPath(
-  new URL("../../../apps/backend/src/workflows/confluence_ingest.workflow.ts", import.meta.url),
-);
-const MARK_STALE_CHUNKS_WORKFLOW_PATH = fileURLToPath(
-  new URL("../../../apps/backend/src/workflows/mark_stale_chunks.workflow.ts", import.meta.url),
-);
-const TRIGGER_PAGE_RESYNC_WORKFLOW_PATH = fileURLToPath(
-  new URL("../../../apps/backend/src/workflows/trigger_page_resync.workflow.ts", import.meta.url),
-);
-// Wave-2 retention cron workflows (combined-pod worker reuse). The run_id retention workflow proxies its 3
-// snake_case sweep activities; the partition-maintenance workflow proxies 1; the workspace-retention
-// workflow proxies its 3 snake_case sweeps + `releaseWorkspace`. Each is bundled into the SAME pod's
-// `all_workflows.ts` and dispatches its activities by their REGISTERED names — registering by-name must hold
-// or the schedule (daily / 5-min) dies with ActivityNotRegistered at fire time. Parsed here so the
-// source-derived coverage assertion PINS them.
-const RUN_ID_RETENTION_WORKFLOW_PATH = fileURLToPath(
-  new URL("../../../apps/backend/src/workflows/run_id_retention.workflow.ts", import.meta.url),
-);
-const PARTITION_MAINTENANCE_WORKFLOW_PATH = fileURLToPath(
-  new URL("../../../apps/backend/src/workflows/partition_maintenance.workflow.ts", import.meta.url),
-);
-const WORKSPACE_RETENTION_WORKFLOW_PATH = fileURLToPath(
-  new URL("../../../apps/backend/src/workflows/workspace_retention.workflow.ts", import.meta.url),
-);
-// Wave-3 spine workflows (clone-backed semantic-docs refresh + CODEOWNERS sync). The refresh workflow
-// proxies TWO snake_case activities (clone_repository_activity Step 1 + refresh_semantic_docs_activity
-// Step 2); the sync workflow proxies one (sync_code_owners_activity). Each is bundled into the SAME pod's
-// `all_workflows.ts` and dispatches its activities by their REGISTERED names — registering by-name must hold
-// or an event-driven start dies with ActivityNotRegistered at dispatch. Parsed here so the source-derived
-// coverage assertion PINS all three (clone_repository_activity is ONLY proxied by the refresh workflow).
-const SYNC_CODE_OWNERS_WORKFLOW_PATH = fileURLToPath(
-  new URL("../../../apps/backend/src/workflows/sync_code_owners.workflow.ts", import.meta.url),
-);
-const REFRESH_SEMANTIC_DOCS_WORKFLOW_PATH = fileURLToPath(
-  new URL("../../../apps/backend/src/workflows/refresh_semantic_docs.workflow.ts", import.meta.url),
-);
-
-/**
- * Parse the REGISTERED activity names from every `proxyActivities<{ <name>(...)` block in a workflow-side
- * module. Each `proxyActivities()` call in this codebase is typed to exactly ONE registered-name method (the
- * naming-bridge convention activity_proxy.ts documents), so the FIRST identifier inside each
- * `proxyActivities<{` block IS the registered name Temporal dispatches by. A literal source parse (no TS
- * compile) is sufficient + dependency-free.
- */
-function parseProxiedActivityNames(modulePath: string): ReadonlyArray<string> {
-  const src = readFileSync(modulePath, "utf8");
-  const names = new Set<string>();
-  const re = /proxyActivities<\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(src)) !== null) {
-    names.add(m[1]!);
-  }
-  return [...names];
-}
-
-/** The full union of activity names the two workflow-side modules proxy (the dispatch-by-name surface). */
-const PROXIED_ACTIVITY_NAMES: ReadonlyArray<string> = [
-  ...new Set([
-    ...parseProxiedActivityNames(WORKFLOW_BODY_PATH),
-    ...parseProxiedActivityNames(ACTIVITY_PROXY_PATH),
-    ...parseProxiedActivityNames(MUTEX_JANITOR_WORKFLOW_PATH),
-    ...parseProxiedActivityNames(REVIEW_RUN_REAPER_WORKFLOW_PATH),
-    ...parseProxiedActivityNames(CONFLUENCE_INGEST_WORKFLOW_PATH),
-    ...parseProxiedActivityNames(MARK_STALE_CHUNKS_WORKFLOW_PATH),
-    ...parseProxiedActivityNames(TRIGGER_PAGE_RESYNC_WORKFLOW_PATH),
-    ...parseProxiedActivityNames(RUN_ID_RETENTION_WORKFLOW_PATH),
-    ...parseProxiedActivityNames(PARTITION_MAINTENANCE_WORKFLOW_PATH),
-    ...parseProxiedActivityNames(WORKSPACE_RETENTION_WORKFLOW_PATH),
-    ...parseProxiedActivityNames(SYNC_CODE_OWNERS_WORKFLOW_PATH),
-    ...parseProxiedActivityNames(REFRESH_SEMANTIC_DOCS_WORKFLOW_PATH),
-  ]),
-];
-
-// The full review-pipeline activity surface the composition root MUST register. Keys are the camelCase
-// function names Temporal resolves activities by (matching the workflow `proxyActivities<{…}>` surface).
+// The activity NAMES the runtime dispatches by (camelCase = the lifecycle/orchestrate ports;
+// snake_case = the cron/event handlers). Hand-maintained — the in_process_ports_wired_keys smoke pins the
+// orchestrate-port subset against in_process_ports.ts so it cannot silently drift for that surface.
 const EXPECTED_ACTIVITY_NAMES = [
   "persistReviewFindings",
   "persistReviewWalkthrough",
@@ -156,21 +39,17 @@ const EXPECTED_ACTIVITY_NAMES = [
   "retrieveKnowledge",
   "bedrockReviewChunk",
   "generateWalkthrough",
-  // #4 manifest fetch/parse (bound-method holders) + #6 carry-forward loader (bare fn) — dispatched
-  // directly by the workflow body (fetch→parse straight-line; loader flag-gated default-off).
+  // #4 manifest fetch/parse (bound-method holders) + #6 carry-forward loader (bare fn).
   "fetchManifestSnapshots",
   "parseManifestDependencies",
   "loadParentReviewFindings",
-  // Stage-2 lifecycle: gate + mutex lease renew/release + placeholder post/delete (dispatched directly by
-  // the workflow body, not the orchestrator's activity_proxy bridge).
+  // Stage-2 lifecycle: gate + mutex lease renew/release + placeholder post/delete.
   "startReviewForWebhook",
   "renewPrReviewMutexLeaseActivity",
   "releasePrReviewMutexActivity",
   "postReviewPlaceholder",
   "deleteReviewPlaceholder",
-  // Stage-3 run-lifecycle + finding-delivery + citation + audit (the body's ANALYSIS_STARTED/ANALYZED/
-  // finalize/run-failed/run-cancelled + the lifecycle-bookkeeping setters; the orchestrator's Step 7.5
-  // citation_validate + the output-safety audit emit).
+  // Stage-3 run-lifecycle + finding-delivery + citation + audit.
   "recordReviewLifecycleEvent",
   "finalizeReviewRun",
   "recordRunFailed",
@@ -180,29 +59,20 @@ const EXPECTED_ACTIVITY_NAMES = [
   "recordDeliveryDegraded",
   "citationValidate",
   "emitOutputSafetyAuditEvent",
-  // Stage-4 enrichment: changed-files enrich (body) + linked-issues / suggested-reviewers (body) +
-  // PR-description summary (posting) + per-chunk evidence manifest (buildChunkContext). The two self-wiring
-  // activities (enrichPrFilesV2, updatePrDescriptionSummary) + the stateless buildRetrievedEvidence are
-  // registered bare; the two bound-method holders (fetchLinkedIssues, fetchSuggestedReviewers) are bound.
+  // Stage-4 enrichment.
   "enrichPrFilesV2",
   "fetchLinkedIssues",
   "fetchSuggestedReviewers",
   "updatePrDescriptionSummary",
   "buildRetrievedEvidence",
-  // Stage-5: arbitration apply + tool-run record (orchestrator Step 7.7) + fix-prompt (posting). The two
-  // arbitration activities self-wire their repos from env (registered bare); generateFixPrompt is the
-  // FixPromptActivities bound arrow property (shared LLM cache + repo + lazy GitHub client).
+  // Stage-5: arbitration apply + tool-run record + fix-prompt.
   "applyArbitrationActivity",
   "recordToolRuns",
   "generateFixPrompt",
-  // Wave-1 liveness-backstop cron activities (ADR-0074 / ADR-0064), registered under their snake_case
-  // Temporal names (the MutexJanitor/ReviewRunReaper workflows proxy them by these exact keys).
+  // Liveness-backstop cron activities (snake_case keys the cron handlers dispatch by).
   "mutex_janitor_activity",
   "review_run_reaper_activity",
-  // Wave-4 Confluence ingest activities (combined-pod worker reuse — ADR-0075), registered under their
-  // snake_case Temporal names (the 3 confluence workflows proxy them by these exact keys). The 8: the
-  // entry-point space enumeration, the 6 sync-holder methods (fetch_space_pages/fetch_page_body/
-  // sanitize_page/chunk_and_embed/upsert_chunks/reconcile_deletions), and the staleness sweep.
+  // Confluence ingest activities.
   "list_active_confluence_spaces_activity",
   "fetch_space_pages_activity",
   "fetch_page_body_activity",
@@ -211,11 +81,7 @@ const EXPECTED_ACTIVITY_NAMES = [
   "upsert_chunks_activity",
   "reconcile_deletions_activity",
   "mark_stale_chunks_activity",
-  // Wave-2 retention cron activities (combined-pod worker reuse), registered under their snake_case Temporal
-  // names (the 3 Wave-2 retention workflows proxy them by these exact keys). The run_id retention workflow
-  // proxies 3 (close-stale-PRs / retire-old-runs / delete-old-events); partition-maintenance proxies 1; the
-  // workspace-retention workflow proxies 3 (orphan-sweep / reap / released-retention) + releaseWorkspace
-  // (camelCase, already listed above).
+  // Retention cron activities.
   "run_id_close_stale_prs",
   "run_id_retire_old_runs",
   "run_id_delete_old_events",
@@ -223,21 +89,16 @@ const EXPECTED_ACTIVITY_NAMES = [
   "run_workspace_orphan_sweep_activity",
   "run_workspace_reap_activity",
   "run_workspace_released_retention_activity",
-  // Wave-3 spine activities (clone primitive + CODEOWNERS sync + semantic-docs refresh), registered under
-  // their snake_case Temporal names (the 2 Wave-3 workflows proxy them by these exact keys; the refresh
-  // workflow proxies BOTH clone_repository_activity as Step 1 AND refresh_semantic_docs_activity as Step 2,
-  // the sync workflow proxies sync_code_owners_activity).
+  // Spine activities (clone primitive + CODEOWNERS sync + semantic-docs refresh).
   "clone_repository_activity",
   "sync_code_owners_activity",
   "refresh_semantic_docs_activity",
 ] as const;
 
 describe("buildActivities() composition root", () => {
-  // Snapshot + set dummy env so construction succeeds WITHOUT a DB connection or live Vault/GitHub. The
-  // DSN is a syntactically-valid Postgres DSN (lazy pool — never dialed); the Qwen DSN routes the embedder
-  // through the dev recording client sentinel (no Qwen round-trip). Per-review routing: buildActivities() NO
-  // LONGER reads CODEMASTER_GITHUB_INSTALLATION_ID — the per-PR id is threaded through each activity input,
-  // so the composition root boots WITHOUT it (this DUMMY_ENV omits it deliberately as the regression guard).
+  // Dummy env so construction succeeds WITHOUT a DB connection or live Vault/GitHub. The DSN is a
+  // syntactically-valid Postgres DSN (lazy pool — never dialed); the Qwen DSN routes the embedder through
+  // the dev recording client sentinel. buildActivities() reads NO per-PR install id (threaded per input).
   const SAVED: Record<string, string | undefined> = {};
   const DUMMY_ENV: Record<string, string> = {
     CODEMASTER_PG_CORE_DSN: "postgresql://codemaster:codemaster@localhost:5433/codemaster_test",
@@ -262,57 +123,23 @@ describe("buildActivities() composition root", () => {
     }
   });
 
-  it("registers EVERY review-pipeline activity (no ActivityNotRegistered gaps)", () => {
-    const activities = buildActivities();
-    const registered = Object.keys(activities).sort();
+  it("registers EVERY activity the runtime dispatches by (no missing-key crash gaps)", () => {
+    const registered = Object.keys(buildActivities()).sort();
     for (const name of EXPECTED_ACTIVITY_NAMES) {
       expect(registered, `missing activity '${name}' in buildActivities() map`).toContain(name);
     }
   });
 
-  // ── Source-derived registry coverage (self-updating; no hand-maintained drift) ──
-  // The two assertions above pin a HAND-MAINTAINED `EXPECTED_ACTIVITY_NAMES` list, which can silently drift
-  // if a new proxied activity is added to the workflow body / activity_proxy bridge but the engineer forgets
-  // to extend the list. THIS assertion derives the dispatch-by-name surface DIRECTLY from the two
-  // proxyActivities() source modules, so a new proxied activity that is NOT registered fails HERE — proving
-  // the FULL proxied set (not just the curated list) is covered, with no ActivityNotRegistered at runtime.
-  it("registers EVERY activity the workflow proxies (full source-derived proxied set — no drift)", () => {
-    // Guard against a parse regression: if the regex stopped matching, this would pass vacuously. The two
-    // modules proxy dozens of activities; assert we actually parsed a non-trivial surface.
-    expect(
-      PROXIED_ACTIVITY_NAMES.length,
-      "parsed proxied-activity set is implausibly small — the proxyActivities source parse likely broke",
-    ).toBeGreaterThanOrEqual(30);
-
-    const registered = new Set(Object.keys(buildActivities()));
-    const missing = PROXIED_ACTIVITY_NAMES.filter((name) => !registered.has(name)).sort();
-    expect(
-      missing,
-      `the workflow proxies these activities but buildActivities() does NOT register them — Temporal would ` +
-        `crash with ActivityNotRegistered at dispatch: ${JSON.stringify(missing)}`,
-    ).toEqual([]);
-
-    // Cross-check the hand-maintained list is a SUPERSET of the source-derived set (so the curated list above
-    // can't fall behind the source either). The curated list may carry extras (e.g. `redactChunks`, which is
-    // registered as an internal helper but never proxied by name).
-    const curated = new Set<string>(EXPECTED_ACTIVITY_NAMES);
-    const notInCurated = PROXIED_ACTIVITY_NAMES.filter((name) => !curated.has(name)).sort();
-    expect(
-      notInCurated,
-      `EXPECTED_ACTIVITY_NAMES has fallen behind the proxyActivities source — add: ${JSON.stringify(notInCurated)}`,
-    ).toEqual([]);
-  });
-
-  it("every registered value is a 1-arg Temporal activity (arity <= 1 — the 2-arg-crash guard)", () => {
+  it("every registered value is a 1-arg activity (arity <= 1 — the 2-arg-crash guard)", () => {
     const activities = buildActivities() as Record<string, unknown>;
     for (const [name, value] of Object.entries(activities)) {
       expect(typeof value, `activity '${name}' is not a function`).toBe("function");
       // A curried / bound 1-arg activity has `.length <= 1`; a bare 2-arg function has `.length === 2`
-      // and crashes when Temporal dispatches it with one positional arg. This is the load-bearing assert.
+      // and crashes when dispatched with one positional arg. This is the load-bearing assert.
       expect(
         (value as (...args: ReadonlyArray<unknown>) => unknown).length,
         `activity '${name}' has arity > 1 — it would receive 'undefined' for its 2nd arg when ` +
-          `Temporal dispatches it with a single positional argument (curry it in buildActivities)`,
+          `dispatched with a single positional argument (curry it in buildActivities)`,
       ).toBeLessThanOrEqual(1);
     }
   });

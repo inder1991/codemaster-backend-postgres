@@ -10,7 +10,6 @@ import {
   wireFieldKeyRefreshLoop,
 } from "#backend/runner/background_runner_main.js";
 import { DisposableRegistry } from "#backend/runner/disposables.js";
-import { runWorker } from "#backend/worker/main.js";
 import {
   getAuditKeyRegistry,
   resetAuditKeyRegistryForTesting,
@@ -32,17 +31,6 @@ describe("CS6 boot wiring — key registry is loaded at boot, fail-loud in produ
     // and the DB instead of this specific refusal.
     vi.stubEnv("CODEMASTER_PG_CORE_DSN", "postgresql://keys-must-fire-first:5432/never");
     await expect(runBackgroundRunner("postgres")).rejects.toThrow(/field-encryption/i);
-    expect(getAuditKeyRegistry()).toBeNull();
-  });
-
-  it("runWorker (temporal mode) in PRODUCTION with no Vault: rejects with the field-encryption refusal BEFORE any Temporal connect", async () => {
-    vi.stubEnv("NODE_ENV", "production");
-    vi.stubEnv("VAULT_ADDR", "");
-    vi.stubEnv("CODEMASTER_FIELD_KEY_SOURCE", "");
-    // No TEMPORAL_ADDRESS either — if the key install did not fire FIRST, the boot would fail on
-    // the Temporal production-misconfiguration guard instead; the assertion pins the ordering.
-    vi.stubEnv("TEMPORAL_ADDRESS", "");
-    await expect(runWorker()).rejects.toThrow(/field-encryption/i);
     expect(getAuditKeyRegistry()).toBeNull();
   });
 

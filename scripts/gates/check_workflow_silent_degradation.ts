@@ -116,53 +116,6 @@ export type ExemptedEntry = {
 // New entries require a follow_up_story per S23.AR.17 P-2 rotation. Prefer the inline
 // `// silent-degradation:exempt reason=<...> follow_up=<...>` marker for one-offs.
 export const EXEMPTED: Record<string, ExemptedEntry> = {
-  "apps/backend/src/workflows/review_pull_request.workflow.ts::395": {
-    symbol: "claimStillHeld",
-    follow_up_story: "PERMANENT-EXEMPTION-pr-mutex-lease-renewal-fail-open",
-    reason:
-      "By-design fail-open on a TRANSIENT lease-renewal activity error (port of the Python " +
-      "review_pull_request.py::546 entry): a renewal blip must not kill an otherwise-live review. " +
-      "The lost-claim path (renewal returns false) is NOT swallowed — abortIfClaimLost throws a " +
-      "non-retryable ApplicationFailure so the superseding review owns the result. Only the " +
-      "activity-ERROR branch returns true. Permanent: the fail-open is intentional, not a TODO.",
-  },
-  "apps/backend/src/workflows/trigger_page_resync.workflow.ts::109": {
-    symbol: "triggerPageResyncWorkflow",
-    follow_up_story: "PERMANENT-EXEMPTION-failure-recorded-in-output-contract",
-    reason:
-      "Fail-soft per the workflow's typed output contract: resync_complete=false IS the recorded " +
-      "failure signal (the caller retries / escalates; see the module DIVERGENCE note). Same " +
-      "class as the Python confluence_sync exemption — the failure is operator-observable through " +
-      "the workflow output even without stageOutcome wrapping.",
-  },
-  "apps/backend/src/workflows/confluence_ingest.workflow.ts::211": {
-    symbol: "confluenceIngestWorkflow",
-    follow_up_story: "PERMANENT-EXEMPTION-failure-recorded-in-output-contract",
-    reason:
-      "Per-SPACE sync failure recorded in the failed_spaces tuple of the output (1:1 port of " +
-      "confluence_sync_workflow.py:146, which the Python gate exempted for exactly this " +
-      "recorded-in-output reason). The in-process twin (runner/handlers/cron_handlers.ts) ALSO " +
-      "console.warns per space; this frozen Temporal twin is retired by the de-temporal program.",
-  },
-  "apps/backend/src/workflows/confluence_ingest.workflow.ts::270": {
-    symbol: "syncOneSpace",
-    follow_up_story: "PERMANENT-EXEMPTION-failure-recorded-in-output-contract",
-    reason:
-      "Per-PAGE fail-open (F-40) recorded in the returned stats.pages_failed counter; the page_id " +
-      "is already in livePageIds so reconcile keeps its chunks protected. Failure count surfaces " +
-      "in the workflow output; the in-process twin logs per page; this frozen Temporal twin is " +
-      "retired by the de-temporal program.",
-  },
-  "apps/backend/src/workflows/outbox_dispatcher.workflow.ts::89": {
-    symbol: "OutboxDispatcherWorkflow",
-    follow_up_story: "PERMANENT-EXEMPTION-outbox-mark-dead-records-durably",
-    reason:
-      "Per-row dispatch failure routes through markAttemptFailed, which durably persists the error " +
-      "onto the outbox row (last_error) and atomically dead-letters at the attempts threshold — " +
-      "recorded MORE durably than a log line (the Python exempted the same site, " +
-      "outbox_dispatcher.py::131). Cancellation re-propagates via the conditional throw above the " +
-      "settle; the in-process twin (outbox_dispatcher_loop.ts) additionally console.warns per row.",
-  },
   "apps/backend/src/runner/stage_log_sink.ts::62": {
     symbol: "makeStructuredStageLogger",
     follow_up_story: "PERMANENT-EXEMPTION-defensive-log-emit",
