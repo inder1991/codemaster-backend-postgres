@@ -27,10 +27,15 @@
  *    `audit/emit.ts` is built against an AuditQueryClient pg-client seam, not the Kysely tx this activity
  *    uses — the audit emit is DEFERRED in this port (already deferred in the TS port broadly). The audit
  *    `before` / `after` dicts ARE assembled (by the upsert helpers) so the wiring is a drop-in later.
- *  - maybe_enqueue_repair kickoff — the Python enqueues RepairInstallationRepositoriesWorkflow via the
- *    shared dispatcher (cooldown/blocked gate → outbox row) at the end of the activity, UNCONDITIONALLY
- *    (not gated on action), with trigger_source="installation_created". That dispatcher
- *    (ingest/_repair_dispatcher.ts) + the outbox sink wiring is the INTEGRATOR step — see // FOLLOW-UP below.
+ *
+ * ## Proactive repair kickoff (RH13 / W3.6 — the previously-deferred integrator step, now WIRED)
+ *
+ * The Python enqueues RepairInstallationRepositoriesWorkflow via the shared dispatcher
+ * (cooldown/blocked gate → outbox row → markAttempted, all in THIS transaction) at the end of the
+ * activity, UNCONDITIONALLY (not gated on action), with trigger_source="installation_created" —
+ * the belt-and-braces hydrate that backfills a fresh install's repos through the canonical
+ * `GET /installation/repositories` even when the installation_repositories webhook is delayed,
+ * batched oddly, or dropped outright (GitHub does not guarantee delivery — RH12).
  */
 
 import { tenantKysely } from "#platform/db/database.js";
@@ -39,6 +44,7 @@ import { WallClock } from "#platform/clock.js";
 import { GitHubInstallationPayloadV1 } from "#contracts/github_installation_payload.v1.js";
 import { ReconcileInstallationResultV1 } from "#contracts/reconcile_results.v1.js";
 
+import { maybeEnqueueRepair } from "#backend/ingest/_repair_dispatcher.js";
 import {
   ensureSenderUser,
   resolveAccountType,
@@ -103,12 +109,15 @@ export async function reconcileInstallation(
     // Deferred alongside the rest of the TS audit-emit port (audit/emit.ts uses an AuditQueryClient
     // pg-client seam, not this Kysely tx). The before/after dicts are already assembled in inst.
 
-    // FOLLOW-UP (INTEGRATOR): enqueue RepairInstallationRepositoriesWorkflow via the shared dispatcher
-    // maybeEnqueueRepair({ tx, githubInstallationId: payload.installation.id, triggerSource:
-    // "installation_created", deliveryId: null }) — UNCONDITIONAL (Python does not gate on action),
-    // in THIS same transaction (the outbox row commits with the installation/user upsert). The
-    // dispatcher (ingest/_repair_dispatcher.ts) + the installation_reconcile outbox-sink wiring is
-    // built/wired by the integrator (the other agent owns _repair_state.ts / _repair_dispatcher.ts).
+    // RH13 (W3.6): the proactive repair kickoff — UNCONDITIONAL (Python does not gate on action),
+    // in THIS same transaction so the outbox row + markAttempted commit atomically with the
+    // installation/user upsert. The dispatcher owns the cooldown/blocked suppression + metrics; a
+    // suppressed enqueue is a normal false return (the skip counter already fired inside).
+    await maybeEnqueueRepair(tx, {
+      githubInstallationId: payload.installation.id,
+      triggerSource: "installation_created",
+      deliveryId: null,
+    });
 
     return { installationId: inst.id, userId: uid, before: inst.before };
   });
