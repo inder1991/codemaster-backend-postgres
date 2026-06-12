@@ -16,7 +16,8 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { promises as fs, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { EventEmitter } from "node:events";
+import { promises as fs, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -224,17 +225,13 @@ describe("GitleaksInWorkerRunner changed-file scoping (W2.6 M3)", () => {
       if (sourceDir) {
         capture.stagedFiles = walkSync(sourceDir).map((p) => path.relative(sourceDir, p));
       }
-      const { EventEmitter } = require("node:events") as typeof import("node:events");
       const proc = new EventEmitter() as ReturnType<SpawnFn>;
       (proc as unknown as { pid: number }).pid = 777;
-      (proc as unknown as { stdout: InstanceType<typeof EventEmitter> }).stdout = new EventEmitter();
-      (proc as unknown as { stderr: InstanceType<typeof EventEmitter> }).stderr = new EventEmitter();
+      (proc as unknown as { stdout: EventEmitter }).stdout = new EventEmitter();
+      (proc as unknown as { stderr: EventEmitter }).stderr = new EventEmitter();
       queueMicrotask(() => {
         if (capture.stdout !== undefined) {
-          (proc as unknown as { stdout: InstanceType<typeof EventEmitter> }).stdout.emit(
-            "data",
-            Buffer.from(capture.stdout),
-          );
+          (proc as unknown as { stdout: EventEmitter }).stdout.emit("data", Buffer.from(capture.stdout));
         }
         proc.emit("close", 0);
       });
@@ -243,7 +240,6 @@ describe("GitleaksInWorkerRunner changed-file scoping (W2.6 M3)", () => {
   }
 
   function walkSync(dir: string): Array<string> {
-    const { readdirSync, statSync } = require("node:fs") as typeof import("node:fs");
     const out: Array<string> = [];
     for (const entry of readdirSync(dir)) {
       const p = path.join(dir, entry);
