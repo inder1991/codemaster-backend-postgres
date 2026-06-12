@@ -261,6 +261,7 @@ import {
   searchAuditEvents,
 } from "#backend/api/admin/audit_events_read.js";
 import { makeRequireRole } from "#backend/api/admin/_authz.js";
+import { makeCsrfProtect } from "#backend/api/auth/csrf.js";
 import {
   KnowledgeStaleWriteError,
   ProposalAlreadyDecidedError,
@@ -326,6 +327,10 @@ export type AdminRoutesOptions = {
   db: Kysely<unknown>;
   signingKey: Buffer | Uint8Array;
   clock: Clock;
+  /** W4.7 / EC4 — when present, the CSRF double-submit verification hook mounts on this scope (every
+   *  non-GET admin route 403s without a matching csrf_token cookie + X-CSRF-Token header). server.ts
+   *  always provides it; optional only so read-only endpoint tests need no CSRF plumbing. */
+  csrfSecret?: Buffer | Uint8Array;
   /** Field-encryption registry for decrypting core.users.email in the members read. server.ts always
    *  provides it; the field is optional only so endpoint tests that don't exercise members need no crypto. */
   registry?: KeyRegistry;
@@ -391,6 +396,13 @@ export async function registerAdminRoutes(
 
   await app.register(async (scope) => {
     await scope.register(cookie);
+
+    // W4.7 / EC4 — CSRF verification on every unsafe method of the admin scope (no exemptions: every
+    // admin route is session-cookie-authenticated). Mounted iff the csrf secret is wired (server.ts
+    // always wires it; endpoint tests that drive only reads may omit it).
+    if (opts.csrfSecret !== undefined) {
+      scope.addHook("onRequest", makeCsrfProtect());
+    }
 
     scope.get(
       "/api/admin/orgs",

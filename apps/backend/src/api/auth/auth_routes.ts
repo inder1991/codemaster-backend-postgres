@@ -8,12 +8,13 @@
 //
 // Registered onto an encapsulated Fastify scope (mirrors github_webhook_routes), so @fastify/cookie is
 // scoped here and the app factory stays pure. The lockout + dispatch substance lives in authenticate()
-// (login.ts); this layer is the HTTP edge: rate-limit gate → dispatch → metrics → cookie → status mapping.
+// (login.ts); this layer is the HTTP edge: CSRF gate → rate-limit gate → dispatch → metrics → cookie →
+// status mapping.
 //
-// DEFERRED (optional + fail-safe in the Python, wired as None unless configured): login.success/.failure
-// audit emission (auditCallbackFactory / auditSessionFactory) and the app-wide CSRF *verification*
-// middleware. Both pair with the admin-pod bootstrap wiring + the TS audit-emit pg-client seam.
-// Tracked: FOLLOW-UP-login-audit-emit-wiring, FOLLOW-UP-csrf-verification-middleware.
+// W4.7 / EC4 closed the deferred CSRF seam: the double-submit *verification* hook (csrf.ts) mounts on
+// this scope whenever csrfSecret is wired (production always wires it), and the session cookie is
+// SameSite=Strict. Still deferred: login.success/.failure audit emission (auditCallbackFactory /
+// auditSessionFactory) — FOLLOW-UP-login-audit-emit-wiring.
 
 import cookie from "@fastify/cookie";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -28,6 +29,11 @@ import {
 } from "#contracts/auth.v1.js";
 
 import type { CoreUserRepo } from "#backend/api/auth/core_user_repo.js";
+import {
+  CSRF_COOKIE_NAME,
+  DEFAULT_CSRF_EXEMPT_PATHS,
+  makeCsrfProtect,
+} from "#backend/api/auth/csrf.js";
 import type { LdapClientPort } from "#backend/api/auth/ldap_client.js";
 import type { LocalUserRepo } from "#backend/api/auth/local_user_repo.js";
 import { type LoginOutcome, authenticate } from "#backend/api/auth/login.js";
@@ -42,7 +48,6 @@ import {
 } from "#backend/api/auth/session.js";
 
 export const SESSION_COOKIE_NAME = "session";
-const CSRF_COOKIE_NAME = "csrf_token";
 
 export type AuthRoutesOptions = {
   localRepo: LocalUserRepo;
@@ -98,12 +103,23 @@ export async function registerAuthRoutes(
   await app.register(async (scope) => {
     await scope.register(cookie);
 
+    // W4.7 / EC4 — CSRF verification on every unsafe method of this scope (login included; logout
+    // exempt). Mounted iff the csrf secret is wired, mirroring the Python's conditional middleware
+    // mount; production (server.ts) always wires it.
+    if (opts.csrfSecret !== undefined) {
+      scope.addHook("onRequest", makeCsrfProtect({ exemptPaths: DEFAULT_CSRF_EXEMPT_PATHS }));
+    }
+
     function setSessionCookie(reply: FastifyReply, value: string, maxAgeSeconds: number): void {
       reply.setCookie(SESSION_COOKIE_NAME, value, {
         maxAge: maxAgeSeconds,
         httpOnly: true,
         secure: secureCookies,
-        sameSite: "lax",
+        // W4.7 / EC4 — Strict (tightened from the Python's spec-locked Lax): the session cookie is
+        // the sole credential for every admin mutation; Strict removes the top-level-navigation
+        // CSRF carve-out entirely. The CSRF cookie below stays Lax (it must survive navigation for
+        // the SPA to read it; it is not a credential).
+        sameSite: "strict",
         path: "/",
       });
     }
@@ -112,7 +128,7 @@ export async function registerAuthRoutes(
         maxAge: 0,
         httpOnly: true,
         secure: secureCookies,
-        sameSite: "lax",
+        sameSite: "strict",
         path: "/",
       });
     }

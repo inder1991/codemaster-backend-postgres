@@ -103,6 +103,8 @@ export async function runServer(deps: RunServerDeps = {}): Promise<void> {
       vault,
       getPreflightValidator,
       pageResyncDispatcher: new OutboxPageResyncDispatcher({ db: coreDb }),
+      // W4.7 / EC4 — mounts the CSRF double-submit verification hook on the admin scope.
+      csrfSecret,
     });
   }
 
