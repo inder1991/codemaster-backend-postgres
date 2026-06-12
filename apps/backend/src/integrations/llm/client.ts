@@ -171,6 +171,12 @@ export type LlmSdk = {
     // mid-flight. Absent → byte-identical to the pre-W4.2 client (every existing adapter/double ignores the
     // extra optional field structurally).
     signal?: AbortSignal;
+    // W2.2 (prompt caching) — OPTIONAL count of leading `messages` entries that form the BYTE-STABLE
+    // cacheable prefix. The adapter places the Anthropic `cache_control: {type: "ephemeral"}` marker at
+    // that boundary (on the hoisted system block and the last stable user block), so the stable prefix
+    // is billed full-price once and at ~10% (cache read) on subsequent identical-prefix calls. Absent →
+    // byte-identical legacy request (no marker; doubles ignore the optional field structurally).
+    cachePrefixMessages?: number;
   }): Promise<Record<string, unknown>>;
 };
 
@@ -439,8 +445,27 @@ export class LlmClient {
     // Absent (the Temporal-legacy path / unit tests) → byte-identical to the pre-W4.2 client (no gate, no
     // signal forwarded).
     signal?: AbortSignal;
+    // W2.2 (prompt caching) — OPTIONAL count of leading `messages` that form the BYTE-STABLE cacheable
+    // prefix (everything the per-chunk fan-out repeats verbatim: system prompt + the PR-level user
+    // prefix). Forwarded to the SDK adapter ONLY on the paid MISS edge — a ledger replay HIT never
+    // builds a provider request — where the adapter places `cache_control: {type: "ephemeral"}` at the
+    // stable/variable boundary (Anthropic Messages API shape; Bedrock serves the same shape). Validated
+    // fail-fast: an integer with 1 <= n < messages.length (a boundary covering the WHOLE prompt would
+    // write a per-chunk cache entry nothing ever reads — a wiring bug, not a cacheable request). Absent
+    // → byte-identical legacy behavior (no marker, no key forwarded).
+    cachePrefixMessages?: number;
   }): Promise<LlmInvokeResultV1> {
     const maxTokens = args.maxTokens ?? 1024;
+    if (args.cachePrefixMessages !== undefined) {
+      const n = args.cachePrefixMessages;
+      if (!Number.isInteger(n) || n < 1 || n >= args.messages.length) {
+        throw new TypeError(
+          `cachePrefixMessages must be an integer with 1 <= n < messages.length ` +
+            `(got ${n} for ${args.messages.length} messages): the stable cacheable prefix must be ` +
+            "non-empty and must leave a variable tail after the cache_control boundary",
+        );
+      }
+    }
     const purpose = args.purpose ?? "review";
     const tools = args.tools ?? null;
     // TS hardening divergence (ADR-0068) — Python falls back to TELEMETRY_MISSING_INSTALLATION_ID (the
@@ -602,6 +627,11 @@ export class LlmClient {
           // spread so the absent case stays byte-identical (the SDK arg carries no `signal` key at all),
           // matching exactOptionalPropertyTypes + the W4.1 GitHub-client idiom.
           ...(args.signal !== undefined ? { signal: args.signal } : {}),
+          // W2.2 — forward the stable-prefix boundary so the adapter can place the cache_control
+          // marker. Conditionally spread: absent → no key at all (byte-identical legacy request).
+          ...(args.cachePrefixMessages !== undefined
+            ? { cachePrefixMessages: args.cachePrefixMessages }
+            : {}),
         });
       } catch (e) {
         // The Python distinguishes TimeoutError (status='timeout') from any other exception
