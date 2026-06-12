@@ -271,7 +271,7 @@ import {
   updateLearningBody,
   validateApproveProposal,
   validateRejectProposal,
-  workflowIdFor,
+  transitionProposalToTerminal,
 } from "#backend/api/admin/knowledge_write.js";
 
 const TAXONOMY_DEFAULT_LIMIT = 50;
@@ -1428,10 +1428,6 @@ export async function registerAdminRoutes(
         if (!UUID_RE.test(proposalId)) {
           return reply.code(422).send({ detail: "proposal_id must be a UUID" });
         }
-        if (opts.temporal === undefined) {
-          return reply.code(503).send({ detail: "approval signal seam unwired" });
-        }
-
         const approverUserId = request.authPrincipal!.userId;
         try {
           await validateApproveProposal(opts.db, {
@@ -1452,10 +1448,26 @@ export async function registerAdminRoutes(
           throw err;
         }
 
-        await opts.temporal.signalWorkflow({
-          workflowId: workflowIdFor(proposalId),
-          signalName: "approve",
-          input: { approver_user_id: approverUserId },
+        // De-Temporal: persist the terminal state SYNCHRONOUSLY (the knowledge_approval workflow's only
+        // effect was this transition). Fenced — a concurrent decision yields 409, never a lost write.
+        const approved = await transitionProposalToTerminal(opts.db, {
+          proposalId,
+          installationId: request.authPrincipal!.installationId,
+          toState: "approved",
+          now: opts.clock.now(),
+        });
+        if (!approved.applied) {
+          return reply.code(409).send({ code: "already_decided", current_state: approved.currentState });
+        }
+        await opts.audit?.({
+          actorUserId: approverUserId,
+          installationId: request.authPrincipal!.installationId,
+          action: "knowledge.proposal.approved",
+          targetKind: "learning_proposal",
+          targetId: proposalId,
+          before: { state: "pending_approval" },
+          after: { state: "approved", approver_user_id: approverUserId },
+          now: opts.clock.now(),
         });
         return reply.code(204).send();
       },
@@ -1471,10 +1483,6 @@ export async function registerAdminRoutes(
         if (!UUID_RE.test(proposalId)) {
           return reply.code(422).send({ detail: "proposal_id must be a UUID" });
         }
-        if (opts.temporal === undefined) {
-          return reply.code(503).send({ detail: "approval signal seam unwired" });
-        }
-
         const body = RejectProposalV1.safeParse(request.body);
         if (!body.success) {
           return reply.code(422).send(body.error);
@@ -1501,10 +1509,24 @@ export async function registerAdminRoutes(
           throw err;
         }
 
-        await opts.temporal.signalWorkflow({
-          workflowId: workflowIdFor(proposalId),
-          signalName: "reject",
-          input: { approver_user_id: approverUserId, reason },
+        const rejected = await transitionProposalToTerminal(opts.db, {
+          proposalId,
+          installationId: request.authPrincipal!.installationId,
+          toState: "rejected",
+          now: opts.clock.now(),
+        });
+        if (!rejected.applied) {
+          return reply.code(409).send({ code: "already_decided", current_state: rejected.currentState });
+        }
+        await opts.audit?.({
+          actorUserId: approverUserId,
+          installationId: request.authPrincipal!.installationId,
+          action: "knowledge.proposal.rejected",
+          targetKind: "learning_proposal",
+          targetId: proposalId,
+          before: { state: "pending_approval" },
+          after: { state: "rejected", approver_user_id: approverUserId, reason },
+          now: opts.clock.now(),
         });
         return reply.code(204).send();
       },

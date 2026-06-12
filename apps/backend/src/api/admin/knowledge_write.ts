@@ -232,6 +232,43 @@ export async function validateRejectProposal(
   return proposal;
 }
 
+/**
+ * Fenced CAS terminal-state transition (pending_approval → approved | rejected). This is the COMPLETE
+ * effect the Temporal `knowledge_approval` workflow applied — its body did nothing but
+ * `proposal_repo.transition_state(...)` (vendor/codemaster-py/codemaster/workflows/knowledge_approval.py).
+ * De-Temporal: the admin route applies it SYNCHRONOUSLY + idempotently instead of signalling a workflow.
+ * The fence (`state = 'pending_approval'`) resolves the approve-vs-expire/decide race the workflow's CAS
+ * handled: a row already off pending returns applied:false with its current_state (the 409 envelope). The
+ * approver identity + reject reason are NOT columns on core.learning_proposals — they are carried by the
+ * admin audit event the route emits.
+ */
+export async function transitionProposalToTerminal(
+  db: Kysely<unknown>,
+  args: {
+    proposalId: string;
+    installationId: string;
+    toState: "approved" | "rejected";
+    now: Date;
+  },
+): Promise<{ applied: boolean; currentState: string | null }> {
+  const updated = await sql<{ state: string }>`
+    UPDATE core.learning_proposals
+    SET state = ${args.toState}, state_changed_at = ${args.now}
+    WHERE proposal_id = ${args.proposalId}
+      AND installation_id = ${args.installationId}
+      AND state = 'pending_approval'
+    RETURNING state
+  `.execute(db);
+  if (updated.rows.length === 1) {
+    return { applied: true, currentState: args.toState };
+  }
+  const current = await getProposal(db, {
+    proposalId: args.proposalId,
+    installationId: args.installationId,
+  });
+  return { applied: false, currentState: current?.state ?? null };
+}
+
 // ─── Temporal signal helpers ──────────────────────────────────────────────────────────────────────
 
 /**
