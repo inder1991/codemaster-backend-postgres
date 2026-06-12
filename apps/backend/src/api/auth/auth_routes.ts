@@ -34,6 +34,7 @@ import {
   DEFAULT_CSRF_EXEMPT_PATHS,
   makeCsrfProtect,
 } from "#backend/api/auth/csrf.js";
+import { makeScopedErrorHandler } from "#backend/api/auth/error_envelope.js";
 import type { LdapClientPort } from "#backend/api/auth/ldap_client.js";
 import type { LocalUserRepo } from "#backend/api/auth/local_user_repo.js";
 import { type LoginOutcome, authenticate } from "#backend/api/auth/login.js";
@@ -102,6 +103,9 @@ export async function registerAuthRoutes(
 
   await app.register(async (scope) => {
     await scope.register(cookie);
+
+    // W4.7 / EH6 — unmapped throws must never echo raw internal error text to the client.
+    scope.setErrorHandler(makeScopedErrorHandler("auth"));
 
     // W4.7 / EC4 — CSRF verification on every unsafe method of this scope (login included; logout
     // exempt). Mounted iff the csrf secret is wired, mirroring the Python's conditional middleware

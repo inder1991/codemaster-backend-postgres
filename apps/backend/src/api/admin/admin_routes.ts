@@ -262,6 +262,7 @@ import {
 } from "#backend/api/admin/audit_events_read.js";
 import { makeRequireRole } from "#backend/api/admin/_authz.js";
 import { makeCsrfProtect } from "#backend/api/auth/csrf.js";
+import { makeScopedErrorHandler } from "#backend/api/auth/error_envelope.js";
 import {
   KnowledgeStaleWriteError,
   ProposalAlreadyDecidedError,
@@ -396,6 +397,10 @@ export async function registerAdminRoutes(
 
   await app.register(async (scope) => {
     await scope.register(cookie);
+
+    // W4.7 / EH6 — unmapped throws (the bare `throw e;` tails after each handler's typed-error
+    // mapping) must never echo raw Postgres/internal error text to the client.
+    scope.setErrorHandler(makeScopedErrorHandler("admin"));
 
     // W4.7 / EC4 — CSRF verification on every unsafe method of the admin scope (no exemptions: every
     // admin route is session-cookie-authenticated). Mounted iff the csrf secret is wired (server.ts

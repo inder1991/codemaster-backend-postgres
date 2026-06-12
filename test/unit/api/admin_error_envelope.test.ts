@@ -5,7 +5,13 @@
 // the full error server-side and returns the uniform `{detail:"internal error"}` envelope.
 // Framework-classified CLIENT errors (4xx, e.g. a malformed JSON body) keep their status.
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// The handler's contract includes a server-side structured log of the FULL error — capture it both
+// to assert it and to keep test output pristine.
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 import { FakeClock } from "#platform/clock.js";
 
@@ -46,6 +52,7 @@ async function makeAdminApp(dbResults: ReadonlyArray<ReadonlyArray<unknown> | Er
 
 describe("W4.7/EH6 admin-scope error envelope", () => {
   it("an unmapped DB error → 500 {detail:'internal error'}; the schema text NEVER reaches the body", async () => {
+    const logSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const app = await makeAdminApp([new Error(PG_LEAK)]);
     const res = await app.inject({
       method: "GET",
@@ -56,6 +63,10 @@ describe("W4.7/EH6 admin-scope error envelope", () => {
     expect(res.json<{ detail: string }>().detail).toBe("internal error");
     expect(res.body).not.toContain("api_key_ciphertext");
     expect(res.body).not.toContain("llm_provider_settings");
+    // The FULL error is preserved server-side (structured log), so EH6 trades no diagnosability.
+    const logged = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toContain("api_unhandled_error");
+    expect(logged).toContain("api_key_ciphertext");
     await app.close();
   });
 
@@ -75,6 +86,7 @@ describe("W4.7/EH6 admin-scope error envelope", () => {
 
 describe("W4.7/EH6 auth-scope error envelope", () => {
   it("an unmapped repo error during login → 500 {detail:'internal error'} without the message", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
     const throwingRepo = {
       getByUsername: async () => {
         throw new Error(PG_LEAK);
