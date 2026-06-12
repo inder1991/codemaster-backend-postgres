@@ -59,10 +59,11 @@ async function grant(
   scope: "platform" | "installation",
   role: string,
   installationId: string | null,
+  revokedAt: string | null = null,
 ): Promise<void> {
   await sql`
-    INSERT INTO core.role_grants (installation_id, subject_kind, subject_id, role, scope)
-    VALUES (${installationId}, 'user', ${USER}, ${role}, ${scope})
+    INSERT INTO core.role_grants (installation_id, subject_kind, subject_id, role, scope, revoked_at)
+    VALUES (${installationId}, 'user', ${USER}, ${role}, ${scope}, ${revokedAt})
   `.execute(db);
 }
 
@@ -85,6 +86,21 @@ describeDb("PostgresRoleResolver (disposable :5434)", () => {
   it("returns null when the user has no grants", async () => {
     const r = new PostgresRoleResolver({ db });
     expect(await r.resolve({ userId: USER, installationId: INSTALL_A })).toBeNull();
+  });
+
+  // W4.7 / EM4 — revocation MUST take effect at resolve time (deliberate parity-break from the frozen
+  // Python, which honored revoked grants for up to a full session lifetime after de-provisioning).
+  it("EM4: a revoked grant does NOT authenticate (sole grant revoked → null)", async () => {
+    await grant("platform", "platform_owner", null, "2026-06-01T00:00:00.000Z");
+    const r = new PostgresRoleResolver({ db });
+    expect(await r.resolve({ userId: USER, installationId: INSTALL_A })).toBeNull();
+  });
+
+  it("EM4: a revoked higher-precedence grant falls back to the still-active lower grant", async () => {
+    await grant("platform", "platform_owner", null, "2026-06-01T00:00:00.000Z");
+    await grant("installation", "reader", INSTALL_A);
+    const r = new PostgresRoleResolver({ db });
+    expect(await r.resolve({ userId: USER, installationId: INSTALL_A })).toBe("reader");
   });
 
   it("fails CLOSED (returns null, does not throw) on a DB error", async () => {
