@@ -29,6 +29,8 @@
 
 import { type Kysely, sql } from "kysely";
 
+import { formatPgvectorLiteral } from "#backend/retrieval/pgvector_literal.js";
+
 import {
   type KnowledgeChunkV1,
   type KnowledgeDocKind,
@@ -123,13 +125,9 @@ function rowToChunkAndScore(row: AnnRow): readonly [KnowledgeChunkV1, number] {
   return [chunk, score] as const;
 }
 
-/**
- * Format the query vector as the pgvector text literal `"[f1,f2,...]"` (1:1 with the Python `qvec`
- * bind). asyncpg/pg cannot encode a raw array for the `vector` column, so we bind this text + CAST.
- */
-function toPgVectorLiteral(vec: ReadonlyArray<number>): string {
-  return `[${vec.map((x) => String(x)).join(",")}]`;
-}
+// W1.3 (RL3): the pgvector text literal is built by the SHARED parser-safe formatter
+// (pgvector_literal.ts) — plain decimal (never exponential), value-exact round-trip, fail-loud on
+// non-finite components. The previous inline `String(x)` join could emit exponent notation.
 
 /**
  * Production {@link AnnPort} against `core.knowledge_chunks` using pgvector cosine distance over the
@@ -149,7 +147,7 @@ export class PostgresAnnPort implements AnnPort {
     args: AnnSearchArgs,
   ): Promise<ReadonlyArray<readonly [KnowledgeChunkV1, number]>> {
     const includeStale = args.includeStale ?? false;
-    const qvec = toPgVectorLiteral(args.queryVector);
+    const qvec = formatPgvectorLiteral(args.queryVector);
     // The `_sql_no_cache` SQL: cosine SIMILARITY = `1 - (vector <=> :qvec)`; tenancy filtered on
     // `installation_id` AND `repository_id`; ordered by ascending DISTANCE (= descending similarity);
     // `LIMIT :top_k` is the only cut. The `installation_id` token satisfies the raw-SQL tenancy gate.

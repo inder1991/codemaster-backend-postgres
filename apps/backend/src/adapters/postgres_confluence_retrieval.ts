@@ -41,6 +41,7 @@
 import { type Kysely, sql } from "kysely";
 
 import type { ConfluenceRetrievedChunk } from "#backend/retrieval/confluence_source.js";
+import { formatPgvectorLiteral } from "#backend/retrieval/pgvector_literal.js";
 
 /**
  * The EmbedderCache seam (Python `codemaster.embedder.cache.EmbedderCache`). NOT yet ported to TS
@@ -76,13 +77,9 @@ type ConfluenceRow = {
   score: number | string;
 };
 
-/**
- * Format the query vector as the pgvector text literal `"[f1,f2,...]"` (1:1 with the Python `qvec`
- * bind). pg cannot encode a raw array for the `vector` column, so we bind this text + CAST AS vector.
- */
-function toPgVectorLiteral(vec: ReadonlyArray<number>): string {
-  return `[${vec.map((x) => String(x)).join(",")}]`;
-}
+// W1.3 (RL3): the pgvector text literal is built by the SHARED parser-safe formatter
+// (retrieval/pgvector_literal.ts) — plain decimal (never exponential), value-exact round-trip,
+// fail-loud on non-finite components. The previous inline `String(x)` join could emit exponent notation.
 
 /** Map a SELECT row to a ConfluenceRetrievedChunk (1:1 with the Python `_row_to_chunk`). */
 function rowToChunk(row: ConfluenceRow): ConfluenceRetrievedChunk {
@@ -151,7 +148,7 @@ export class PostgresConfluenceRetrieval {
       return [];
     }
 
-    const qvec = toPgVectorLiteral(args.queryEmbedding);
+    const qvec = formatPgvectorLiteral(args.queryEmbedding);
     const labelsArray = [...effectiveLabels];
     // Bind a REAL pg text[] for the `&&` overlap (NOT a CSV string) — `${labelsArray}::text[]` lets
     // node-pg encode the JS array to a Postgres array literal.
