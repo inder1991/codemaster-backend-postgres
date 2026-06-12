@@ -6,10 +6,13 @@
 // bedrockReviewChunk wraps that into the ReviewChunkResponseV1 envelope — the activity return shape.
 //
 // The OBSERVABLE OUTPUT is the ReviewChunkResponseV1 — a DETERMINISTIC pure transform of the cassette
-// LLM response. doReview composes the (already-ported) reuse modules: buildSystemPrompt + buildUserMessage
-// (the LLM input), the LlmClient.invokeModel transform (which runs the REAL output-safety validator),
-// and parseWithSkipMalformed (the scope/evidence-enforcing parser). The three error paths + the
-// sanitize-and-continue branch are ported byte-faithfully.
+// LLM response. doReview composes the (already-ported) reuse modules: buildSystemPrompt +
+// buildCachedReviewPrompt (the LLM input — W2.2 cache-ordered: the byte-stable PR prefix before the
+// per-chunk suffix so the Anthropic/Bedrock prompt cache can re-bill the shared prefix at ~10%), the
+// LlmClient.invokeModel transform (which runs the REAL output-safety validator), and
+// parseWithSkipMalformed (the scope/evidence-enforcing parser). The three error paths + the
+// sanitize-and-continue branch are ported byte-faithfully. (The pre-W2.2 single-user-message
+// assembly, buildUserMessage, stays byte-frozen in prompt_builder.ts for the Python parity oracle.)
 //
 // Temporal mapping: the Python raises `temporalio.exceptions.ApplicationError(msg, type=..., non_retryable=...)`.
 // Faults are raised as ActivityError (review/activity_error.ts) carrying the type NAME the runner
@@ -29,7 +32,7 @@ import {
 import type { LlmClient } from "#backend/integrations/llm/client.js";
 import { buildSystemPrompt, REVIEW_TOOL_SCHEMA, ARBITRATION_INTENT_TOOL_SCHEMA } from "#backend/llm/review_prompt.js";
 import { modelForPurpose } from "#backend/llm/model_router.js";
-import { buildUserMessage } from "#backend/review/prompt_builder.js";
+import { buildCachedReviewPrompt } from "#backend/review/prompt_builder.js";
 import { parseWithSkipMalformed } from "#backend/review/chunk_response_parser.js";
 import { redactText } from "#backend/redact/output_redaction.js";
 
@@ -111,10 +114,20 @@ export async function doReview(
   // this slice); the pure seed resolver IS the unconfigured fallback, which is the cassette behavior.
   const resolvedModel = args.model ?? modelForPurpose("review_finding");
 
+  // W2.2 (prompt caching) — CACHE-ORDERED assembly: everything byte-stable across the N chunk calls
+  // of one review comes FIRST (system prompt, then the PR-level user prefix), the per-chunk suffix
+  // (policy → knowledge → evidence → Tier-1 appendix → the chunk diff LAST) after the boundary.
+  // `cachePrefixMessages: 2` tells the SDK adapter where to place `cache_control:{type:"ephemeral"}`,
+  // so the (tools + system + stable-prefix) bytes are billed full price once per review and at ~10%
+  // (cache read) on every other chunk call. The pre-W2.2 single-user-message assembly
+  // (buildUserMessage) remains byte-frozen for the Python parity oracle; the LLM-visible content here
+  // is the SAME blocks reordered (pinned by test/unit/review/prompt_cache_split.test.ts).
   const systemPrompt = buildSystemPrompt({ policyRevision: context.policy_revision });
+  const { stablePrefix, chunkSuffix } = buildCachedReviewPrompt(context);
   const messages: Array<LlmMessage> = [
     { role: "system", content: systemPrompt },
-    { role: "user", content: buildUserMessage(context) },
+    { role: "user", content: stablePrefix },
+    { role: "user", content: chunkSuffix },
   ];
 
   let result;
@@ -153,6 +166,9 @@ export async function doReview(
         // F9: the bulk-spend per-chunk site labels its ledger hit/miss/paid telemetry too (else purpose="unknown").
         ledgerPurpose: "bedrock_review_chunk",
       },
+      // W2.2 — the stable/variable boundary: messages[0..1] (system + PR-stable prefix) are
+      // byte-identical across every chunk of this review; messages[2] is the per-chunk suffix.
+      cachePrefixMessages: 2,
     });
   } catch (e) {
     // (a) Budget exceeded → non-retryable.
