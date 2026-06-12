@@ -112,11 +112,10 @@
         "runtime": {
           "type": "object",
           "properties": {
-            "mode": { "type": "string", "enum": ["temporal", "postgres", "shadow"] }
+            "mode": { "type": "string", "enum": ["postgres", "shadow"] }
           },
           "required": ["mode"]
         },
-        "temporal": { "type": "object" },
         "embeddings": {
           "type": "object",
           "properties": {

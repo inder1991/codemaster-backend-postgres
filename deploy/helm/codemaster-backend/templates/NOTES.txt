@@ -24,10 +24,6 @@ Ingress hosts:
 
 {{- /* ----- Loud production pre-flight warnings ----- */ -}}
 {{- $warnings := list -}}
-{{- if eq .Values.config.nodeEnv "production" -}}
-  {{- if not .Values.config.temporal.address -}}{{- $warnings = append $warnings "config.temporal.address is EMPTY — the worker's real-cluster guard will fail boot. Set it (e.g. temporal-frontend.temporal.svc:7233)." -}}{{- end -}}
-  {{- if not .Values.config.temporal.namespace -}}{{- $warnings = append $warnings "config.temporal.namespace is EMPTY — REQUIRED when nodeEnv=production." -}}{{- end -}}
-{{- end -}}
 {{- if eq .Values.config.embeddings.provider "platform" -}}
   {{- if not .Values.config.embeddings.qwenDsn -}}{{- $warnings = append $warnings "embeddings.provider=platform but config.embeddings.qwenDsn is empty — set it, or move it to vault.agent.envSecrets if it carries credentials." -}}{{- end -}}
 {{- else if eq .Values.config.embeddings.provider "openai_compat" -}}

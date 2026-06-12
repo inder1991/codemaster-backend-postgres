@@ -63,12 +63,8 @@ config:
   api:
     authRoutesEnabled: true
     secureCookies: false     # kind has no TLS at the edge
-  temporal:
-    address: temporal-frontend:7233
-    namespace: default
-    taskQueue: review-default
-    outboxTaskQueue: outbox-dispatcher
-    tls: false
+  runtime:
+    mode: postgres           # Temporal removed; the Postgres runtime is the only runtime
   embeddings:
     provider: openai_compat
     openaiCompat:
