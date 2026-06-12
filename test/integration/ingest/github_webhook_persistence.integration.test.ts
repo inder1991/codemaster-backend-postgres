@@ -71,7 +71,7 @@ async function seedTenant(): Promise<Seed> {
   return { installationId, githubInstallationId, githubRepoId, prNumber };
 }
 
-function prBody(seed: Seed, action = "opened"): string {
+function prBody(seed: Seed, action = "opened", draft = false): string {
   const account = { id: 7, login: "octocat", type: "User" };
   return JSON.stringify({
     action,
@@ -84,7 +84,7 @@ function prBody(seed: Seed, action = "opened"): string {
       head: { sha: "a".repeat(40), repo: { full_name: `octo/repo-${seed.githubRepoId}` }, ref: "feat/x" },
       base: { sha: "b".repeat(40), repo: { full_name: `octo/repo-${seed.githubRepoId}` }, ref: "main" },
       user: account,
-      draft: false,
+      draft,
       merged: false,
       id: 99,
       created_at: "2026-01-01T00:00:00Z",
@@ -183,6 +183,85 @@ describeDb("github webhook persistence spine (integration, disposable PG)", () =
       expect(reviewPayload.pr_number).toBe(seed.prNumber);
       expect(reviewPayload.github_installation_id).toBe(seed.githubInstallationId);
     } finally {
+      await cleanup(seed);
+    }
+  });
+
+  it("XH6/W4.3: DRAFT opened/synchronize are SKIPPED by default — no run, no outbox row; ready_for_review reviews", async () => {
+    // Drafts are the highest-churn phase: pre-XH6 a draft opened + pushed 10x + marked ready ran
+    // ~12 full reviews (clone + Tier-1 + Tier-2 LLM + post) when ONE at ready_for_review would do —
+    // the only behavioral effect of the draft flag was a prompt tone-down line.
+    const seed = await seedTenant();
+    try {
+      // Draft OPENED → webhook persisted (audit + idempotency + PR metadata) but NOT review-triggering.
+      const opened = await persistWebhook({
+        db,
+        body: new TextEncoder().encode(prBody(seed, "opened", true)),
+        headers: { "x-github-delivery": `d-${seed.githubRepoId}-draft-1`, "x-github-event": "pull_request" },
+        signatureValid: true,
+        clock: CLOCK,
+      });
+      expect(opened.deduped).toBe(false);
+      // Draft SYNCHRONIZE (the churn case) → also skipped.
+      await persistWebhook({
+        db,
+        body: new TextEncoder().encode(prBody(seed, "synchronize", true)),
+        headers: { "x-github-delivery": `d-${seed.githubRepoId}-draft-2`, "x-github-event": "pull_request" },
+        signatureValid: true,
+        clock: CLOCK,
+      });
+
+      const runs = await pool.query(
+        `SELECT 1 FROM core.review_runs r
+          JOIN core.pull_request_reviews v ON v.review_id = r.review_id
+         WHERE v.repo_id = $1 AND v.pr_number = $2`,
+        [seed.githubRepoId, seed.prNumber],
+      );
+      expect(runs.rows).toHaveLength(0); // no run was ever allocated for the draft
+      const outbox = await pool.query(
+        `SELECT 1 FROM core.outbox WHERE installation_id = $1 AND sink = 'temporal_workflow_start'`,
+        [seed.installationId],
+      );
+      expect(outbox.rows).toHaveLength(0); // no review dispatch
+
+      // READY_FOR_REVIEW (GitHub stamps draft:false on it) → the ONE review fires.
+      await persistWebhook({
+        db,
+        body: new TextEncoder().encode(prBody(seed, "ready_for_review", false)),
+        headers: { "x-github-delivery": `d-${seed.githubRepoId}-ready`, "x-github-event": "pull_request" },
+        signatureValid: true,
+        clock: CLOCK,
+      });
+      const readyOutbox = await pool.query(
+        `SELECT 1 FROM core.outbox WHERE installation_id = $1 AND sink = 'temporal_workflow_start'`,
+        [seed.installationId],
+      );
+      expect(readyOutbox.rows).toHaveLength(1);
+    } finally {
+      await cleanup(seed);
+    }
+  });
+
+  it("XH6/W4.3: CODEMASTER_REVIEW_DRAFT_PRS=true restores the legacy review-every-draft-push posture", async () => {
+    const seed = await seedTenant();
+    const prior = process.env.CODEMASTER_REVIEW_DRAFT_PRS;
+    process.env.CODEMASTER_REVIEW_DRAFT_PRS = "true";
+    try {
+      await persistWebhook({
+        db,
+        body: new TextEncoder().encode(prBody(seed, "synchronize", true)),
+        headers: { "x-github-delivery": `d-${seed.githubRepoId}-draft-on`, "x-github-event": "pull_request" },
+        signatureValid: true,
+        clock: CLOCK,
+      });
+      const outbox = await pool.query(
+        `SELECT 1 FROM core.outbox WHERE installation_id = $1 AND sink = 'temporal_workflow_start'`,
+        [seed.installationId],
+      );
+      expect(outbox.rows).toHaveLength(1); // drafts review when the operator opts in
+    } finally {
+      if (prior === undefined) delete process.env.CODEMASTER_REVIEW_DRAFT_PRS;
+      else process.env.CODEMASTER_REVIEW_DRAFT_PRS = prior;
       await cleanup(seed);
     }
   });
