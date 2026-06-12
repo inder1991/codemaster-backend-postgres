@@ -80,7 +80,7 @@ describe("auth routes (Fastify inject)", () => {
       const sessionCookie = res.cookies.find((c) => c.name === SESSION_COOKIE_NAME);
       expect(sessionCookie?.value).toBeTruthy();
       expect(sessionCookie?.httpOnly).toBe(true);
-      expect(sessionCookie?.sameSite).toBe("Lax");
+      expect(sessionCookie?.sameSite).toBe("Strict"); // W4.7/EC4 — tightened from Lax
       await app.close();
     });
 
