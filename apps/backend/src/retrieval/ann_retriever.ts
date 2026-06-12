@@ -21,9 +21,11 @@
 // frozen Python emits an OTel histogram here; that observability module is not ported yet, so this port
 // keeps the timing seam intact but omits the (absent) metric emission.
 //
-// ── Purpose ──
-// `purpose="review_query"` (1:1 with the Python `_QUERY_PURPOSE`) — DISTINCT from EmbedQueryActivity's
-// `"in_repo_doc"`: the activity is the per-PR memoized path; this is the legacy per-chunk fallback.
+// ── Purpose (W1.3 — RL-appendix embed-mode) ──
+// HARDENING DIVERGENCE from the frozen Python: the Python used "review_query" here but "in_repo_doc"
+// in embed_query.py — two different purposes for the SAME query, so a chunk whose memoized embed
+// failed got a different query vector than its siblings. Both paths now share the ONE
+// QUERY_EMBED_PURPOSE + the flag-gated Qwen query-instruction seam (retrieval/query_embed.ts).
 
 import {
   type EmbeddingsPort,
@@ -34,6 +36,7 @@ import {
 import { type Clock, WallClock } from "#platform/clock.js";
 
 import { MIN_COSINE_SIMILARITY_FLOOR } from "./constants.js";
+import { buildQueryEmbedText, QUERY_EMBED_PURPOSE } from "./query_embed.js";
 
 import type { AnnPort } from "./ann_port.js";
 import type {
@@ -41,8 +44,6 @@ import type {
   RetrievedKnowledgeV1,
   ScoredKnowledgeChunkV1,
 } from "#contracts/knowledge_chunks.v1.js";
-
-const QUERY_PURPOSE = "review_query";
 
 export type AnnRetrieverOptions = {
   port: AnnPort;
@@ -83,9 +84,10 @@ export class AnnRetriever {
     } else {
       try {
         const result = await this.embeddings.embed({
-          texts: [query.query],
+          // W1.3: every QUERY embed routes through the shared seam (instruction prefix when flagged on).
+          texts: [buildQueryEmbedText(query.query)],
           model_name: this.modelName,
-          purpose: QUERY_PURPOSE,
+          purpose: QUERY_EMBED_PURPOSE,
         });
         const first = result.vectors[0];
         queryVector = first === undefined ? [] : first;
