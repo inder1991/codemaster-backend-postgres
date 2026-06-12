@@ -45,6 +45,23 @@ import type { ArbitrationIntentV1 } from "#contracts/arbitration_intent.v1.js";
 // Sandbox-safe: degradation.ts is already part of the workflow bundle (no new runtime edges).
 import { isCancellation } from "./degradation.js";
 
+/**
+ * Abort-class error NAMES that must PROPAGATE out of the fail-soft fan-out even when a failureSlot
+ * is supplied (wave-1 adversarial-review fix). Name-matched (the CS4.3 posture) so this
+ * workflow-bundle-safe module never imports runner code:
+ *   * THROTTLE faults — the CS4.4/W1.9c layering parks the whole JOB attempt-free at the
+ *     Retry-After/resetAt hint via the runner's deferRetry; recording a throttle as a chunk
+ *     degradation would permanently lose the chunk and settle the review 'done'. MUST mirror
+ *     runner/retry_hints.ts THROTTLE_ERROR_NAMES — pinned in lockstep by parallelism.test.ts.
+ *   * TerminalCancelError — the de-Temporal shell's composed-abort fault (mutex loss / supersede /
+ *     hard timeout); isCancellation also recognizes it, listed here for the lockstep pin.
+ */
+export const FANOUT_ABORT_CLASS_ERROR_NAMES: ReadonlySet<string> = new Set([
+  "GitHubRateLimitExceeded",
+  "LlmRateLimitError",
+  "TerminalCancelError",
+]);
+
 /** Default per-PR chunk-review concurrency. Matches the Sprint-6 routing-policy slot
  *  (CHUNK_CONCURRENCY_DEFAULT in parallelism.py:43). */
 export const CHUNK_CONCURRENCY_DEFAULT = 4;
@@ -227,7 +244,11 @@ export async function fanOutReview(
         // Cancellation ALWAYS aborts the fan-out (never a degradation record): signal peers to stop,
         // then re-raise verbatim. Without a failureSlot every failure takes this path — the legacy
         // first-error-wins contract (the first-observed error propagates through `Promise.all`).
-        if (options.failureSlot === undefined || isCancellation(err)) {
+        if (
+          options.failureSlot === undefined ||
+          isCancellation(err) ||
+          (err instanceof Error && FANOUT_ABORT_CLASS_ERROR_NAMES.has(err.name))
+        ) {
           aborted = true;
           throw err;
         }

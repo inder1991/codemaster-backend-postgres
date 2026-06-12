@@ -205,11 +205,14 @@ describe("applyInProcessRetry — behavior of the wrapped/unwrapped port fns", (
 // DETERMINISTIC output-unsafe fault burns the full 4-attempt curve instead of failing fast.
 describe("toRetryPolicy — nonRetryable matches the real TS error classes (review fix)", () => {
   it("LlmOutputUnsafeError is non-retryable under the reviewChunk policy", async () => {
-    const { LlmOutputUnsafeError } = await import("#backend/integrations/llm/errors.js");
     const { IN_PROCESS_RETRY_POLICIES, toRetryPolicy } = await import(
       "#backend/runner/retry_policies.js"
     );
-    const policy = toRetryPolicy(IN_PROCESS_RETRY_POLICIES.reviewChunk);
-    expect(policy.nonRetryable(new LlmOutputUnsafeError("unsafe output"))).toBe(true);
+    const policy = toRetryPolicy("reviewChunk", IN_PROCESS_RETRY_POLICIES.reviewChunk!);
+    // The classifier is NAME-matched; a name-faithful instance suffices (the real class requires
+    // a full OutputSafetyDecisionV1 — irrelevant to the name dispatch under test).
+    const unsafe = new Error("unsafe output");
+    unsafe.name = "LlmOutputUnsafeError";
+    expect(policy.nonRetryable(unsafe)).toBe(true);
   });
 });

@@ -275,7 +275,11 @@ export function isCancellation(exc: unknown): boolean {
   if (exc instanceof CancelledFailure) {
     return true;
   }
-  if (exc instanceof Error && exc.name === "AbortError") {
+  if (exc instanceof Error && (exc.name === "AbortError" || exc.name === "TerminalCancelError")) {
+    // TerminalCancelError is the de-Temporal shell's composed-abort fault (mutex loss / supersede /
+    // hard timeout — review_job_runner.ts). Name-matched so this workflow-bundle-safe module never
+    // imports runner code. Wave-1 adversarial-review fix: without it, a post-abort fan-out recorded
+    // every remaining chunk as a false degradation before teardown.
     return true;
   }
   return false;

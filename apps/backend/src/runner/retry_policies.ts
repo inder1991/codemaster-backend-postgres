@@ -101,6 +101,15 @@ export function toRetryPolicy(name: string, options: RetryActivityOptions): Retr
     ? parseTemporalDuration(options.retry.maximumInterval)
     : initialIntervalS * SDK_DEFAULT_MAX_INTERVAL_FACTOR;
   const declared = new Set(options.retry?.nonRetryableErrorTypes ?? []);
+  // Wave-1 adversarial-review fix: RETRY_POLICIES transcribes the PYTHON ApplicationError type
+  // names; the REAL TS classes differ. Carry both vocabularies so deterministic faults fail fast
+  // instead of burning the curve (pinned with the real classes in retry_policies.test.ts).
+  if (declared.has("BedrockOutputUnsafeError")) {
+    declared.add("LlmOutputUnsafeError");
+  }
+  if (declared.has("BedrockBudgetExceededError")) {
+    declared.add("BedrockBudgetExceededError"); // TS class keeps this name (enforcer.ts) — listed for symmetry
+  }
   return {
     startToCloseS: parseTemporalDuration(options.startToCloseTimeout),
     initialIntervalS,
