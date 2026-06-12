@@ -122,6 +122,15 @@
             "provider": { "type": "string", "enum": ["platform", "openai_compat"] }
           }
         },
+        "rerank": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "model": { "type": "string", "enum": ["", "cohere.rerank-v3-5:0", "amazon.rerank-v1:0"] },
+            "region": { "type": "string", "pattern": "^$|^[a-z]{2}-[a-z]+-[0-9]+$" },
+            "topN": { "type": "integer", "minimum": 1, "maximum": 100 }
+          }
+        },
         "workspaceRoot": { "type": "string", "minLength": 1 },
         "cloneCacheRoot": { "type": "string", "minLength": 1 },
         "features": { "type": "object" },

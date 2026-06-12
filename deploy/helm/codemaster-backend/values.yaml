@@ -226,6 +226,21 @@ config:
       # leave empty and inject CODEMASTER_EMBEDDER_API_KEY via vault.agent.envSecrets.
       apiKey: ""
 
+  # ---- Optional Bedrock re-ranker (W1.3 RH9) — DEFAULT OFF ----
+  # Re-scores the retrieval candidates against the review query via a Bedrock RERANK-API model.
+  # Fail-open: a rerank fault falls back to the pre-rerank order and never fails a review. The
+  # rerank call reuses the platform Bedrock credentials (admin llm-provider-config) — nothing
+  # secret here. NOTE: an admin save via PUT /api/admin/rerank-config OVERRIDES this baseline at
+  # runtime (database > environment > default).
+  rerank:
+    enabled: false
+    # cohere.rerank-v3-5:0 | amazon.rerank-v1:0 (schema enum-locked). Required when enabled=true.
+    model: ""
+    # AWS region of the rerank model. Empty -> the platform Bedrock credential row's region.
+    region: ""
+    # How many leading pre-rerank candidates are submitted for re-scoring (cost/latency bound, 1-100).
+    topN: 25
+
   workspaceRoot: /var/lib/codemaster/workspaces
   cloneCacheRoot: /clone-cache
 
