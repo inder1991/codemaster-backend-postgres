@@ -61,11 +61,9 @@ export async function upsertPurposeModel(
 
 /** The Bedrock RERANK-API models the engine can invoke (the rerank analogue of {@link BEDROCK_MODELS}).
  *  A PUT /api/admin/rerank-config naming any other model_id is rejected — the adapter only speaks the
- *  Cohere/Amazon rerank request shapes. */
-export const RERANK_MODELS: ReadonlySet<string> = new Set([
-  "cohere.rerank-v3-5:0",
-  "amazon.rerank-v1:0",
-]);
+ *  Cohere/Amazon rerank request shapes. Single-sourced from the retrieval-side config contract so the
+ *  admin PUT, the env parse, and the adapter can never disagree on the accepted set. */
+export { RERANK_MODELS } from "#backend/retrieval/rerank_config.js";
 
 /** The stored rerank settings row (camelCase view of core.rerank_settings; migration 0047). */
 export type RerankSettingsRow = {
