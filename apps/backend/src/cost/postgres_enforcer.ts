@@ -398,20 +398,10 @@ export class PostgresCostCapEnforcer implements CostCapEnforcer {
           configuredCap: effectiveOrgCap,
         });
 
-        // SELECT FOR UPDATE on both rows so the diff is applied under the same lock as the original
-        // reservation — no torn read between this UPDATE and a concurrent checkOrRaise.
-        // tenant:exempt reason=scope-discriminated-cost-daily follow_up=PERMANENT-EXEMPTION-cost-daily-scope
-        await sql`
-          SELECT daily_total_cents FROM telemetry.cost_daily
-           WHERE today = ${today} AND scope = 'global' FOR UPDATE
-        `.execute(trx);
-        if (!isPlatformScope) {
-          // tenant:exempt reason=scope-discriminated-cost-daily follow_up=PERMANENT-EXEMPTION-cost-daily-scope
-          await sql`
-            SELECT daily_total_cents FROM telemetry.cost_daily
-             WHERE today = ${today} AND scope = 'per_org' AND scope_id = ${installationId}::uuid FOR UPDATE
-          `.execute(trx);
-        }
+        // Settle = unconditional single-statement adjust per row (W2.1): `daily_total_cents + diff`
+        // is computed row-locally INSIDE each UPDATE, so no pre-locking FOR-UPDATE read is needed —
+        // the statement's own row lock makes the read-modify-write atomic, and nothing is held
+        // across round-trips. Write order global→per_org matches the reserve gates (deadlock-free).
         // tenant:exempt reason=scope-discriminated-cost-daily follow_up=PERMANENT-EXEMPTION-cost-daily-scope
         await sql`
           UPDATE telemetry.cost_daily
