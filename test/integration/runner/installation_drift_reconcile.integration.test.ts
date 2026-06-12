@@ -13,8 +13,8 @@
 // Runs ONLY against an explicitly-set CODEMASTER_PG_CORE_DSN (the disposable DB) — never a shared
 // cluster (skips when the DSN is absent, per test/integration/_db.ts).
 import { randomInt } from "node:crypto"; // test/ is OUT of the clock/random gate's scope
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { Kysely, PostgresDialect, sql } from "kysely";
+import { afterAll, beforeAll, expect, it } from "vitest";
+import { Kysely, PostgresDialect } from "kysely";
 import { Pool } from "pg";
 
 import { installationDriftReconcileActivity } from "#backend/activities/installation_drift_reconcile.activity.js";

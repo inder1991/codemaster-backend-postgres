@@ -25,6 +25,7 @@ import { MarkStaleChunksInputV1 } from "#contracts/confluence_sync_stale.v1.js";
 
 import {
   ConfluenceIngestCronInput,
+  InstallationDriftReconcileCronInputV1,
   MutexJanitorCronInputV1,
   PartitionMaintenanceCronInputV1,
   ReviewRunReaperCronInputV1,
@@ -47,4 +48,6 @@ export const SCHEDULED_JOB_INPUT_CONTRACTS: ReadonlyMap<string, z.ZodTypeAny> = 
   ["run_id_retention", RunIdRetentionCronInputV1],
   ["workspace_retention", WorkspaceRetentionCronInputV1],
   ["confluence_ingest", ConfluenceIngestCronInput],
+  // W3.6 (RH12): the installation drift-reconcile self-heal sweep.
+  ["installation_drift_reconcile", InstallationDriftReconcileCronInputV1],
 ]);

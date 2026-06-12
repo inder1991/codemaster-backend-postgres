@@ -4,6 +4,7 @@ import {
   type ConfluenceChunkClient,
   type ConfluenceSyncActivities,
 } from "#backend/activities/confluence_sync.activity.js";
+import { installationDriftReconcileActivity } from "#backend/activities/installation_drift_reconcile.activity.js";
 import { jobRetentionSweepActivity } from "#backend/activities/job_retention.activity.js";
 import { ListActiveConfluenceSpacesActivity } from "#backend/activities/list_active_confluence_spaces.activity.js";
 import { MarkStaleChunksActivity } from "#backend/activities/mark_stale_chunks.activity.js";
@@ -130,6 +131,12 @@ export const JobRetentionCronInputV1 = z
     backgroundJobsTtlDays: z.number().int().min(1),
   })
   .strict();
+
+/** installation_drift_reconcile scheduled input — zero-config (W3.6 RH12: the walk bound is an
+ *  activity default; the per-installation cooldown is env-owned —
+ *  `CODEMASTER_REPAIR_COOLDOWN_SECONDS`). STRICT: an operator edit expecting an effect fails the
+ *  parse loudly instead of being silently forwarded. */
+export const InstallationDriftReconcileCronInputV1 = z.object({}).strict();
 
 /**
  * A {@link GitHubApiClient} built lazily on first `.get`/`.patch` and memoized — the SAME
@@ -435,6 +442,24 @@ export function registerCronHandlers(registry: HandlerRegistry, deps: CronHandle
         `background_jobs_deleted=${result.background_jobs_deleted} ` +
         `idempotency_deleted=${result.idempotency_deleted} batches=${result.batches} ` +
         `job_id=${handlerDeps.job.job_id}`,
+    );
+  });
+
+  // W3.6 (RH12): installation_drift_reconcile — the daily 04:15 UTC self-heal sweep. Walks active
+  // installations through the SAME cooldown/blocked-gated maybeEnqueueRepair dispatcher the
+  // PR-webhook drift + installation_created paths use (trigger_source='drift_sweep'), so a dropped
+  // GitHub webhook self-corrects on the cron cadence: the repair envelope rides the outbox →
+  // cutover port → repair_installation_repositories hydrate, which upserts the canonical repo set
+  // idempotently. No-signal posture (the sweep crons' rationale): each per-installation unit is a
+  // cooldown-gated idempotent enqueue — a lease-lost duplicate re-sweep suppresses itself.
+  registry.register("installation_drift_reconcile", async (payload, _signal, handlerDeps) => {
+    InstallationDriftReconcileCronInputV1.parse(payload);
+    const result = await installationDriftReconcileActivity(
+      deps.dsn !== undefined ? { dsn: deps.dsn } : {},
+    );
+    console.info(
+      `installation_drift_reconcile swept: scanned=${result.scanned} enqueued=${result.enqueued} ` +
+        `suppressed=${result.suppressed} failed=${result.failed} job_id=${handlerDeps.job.job_id}`,
     );
   });
 
