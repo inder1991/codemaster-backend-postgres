@@ -186,4 +186,28 @@ describeDb("mutexJanitorActivity (integration, disposable PG)", () => {
       await cleanup(seed);
     }
   });
+
+  it("OM7/W3.5: the sweep is BOUNDED — at most sweepLimit rows per invocation; the next tick continues", async () => {
+    // Pre-OM7 the janitor swept the WHOLE eligible set in one transaction (FOR UPDATE locks held the
+    // entire time + per-row audit INSERTs) — after an incident leaking many leases, a single long
+    // transaction could exceed the 900s ceiling and roll back ENTIRELY: zero progress, same giant
+    // set retried next tick. Bounding per-invocation work guarantees forward progress.
+    const seed = await seedTenant();
+    const ids = [
+      await seedMutex(seed, 41, { releasedAtSql: "NULL", leaseExpiresAtSql: "now() - interval '1 hour'", holder: "wf-1" }),
+      await seedMutex(seed, 42, { releasedAtSql: "NULL", leaseExpiresAtSql: "now() - interval '1 hour'", holder: "wf-2" }),
+      await seedMutex(seed, 43, { releasedAtSql: "NULL", leaseExpiresAtSql: "now() - interval '1 hour'", holder: "wf-3" }),
+    ];
+    try {
+      const first = await mutexJanitorActivity({ dsn: INTEGRATION_DSN ?? "", sweepLimit: 2 });
+      expect(first.swept).toBe(2);
+      const second = await mutexJanitorActivity({ dsn: INTEGRATION_DSN ?? "", sweepLimit: 2 });
+      expect(second.swept).toBe(1); // the next tick drains the remainder
+      for (const id of ids) {
+        expect((await fetchMutex(id))?.released_at).not.toBeNull();
+      }
+    } finally {
+      await cleanup(seed);
+    }
+  });
 });
