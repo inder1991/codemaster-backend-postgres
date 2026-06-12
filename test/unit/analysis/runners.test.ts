@@ -30,6 +30,7 @@ import {
   parseEslintOutput,
 } from "#backend/analysis/eslint_runner.js";
 import {
+  GITLEAKS_SCAN_STAGING_DIRNAME,
   GitleaksInWorkerRunner,
   parseGitleaksOutput,
   redactSecret,
@@ -39,7 +40,11 @@ import {
   parseRuffOutput,
   severityForCode,
 } from "#backend/analysis/ruff_runner.js";
-import { SubprocessLaunchError, type SubprocessResultV1 } from "#backend/analysis/in_worker_runner.js";
+import {
+  SubprocessLaunchError,
+  type SpawnFn,
+  type SubprocessResultV1,
+} from "#backend/analysis/in_worker_runner.js";
 import { ESLINT_CONFIG_PATH, RUFF_CONFIG_PATH } from "#backend/analysis/config_assets.js";
 
 function result(exitCode: number, stdout: string, stderr = ""): SubprocessResultV1 {
@@ -194,6 +199,131 @@ describe("runner fail-open on a missing binary", () => {
   });
 });
 
+// ─── W2.6 (M3): gitleaks scoped to the changed file set, not the whole tree ──────────────────────
+
+describe("GitleaksInWorkerRunner changed-file scoping (W2.6 M3)", () => {
+  let ws: string;
+  beforeEach(async () => {
+    ws = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "gl-scope-")));
+  });
+  afterEach(async () => {
+    await fs.rm(ws, { recursive: true, force: true });
+  });
+
+  /** A fake spawn that snapshots the staged tree AT SPAWN TIME and emits a canned close. */
+  function fakeSpawn(capture: {
+    command?: ReadonlyArray<string>;
+    stagedFiles?: Array<string>;
+    stdout?: string;
+  }): SpawnFn {
+    return (command, args) => {
+      capture.command = [command, ...args];
+      // Snapshot what the staging dir holds at the moment the tool would run.
+      const sourceArg = [command, ...args].find((a) => a.startsWith("--source="));
+      const sourceDir = sourceArg ? sourceArg.slice("--source=".length) : undefined;
+      if (sourceDir) {
+        capture.stagedFiles = walkSync(sourceDir).map((p) => path.relative(sourceDir, p));
+      }
+      const { EventEmitter } = require("node:events") as typeof import("node:events");
+      const proc = new EventEmitter() as ReturnType<SpawnFn>;
+      (proc as unknown as { pid: number }).pid = 777;
+      (proc as unknown as { stdout: InstanceType<typeof EventEmitter> }).stdout = new EventEmitter();
+      (proc as unknown as { stderr: InstanceType<typeof EventEmitter> }).stderr = new EventEmitter();
+      queueMicrotask(() => {
+        if (capture.stdout !== undefined) {
+          (proc as unknown as { stdout: InstanceType<typeof EventEmitter> }).stdout.emit(
+            "data",
+            Buffer.from(capture.stdout),
+          );
+        }
+        proc.emit("close", 0);
+      });
+      return proc;
+    };
+  }
+
+  function walkSync(dir: string): Array<string> {
+    const { readdirSync, statSync } = require("node:fs") as typeof import("node:fs");
+    const out: Array<string> = [];
+    for (const entry of readdirSync(dir)) {
+      const p = path.join(dir, entry);
+      if (statSync(p).isDirectory()) out.push(...walkSync(p));
+      else out.push(p);
+    }
+    return out;
+  }
+
+  it("scans a staging dir holding EXACTLY the routed files — not the whole workspace", async () => {
+    await fs.mkdir(path.join(ws, "sub"), { recursive: true });
+    await fs.writeFile(path.join(ws, "sub", "changed.env"), "k=v\n");
+    await fs.writeFile(path.join(ws, "unchanged.env"), "huge=tree\n");
+
+    const capture: { command?: ReadonlyArray<string>; stagedFiles?: Array<string> } = {};
+    const runner = new GitleaksInWorkerRunner({ spawnFn: fakeSpawn(capture) });
+    await runner.run({ workspace: ws, files: ["sub/changed.env"], changedLineRanges: {} });
+
+    const sourceArg = capture.command?.find((a) => a.startsWith("--source="));
+    expect(sourceArg).toBeDefined();
+    const sourceDir = sourceArg!.slice("--source=".length);
+    // The scan root is the per-run staging dir INSIDE the workspace, not the workspace root.
+    expect(sourceDir).toBe(path.join(ws, GITLEAKS_SCAN_STAGING_DIRNAME));
+    // The staged tree holds exactly the routed file (relative structure preserved).
+    expect(capture.stagedFiles).toEqual(["sub/changed.env"]);
+  });
+
+  it("maps findings back to the ORIGINAL workspace-relative paths", async () => {
+    await fs.mkdir(path.join(ws, "sub"), { recursive: true });
+    await fs.writeFile(path.join(ws, "sub", "secrets.env"), "k=v\n");
+    const stagingRoot = path.join(ws, GITLEAKS_SCAN_STAGING_DIRNAME);
+    const report = JSON.stringify([
+      {
+        Description: "Test rule",
+        StartLine: 1,
+        EndLine: 1,
+        Secret: "supersecretvalue",
+        File: path.join(stagingRoot, "sub", "secrets.env"),
+        RuleID: "test-rule",
+      },
+    ]);
+    const capture: { command?: ReadonlyArray<string>; stdout?: string } = { stdout: report };
+    const runner = new GitleaksInWorkerRunner({ spawnFn: fakeSpawn(capture) });
+    const findings = await runner.run({ workspace: ws, files: ["sub/secrets.env"], changedLineRanges: {} });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.file).toBe("sub/secrets.env");
+  });
+
+  it("removes the staging dir after the run (success path)", async () => {
+    await fs.writeFile(path.join(ws, "a.env"), "k=v\n");
+    const runner = new GitleaksInWorkerRunner({ spawnFn: fakeSpawn({}) });
+    await runner.run({ workspace: ws, files: ["a.env"], changedLineRanges: {} });
+    await expect(fs.access(path.join(ws, GITLEAKS_SCAN_STAGING_DIRNAME))).rejects.toThrow();
+  });
+
+  it("a routed file missing on disk is skipped fail-open; the rest still stage + scan", async () => {
+    await fs.writeFile(path.join(ws, "present.env"), "k=v\n");
+    const capture: { stagedFiles?: Array<string> } = {};
+    const runner = new GitleaksInWorkerRunner({ spawnFn: fakeSpawn(capture) });
+    await runner.run({
+      workspace: ws,
+      files: ["present.env", "deleted-in-pr.env"],
+      changedLineRanges: {},
+    });
+    expect(capture.stagedFiles).toEqual(["present.env"]);
+  });
+
+  it("a path-traversal file entry is refused from staging (never linked outside the workspace)", async () => {
+    await fs.writeFile(path.join(ws, "ok.env"), "k=v\n");
+    const capture: { stagedFiles?: Array<string> } = {};
+    const runner = new GitleaksInWorkerRunner({ spawnFn: fakeSpawn(capture) });
+    await runner.run({
+      workspace: ws,
+      files: ["ok.env", "../../etc/passwd"],
+      changedLineRanges: {},
+    });
+    expect(capture.stagedFiles).toEqual(["ok.env"]);
+  });
+});
+
 // ─── REAL subprocess parity (binaries installed locally) ─────────────────────────────────────────
 
 function binaryAvailable(bin: string, versionArgs: ReadonlyArray<string>): string | null {
@@ -284,4 +414,18 @@ describe("REAL subprocess: runners against actual tool binaries", () => {
       expect(f.message).toContain("…");
     }
   }, 30_000);
+
+  it.runIf(GITLEAKS_BIN && GITLEAKS_DEV_STDOUT_OK)(
+    "Gitleaks scan is SCOPED to the routed files — a secret in an unrouted file is not scanned (W2.6 M3)",
+    async () => {
+      await fs.writeFile(path.join(ws, "changed.env"), `slack_token=${SLACK_BAIT_TOKEN}\n`);
+      await fs.writeFile(path.join(ws, "untouched.env"), `slack_token=${SLACK_BAIT_TOKEN}\n`);
+      const runner = new GitleaksInWorkerRunner({ gitleaksPath: GITLEAKS_BIN!, timeoutSeconds: 30 });
+      const findings = await runner.run({ workspace: ws, files: ["changed.env"], changedLineRanges: {} });
+      expect(findings.length).toBeGreaterThan(0);
+      // Every finding maps to the routed file; the unrouted file never entered the scan.
+      expect(findings.every((f) => f.file === "changed.env")).toBe(true);
+    },
+    30_000,
+  );
 });
