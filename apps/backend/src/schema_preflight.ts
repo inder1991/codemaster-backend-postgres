@@ -37,6 +37,8 @@ export const EXPECTED_MIGRATIONS = [
   // renumbered to 0046 (the migrations/ files were renamed to match; this list IS the dir-pin).
   "0045_login_rate_limit",
   "0046_payload_schema_version",
+  // W1.3 RH9 — the optional Bedrock re-ranker's platform-singleton config row (admin PUT surface).
+  "0047_rerank_settings",
 ] as const satisfies ReadonlyArray<string>;
 
 /** The DB's applied migration sequence diverges from the image's compiled-in expectation — the pod
