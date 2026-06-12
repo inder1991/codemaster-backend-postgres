@@ -56,7 +56,10 @@ import {
 import { doPost } from "#backend/activities/post_review_results.activity.js";
 import { bedrockReviewChunk, type LlmClientCacheLike } from "#backend/review/review_activity.js";
 import { WalkthroughActivities } from "#backend/review/walkthrough_activity.js";
-import { buildStaticAnalysisActivity } from "#backend/activities/static_analysis.activity.js";
+import {
+  buildStaticAnalysisActivity,
+  TIER1_SOFT_BARRIER_SECONDS,
+} from "#backend/activities/static_analysis.activity.js";
 import { RuffInWorkerRunner } from "#backend/analysis/ruff_runner.js";
 import { EslintInWorkerRunner } from "#backend/analysis/eslint_runner.js";
 import { GitleaksInWorkerRunner } from "#backend/analysis/gitleaks_runner.js";
@@ -363,7 +366,9 @@ export function makeInProcessPorts(deps: InProcessPortDeps, signal: AbortSignal)
         gitleaks: new GitleaksInWorkerRunner(),
       },
       curatorCache: strictCache(),
-      deadlineSeconds: 60,
+      // W2.6 (M4): the shared soft-barrier constant — strictly below the 60s per-tool guard, so the
+      // orchestrator's authoritative deadline preempts a hung tool here exactly as in build_activities.
+      deadlineSeconds: TIER1_SOFT_BARRIER_SECONDS,
       clock: new WallClock(),
     });
     return staticMemo;

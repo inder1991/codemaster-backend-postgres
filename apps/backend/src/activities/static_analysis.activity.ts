@@ -95,6 +95,18 @@ export const MAX_RAW_PER_TOOL = 500;
  */
 export const MAX_FILES_PER_RUNNER = 1000;
 
+/**
+ * The Tier-1 soft-barrier deadline (seconds) — the orchestrator's AUTHORITATIVE budget, owned here
+ * next to the holder that constructs the orchestrator. W2.6 (M4): this MUST stay strictly below the
+ * per-tool safety guard ({@link import("#backend/analysis/in_worker_runner.js").DEFAULT_TIMEOUT_SECONDS},
+ * 60s) — when the two are equal the documented "orchestrator owns the deadline; tool timeouts are
+ * only safety guards" inversion never happens and a hung tool eats the full per-tool budget. 45s
+ * barrier / 60s guard gives the barrier a 15s preemption margin. (Pre-M4 both were 60 — the barrier
+ * never preempted anything.) Both production composition roots (worker/build_activities.ts +
+ * runner/in_process_ports.ts) import THIS constant; the lockstep is unit-pinned.
+ */
+export const TIER1_SOFT_BARRIER_SECONDS = 45;
+
 /** ESLint-eligible extensions (1:1 with the Python `_ProductionPipeline` `.endswith((".ts", ".tsx",
  *  ".js", ".jsx"))` routing). */
 const ESLINT_EXTENSIONS: ReadonlyArray<string> = [".ts", ".tsx", ".js", ".jsx"];
