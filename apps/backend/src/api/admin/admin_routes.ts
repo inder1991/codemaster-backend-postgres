@@ -62,6 +62,8 @@ import {
   PutFlagRequestV1,
   PutFlagResponseV1,
   RejectProposalV1,
+  RerankConfigUpdateV1,
+  RerankConfigV1,
   RetrievalModeRequestV1,
   RollbackGenerationRequestV1,
   StaleWriteV1,
@@ -176,11 +178,18 @@ import {
 } from "#backend/api/admin/retrieval_aggregate_read.js";
 import {
   BEDROCK_MODELS,
+  RERANK_MODELS,
   deleteModel,
+  readRerankSettings,
   setValidation,
   upsertModel,
   upsertPurposeModel,
+  upsertRerankSettings,
 } from "#backend/api/admin/llm_catalog_write.js";
+import {
+  parseRerankEnv,
+  resolveEffectiveRerankConfig,
+} from "#backend/retrieval/rerank_config.js";
 import { setEnabled } from "#backend/api/admin/repositories_write.js";
 import { submitFindingFeedback } from "#backend/api/admin/finding_feedback_write.js";
 import {
@@ -2289,6 +2298,98 @@ export async function registerAdminRoutes(
           .getPreflightValidator(body.provider)
           .validateCredentials({ apiKey: body.api_key, region: body.region });
         return reply.code(200).send(LlmConnectionTestResultV1.parse({ ok: result.ok, message: result.errorMessage || "ok" }));
+      },
+    );
+
+    // ─── W1.3 RH9 — GET/PUT /rerank-config: the optional Bedrock re-ranker (DEFAULT OFF) ───────────
+    // The UI-facing config surface for the retrieval reranker. NON-SECRET knobs only (the rerank call
+    // reuses the platform Bedrock token from llm-provider-config), so no vault/preflight gating. The
+    // GET reports the EFFECTIVE config (admin row > Helm env > disabled default) + its `source`; the
+    // PUT is a full-state upsert of the platform-singleton core.rerank_settings row, which the
+    // retrieval resolver re-reads per retrieval — a save takes effect on the next review, no redeploy.
+    scope.get(
+      "/api/admin/rerank-config",
+      { preHandler: requireRole([...READER_ROLES]) },
+      async (_request, reply) => {
+        const row = await readRerankSettings(opts.db);
+        // parseRerankEnv is FAIL-LOUD on a malformed CODEMASTER_RERANK_* (a 500 here is the same
+        // misconfig the worker's wiring refuses at build time — never silently masked as "default").
+        const { config, source } = resolveEffectiveRerankConfig({ row, env: parseRerankEnv() });
+        return reply.code(200).send(
+          RerankConfigV1.parse({
+            enabled: config.enabled,
+            model_id: config.modelId,
+            region: config.region,
+            top_n: config.topN,
+            source,
+            updated_at: row?.updatedAt.toISOString() ?? null,
+            updated_by_user_id: row?.updatedByUserId ?? null,
+          }),
+        );
+      },
+    );
+
+    scope.put(
+      "/api/admin/rerank-config",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const parsed = RerankConfigUpdateV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        const body = parsed.data;
+        if (!RERANK_MODELS.has(body.model_id)) {
+          return reply.code(422).send({
+            detail: {
+              code: "rerank_model_not_supported",
+              message: `model '${body.model_id}' is not a supported Bedrock rerank model`,
+              allowed: [...RERANK_MODELS],
+            },
+          });
+        }
+        const before = await readRerankSettings(opts.db);
+        const updatedAt = opts.clock.now();
+        await upsertRerankSettings(opts.db, {
+          enabled: body.enabled,
+          modelId: body.model_id,
+          region: body.region,
+          topN: body.top_n,
+          updatedAt,
+          updatedByUserId: principal.userId,
+        });
+        const after = {
+          enabled: body.enabled,
+          model_id: body.model_id,
+          region: body.region,
+          top_n: body.top_n,
+        };
+        await opts.audit?.({
+          actorUserId: principal.userId,
+          installationId: PLATFORM_SCOPE_AUDIT_INSTALLATION_ID,
+          action: "rerank_config.updated",
+          targetKind: "rerank_config",
+          targetId: "global",
+          before:
+            before === null
+              ? null
+              : {
+                  enabled: before.enabled,
+                  model_id: before.modelId,
+                  region: before.region,
+                  top_n: before.topN,
+                },
+          after,
+          now: updatedAt,
+        });
+        return reply.code(200).send(
+          RerankConfigV1.parse({
+            ...after,
+            source: "database",
+            updated_at: updatedAt.toISOString(),
+            updated_by_user_id: principal.userId,
+          }),
+        );
       },
     );
 
