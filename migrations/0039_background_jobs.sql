@@ -44,7 +44,9 @@ CREATE TABLE core.background_jobs (
   created_at      timestamptz NOT NULL DEFAULT now(),
   updated_at      timestamptz NOT NULL DEFAULT now()
 );
--- overlap=SKIP guard: at most one ACTIVE row per dedup_key (scheduled enqueues use `${schedule_id}:${bucket}`):
+-- overlap=SKIP guard: at most one ACTIVE row per dedup_key (scheduled enqueues use the BARE
+-- schedule_id — scheduler.ts:pollAndEnqueue; a per-tick `:bucket` suffix would defeat overlap=SKIP
+-- by freeing the key every tick. L9/W4.1: comment corrected — no `bucket` concept exists):
 CREATE UNIQUE INDEX uq_background_jobs_dedup_active ON core.background_jobs (dedup_key)
   WHERE dedup_key IS NOT NULL AND state IN ('ready','leased');
 -- claim-supporting index (the Wave-2 claim scans state + due-time + priority):

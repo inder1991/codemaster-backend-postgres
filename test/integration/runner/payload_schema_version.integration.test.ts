@@ -37,6 +37,11 @@ if (INTEGRATION_DSN) { pool = new Pool({ connectionString: INTEGRATION_DSN, max:
   db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) }); }
 
 afterAll(async () => {
+  if (INTEGRATION_DSN) {
+    // Leftover w41-% schedules would feed OTHER suites' pollAndEnqueue passes (a due scan is
+    // table-wide) — remove them here as well as in beforeEach.
+    await sql`DELETE FROM core.scheduled_jobs WHERE schedule_id LIKE 'w41-%'`.execute(db);
+  }
   await db?.destroy();
   if (INTEGRATION_DSN) await disposePool(INTEGRATION_DSN);
 });
@@ -158,8 +163,10 @@ describeDb("payload schema versioning (W4.1 L8 + OWNER-PAYLOAD-VERSIONING)", () 
     );
     const repo = new BackgroundJobsRepo(db);
     const clock = new FakeClock({ now: new Date("2026-06-11T00:00:01.000Z") });
-    // ONE schedule enqueued (the v1 row); the v2 row is isolated-skipped + left unadvanced.
-    expect(await pollAndEnqueue({ repo, db, clock })).toBe(1);
+    // The v1 row enqueues; the v2 row is isolated-skipped + left unadvanced. (The poll's RETURN
+    // count is not asserted — the due scan is table-wide and other suites' seeded schedules may
+    // also be due; the w41-scoped rows are the deterministic surface.)
+    await pollAndEnqueue({ repo, db, clock });
     const enqueued = await pool.query<{ dedup_key: string | null }>(
       `SELECT dedup_key FROM core.background_jobs WHERE dedup_key LIKE 'w41-%'`,
     );

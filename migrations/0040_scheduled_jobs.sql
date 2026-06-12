@@ -1,8 +1,10 @@
 -- 0040_scheduled_jobs.sql — Phase 3a Wave 1 (de-Temporal full-removal program, 2026-06-10):
 -- core.scheduled_jobs, the Postgres scheduler rows replacing Temporal Schedules. One row per
 -- schedule. The Wave-3 scheduler loop (a leased singleton) reads `enabled AND next_run_at <= now()`,
--- enqueues a core.background_jobs row (dedup_key = schedule_id || ':' || bucket for overlap=SKIP via
--- 0039's uq_background_jobs_dedup_active), stamps last_enqueued_at, and advances next_run_at.
+-- enqueues a core.background_jobs row (dedup_key = the BARE schedule_id for overlap=SKIP via
+-- 0039's uq_background_jobs_dedup_active — L9/W4.1: comment corrected, no `bucket` concept exists;
+-- a per-tick suffix would free the key every tick and defeat overlap=SKIP), stamps
+-- last_enqueued_at, and advances next_run_at.
 --
 --   * schedule_id (text PK) is the idempotency anchor — mirrors ensureCronSchedule's
 --     create-if-absent semantics; operators pause via `enabled = false`.

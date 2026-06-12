@@ -3,7 +3,8 @@ import { z } from "zod";
 // Phase 3a W1: row contract for core.scheduled_jobs (migration 0040) — the Postgres scheduler that
 // replaces Temporal Schedules (2026-06-10 full-removal program). One row per schedule; the Wave-3
 // scheduler loop reads `enabled AND next_run_at <= now()`, enqueues a core.background_jobs row
-// (dedup_key = `${schedule_id}:${bucket}` for overlap=SKIP), and advances next_run_at.
+// (dedup_key = the BARE schedule_id for overlap=SKIP — L9/W4.1: no `bucket` concept exists; a
+// per-tick suffix would free the key every tick and defeat overlap=SKIP), and advances next_run_at.
 //
 //   - cadence_kind: 'cron' (cadence_spec = a cron expression) | 'interval' (cadence_spec = seconds).
 //     DB CHECK ck_scheduled_jobs_cadence_kind mirrors the enum.
@@ -19,6 +20,8 @@ export type CadenceKind = z.infer<typeof CadenceKind>;
 // both coerce (the admin.v1.ts idiom; ZodNullable short-circuits null before coercion).
 export const ScheduledJobV1 = z
   .object({
+    // W4.1 (L8): a REAL column since migration 0045 (int NOT NULL DEFAULT 1) — the scheduler skips
+    // rows stamped newer than SCHEDULED_JOB_ENVELOPE_SCHEMA_VERSION via the W4a.2 isolation.
     schema_version: z.number().int().default(1),
     schedule_id: z.string().min(1),
     job_type: z.string().min(1),
