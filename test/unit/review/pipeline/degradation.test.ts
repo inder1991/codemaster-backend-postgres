@@ -186,11 +186,11 @@ describe("recordStage shim — outcome allowlist guard (Stage 0 no-op emit)", ()
 });
 
 describe("STAGE_NAMES registry — pipeline_metrics.STAGE_NAMES + TS-enhancement stages", () => {
-  it("contains 34 stage names (30 from Python + 4 TS-enhancement)", () => {
-    expect(STAGE_NAMES.size).toBe(34);
+  it("contains 35 stage names (30 from Python + 5 TS-enhancement)", () => {
+    expect(STAGE_NAMES.size).toBe(35);
   });
 
-  it("contains the TS-enhancement stages (#4 manifest fetch/parse + #6 carry-forward + W1.9a dedup)", () => {
+  it("contains the TS-enhancement stages (#4 manifest fetch/parse + #6 carry-forward + W1.9a dedup + W2.4 probe)", () => {
     for (const s of [
       "fetch_manifest_snapshots",
       "parse_manifest_dependencies",
@@ -199,6 +199,9 @@ describe("STAGE_NAMES registry — pipeline_metrics.STAGE_NAMES + TS-enhancement
       // Python ran dedup inline in the aggregate path and has no such stage), so the TS registry
       // carries the extra stage name.
       "dedup",
+      // W2.4 (XH13): the once-per-review retrieval short-circuit probe (the Python ran retrieval
+      // unconditionally — no such stage in its frozenset).
+      "probe_knowledge_corpus",
     ]) {
       expect(STAGE_NAMES.has(s)).toBe(true);
     }

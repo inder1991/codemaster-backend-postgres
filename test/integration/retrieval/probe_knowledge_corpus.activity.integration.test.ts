@@ -51,14 +51,15 @@ beforeAll(async () => {
               ${"org/repo-" + repoId.slice(0, 8)}, 'main')
     `.execute(db);
   }
-  // ONE active knowledge chunk for REPO_ID only (no vector needed — BM25 retrieval needs none either).
+  // ONE active knowledge chunk for REPO_ID only (the column demands a vector; the probe never reads it).
+  const unitVec = `[1${",0".repeat(1023)}]`;
   await sql`
     INSERT INTO core.knowledge_chunks
       (chunk_id, installation_id, repository_id, relative_path, chunk_index,
-       content_sha256, heading_path, body, doc_kind, doc_status)
+       content_sha256, heading_path, body, vector, doc_kind, doc_status)
     VALUES (${randomUUID()}, ${INSTALLATION_ID}, ${REPO_ID}, 'docs/adr-1.md', 0,
             ${"0".repeat(64)}, ${sql`ARRAY[]::text[]`}, 'use parameterized queries',
-            'adr', 'active'::core.knowledge_doc_status)
+            ${unitVec}::vector, 'adr', 'active'::core.knowledge_doc_status)
   `.execute(db);
 });
 

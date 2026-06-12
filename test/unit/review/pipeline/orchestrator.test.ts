@@ -1467,7 +1467,17 @@ describe("W2.4 (XH13) — retrieveKnowledge memoization per unique query", () =>
     const stub = makeStub({
       reviewFiles: ["src/a.ts"],
       chunksOverride: sameQueryChunks,
-      retrievedKnowledgeItems: [knowledgeItem(uuidFor(800))],
+      retrievedKnowledgeItems: [
+        {
+          chunk_id: uuidFor(800),
+          installation_id: uuidFor(2),
+          repo_id: uuidFor(3),
+          relative_path: "docs/guide.md",
+          chunk_index: 0,
+          body: "knowledge body",
+          doc_kind: "other",
+        },
+      ],
     });
     const ctx = makeCtx(stub);
     await orchestrate({ ...ctx, limits: { chunkConcurrency: 1 } });
