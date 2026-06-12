@@ -100,13 +100,14 @@ describe("tenant-scoped raw-SQL gate", () => {
     });
   });
 
-  // W4.2 [RH1] — the tracked FOLLOW-UP-gf3-error-mode promotion: the gate BLOCKS (exit 1) on the
-  // runner data plane + review pipeline + platform libs; ONLY the admin/auth HTTP surface
-  // (apps/backend/src/api/**) stays WARN until W4.7 lands its own tenancy/authz wave.
-  describe("ERROR-mode for the runner/review surfaces (FOLLOW-UP-gf3-error-mode closure)", () => {
+  // W4.2 [RH1] flipped the runner data plane + review pipeline + platform libs to ERROR-mode;
+  // W4.7 finished the promotion: the admin/auth HTTP surface (apps/backend/src/api/**) — its last
+  // WARN holdout — is ERROR-mode too (the W4.2 triage left it at ZERO findings, and the W4.7 reads
+  // are tenancy-filtered or carry per-site exempt markers). The gate is now fully blocking.
+  describe("ERROR-mode everywhere (FOLLOW-UP-gf3-error-mode closure; W4.7 finished the api/** promotion)", () => {
     const unfiltered = "await db.executeQuery(sql`SELECT id FROM core.repositories WHERE run_id = ${rid}`);";
 
-    it("isErrorModePath: runner/ingest/workflow/review/activities/domain/workspace + libs → ERROR; api/** → WARN", () => {
+    it("isErrorModePath: every production surface → ERROR (api/** included since W4.7)", () => {
       expect(isErrorModePath("/r/apps/backend/src/runner/review_jobs_repo.ts")).toBe(true);
       expect(isErrorModePath("/r/apps/backend/src/ingest/github_webhook_persistence.ts")).toBe(true);
       expect(isErrorModePath("/r/apps/backend/src/workflow/_supersede.ts")).toBe(true);
@@ -114,8 +115,8 @@ describe("tenant-scoped raw-SQL gate", () => {
       expect(isErrorModePath("/r/apps/backend/src/activities/run_id_retention.activity.ts")).toBe(true);
       expect(isErrorModePath("/r/apps/backend/src/domain/repos/outbox_repo.ts")).toBe(true);
       expect(isErrorModePath("/r/libs/platform/src/db/x.ts")).toBe(true);
-      expect(isErrorModePath("/r/apps/backend/src/api/admin/admin_read_repo.ts")).toBe(false);
-      expect(isErrorModePath("/r/apps/backend/src/api/auth/local_user_repo.ts")).toBe(false);
+      expect(isErrorModePath("/r/apps/backend/src/api/admin/admin_read_repo.ts")).toBe(true);
+      expect(isErrorModePath("/r/apps/backend/src/api/auth/local_user_repo.ts")).toBe(true);
     });
 
     it("an unfiltered site on the runner data plane is BLOCKING (exit 1)", () => {
@@ -124,10 +125,10 @@ describe("tenant-scoped raw-SQL gate", () => {
       expect(exitCodeFor(v)).toBe(1);
     });
 
-    it("an unfiltered site on the api surface stays WARN-only (exit 0)", () => {
+    it("an unfiltered site on the api surface is BLOCKING too (exit 1) — W4.7 promotion", () => {
       const v = violations(unfiltered, "apps/backend/src/api/admin/new_admin_read.ts");
       expect(v).toHaveLength(1);
-      expect(exitCodeFor(v)).toBe(0);
+      expect(exitCodeFor(v)).toBe(1);
     });
 
     it("zero findings → exit 0", () => {
