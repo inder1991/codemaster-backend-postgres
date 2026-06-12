@@ -29,6 +29,7 @@ import { FakeClock } from "#platform/clock.js";
 import { RunnerToolError } from "#backend/analysis/eslint_runner.js";
 import {
   SubprocessLaunchError,
+  SubprocessOomError,
   SubprocessTimeoutError,
 } from "#backend/analysis/in_worker_runner.js";
 import {
@@ -147,6 +148,31 @@ describe("StaticAnalysisOrchestrator", () => {
     expect(byName.get("eslint")?.status).toBe("completed");
     expect(byName.get("gitleaks")?.status).toBe("failed_runtime");
     expect(byName.get("gitleaks")?.error_class).toBe("RunnerToolError");
+  });
+
+  it("W2.6 (M5/H15): SubprocessOomError maps to the dedicated `oom` ToolStatusV1 status", async () => {
+    const clock = new FakeClock();
+    const okRunner = new FakeRunner("eslint", { kind: "ok", findings: [finding("eslint", "b.ts", 10)] }, clock);
+    const oomed = new FakeRunner("gitleaks", {
+      kind: "throw",
+      error: new SubprocessOomError({
+        command: ["gitleaks"],
+        reason: "combined stdout+stderr exceeded the 1024-byte cap",
+      }),
+    });
+    const orch = new StaticAnalysisOrchestrator({ deadlineSeconds: 30, clock });
+    const out = await orch.run({
+      runners: [spec(okRunner, ["b.ts"]), spec(oomed, ["secrets.env"])],
+      workspace: "/ws",
+      changedLineRanges: ALL_CHANGED,
+    });
+    const byName = new Map(out.toolStatuses.map((s) => [s.tool_name, s]));
+    expect(byName.get("gitleaks")?.status).toBe("oom");
+    expect(byName.get("gitleaks")?.error_class).toBe("SubprocessOomError");
+    expect(byName.get("gitleaks")?.error_message).toContain("1024-byte cap");
+    // the surviving tool is unaffected (fail-open contract)
+    expect(byName.get("eslint")?.status).toBe("completed");
+    expect(out.findings.map((f) => f.tool)).toEqual(["eslint"]);
   });
 
   it("empty-files runner is marked `skipped` and never spawned", async () => {

@@ -94,6 +94,7 @@ const DEGRADED_STATUSES: ReadonlySet<string> = new Set<string>([
   "failed_runtime",
   "timed_out",
   "auth_failed",
+  "oom", // W2.6 (H15/M5): resource-exhaustion teardown is a per-tool degradation like any other
 ]);
 
 /**

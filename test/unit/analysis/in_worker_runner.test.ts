@@ -20,6 +20,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   InWorkerRunner,
   SubprocessLaunchError,
+  SubprocessOomError,
   SubprocessTimeoutError,
   type SpawnFn,
 } from "#backend/analysis/in_worker_runner.js";
@@ -36,6 +37,9 @@ type FakeProcConfig = {
   hang?: boolean;
   /** When true, even a kill() does NOT emit close (models a process ignoring SIGTERM). */
   ignoreSigterm?: boolean;
+  /** When set, `close` fires with (code=null, signal=<this>) — models a signal-killed child
+   *  (the kernel OOM-killer SIGKILL path, M5). */
+  closeSignal?: NodeJS.Signals;
 };
 
 class FakeProcess extends EventEmitter {
@@ -53,6 +57,10 @@ class FakeProcess extends EventEmitter {
     queueMicrotask(() => {
       if (this.cfg.stdout !== undefined) this.stdout.emit("data", Buffer.from(this.cfg.stdout));
       if (this.cfg.stderr !== undefined) this.stderr.emit("data", Buffer.from(this.cfg.stderr));
+      if (this.cfg.closeSignal !== undefined) {
+        this.emitSignalClose(this.cfg.closeSignal);
+        return;
+      }
       if (!this.cfg.hang) this.emitClose(this.cfg.exitCode ?? 0);
     });
   }
@@ -61,6 +69,13 @@ class FakeProcess extends EventEmitter {
     if (this.closed) return;
     this.closed = true;
     this.emit("close", code);
+  }
+
+  private emitSignalClose(signal: NodeJS.Signals): void {
+    if (this.closed) return;
+    this.closed = true;
+    // node `close` fires (code, signal) — code is null when the child died to a signal.
+    this.emit("close", null, signal);
   }
 
   public kill(signal?: NodeJS.Signals | number): boolean {
@@ -235,6 +250,75 @@ describe("InWorkerRunner.runSubprocess", () => {
   it("rejects an empty command and an empty workspace at construction", () => {
     expect(() => new InWorkerRunner({ command: [], workspace: "/tmp/ws" })).toThrow();
     expect(() => new InWorkerRunner({ command: ["tool"], workspace: "" })).toThrow();
+  });
+
+  // ─── W2.6 (H15): bounded subprocess output ──────────────────────────────────────────────────────
+
+  it("output cap (H15): breaching maxOutputBytes kills the process GROUP and raises SubprocessOomError", async () => {
+    // A chatty tool that emits 2 KiB then hangs; the cap is 1 KiB. The runner must tear the group
+    // down (SIGTERM → close) and raise the typed oom error — NOT accumulate unbounded buffers until
+    // the 60s timeout.
+    const rec = new SpawnRecorder([{ stdout: "x".repeat(2048), hang: true }]);
+    const killCalls: Array<{ pid: number; signal: NodeJS.Signals | number | undefined }> = [];
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: NodeJS.Signals | number) => {
+      killCalls.push({ pid, signal });
+      if (signal === "SIGTERM") queueMicrotask(() => rec.procs[0]!.emit("close", -1));
+      return true;
+    }) as typeof process.kill);
+
+    const runner = new InWorkerRunner({
+      command: ["tool"],
+      workspace: "/tmp/ws",
+      spawnFn: rec.fn,
+      maxOutputBytes: 1024,
+    });
+    await expect(runner.runSubprocess()).rejects.toBeInstanceOf(SubprocessOomError);
+    killSpy.mockRestore();
+    expect(killCalls[0]).toEqual({ pid: -4242, signal: "SIGTERM" });
+  });
+
+  it("output cap (H15): stdout AND stderr both count toward the combined cap", async () => {
+    const rec = new SpawnRecorder([{ stdout: "x".repeat(700), stderr: "y".repeat(700), hang: true }]);
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: NodeJS.Signals | number) => {
+      if (signal === "SIGTERM") queueMicrotask(() => rec.procs[0]!.emit("close", -1));
+      return true;
+    }) as typeof process.kill);
+    const runner = new InWorkerRunner({
+      command: ["tool"],
+      workspace: "/tmp/ws",
+      spawnFn: rec.fn,
+      maxOutputBytes: 1024,
+    });
+    await expect(runner.runSubprocess()).rejects.toBeInstanceOf(SubprocessOomError);
+    killSpy.mockRestore();
+  });
+
+  it("output cap (H15): output UNDER the cap completes normally", async () => {
+    const rec = new SpawnRecorder([{ exitCode: 0, stdout: "x".repeat(512), stderr: "" }]);
+    const runner = new InWorkerRunner({
+      command: ["tool"],
+      workspace: "/tmp/ws",
+      spawnFn: rec.fn,
+      maxOutputBytes: 1024,
+    });
+    const result = await runner.runSubprocess();
+    expect(result.exit_code).toBe(0);
+    expect(Buffer.from(result.stdout).toString("utf8")).toBe("x".repeat(512));
+  });
+
+  // ─── W2.6 (M5): external SIGKILL (kernel OOM-kill) surfaces as the typed oom error ─────────────
+
+  it("SIGKILL termination (M5): close(code=null, signal=SIGKILL) raises SubprocessOomError, not exit -1", async () => {
+    const rec = new SpawnRecorder([{ closeSignal: "SIGKILL" }]);
+    const runner = new InWorkerRunner({ command: ["tool"], workspace: "/tmp/ws", spawnFn: rec.fn });
+    await expect(runner.runSubprocess()).rejects.toBeInstanceOf(SubprocessOomError);
+  });
+
+  it("non-SIGKILL signal death (e.g. SIGSEGV) keeps the legacy exit_code=-1 mapping (failed_runtime class)", async () => {
+    const rec = new SpawnRecorder([{ closeSignal: "SIGSEGV" }]);
+    const runner = new InWorkerRunner({ command: ["tool"], workspace: "/tmp/ws", spawnFn: rec.fn });
+    const result = await runner.runSubprocess();
+    expect(result.exit_code).toBe(-1);
   });
 
   // ─── REAL subprocess: zombie reaping of a SIGTERM-ignoring process group ────────────────────────

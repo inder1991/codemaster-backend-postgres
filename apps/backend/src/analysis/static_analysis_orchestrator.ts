@@ -46,7 +46,7 @@ import { type Clock } from "#platform/clock.js";
 import { transportAbortSignal } from "#platform/transport_timeout.js";
 
 import { RunnerToolError } from "./eslint_runner.js";
-import { SubprocessLaunchError, SubprocessTimeoutError } from "./in_worker_runner.js";
+import { SubprocessLaunchError, SubprocessOomError, SubprocessTimeoutError } from "./in_worker_runner.js";
 import type { AnalysisRunner, ChangedLineRanges } from "./runner_port.js";
 
 /** One registered runner + the files it should scan. 1:1 with the Python `RunnerSpec`. */
@@ -96,6 +96,7 @@ type RunnerOutcome =
   | { readonly kind: "completed"; readonly findings: ReadonlyArray<AnalysisFindingV1> }
   | { readonly kind: "failed_startup"; readonly errorClass: string; readonly errorMessage: string }
   | { readonly kind: "failed_runtime"; readonly errorClass: string; readonly errorMessage: string }
+  | { readonly kind: "oom"; readonly errorClass: string; readonly errorMessage: string }
   | { readonly kind: "timed_out" };
 
 type RunnerTask = {
@@ -227,6 +228,11 @@ export class StaticAnalysisOrchestrator {
         // A runner timed out on ITS OWN safety guard (vs the orchestrator deadline) — still timed_out.
         return { kind: "timed_out" };
       }
+      if (e instanceof SubprocessOomError) {
+        // W2.6 (H15/M5): output-cap breach or external SIGKILL — the dedicated `oom` status, so
+        // resource exhaustion is distinguishable from a generic crash on dashboards.
+        return { kind: "oom", errorClass: e.name, errorMessage: e.message };
+      }
       if (e instanceof RunnerToolError) {
         return { kind: "failed_runtime", errorClass: e.name, errorMessage: e.message };
       }
@@ -255,7 +261,7 @@ export class StaticAnalysisOrchestrator {
     return failedStatus(spec, startedAt, finishedAt, {
       errorClass: outcome.errorClass,
       errorMessage: outcome.errorMessage,
-      statusLabel: outcome.kind, // "failed_startup" | "failed_runtime"
+      statusLabel: outcome.kind, // "failed_startup" | "failed_runtime" | "oom"
     });
   }
 }

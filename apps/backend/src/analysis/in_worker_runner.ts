@@ -38,8 +38,18 @@ import { type ChildProcess, spawn as nodeSpawn, type SpawnOptions } from "node:c
 import { type Clock, WallClock } from "#platform/clock.js";
 import { transportAbortSignal } from "#platform/transport_timeout.js";
 
-/** Default wall-clock budget for one tool invocation (S9.1.2c). */
-const DEFAULT_TIMEOUT_SECONDS = 60;
+/** Default wall-clock budget for one tool invocation (S9.1.2c). EXPORTED so the orchestrator's
+ *  soft-barrier deadline can be pinned strictly BELOW it (W2.6 / M4). */
+export const DEFAULT_TIMEOUT_SECONDS = 60;
+
+/**
+ * Default cap on ACCUMULATED stdout+stderr bytes (W2.6 / H15). Node's `spawn` has no `maxBuffer`, so
+ * pre-cap a chatty tool (ESLint/Ruff JSON over a minified bundle, a gitleaks report over a giant
+ * tree) could emit hundreds of MB inside the 60s budget and OOM the WHOLE runner process — taking
+ * down every co-located review plus the self-healing loops. 32 MiB comfortably holds any legitimate
+ * linter report (the per-tool findings cap is 500) while bounding the worst case.
+ */
+export const DEFAULT_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 
 /** Grace between SIGTERM and SIGKILL — long enough for a clean flush + exit, short enough that a
  *  misbehaving tool doesn't keep the worker pinned past the budget (mirrors `_SIGTERM_GRACE_SECONDS`). */
@@ -96,6 +106,26 @@ export class SubprocessTimeoutError extends Error {
   }
 }
 
+/**
+ * Raised when the subprocess is resource-exhaustion-killed (W2.6 / H15+M5): EITHER the runner's own
+ * output cap tripped (accumulated stdout+stderr exceeded {@link DEFAULT_MAX_OUTPUT_BYTES} — the
+ * process group is SIGTERM→SIGKILL reaped before this fires), OR the child died to an EXTERNAL
+ * SIGKILL (`close(code=null, signal='SIGKILL')` — the kernel OOM-killer signature). The orchestrator
+ * translates this to the dedicated `oom` {@link import("#contracts/tool_status.v1.js").ToolStatusV1}
+ * status so operators can distinguish resource exhaustion from a generic tool crash.
+ */
+export class SubprocessOomError extends Error {
+  public readonly command: ReadonlyArray<string>;
+  public readonly reason: string;
+
+  public constructor({ command, reason }: { command: ReadonlyArray<string>; reason: string }) {
+    super(`subprocess ${formatCommand(command)} resource-killed (oom): ${reason}`);
+    this.name = "SubprocessOomError";
+    this.command = [...command];
+    this.reason = reason;
+  }
+}
+
 /** `repr`-style quoting so the error message mirrors Python's `{command!r}` (tuple of strings). */
 function formatCommand(command: ReadonlyArray<string>): string {
   return `(${command.map((c) => `'${c}'`).join(", ")})`;
@@ -106,6 +136,9 @@ type InWorkerRunnerOptions = {
   readonly workspace: string;
   readonly timeoutSeconds?: number;
   readonly sigtermGraceSeconds?: number;
+  /** Cap on ACCUMULATED stdout+stderr bytes (W2.6 / H15); breach → group teardown +
+   *  {@link SubprocessOomError}. Default {@link DEFAULT_MAX_OUTPUT_BYTES}. */
+  readonly maxOutputBytes?: number;
   /** Injected for tests; defaults to `node:child_process.spawn`. */
   readonly spawnFn?: SpawnFn;
   /** Clock seam for the wall-ms measurement (`time.perf_counter()` analogue). Defaults to WallClock. */
@@ -129,6 +162,7 @@ export class InWorkerRunner {
   private readonly workspace: string;
   private readonly timeoutSeconds: number;
   private readonly sigtermGraceSeconds: number;
+  private readonly maxOutputBytes: number;
   private readonly spawnFn: SpawnFn;
   private readonly clock: Clock;
   private readonly signal: AbortSignal | undefined;
@@ -138,6 +172,7 @@ export class InWorkerRunner {
     workspace,
     timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
     sigtermGraceSeconds = DEFAULT_SIGTERM_GRACE_SECONDS,
+    maxOutputBytes = DEFAULT_MAX_OUTPUT_BYTES,
     spawnFn = nodeSpawn,
     clock = new WallClock(),
     signal,
@@ -148,6 +183,7 @@ export class InWorkerRunner {
     this.workspace = workspace;
     this.timeoutSeconds = timeoutSeconds;
     this.sigtermGraceSeconds = sigtermGraceSeconds;
+    this.maxOutputBytes = maxOutputBytes;
     this.spawnFn = spawnFn;
     this.clock = clock;
     this.signal = signal;
@@ -179,10 +215,30 @@ export class InWorkerRunner {
       throw new SubprocessLaunchError({ command: this.command, reason: errorReason(e) });
     }
 
+    // W2.6 (H15): bounded accumulation. Running byte totals are tracked in the data handlers; the
+    // FIRST chunk that pushes the COMBINED total past the cap resolves `outputCapBreached`, which
+    // races against `closed` below → group teardown + SubprocessOomError. Chunks past the breach
+    // are dropped (never appended), so memory stays bounded even while teardown is in flight.
     const stdoutChunks: Array<Buffer> = [];
     const stderrChunks: Array<Buffer> = [];
-    proc.stdout?.on("data", (d: Buffer) => stdoutChunks.push(d));
-    proc.stderr?.on("data", (d: Buffer) => stderrChunks.push(d));
+    let accumulatedBytes = 0;
+    let capBreached = false;
+    let resolveCapBreached: () => void = () => {};
+    const outputCapBreached = new Promise<void>((resolve) => {
+      resolveCapBreached = resolve;
+    });
+    const accumulate = (sink: Array<Buffer>) => (d: Buffer): void => {
+      if (capBreached) return;
+      accumulatedBytes += d.byteLength;
+      if (accumulatedBytes > this.maxOutputBytes) {
+        capBreached = true;
+        resolveCapBreached();
+        return;
+      }
+      sink.push(d);
+    };
+    proc.stdout?.on("data", accumulate(stdoutChunks));
+    proc.stderr?.on("data", accumulate(stderrChunks));
 
     // The `error` event fires for async spawn failures — ENOENT (missing binary) being the one that
     // matters most for fail-open. We surface it as a rejected `launchError` racing against `closed`.
@@ -194,9 +250,11 @@ export class InWorkerRunner {
       });
     });
 
-    const closed = new Promise<number>((resolve) => {
-      // `close` fires after stdio flush + exit; code is the exit code, or null when killed by signal.
-      proc.once("close", (code) => resolve(code ?? -1));
+    const closed = new Promise<{ code: number; signal: NodeJS.Signals | null }>((resolve) => {
+      // `close` fires after stdio flush + exit; code is the exit code, or null when killed by
+      // signal — the signal is captured so an EXTERNAL SIGKILL (kernel OOM-kill, M5) is
+      // distinguishable from a plain crash.
+      proc.once("close", (code, signal) => resolve({ code: code ?? -1, signal: signal ?? null }));
     });
 
     const timedOut = abortAfter(this.timeoutSeconds);
@@ -207,6 +265,7 @@ export class InWorkerRunner {
       launchFailed.then(() => "launch" as const),
       timedOut.then(() => "timeout" as const),
       externalAbort.then(() => "timeout" as const),
+      outputCapBreached.then(() => "output_cap" as const),
     ]);
 
     if (winner === "launch") {
@@ -219,7 +278,29 @@ export class InWorkerRunner {
       throw new SubprocessTimeoutError({ command: this.command, wallMs });
     }
 
-    const exitCode = await closed;
+    if (winner === "output_cap") {
+      // H15: the chatty tool is reaped exactly like a timeout (SIGTERM → grace → SIGKILL the whole
+      // group), then surfaced as the typed oom error the orchestrator maps to the `oom` status.
+      await this.killProcessGroup(proc, closed);
+      throw new SubprocessOomError({
+        command: this.command,
+        reason:
+          `combined stdout+stderr exceeded the ${this.maxOutputBytes}-byte cap ` +
+          `(accumulated ${accumulatedBytes} bytes before teardown)`,
+      });
+    }
+
+    const { code: exitCode, signal: exitSignal } = await closed;
+    if (exitSignal === "SIGKILL") {
+      // M5: code=null + SIGKILL with no runner-initiated teardown in play is the kernel OOM-killer
+      // signature — surface the dedicated typed error instead of collapsing to exit -1 →
+      // RunnerToolError → failed_runtime (which made resource exhaustion indistinguishable from a
+      // generic tool crash).
+      throw new SubprocessOomError({
+        command: this.command,
+        reason: "killed by SIGKILL (exit code null) — external kill, kernel OOM-killer signature",
+      });
+    }
     const wallMs = Math.round((this.clock.monotonic() - startedSeconds) * 1000);
     return {
       exit_code: exitCode,
@@ -234,7 +315,10 @@ export class InWorkerRunner {
    * alive. Relies on `detached: true` having given the child its own process group (PGID == PID), so
    * `process.kill(-pid, sig)` signals the whole group — the Node analogue of Python's `os.killpg`.
    */
-  private async killProcessGroup(proc: ChildProcess, closed: Promise<number>): Promise<void> {
+  private async killProcessGroup(
+    proc: ChildProcess,
+    closed: Promise<{ code: number; signal: NodeJS.Signals | null }>,
+  ): Promise<void> {
     const pid = proc.pid;
     if (pid === undefined) return; // never spawned cleanly; nothing to reap.
 
