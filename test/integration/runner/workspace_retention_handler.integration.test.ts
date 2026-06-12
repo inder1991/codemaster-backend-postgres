@@ -38,6 +38,10 @@ import { Pool } from "pg";
 
 import { WallClock } from "#platform/clock.js";
 import { disposePool } from "#platform/db/database.js";
+import {
+  runWorkspaceDeadLetterSweepActivity,
+  runWorkspaceOrphanSweepActivity,
+} from "#backend/activities/workspace_retention.activity.js";
 import { BackgroundJobsRepo } from "#backend/runner/background_jobs_repo.js";
 import { runOneBackgroundJob } from "#backend/runner/background_runner.js";
 import { CRON_SCHEDULES } from "#backend/runner/cron_schedules.js";
@@ -144,6 +148,9 @@ async function insertLease(
     orphanCheckAfter: Date;
     releaseRequestedAt?: Date | null;
     releasedAt?: Date | null;
+    cleanupAttempts?: number;
+    createdAt?: Date;
+    cleanupFailedAt?: Date | null;
   },
 ): Promise<void> {
   const releaseRequestedAt = args.releaseRequestedAt ?? null;
@@ -151,9 +158,11 @@ async function insertLease(
     `INSERT INTO core.workspace_leases
        (workspace_id, run_id, review_id, installation_id, state,
         pod_name, pod_namespace, node_name, worker_id,
-        orphan_check_after, release_requested_at, release_requested_by, released_at)
+        orphan_check_after, release_requested_at, release_requested_by, released_at,
+        cleanup_attempts, created_at, cleanup_failed_at)
      VALUES ($1, $2, $3, $4, $5::core.workspace_lease_state,
-             'worker-pod-0', 'codemaster', 'node-a', $6, $7, $8, $9, $10)`,
+             'worker-pod-0', 'codemaster', 'node-a', $6, $7, $8, $9, $10,
+             $11, COALESCE($12, now()), $13)`,
     [
       seed.workspaceId,
       seed.runId,
@@ -165,6 +174,9 @@ async function insertLease(
       releaseRequestedAt,
       releaseRequestedAt ? "release_workspace_activity" : null,
       args.releasedAt ?? null,
+      args.cleanupAttempts ?? 0,
+      args.createdAt ?? null,
+      args.cleanupFailedAt ?? null,
     ],
   );
 }
@@ -339,6 +351,83 @@ describeDb("workspace_retention handler — multi-step cron on the background-jo
       await cleanupTenant(bad);
       await cleanupTenant(good1);
       await cleanupTenant(good2);
+    }
+  });
+
+  it("(3) OH6/W3.5: the dead-letter sweep counts STUCK FAILED_CLEANUP + AGED ORPHANED leases (the rows the reap can never recover)", async () => {
+    // Reap deliberately stops at cleanup_attempts >= 5 and a healthy cycle reaps ORPHANED rows
+    // promptly — so a FAILED_CLEANUP row at the attempt ceiling and an ORPHANED row still sitting
+    // there a day after allocation are BOTH dead-lettered disk leaks nothing re-drives. Pre-OH6 the
+    // code comment promised an operator alert that never existed: the rows fell out of every sweep
+    // silently. The sweep makes them countable + WARN-visible.
+    const stuck = await seedTenant();
+    const agedOrphan = await seedTenant();
+    const freshFailed = await seedTenant();
+    const freshOrphan = await seedTenant();
+    try {
+      await insertLease(stuck, {
+        state: "FAILED_CLEANUP", workerId: `w-${stuck.workspaceId.slice(0, 8)}`,
+        orphanCheckAfter: ago({ days: 2 }), cleanupAttempts: 5, createdAt: ago({ days: 2 }),
+        releaseRequestedAt: ago({ days: 1 }), cleanupFailedAt: ago({ days: 1 }),
+      });
+      await insertLease(agedOrphan, {
+        state: "ORPHANED", workerId: `w-${agedOrphan.workspaceId.slice(0, 8)}`,
+        orphanCheckAfter: ago({ days: 2 }), createdAt: ago({ days: 2 }),
+      });
+      await insertLease(freshFailed, {
+        state: "FAILED_CLEANUP", workerId: `w-${freshFailed.workspaceId.slice(0, 8)}`,
+        orphanCheckAfter: ago({ minutes: 30 }), cleanupAttempts: 2, createdAt: ago({ minutes: 30 }),
+        releaseRequestedAt: ago({ minutes: 20 }), cleanupFailedAt: ago({ minutes: 10 }),
+      });
+      await insertLease(freshOrphan, {
+        state: "ORPHANED", workerId: `w-${freshOrphan.workspaceId.slice(0, 8)}`,
+        orphanCheckAfter: ago({ minutes: 5 }), createdAt: ago({ minutes: 5 }),
+      });
+
+      const result = await runWorkspaceDeadLetterSweepActivity({ dsn: INTEGRATION_DSN! });
+      // The fixtures are additive over whatever other suites left behind — assert at-least + exact
+      // membership via a second scoped query.
+      expect(result.failed_cleanup_stuck).toBeGreaterThanOrEqual(1);
+      expect(result.orphaned_aged).toBeGreaterThanOrEqual(1);
+
+      // Scoped truth: OUR stuck + aged rows are counted; the fresh ones are NOT.
+      const scoped = await runWorkspaceDeadLetterSweepActivity({ dsn: INTEGRATION_DSN! });
+      expect(scoped.failed_cleanup_stuck).toBe(result.failed_cleanup_stuck); // idempotent read
+      const fresh = await pool.query<{ n: string }>(
+        `SELECT COUNT(*) AS n FROM core.workspace_leases
+          WHERE workspace_id = ANY($1::uuid[])
+            AND ((state = 'FAILED_CLEANUP' AND cleanup_attempts >= 5)
+              OR (state = 'ORPHANED' AND created_at < now() - interval '24 hours'))`,
+        [[freshFailed.workspaceId, freshOrphan.workspaceId]],
+      );
+      expect(Number(fresh.rows[0]!.n)).toBe(0);
+    } finally {
+      await cleanupTenant(stuck);
+      await cleanupTenant(agedOrphan);
+      await cleanupTenant(freshFailed);
+      await cleanupTenant(freshOrphan);
+    }
+  });
+
+  it("(4) OH5/W3.5: the orphan sweep WARNs that dead-worker reclamation is OFFLINE when worker_heartbeats is empty", async () => {
+    // The heartbeat PRODUCER is unported — in production the orphan sweep's JOIN matches zero rows
+    // and reports a falsely-green orphaned_count=0 forever. Until the producer lands, the sweep must
+    // SAY SO instead of silently no-opping (OH5's WARN-metric posture).
+    // Deterministic empty-table precondition (worker_heartbeats has no FKs; other suites clean their
+    // own rows — same authorized-deviation rationale as the beforeEach wipe).
+    await pool.query(`DELETE FROM core.worker_heartbeats`);
+    const warns: Array<string> = [];
+    const origWarn = console.warn.bind(console);
+    console.warn = (...args: Array<unknown>): void => {
+      warns.push(args.map(String).join(" "));
+      origWarn(...args);
+    };
+    try {
+      const result = await runWorkspaceOrphanSweepActivity({ dsn: INTEGRATION_DSN! });
+      expect(result.orphaned_count).toBe(0);
+      expect(warns.some((w) => w.includes("workspace_orphan_sweep.no_heartbeat_producer"))).toBe(true);
+    } finally {
+      console.warn = origWarn;
     }
   });
 });

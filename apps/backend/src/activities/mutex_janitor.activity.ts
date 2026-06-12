@@ -58,7 +58,15 @@ export type MutexJanitorDeps = {
   dsn?: string;
   /** Time seam for the `released_at` stamp + audit `after` timestamp; default {@link WallClock} (1:1 Python). */
   clock?: Clock;
+  /** W3.5 (OM7): per-invocation sweep bound; default {@link DEFAULT_SWEEP_LIMIT}. The cron fires
+   *  every 5 min, so a post-incident backlog drains across ticks instead of one unbounded
+   *  transaction holding FOR UPDATE locks + per-row audit writes until the runtime ceiling rolls
+   *  the WHOLE batch back (zero progress, same set retried). */
+  sweepLimit?: number;
 };
+
+/** OM7: rows per janitor invocation — bounded lock/transaction duration, guaranteed forward progress. */
+const DEFAULT_SWEEP_LIMIT = 500;
 
 /** Resolve the DSN for the shared pool: the injected one, else `CODEMASTER_PG_CORE_DSN`. */
 function resolveDsn(deps: MutexJanitorDeps): string {
@@ -102,13 +110,18 @@ export async function mutexJanitorActivity(
     // eligibility predicate `lease_expires_at < now()` uses the DB now() (server transaction time); the
     // `released_at` value written below uses the INJECTED clock — that split is preserved verbatim.
     // tenant:exempt reason=cross-tenant-liveness-sweep follow_up=PERMANENT-EXEMPTION-mutex-janitor
+    // OM7: BOUNDED — oldest-expiry first, at most sweepLimit rows per invocation; the next tick
+    // (every 5 min) continues. NULLS FIRST keeps any pre-CHECK legacy NULL-lease rows drainable.
     const expired = await client.query<ExpiredMutexRow>(
       "SELECT mutex_id, installation_id, repository_id, " +
         " pr_number, holder_workflow_id " +
         "FROM core.pr_review_mutex " +
         "WHERE released_at IS NULL " +
         "  AND (lease_expires_at IS NULL OR lease_expires_at < now()) " +
+        "ORDER BY lease_expires_at NULLS FIRST " +
+        "LIMIT $1 " +
         "FOR UPDATE SKIP LOCKED",
+      [deps.sweepLimit ?? DEFAULT_SWEEP_LIMIT],
     );
     const rows = expired.rows;
     scanned = rows.length;

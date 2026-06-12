@@ -1,5 +1,6 @@
 import { ZodError } from "zod";
 import type { Clock } from "#platform/clock.js";
+import { BACKGROUND_JOB_ENVELOPE_SCHEMA_VERSION } from "./background_jobs_repo.js";
 import type { BackgroundJobsRepo } from "./background_jobs_repo.js";
 import type { HandlerDeps, HandlerRegistry } from "./handler_registry.js";
 import { PermanentJobError } from "./errors.js";
@@ -74,6 +75,34 @@ export async function runOneBackgroundJob(o: { repo: BackgroundJobsRepo; registr
     if (!r.applied) recordStaleTokenWrite({ op: "markFailed" });   // lease was stolen → loser; bounded op label
     return r.applied ? outcome : "lease_lost";
   };
+
+  // Dispatch seam ①b (W4.1 — OWNER-PAYLOAD-VERSIONING, BEFORE the handler lookup so a newer
+  // producer's row can never be mis-judged through THIS runner's vocabulary): a row stamped with an
+  // envelope schema_version NEWER than this build understands is rolling-deploy skew — the
+  // ENVIRONMENT (an old pod) refusing the work, not the work failing. DEFER it (the deferRetry
+  // throttle settle: re-enqueued 'ready' at a paced instant, NO attempt consumed, last_error
+  // explains) so a newer runner claims it after the deploy completes. It must NEVER dead-letter:
+  // the two-phase bump discipline (runners understand vN+1 before producers emit it —
+  // background_jobs_repo.ts envelope doc) makes this gate firing at all an ordering anomaly worth
+  // a WARN, but the payload itself is valid future work.
+  if (job.schema_version > BACKGROUND_JOB_ENVELOPE_SCHEMA_VERSION) {
+    const detail =
+      `envelope schema_version ${job.schema_version} is newer than this runner supports ` +
+      `(${BACKGROUND_JOB_ENVELOPE_SCHEMA_VERSION}) — deferred for a newer runner (deploy skew)`;
+    console.warn(JSON.stringify({
+      event: "background_job.envelope_version_deferred",
+      job_id: job.job_id,
+      job_type: job.job_type,
+      job_schema_version: job.schema_version,
+      supported_schema_version: BACKGROUND_JOB_ENVELOPE_SCHEMA_VERSION,
+    }));
+    const runAfter = new Date(o.clock.now().getTime() + 60_000); // pace the re-claim; never hot-loop
+    const r = await o.repo.deferRetry({ jobId: job.job_id, owner: o.owner, token, error: detail, runAfter });
+    if (!r.applied) recordStaleTokenWrite({ op: "markFailed" });   // bounded op label (failure-settle family)
+    const outcome: BackgroundRunOutcome = r.applied ? "failed" : "lease_lost";
+    recordBackgroundJobOutcome({ outcome });
+    return { outcome, jobId: job.job_id };
+  }
 
   // Dispatch seam ① — registry lookup. NO registered handler is a wiring bug, not a transient
   // fault: dead-letter NOW (terminal, never re-enqueued) + the bounded no-handler counter.

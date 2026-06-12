@@ -241,4 +241,31 @@ describeDb("ReviewJobsRepo.reapStuckRuns", () => {
       await cleanup(seed);
     }
   });
+
+  it("OM7/W3.5: the unified reap is BOUNDED — at most sweepLimit jobs per invocation; the next call continues", async () => {
+    const repo = new ReviewJobsRepo(db, { sweepLimit: 2 });
+    const seeds = [await seedTenant("RUNNING", 71), await seedTenant("RUNNING", 72), await seedTenant("RUNNING", 73)];
+    try {
+      for (const seed of seeds) {
+        const jobId = await repo.enqueue({
+          runId: seed.runId, reviewId: seed.reviewId, installationId: seed.installationId,
+          maxAttempts: 1, payload: minimalReviewPayload(seed),
+        });
+        const claimed = await repo.claim({ owner: "w-om7", leaseMs: 60_000, maxRuntimeMs: 600_000 });
+        expect(claimed!.job_id).toBe(jobId);
+        await expireLease(jobId);
+      }
+      const first = await repo.reapStuckRuns();
+      expect(first).toBe(2);
+      const second = await repo.reapStuckRuns();
+      expect(second).toBeGreaterThanOrEqual(1); // the next invocation drains the remainder
+      for (const seed of seeds) {
+        expect((await readRunRow(seed.runId)).lifecycle_state).toBe("CANCELLED");
+      }
+    } finally {
+      for (const seed of seeds) {
+        await cleanup(seed);
+      }
+    }
+  });
 });

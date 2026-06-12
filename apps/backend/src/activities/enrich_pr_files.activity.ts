@@ -79,6 +79,46 @@ import {
  */
 export const MAX_FILES_PER_ENRICHMENT = 500;
 
+// ─── XM10 (W4.3): review-value ranking for the over-cap truncation ────────────────────────────────
+
+/** Generated / vendored / lockfile shapes — near-zero review value; they fall past the cap FIRST.
+ *  Conservative, path-anchored patterns (a false negative just keeps GitHub order for that file). */
+const LOW_VALUE_PATTERNS: ReadonlyArray<RegExp> = [
+  /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock|composer\.lock|Gemfile\.lock|go\.sum)$/,
+  /\.(min\.js|min\.css|map|snap|lock)$/,
+  /(^|\/)(dist|build|vendor|node_modules|__snapshots__)\//,
+  /\.(generated|pb)\.(go|ts|js|py)$/,
+  /_pb2\.py$/,
+];
+
+/** Security-relevant infra shapes — highest review value; they survive the cap FIRST. */
+const SECURITY_RELEVANT_PATTERNS: ReadonlyArray<RegExp> = [
+  /(^|\/)\.github\/workflows\//,
+  /(^|\/)Dockerfile[^/]*$/,
+  /\.(tf|tfvars)$/,
+];
+
+/** Lower = kept first. 0 security-relevant · 1 normal code · 2 generated/vendored/lockfile. */
+function reviewValueTier(filename: string): number {
+  if (SECURITY_RELEVANT_PATTERNS.some((re) => re.test(filename))) return 0;
+  if (LOW_VALUE_PATTERNS.some((re) => re.test(filename))) return 2;
+  return 1;
+}
+
+/**
+ * XM10 (W4.3) — rank the envelopes by review value BEFORE the truncation slice, ONLY when the PR is
+ * over the cap (an at-or-under-cap PR keeps GitHub's order untouched — no behavior change on the
+ * overwhelming majority of PRs). GitHub's order is arbitrary, not relevance-ranked: pre-XM10 a
+ * monster PR whose lockfiles/dist bundles sorted early ate the 500-file budget while real code —
+ * and the CI workflow change — silently fell off the reviewed set. The sort is STABLE (V8
+ * guarantees it), so GitHub order is preserved WITHIN each tier — deterministic across replays.
+ */
+function rankByReviewValue(
+  envelopes: ReadonlyArray<PullRequestFileEnvelopeV1>,
+): Array<PullRequestFileEnvelopeV1> {
+  return [...envelopes].sort((a, b) => reviewValueTier(a.filename) - reviewValueTier(b.filename));
+}
+
 // ─── GitHub-client port (1:1 with the frozen `GitHubPrFilesPort`) ─────────────────────────────────
 
 /**
@@ -174,7 +214,9 @@ export async function doEnrichPrFiles(
         `${MAX_FILES_PER_ENRICHMENT} (event=enrich_pr_files_v2.truncated original_count=` +
         `${envelopes.length} cap=${MAX_FILES_PER_ENRICHMENT})`,
     );
-    envelopes = envelopes.slice(0, MAX_FILES_PER_ENRICHMENT);
+    // XM10 (W4.3): rank by review value FIRST so the slice keeps code + security-relevant files
+    // and drops the generated/lockfile noise — not GitHub's arbitrary first-500.
+    envelopes = rankByReviewValue(envelopes).slice(0, MAX_FILES_PER_ENRICHMENT);
     truncatedAt = MAX_FILES_PER_ENRICHMENT;
   }
 

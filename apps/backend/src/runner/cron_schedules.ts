@@ -141,6 +141,20 @@ export const CRON_SCHEDULES: ReadonlyArray<CronScheduleSeed> = [
     cadence_spec: "30 3 * * *", // daily 03:30 UTC — inside computeNextRun's "M H * * *" vocabulary
     input: { reviewJobsTtlDays: 30, backgroundJobsTtlDays: 30 },
   },
+  // W3.6 (RH12): installation drift-reconcile — NET-NEW self-heal cron (no Temporal predecessor:
+  // the Python relied on event-driven repair only, which a dropped webhook defeats forever). Walks
+  // active installations through the cooldown-gated maybeEnqueueRepair dispatcher
+  // (trigger_source='drift_sweep') so `core.repositories` reconverges with GitHub's canonical
+  // `GET /installation/repositories` view on a daily cadence even when webhooks are lost. Daily
+  // 04:15 UTC — the low-traffic window, offset from the 03:00/03:30 retention pair so the janitors
+  // never contend; zero-config (the walk bound + cooldown are activity/env-owned).
+  {
+    schedule_id: "codemaster-installation-drift-reconcile",
+    job_type: "installation_drift_reconcile",
+    cadence_kind: "cron",
+    cadence_spec: "15 4 * * *", // daily 04:15 UTC — inside computeNextRun's "M H * * *" vocabulary
+    input: {},
+  },
 ];
 
 /**

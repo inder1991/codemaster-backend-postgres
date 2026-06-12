@@ -16,7 +16,20 @@ import { z } from "zod";
 //  - trigger_source: Literal[...]     → TriggerSource enum (required; no default)
 
 // trigger_source = Literal["pr_webhook", "admin_manual", "installation_created"]
-export const TriggerSource = z.enum(["pr_webhook", "admin_manual", "installation_created"]);
+//
+// + "drift_sweep" — DELIBERATE TS-side widening over the frozen Python literal set (W3.6 / RH12):
+// the periodic installation drift-reconcile cron (installation_drift_reconcile.activity.ts) pushes
+// active installations through the SAME maybeEnqueueRepair dispatcher, and its repairs must be
+// distinguishable on the bounded trigger_source metric label (a sweep storm looks different from a
+// PR-webhook drift storm). Additive-within-version: v1 consumers that switch on the old literals
+// treat it as just another enqueue source; the payload shape is unchanged. The Python oracle
+// REJECTS it — pinned as an explicit divergence in the contract parity suite.
+export const TriggerSource = z.enum([
+  "pr_webhook",
+  "admin_manual",
+  "installation_created",
+  "drift_sweep",
+]);
 export type TriggerSource = z.infer<typeof TriggerSource>;
 
 // RepairInstallationRepositoriesPayloadV1 — ConfigDict(extra="forbid", frozen=True) → .strict().

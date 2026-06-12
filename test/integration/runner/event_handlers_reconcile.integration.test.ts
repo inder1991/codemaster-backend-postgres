@@ -76,6 +76,14 @@ beforeAll(() => {
 
 afterAll(async () => {
   if (!INTEGRATION_DSN) return;
+  if (ghIids.length > 0) {
+    // RH13: the reconcile_installation handler now appends repair outbox rows; clean ours up.
+    await pool.query(
+      `DELETE FROM core.outbox WHERE sink = 'installation_reconcile'
+        AND (payload->'args'->0->>'github_installation_id')::bigint = ANY($1::bigint[])`,
+      [ghIids],
+    );
+  }
   if (ghRepoIds.length > 0) {
     await pool.query(`DELETE FROM core.repositories WHERE github_repo_id = ANY($1::bigint[])`, [
       ghRepoIds,
@@ -167,6 +175,61 @@ describeDb("event_handlers — reconcile×3 on the background-jobs platform (Pha
     );
     expect(suspended.rows).toHaveLength(1);
     expect(suspended.rows[0]!.suspended_at).not.toBeNull();
+  });
+
+  it("(1b) RH13/W3.6: 'reconcile_installation' proactively enqueues the cooldown-gated repair (installation_created)", async () => {
+    // The frozen Python enqueues RepairInstallationRepositoriesWorkflow UNCONDITIONALLY at the end
+    // of reconcile_installation (trigger_source='installation_created') so a fresh App install
+    // hydrates its repos immediately — NOT lazily when the first PR webhook happens to hit an
+    // unknown repo. Pre-RH13 the TS port carried only a FOLLOW-UP comment: a dropped/delayed
+    // installation_repositories webhook left a 500-repo org with ZERO reviews indefinitely.
+    const gid = nextGhIid();
+    const login = `sender-${gid}`;
+    const handles = buildBackgroundRunner({ db, clock: new WallClock(), config: TEST_CONFIG });
+    const repo = new BackgroundJobsRepo(db);
+
+    await repo.enqueue({
+      jobType: "reconcile_installation",
+      payload: installationPayload({ action: "created", gid, login }),
+    });
+    expect((await handles.runOneCycle()).outcome).toBe("done");
+
+    // The repair dispatch landed as an installation_reconcile outbox row carrying the repair
+    // envelope (the SAME cooldown-gated path the PR-webhook drift detection uses).
+    const outboxRows = await pool.query<{ payload: Record<string, unknown> }>(
+      `SELECT payload FROM core.outbox WHERE sink = 'installation_reconcile'
+        AND (payload->'args'->0->>'github_installation_id')::bigint = $1`,
+      [gid],
+    );
+    expect(outboxRows.rows).toHaveLength(1);
+    const envelope = outboxRows.rows[0]!.payload as {
+      workflow_type: string;
+      args: Array<{ trigger_source: string }>;
+    };
+    expect(envelope.workflow_type).toBe("repairInstallationRepositories");
+    expect(envelope.args[0]!.trigger_source).toBe("installation_created");
+
+    // markAttempted stamped the cooldown row in the SAME transaction.
+    const stateRows = await pool.query<{ last_attempt_at: Date | null }>(
+      `SELECT last_attempt_at FROM cache.repository_repair_state WHERE github_installation_id = $1`,
+      [gid],
+    );
+    expect(stateRows.rows).toHaveLength(1);
+    expect(stateRows.rows[0]!.last_attempt_at).not.toBeNull();
+
+    // A SECOND reconcile inside the cooldown window is SUPPRESSED (no second outbox row) — the
+    // repair-spam throttle the dispatcher owns.
+    await repo.enqueue({
+      jobType: "reconcile_installation",
+      payload: installationPayload({ action: "unsuspended", gid, login }),
+    });
+    expect((await handles.runOneCycle()).outcome).toBe("done");
+    const after = await pool.query(
+      `SELECT 1 FROM core.outbox WHERE sink = 'installation_reconcile'
+        AND (payload->'args'->0->>'github_installation_id')::bigint = $1`,
+      [gid],
+    );
+    expect(after.rows).toHaveLength(1);
   });
 
   it("(2) PARITY: 'reconcile_repositories' jobs upsert added repos (auto-enable) + soft-disable removed repos", async () => {

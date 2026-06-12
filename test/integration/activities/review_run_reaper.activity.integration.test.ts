@@ -311,6 +311,44 @@ describeDb("reviewRunReaperActivity (integration, disposable PG)", () => {
     }
   });
 
+  it("OM7/W3.5: the reap is BOUNDED — at most sweepLimit runs per invocation; the next tick continues", async () => {
+    // Pre-OM7 the CTE UPDATE flipped EVERY stale run in one unbounded transaction with per-row
+    // audit INSERTs — a post-incident backlog could run past the job ceiling and roll back whole:
+    // zero progress, same set retried. Bounded per-invocation work guarantees forward progress.
+    const installationId = newUuid();
+    await seedInstallation(installationId);
+    const runs = [] as Array<Awaited<ReturnType<typeof seedRun>>>;
+    for (let i = 0; i < 3; i += 1) {
+      runs.push(
+        await seedRun({
+          installationId,
+          lifecycleState: "RUNNING",
+          startedAtSql: "now() - interval '2 hours'",
+          linkRepo: true,
+        }),
+      );
+    }
+    try {
+      const first = await reviewRunReaperActivity({
+        dsn: INTEGRATION_DSN!,
+        staleAfterSeconds: 3600,
+        sweepLimit: 2,
+      });
+      expect(first.reaped).toBe(2);
+      const second = await reviewRunReaperActivity({
+        dsn: INTEGRATION_DSN!,
+        staleAfterSeconds: 3600,
+        sweepLimit: 2,
+      });
+      expect(second.reaped).toBeGreaterThanOrEqual(1); // the next tick drains the remainder
+      for (const r of runs) {
+        expect((await runRow(r.runId)).lifecycle_state).toBe("CANCELLED");
+      }
+    } finally {
+      await cleanup(installationId, runs);
+    }
+  });
+
   it("does NOT reap a stale RUNNING run while a LIVE review_jobs row (state IN ready|leased) shields it [D3, gate ④]", async () => {
     const installationId = newUuid();
     await seedInstallation(installationId);

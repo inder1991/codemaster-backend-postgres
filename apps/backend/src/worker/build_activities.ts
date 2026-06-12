@@ -79,7 +79,10 @@ import { postCheckRun } from "#backend/activities/post_check_run.activity.js";
 import { postReviewResults } from "#backend/activities/post_review_results.activity.js";
 import { releaseWorkspace } from "#backend/activities/release_workspace.activity.js";
 import { selectCarryForward } from "#backend/activities/select_carry_forward.activity.js";
-import { buildStaticAnalysisActivity } from "#backend/activities/static_analysis.activity.js";
+import {
+  buildStaticAnalysisActivity,
+  TIER1_SOFT_BARRIER_SECONDS,
+} from "#backend/activities/static_analysis.activity.js";
 import { RuffInWorkerRunner } from "#backend/analysis/ruff_runner.js";
 import { EslintInWorkerRunner } from "#backend/analysis/eslint_runner.js";
 import { GitleaksInWorkerRunner } from "#backend/analysis/gitleaks_runner.js";
@@ -235,13 +238,16 @@ import { WallClock } from "#platform/clock.js";
 // ─── env reads (the same fail-loud reads the individual activities use) ──────────────────────────
 
 /**
- * The Tier-1 static-analysis soft-barrier deadline (seconds). 1:1 with the frozen Python default
- * `review_budgets.yaml::tier1_static_analysis_seconds: 60` — the StaticAnalysisOrchestrator owns this
- * authoritative deadline (per-tool runner timeouts are only safety guards). The DB/yaml-backed budgets
- * config loader (`review_budgets.py::load_budgets`) is NOT ported to TS yet; this constant is the
- * unconfigured default until it lands. FOLLOW-UP-review-budgets-loader.
+ * The Tier-1 static-analysis soft-barrier deadline (seconds). W2.6 (M4): the SHARED
+ * `TIER1_SOFT_BARRIER_SECONDS` (static_analysis.activity.ts) — 45s, strictly below the 60s per-tool
+ * safety guard, so the orchestrator's authoritative deadline actually preempts a hung tool.
+ * DELIBERATE divergence from the frozen Python default
+ * `review_budgets.yaml::tier1_static_analysis_seconds: 60`, whose equal barrier/guard values made
+ * the soft barrier a no-op. The DB/yaml-backed budgets config loader
+ * (`review_budgets.py::load_budgets`) is NOT ported to TS yet; this constant is the unconfigured
+ * default until it lands. FOLLOW-UP-review-budgets-loader.
  */
-const TIER1_STATIC_ANALYSIS_SECONDS = 60;
+const TIER1_STATIC_ANALYSIS_SECONDS = TIER1_SOFT_BARRIER_SECONDS;
 
 /**
  * Read the canonical core-store DSN, fail-loud when unset. Mirrors the private `requireCoreDsn()` in

@@ -26,6 +26,23 @@ import { BackgroundJobV1 } from "#contracts/background_job.v1.js";
 //     returns the EXISTING job_id instead of inserting (uq_background_jobs_dedup_active).
 //   * updated_at is maintained app-side (0039 ships no touch-trigger): every UPDATE sets it.
 
+/**
+ * W4.1 (L8 + OWNER-PAYLOAD-VERSIONING): the STORAGE-ENVELOPE version every enqueue stamps onto
+ * `core.background_jobs.schema_version` (migration 0045; the review-jobs analogue is
+ * JOB_PAYLOAD_SCHEMA_VERSION on core.review_jobs). The job payload is an API CONTRACT with a
+ * documented cross-deploy compat window:
+ *
+ *   * ADDITIVE-WITHIN-VERSION: new optional payload fields do NOT bump this — handlers parse with
+ *     their own (defaulting) Zod contracts, so a vN payload missing a new optional field still runs.
+ *   * EXPLICIT BUMP on any breaking envelope/payload-shape change, deployed in TWO phases: first
+ *     ship runners that UNDERSTAND vN+1 (still enqueueing vN), then flip producers to vN+1. The
+ *     runner accepts every version <= its own (backward window: a stored vN-1 row claims + runs
+ *     unchanged after an upgrade) and DEFERS — never dead-letters — a row stamped NEWER than it
+ *     understands (forward window: rolling-deploy skew; a newer pod claims it minutes later). See
+ *     background_runner.ts dispatch seam ①b.
+ */
+export const BACKGROUND_JOB_ENVELOPE_SCHEMA_VERSION = 1;
+
 export type EnqueueArgs = {
   jobType: string;
   payload: unknown; // validated inside enqueue: MUST be a plain object of STRICT JSON values (no undefined/function/bigint/NaN/Infinity/Date — W4c.1 #9)
@@ -119,10 +136,10 @@ export class BackgroundJobsRepo {
       // platform-scoped (tenant-agnostic) job, hence the marker for the NULL case:
       // tenant:exempt reason=tenant-agnostic-background-job follow_up=PERMANENT-EXEMPTION-platform-scoped-jobs
       const r = await sql<{ job_id: string }>`INSERT INTO core.background_jobs
-          (job_id, job_type, installation_id, payload, payload_sha256, priority, max_attempts, run_after, dedup_key)
+          (job_id, job_type, installation_id, payload, payload_sha256, priority, max_attempts, run_after, dedup_key, schema_version)
         VALUES (${jobId}, ${a.jobType}, ${a.installationId ?? null}, CAST(${canonical} AS jsonb), ${payloadSha256},
           ${a.priority ?? 0}, ${a.maxAttempts ?? 3}, COALESCE(CAST(${a.runAfter ?? null} AS timestamptz), now()),
-          ${a.dedupKey ?? null})
+          ${a.dedupKey ?? null}, ${BACKGROUND_JOB_ENVELOPE_SCHEMA_VERSION})
         ON CONFLICT (dedup_key) WHERE dedup_key IS NOT NULL AND state IN ('ready','leased') DO NOTHING
         RETURNING job_id`.execute(this.db);
       if (r.rows[0]) return r.rows[0].job_id;

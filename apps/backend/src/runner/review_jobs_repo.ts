@@ -12,6 +12,10 @@ import { ReviewPullRequestPayloadV1 } from "#contracts/review_pull_request.v1.js
 // verifyPayload re-parses + re-hashes it in the shell before running, so a corrupted/drifted row is caught.
 export const JOB_PAYLOAD_SCHEMA_VERSION = 1; // F1: storage-envelope version (NOT the payload's inner schema_version=2)
 
+/** W3.5 (OM7): stuck jobs reaped per {@link ReviewJobsRepo.reapStuckRuns} invocation — bounded
+ *  transaction/lock duration with guaranteed forward progress (the next invocation continues). */
+export const REAP_STUCK_RUNS_SWEEP_LIMIT = 500;
+
 export type EnqueueArgs = { runId: string; reviewId: string; installationId: string;
   payload: unknown; // validated inside enqueue via ReviewPullRequestPayloadV1.parse (D1)
   deliveryId?: string | null; priority?: number; maxAttempts?: number };
@@ -138,7 +142,12 @@ export class ReviewJobsRepo {
    */
   constructor(
     private db: Kysely<unknown>,
-    private reaperDeps: { dsn?: string; clock?: Clock } = {},
+    private reaperDeps: { dsn?: string; clock?: Clock;
+      /** W3.5 (OM7): per-invocation reap bound for {@link reapStuckRuns}; default
+       *  {@link REAP_STUCK_RUNS_SWEEP_LIMIT}. A post-incident backlog drains across invocations
+       *  instead of one unbounded job+run+mutex+audit transaction rolling back whole at the
+       *  runtime ceiling. */
+      sweepLimit?: number } = {},
   ) {}
 
   async enqueue(a: EnqueueArgs): Promise<string> {
@@ -461,17 +470,26 @@ export class ReviewJobsRepo {
       //     NOT matched — claim() owns reclaiming those). The outer SELECT resolves installation_id for the
       //     audit fan-out via the same FK chain + LEFT JOIN as reviewRunReaperActivity (orphan → NULL).
       // tenant:exempt reason=worker-pool-claim-across-tenants follow_up=PERMANENT-EXEMPTION-worker-pool-claim
+      // OM7: the MATERIALIZED batch CTE bounds one invocation at sweepLimit stuck jobs (the
+      // job_retention single-evaluation precedent); the next invocation continues — guaranteed
+      // forward progress with bounded transaction/lock duration. Oldest leases drain first.
       const reapedRes = await client.query<{
         job_id: string; run_id: string; mutex_id: string | null; installation_id: string | null;
       }>(
-        "WITH reaped AS ( " +
+        "WITH batch AS MATERIALIZED ( " +
+          "  SELECT job_id FROM core.review_jobs " +
+          "   WHERE state = 'leased' AND leased_until < now() AND attempts >= max_attempts " +
+          "   ORDER BY leased_until " +
+          "   LIMIT $1 " +
+          "   FOR UPDATE SKIP LOCKED " +
+          "), reaped AS ( " +
           "  UPDATE core.review_jobs " +
           "     SET state = 'dead', " +
           "         dead_reason = COALESCE(dead_reason, 'lease expired with attempts exhausted (stuck run)'), " +
           "         finished_at = now(), " +
           "         leased_until = NULL, lease_owner = NULL, attempt_token = NULL, " +
           "         timeout_at = NULL, heartbeat_at = NULL " +
-          "   WHERE state = 'leased' AND leased_until < now() AND attempts >= max_attempts " +
+          "   WHERE job_id IN (SELECT job_id FROM batch) " +
           "  RETURNING job_id, run_id, mutex_id " +
           ") " +
           "SELECT rj.job_id, rj.run_id, rj.mutex_id, rep.installation_id " +
@@ -479,7 +497,7 @@ export class ReviewJobsRepo {
           "JOIN core.review_runs rr ON rr.run_id = rj.run_id " +
           "JOIN core.pull_request_reviews ppr ON ppr.review_id = rr.review_id " +
           "LEFT JOIN core.repositories rep ON rep.github_repo_id = ppr.repo_id",
-        [],
+        [this.reaperDeps.sweepLimit ?? REAP_STUCK_RUNS_SWEEP_LIMIT],
       );
       const reaped = reapedRes.rows;
 

@@ -72,6 +72,12 @@ afterAll(async () => {
     ]);
   }
   if (ghIids.length > 0) {
+    // RH13: reconcileInstallation now appends repair outbox rows; clean ours up.
+    await pool.query(
+      `DELETE FROM core.outbox WHERE sink = 'installation_reconcile'
+        AND (payload->'args'->0->>'github_installation_id')::bigint = ANY($1::bigint[])`,
+      [ghIids],
+    );
     await pool.query(
       `DELETE FROM cache.repository_repair_state WHERE github_installation_id = ANY($1::bigint[])`,
       [ghIids],
@@ -215,9 +221,12 @@ describeDb("reconcile/hydrate activities (integration, disposable PG)", () => {
       installationPayload({ action: "created", gid, login, senderLogin: login }),
     );
 
-    // Seed a repair_state row so we can assert clearOnSuccess removed it.
+    // Seed/refresh the repair_state row so we can assert clearOnSuccess removed it. UPSERT (RH13):
+    // reconcileInstallation now runs maybeEnqueueRepair itself, whose markAttempted already created
+    // the row inside the reconcile transaction — a plain INSERT would PK-conflict.
     await pool.query(
-      `INSERT INTO cache.repository_repair_state (github_installation_id, last_attempt_at) VALUES ($1, now())`,
+      `INSERT INTO cache.repository_repair_state (github_installation_id, last_attempt_at) VALUES ($1, now())
+         ON CONFLICT (github_installation_id) DO UPDATE SET last_attempt_at = now()`,
       [gid],
     );
 

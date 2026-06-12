@@ -21,7 +21,7 @@
  *
  * ## Cardinality discipline (the same the Python module enforces)
  * NO installation_id / repository_id / github_iid labels. Every label is a bounded enum:
- *   trigger_source ∈ {pr_webhook, admin_manual, installation_created}
+ *   trigger_source ∈ {pr_webhook, admin_manual, installation_created, drift_sweep}
  *   blocked_reason ∈ {installation_not_found, installation_suspended, app_unauthorized, app_uninstalled}
  *   event_type     ∈ {installation, pull_request, installation_repositories}
  *   missing_field  ∈ the builder's SkipReason literals

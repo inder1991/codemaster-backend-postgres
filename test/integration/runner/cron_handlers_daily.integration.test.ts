@@ -9,7 +9,7 @@
 //       cycle runs partman.run_maintenance against the :5434 pg_partman install WITHOUT error — the
 //       job settles 'done' with last_error NULL (the handler returns void; the platform persists
 //       OUTCOME, so done-with-no-error IS the "returns a result / does not throw" oracle);
-//   (3) STARTUP (the 7-cron chain): ensureScheduledJobs seeds ALL 7 core.scheduled_jobs rows
+//   (3) STARTUP (the 9-cron chain): ensureScheduledJobs seeds ALL 9 core.scheduled_jobs rows
 //       (4 interval + 3 daily-cron); pollAndEnqueue after advancing a FakeClock past the due instant
 //       enqueues the due ones (dedup_key = schedule_id); the background cycles dispatch every one to
 //       'done'; the 02:00 daily rows hold for 02:00 UTC (not due at 01:59, due exactly at 02:00)
@@ -22,7 +22,7 @@
 //       (retired_at + retention_reason='ttl_expired'), and the aged workflow_event is hard-deleted —
 //       parity with calling the three activities directly.
 //
-// Plus the pure (no-DB) registry-shape checks: the 7-entry CRON_SCHEDULES literal, and that every
+// Plus the pure (no-DB) registry-shape checks: the 9-entry CRON_SCHEDULES literal, and that every
 // cadence_spec satisfies the scheduler's computeNextRun daily vocabulary ("M H * * *" ONLY — a seed
 // whose spec throws would poison every poll pass, so EVERY entry's spec is asserted computable).
 //
@@ -280,17 +280,19 @@ describeDb("cron_handlers — daily crons on the background-jobs platform (Phase
     expect(settled.last_error).toBeNull();
   });
 
-  it("(3) STARTUP: ensureScheduledJobs seeds ALL 8 rows; a due poll enqueues them; cycles dispatch them; daily rows hold for their wall instants", async () => {
+  it("(3) STARTUP: ensureScheduledJobs seeds ALL 9 rows; a due poll enqueues them; cycles dispatch them; daily rows hold for their wall instants", async () => {
     const t0 = new Date("2026-06-10T00:00:00.000Z");
     const fake = new FakeClock({ now: t0 });
     await ensureScheduledJobs(db, fake);
 
-    // ALL 8 rows seeded (ORDER BY schedule_id) — 2 interval (W3b.1) + 2 daily-cron (W3b.2) + the
+    // ALL 9 rows seeded (ORDER BY schedule_id) — 2 interval (W3b.1) + 2 daily-cron (W3b.2) + the
     // run_id_retention daily cron (W3d.1) + the workspace_retention interval (W3e.1) + the
-    // confluence_ingest interval (W3e.2) + the job_retention daily cron (W4.6 L4+L5).
+    // confluence_ingest interval (W3e.2) + the job_retention daily cron (W4.6 L4+L5) + the
+    // installation drift-reconcile daily cron (W3.6 RH12).
     const seeded = await readSchedules();
     expect(seeded.map((r) => r.schedule_id)).toEqual([
       "codemaster-confluence-ingest",
+      "codemaster-installation-drift-reconcile",
       "codemaster-job-retention",
       "codemaster-mark-stale-chunks",
       "codemaster-mutex-janitor",
@@ -319,15 +321,16 @@ describeDb("cron_handlers — daily crons on the background-jobs platform (Phase
     expect(retention.next_run_at.getTime()).toBe(t0.getTime());
     expect(retention.last_enqueued_at).toBeNull();
 
-    // Advance the FakeClock past the due instant → ONE poll enqueues ALL 8 (dedup_key = schedule_id).
+    // Advance the FakeClock past the due instant → ONE poll enqueues ALL 9 (dedup_key = schedule_id).
     fake.advance({ seconds: 1 });                                          // t1 = 00:00:01Z
     const repo = new BackgroundJobsRepo(db);
-    expect(await pollAndEnqueue({ repo, db, clock: fake })).toBe(8);
+    expect(await pollAndEnqueue({ repo, db, clock: fake })).toBe(9);
     const jobs = await sql<{ job_id: string; job_type: string; state: string; dedup_key: string | null }>`
       SELECT job_id, job_type, state, dedup_key FROM core.background_jobs ORDER BY job_type`.execute(db);
     expect(jobs.rows.map((j) => j.job_type)).toEqual([
-      "confluence_ingest", "job_retention", "mark_stale_chunks", "mutex_janitor",
-      "partition_maintenance", "review_run_reaper", "run_id_retention", "workspace_retention",
+      "confluence_ingest", "installation_drift_reconcile", "job_retention", "mark_stale_chunks",
+      "mutex_janitor", "partition_maintenance", "review_run_reaper", "run_id_retention",
+      "workspace_retention",
     ]);
     const byType = new Map(jobs.rows.map((j) => [j.job_type, j]));
     for (const s of CRON_SCHEDULES) {
@@ -347,8 +350,9 @@ describeDb("cron_handlers — daily crons on the background-jobs platform (Phase
     expect(at("codemaster-partition-maintenance").next_run_at.toISOString()).toBe("2026-06-10T02:00:00.000Z");
     expect(at("codemaster-run-id-retention").next_run_at.toISOString()).toBe("2026-06-10T03:00:00.000Z");
     expect(at("codemaster-job-retention").next_run_at.toISOString()).toBe("2026-06-10T03:30:00.000Z");
+    expect(at("codemaster-installation-drift-reconcile").next_run_at.toISOString()).toBe("2026-06-10T04:15:00.000Z");
 
-    // The background cycles dispatch ALL 8 through the registry to 'done' (WallClock composition —
+    // The background cycles dispatch ALL 9 through the registry to 'done' (WallClock composition —
     // claim order is priority/run_after-driven, so assert the SET, not the order). The retention job
     // runs its REAL sweeps here (no stale ephemeral candidates exist → the deferred-Vault GitHub
     // client is never built; the retire/delete sweeps are idempotent cross-tenant scans — as are the
@@ -357,13 +361,13 @@ describeDb("cron_handlers — daily crons on the background-jobs platform (Phase
     // deferred-Vault ConfluenceClient + the lazy embedder are never built).
     const handles = buildBackgroundRunner({ db, clock: new WallClock(), config: TEST_CONFIG });
     const dispatched = new Set<string>();
-    for (let i = 0; i < 8; i += 1) {
+    for (let i = 0; i < 9; i += 1) {
       const r = await handles.runOneCycle();
       expect(r.outcome).toBe("done");
       dispatched.add(r.jobId!);
     }
     expect(dispatched).toEqual(new Set(jobs.rows.map((j) => j.job_id)));
-    expect((await handles.runOneCycle()).outcome).toBe("idle");            // exactly 8 — nothing left
+    expect((await handles.runOneCycle()).outcome).toBe("idle");            // exactly 9 — nothing left
 
     // Daily-cadence discipline: at 01:59 only the interval rows are due (every daily row HOLDS) …
     fake.set({ now: new Date("2026-06-10T01:59:00.000Z") });
@@ -479,11 +483,59 @@ describeDb("cron_handlers — daily crons on the background-jobs platform (Phase
       await cleanupRetentionFixtures(seed);
     }
   });
+
+  it("(5) OH7: a close-sweep fault does NOT abort retire + delete — both pure-DB sweeps still run; the attempt still fails for redrive", async () => {
+    const seed = await seedRetentionFixtures();
+    // The close sweep's GitHub egress hard-fails — pre-OH7 this aborted the WHOLE chain, so retire
+    // + delete (pure-DB, zero dependency on close) silently skipped for the day and terminal runs
+    // + aged events accumulated unbounded.
+    const failingGithub = {
+      get: async (): Promise<never> => {
+        throw new Error("synthetic GitHub outage (OH7)");
+      },
+      patch: async (): Promise<never> => {
+        throw new Error("synthetic GitHub outage (OH7)");
+      },
+    } as unknown as GitHubApiClient;
+
+    try {
+      const registry = new HandlerRegistry();
+      registerCronHandlers(registry, { dsn: INTEGRATION_DSN!, retentionGithubClient: failingGithub });
+      const repo = new BackgroundJobsRepo(db);
+      const jobId = await repo.enqueue({
+        jobType: "run_id_retention",
+        payload: { prTtlDays: 7, runTtlDays: 30, eventTtlDays: 90 },
+      });
+      const r = await runOneBackgroundJob({
+        repo, registry, clock: new WallClock(),
+        owner: TEST_CONFIG.owner, leaseS: TEST_CONFIG.leaseS, heartbeatS: TEST_CONFIG.heartbeatS,
+        maxRuntimeS: TEST_CONFIG.maxRuntimeS,
+      });
+      // The attempt FAILS (the redrive keeps re-attempting the close sweep on the backoff curve) …
+      expect(r.outcome).toBe("failed");
+      const job = await repo.getById(jobId);
+      expect(job!.state).toBe("ready"); // re-enqueued, not dead (attempts remain)
+      expect(job!.last_error).toContain("close");
+
+      // … but the RETIRE sweep still ran: the 40d terminal run was soft-deleted …
+      const old = await sql<{ retired_at: Date | null; retention_reason: string | null }>`
+        SELECT retired_at, retention_reason FROM core.review_runs WHERE run_id = ${seed.oldRunId}`.execute(db);
+      expect(old.rows[0]!.retired_at).not.toBeNull();
+      expect(old.rows[0]!.retention_reason).toBe("ttl_expired");
+
+      // … and the DELETE sweep still ran: the 100d workflow_event is gone.
+      const evt = await sql<{ n: string }>`
+        SELECT COUNT(*) AS n FROM audit.workflow_events WHERE event_id = ${seed.agedEventId}`.execute(db);
+      expect(Number(evt.rows[0]!.n)).toBe(0);
+    } finally {
+      await cleanupRetentionFixtures(seed);
+    }
+  });
 });
 
 // ─── CRON_SCHEDULES literal shape + cadence-vocabulary fit (pure — no DB) ──────────────────────────
 describe("CRON_SCHEDULES (Phase 3b W3b.2 + Phase 3d W3d.1 + Phase 3e W3e.1 + W3e.2 entries)", () => {
-  it("carries the 8 entries: the 2 W3b.1 intervals + the 2 daily 02:00 crons + run_id_retention at 03:00 + job_retention at 03:30 UTC + the workspace_retention 5-min interval + the confluence_ingest 6-h interval", () => {
+  it("carries the 9 entries: the 2 W3b.1 intervals + the 2 daily 02:00 crons + run_id_retention at 03:00 + job_retention at 03:30 + installation_drift_reconcile at 04:15 UTC + the workspace_retention 5-min interval + the confluence_ingest 6-h interval", () => {
     expect(CRON_SCHEDULES).toEqual([
       { schedule_id: "codemaster-mutex-janitor", job_type: "mutex_janitor", cadence_kind: "interval", cadence_spec: "300", input: {} },
       { schedule_id: "codemaster-review-run-reaper", job_type: "review_run_reaper", cadence_kind: "interval", cadence_spec: "600", input: {} },
@@ -502,6 +554,9 @@ describe("CRON_SCHEDULES (Phase 3b W3b.2 + Phase 3d W3d.1 + Phase 3e W3e.1 + W3e
       // W4.6 (L4+L5): NET-NEW platform cron (no Temporal predecessor) — the terminal-job-row +
       // idempotency-ledger janitor, 03:30 UTC, TTLs pinned in the input (the run_id_retention posture).
       { schedule_id: "codemaster-job-retention", job_type: "job_retention", cadence_kind: "cron", cadence_spec: "30 3 * * *", input: { reviewJobsTtlDays: 30, backgroundJobsTtlDays: 30 } },
+      // W3.6 (RH12): NET-NEW self-heal cron (no Temporal predecessor) — the installation
+      // drift-reconcile sweep, 04:15 UTC, zero-config (walk bound + cooldown are activity/env-owned).
+      { schedule_id: "codemaster-installation-drift-reconcile", job_type: "installation_drift_reconcile", cadence_kind: "cron", cadence_spec: "15 4 * * *", input: {} },
     ]);
   });
 

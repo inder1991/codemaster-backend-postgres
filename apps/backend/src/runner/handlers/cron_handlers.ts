@@ -4,6 +4,7 @@ import {
   type ConfluenceChunkClient,
   type ConfluenceSyncActivities,
 } from "#backend/activities/confluence_sync.activity.js";
+import { installationDriftReconcileActivity } from "#backend/activities/installation_drift_reconcile.activity.js";
 import { jobRetentionSweepActivity } from "#backend/activities/job_retention.activity.js";
 import { ListActiveConfluenceSpacesActivity } from "#backend/activities/list_active_confluence_spaces.activity.js";
 import { MarkStaleChunksActivity } from "#backend/activities/mark_stale_chunks.activity.js";
@@ -20,6 +21,7 @@ import {
   runIdRetireOldRunsActivity,
 } from "#backend/activities/run_id_retention.activity.js";
 import {
+  runWorkspaceDeadLetterSweepActivity,
   runWorkspaceOrphanSweepActivity,
   runWorkspaceReapActivity,
   runWorkspaceReleasedRetentionActivity,
@@ -130,6 +132,12 @@ export const JobRetentionCronInputV1 = z
     backgroundJobsTtlDays: z.number().int().min(1),
   })
   .strict();
+
+/** installation_drift_reconcile scheduled input — zero-config (W3.6 RH12: the walk bound is an
+ *  activity default; the per-installation cooldown is env-owned —
+ *  `CODEMASTER_REPAIR_COOLDOWN_SECONDS`). STRICT: an operator edit expecting an effect fails the
+ *  parse loudly instead of being silently forwarded. */
+export const InstallationDriftReconcileCronInputV1 = z.object({}).strict();
 
 /**
  * A {@link GitHubApiClient} built lazily on first `.get`/`.patch` and memoized — the SAME
@@ -382,10 +390,15 @@ export function registerCronHandlers(registry: HandlerRegistry, deps: CronHandle
     );
   });
 
-  // W3d.1: run_id_retention — the daily 03:00 UTC chain of the 3 run_id sweeps, SEQUENTIAL in the
-  // SAME close → retire → delete order the Temporal runIdRetentionWorkflow body composes (a sweep
-  // throw aborts the chain and fails the attempt, the platform analogue of the workflow surfacing an
-  // activity failure after retries). Each TTL threads from the scheduled input — 1:1 with the
+  // W3d.1 + W3.5 (OH7): run_id_retention — the daily 03:00 UTC trio of run_id sweeps, run in the
+  // SAME close → retire → delete order the Temporal runIdRetentionWorkflow body composes, but now
+  // DECOUPLED (OH7): each sweep runs in its own try/catch, so a close-sweep fault (the GitHub-
+  // egress-dependent, most failure-prone sweep) can no longer abort the two pure-DB sweeps that
+  // have ZERO dependency on it — pre-OH7 one transient PR-closer error skipped retire + delete for
+  // the whole day, accumulating terminal runs + aged events unbounded. Failures are collected and
+  // RE-THROWN as one aggregate AFTER all three ran, so the attempt still fails → markFailed
+  // backoff redrive (every sweep is an idempotent TTL-cutoff scan — a redrive re-running the
+  // succeeded sweeps is a cheap no-op). Each TTL threads from the scheduled input — 1:1 with the
   // workflow threading its pinned input into the matching activity proxy. The retention GitHub
   // client (the close sweep's only egress) is closed over ONCE at registration: the injected test
   // fake, or the deferred-Vault lazy client (never built while the candidate SQL returns zero rows).
@@ -393,27 +406,59 @@ export function registerCronHandlers(registry: HandlerRegistry, deps: CronHandle
   registry.register("run_id_retention", async (payload, _signal, handlerDeps) => {
     const input = RunIdRetentionCronInputV1.parse(payload);
     const dsnPart = deps.dsn !== undefined ? { dsn: deps.dsn } : {};
-    const prCloser = await runIdCloseStalePrsActivity({
-      ...dsnPart,
-      clock: handlerDeps.clock,
-      ttlDays: input.prTtlDays,
-      githubClient: retentionGithubClient,
-    });
-    const runs = await runIdRetireOldRunsActivity({
-      ...dsnPart,
-      clock: handlerDeps.clock,
-      ttlDays: input.runTtlDays,
-    });
-    const events = await runIdDeleteOldEventsActivity({
-      ...dsnPart,
-      clock: handlerDeps.clock,
-      ttlDays: input.eventTtlDays,
-    });
-    console.info(
-      `run_id_retention swept: prs_closed=${prCloser.closed} prs_skipped=${prCloser.skipped} ` +
-        `runs_retired=${runs.retired} events_deleted=${events.deleted} ` +
-        `events_batches=${events.batches} job_id=${handlerDeps.job.job_id}`,
+    const failures: Array<string> = [];
+    const sweep = async <T>(name: string, run: () => Promise<T>): Promise<T | null> => {
+      try {
+        return await run();
+      } catch (e) {
+        // OH7: log + continue to the next sweep; the aggregate throw below still fails the attempt.
+        const message = e instanceof Error ? e.message : String(e);
+        failures.push(`${name}: ${message}`);
+        console.warn(
+          JSON.stringify({
+            event: "run_id_retention.sweep_failed",
+            sweep: name,
+            job_id: handlerDeps.job.job_id,
+            error: message,
+          }),
+        );
+        return null;
+      }
+    };
+
+    const prCloser = await sweep("close", () =>
+      runIdCloseStalePrsActivity({
+        ...dsnPart,
+        clock: handlerDeps.clock,
+        ttlDays: input.prTtlDays,
+        githubClient: retentionGithubClient,
+      }),
     );
+    const runs = await sweep("retire", () =>
+      runIdRetireOldRunsActivity({
+        ...dsnPart,
+        clock: handlerDeps.clock,
+        ttlDays: input.runTtlDays,
+      }),
+    );
+    const events = await sweep("delete", () =>
+      runIdDeleteOldEventsActivity({
+        ...dsnPart,
+        clock: handlerDeps.clock,
+        ttlDays: input.eventTtlDays,
+      }),
+    );
+    console.info(
+      `run_id_retention swept: prs_closed=${prCloser?.closed ?? "failed"} ` +
+        `prs_skipped=${prCloser?.skipped ?? "failed"} runs_retired=${runs?.retired ?? "failed"} ` +
+        `events_deleted=${events?.deleted ?? "failed"} events_batches=${events?.batches ?? "failed"} ` +
+        `sweeps_failed=${failures.length} job_id=${handlerDeps.job.job_id}`,
+    );
+    if (failures.length > 0) {
+      // Surface the per-sweep failure count + reasons through last_error; the redrive re-runs the
+      // idempotent chain (the platform analogue of the workflow surfacing an activity failure).
+      throw new Error(`run_id_retention: ${failures.length}/3 sweeps failed — ${failures.join("; ")}`);
+    }
   });
 
   // W4.6 (L4+L5): job_retention — the daily 03:30 UTC janitor for the runner's OWN terminal job
@@ -435,6 +480,24 @@ export function registerCronHandlers(registry: HandlerRegistry, deps: CronHandle
         `background_jobs_deleted=${result.background_jobs_deleted} ` +
         `idempotency_deleted=${result.idempotency_deleted} batches=${result.batches} ` +
         `job_id=${handlerDeps.job.job_id}`,
+    );
+  });
+
+  // W3.6 (RH12): installation_drift_reconcile — the daily 04:15 UTC self-heal sweep. Walks active
+  // installations through the SAME cooldown/blocked-gated maybeEnqueueRepair dispatcher the
+  // PR-webhook drift + installation_created paths use (trigger_source='drift_sweep'), so a dropped
+  // GitHub webhook self-corrects on the cron cadence: the repair envelope rides the outbox →
+  // cutover port → repair_installation_repositories hydrate, which upserts the canonical repo set
+  // idempotently. No-signal posture (the sweep crons' rationale): each per-installation unit is a
+  // cooldown-gated idempotent enqueue — a lease-lost duplicate re-sweep suppresses itself.
+  registry.register("installation_drift_reconcile", async (payload, _signal, handlerDeps) => {
+    InstallationDriftReconcileCronInputV1.parse(payload);
+    const result = await installationDriftReconcileActivity(
+      deps.dsn !== undefined ? { dsn: deps.dsn } : {},
+    );
+    console.info(
+      `installation_drift_reconcile swept: scanned=${result.scanned} enqueued=${result.enqueued} ` +
+        `suppressed=${result.suppressed} failed=${result.failed} job_id=${handlerDeps.job.job_id}`,
     );
   });
 
@@ -486,11 +549,26 @@ export function registerCronHandlers(registry: HandlerRegistry, deps: CronHandle
     // Step 3 — retention purge: hard-delete RELEASED rows past the 7d retention window.
     const purge = await runWorkspaceReleasedRetentionActivity({ ...dsnPart, clock: handlerDeps.clock });
 
+    // Step 4 (W3.5 OH6) — dead-letter visibility: count + gauge the permanently-stuck lease classes
+    // (FAILED_CLEANUP at the attempt ceiling; ORPHANED aged >24h). Pure observability — fail-OPEN:
+    // a fault here must never fail the janitor chain that just did real recovery work.
+    let deadLetter = { failed_cleanup_stuck: -1, orphaned_aged: -1 };
+    try {
+      deadLetter = await runWorkspaceDeadLetterSweepActivity({ ...dsnPart, clock: handlerDeps.clock });
+    } catch (e) {
+      console.warn(
+        `workspace_retention: dead-letter sweep failed (observability only; the janitor chain ` +
+          `completed): ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+
     // The workflow body's { orphaned, reaped, retention_deleted } result counters, as the log tally
     // (the platform persists job OUTCOME, not results — same posture as every cron handler above).
     console.info(
       `workspace_retention swept: orphaned=${orphan.orphaned_count} reaped=${reaped} ` +
-        `retention_deleted=${purge.deleted_count} job_id=${handlerDeps.job.job_id}`,
+        `retention_deleted=${purge.deleted_count} ` +
+        `dead_letter_failed_cleanup=${deadLetter.failed_cleanup_stuck} ` +
+        `dead_letter_orphaned_aged=${deadLetter.orphaned_aged} job_id=${handlerDeps.job.job_id}`,
     );
   });
 

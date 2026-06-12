@@ -224,4 +224,63 @@ describe("doEnrichPrFiles — empty + cap", () => {
     expect(result.files).toHaveLength(MAX_FILES_PER_ENRICHMENT);
     expect(result.truncated_at).toBe(MAX_FILES_PER_ENRICHMENT);
   });
+
+  it("XM10/W4.3: when OVER the cap, kept files are RANKED by review value — generated/lockfiles fall past the cap; code + security-relevant files survive", async () => {
+    // GitHub's order is arbitrary (alphabetical-ish), not relevance-ranked. Pre-XM10 a large
+    // refactor whose lockfiles/dist bundles sorted early ate the 500-file budget while real code —
+    // and the CI workflow change — silently fell off the reviewed set.
+    const envelopes: Array<PullRequestFileEnvelopeV1> = [];
+    // 50 low-value generated/vendored/lockfile entries FIRST (GitHub order)…
+    for (let i = 0; i < 25; i += 1) {
+      envelopes.push(envelope(`dist/bundle_${i}.min.js`, null));
+      envelopes.push(envelope(`vendor/dep_${i}/package-lock.json`, null));
+    }
+    // …then a full cap's worth of real code…
+    for (let i = 0; i < MAX_FILES_PER_ENRICHMENT - 1; i += 1) {
+      envelopes.push(envelope(`src/mod_${i}.py`, `@@ -0,0 +1,1 @@\n+x\n`));
+    }
+    // …and a security-relevant file DEAD LAST in GitHub order.
+    envelopes.push(envelope(".github/workflows/deploy.yml", `@@ -0,0 +1,1 @@\n+x\n`));
+
+    const { github } = fakeGitHub(envelopes);
+    const { repo } = fakeRepo();
+    const result = await doEnrichPrFiles(input(), {
+      github,
+      repo,
+      clock: new FakeClock({ now: FIXED_NOW }),
+    });
+
+    expect(result.files).toHaveLength(MAX_FILES_PER_ENRICHMENT);
+    expect(result.truncated_at).toBe(MAX_FILES_PER_ENRICHMENT);
+    const kept = new Set(result.files.map((f) => f.file_path));
+    // The security-relevant workflow file survives despite sorting last in GitHub order…
+    expect(kept.has(".github/workflows/deploy.yml")).toBe(true);
+    // …every real code file survives…
+    expect(kept.has("src/mod_0.py")).toBe(true);
+    expect(kept.has(`src/mod_${MAX_FILES_PER_ENRICHMENT - 2}.py`)).toBe(true);
+    // …and the generated/lockfile noise is what fell past the cap.
+    expect(kept.has("dist/bundle_0.min.js")).toBe(false);
+    expect(kept.has("vendor/dep_0/package-lock.json")).toBe(false);
+  });
+
+  it("XM10/W4.3: at-or-under the cap, GitHub order is preserved untouched (no re-ranking)", async () => {
+    const envelopes = [
+      envelope("zz_last.py", "@@ -0,0 +1,1 @@\n+x\n"),
+      envelope("package-lock.json", null),
+      envelope("aa_first.py", "@@ -0,0 +1,1 @@\n+x\n"),
+    ];
+    const { github } = fakeGitHub(envelopes);
+    const { repo } = fakeRepo();
+    const result = await doEnrichPrFiles(input(), {
+      github,
+      repo,
+      clock: new FakeClock({ now: FIXED_NOW }),
+    });
+    expect(result.files.map((f) => f.file_path)).toEqual([
+      "zz_last.py",
+      "package-lock.json",
+      "aa_first.py",
+    ]);
+    expect(result.truncated_at).toBeNull();
+  });
 });

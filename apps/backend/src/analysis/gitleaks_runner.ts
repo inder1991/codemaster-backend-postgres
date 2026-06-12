@@ -21,7 +21,23 @@
  *
  * Conventions match the other runners: empty file list → []; exit 0/1 → success; exit ≥ 2 →
  * {@link RunnerToolError}; malformed JSON / null body / non-array → log WARN + return [].
+ *
+ * ## Changed-file scoping (W2.6 / M3 — DELIBERATE divergence from the frozen Python)
+ *
+ * The Python runner scans the WHOLE checked-out tree (`--source=<workspace>`) and discards
+ * out-of-PR findings post-hoc — a full-tree secret scan per PR regardless of PR size: a cost /
+ * timeout / OOM amplifier on large monorepos, exactly where losing the secret scan matters most.
+ * This port scopes the scan to the routed file set: the routed files are HARDLINKED (copy
+ * fallback) into a per-run staging dir inside the workspace ({@link GITLEAKS_SCAN_STAGING_DIRNAME},
+ * relative structure preserved) and `--source` points at THAT dir, so scan cost scales with PR
+ * size, not repo size. Findings map back through the staging root, so reported paths stay
+ * workspace-relative. Fail-OPEN at every step: an unstageable file (deleted in the PR, traversal
+ * escape) is skipped with a WARN; a staging-root failure falls back to the legacy whole-tree scan;
+ * the staging dir is removed in `finally`.
  */
+
+import { promises as fs } from "node:fs";
+import * as path from "node:path";
 
 import { RunnerToolError } from "./eslint_runner.js";
 import { InWorkerRunner, type SpawnFn, type SubprocessResultV1 } from "./in_worker_runner.js";
@@ -33,6 +49,10 @@ import { type Clock } from "#platform/clock.js";
 
 /** Per the always-promote rule — every gitleaks finding gets blocker so the curator translates 1:1. */
 const GITLEAKS_SEVERITY = "blocker";
+
+/** The per-run staging dir (inside the workspace — same filesystem, so staging is hardlink-cheap)
+ *  the scoped scan points `--source` at. Recreated per run; removed in `finally`. */
+export const GITLEAKS_SCAN_STAGING_DIRNAME = ".codemaster-gitleaks-scan";
 
 /**
  * Show first/last 4 chars; mask the middle. Mirrors the PatternSecretDetector redaction style so
@@ -76,21 +96,61 @@ export class GitleaksInWorkerRunner implements AnalysisRunner {
 
   public async run({ workspace, files, signal }: RunnerRunInput): Promise<ReadonlyArray<AnalysisFindingV1>> {
     if (files.length === 0) return [];
-    const runner = new InWorkerRunner({
-      command: this.buildCommand(workspace),
-      workspace,
-      ...(this.timeoutSeconds !== undefined ? { timeoutSeconds: this.timeoutSeconds } : {}),
-      ...(this.spawnFn !== undefined ? { spawnFn: this.spawnFn } : {}),
-      ...(this.clock !== undefined ? { clock: this.clock } : {}),
-      ...(signal !== undefined ? { signal } : {}),
-    });
-    const result = await runner.runSubprocess();
-    return parseGitleaksOutput(result, workspace);
+
+    // W2.6 (M3): stage the routed files into the per-run scan dir so the scan cost scales with PR
+    // size, not repo size. Staging failure (root-level) falls back to the legacy whole-tree scan.
+    const stagingRoot = path.join(workspace, GITLEAKS_SCAN_STAGING_DIRNAME);
+    let scanRoot = workspace;
+    let staged = false;
+    try {
+      await stageChangedFiles(workspace, stagingRoot, files);
+      staged = true;
+      scanRoot = stagingRoot;
+    } catch (e) {
+      // Fail-OPEN: a staging-root fault must never lose the secret scan — fall back to the
+      // pre-M3 whole-tree behavior (slower, never less coverage).
+      console.warn(
+        JSON.stringify({
+          event: "gitleaks.staging_failed_whole_tree_fallback",
+          workspace,
+          error: e instanceof Error ? e.message : String(e),
+        }),
+      );
+    }
+
+    try {
+      const runner = new InWorkerRunner({
+        command: this.buildCommand(scanRoot),
+        workspace,
+        ...(this.timeoutSeconds !== undefined ? { timeoutSeconds: this.timeoutSeconds } : {}),
+        ...(this.spawnFn !== undefined ? { spawnFn: this.spawnFn } : {}),
+        ...(this.clock !== undefined ? { clock: this.clock } : {}),
+        ...(signal !== undefined ? { signal } : {}),
+      });
+      const result = await runner.runSubprocess();
+      // Findings map back through the SCAN root (staging dir when scoped; workspace on fallback) so
+      // reported paths are the original workspace-relative paths either way.
+      return parseGitleaksOutput(result, scanRoot);
+    } finally {
+      if (staged) {
+         
+        await fs.rm(stagingRoot, { recursive: true, force: true }).catch((e: unknown) => {
+          console.warn(
+            JSON.stringify({
+              event: "gitleaks.staging_cleanup_failed",
+              staging_root: stagingRoot,
+              error: e instanceof Error ? e.message : String(e),
+            }),
+          );
+        });
+      }
+    }
   }
 
-  private buildCommand(workspace: string): ReadonlyArray<string> {
-    // gitleaks `detect` scans the whole working tree; the per-file filter is applied post-hoc in the
-    // changed-line filter. --no-banner + report-format json + --no-git so we don't need a .git dir.
+  private buildCommand(scanRoot: string): ReadonlyArray<string> {
+    // Scoped scan (W2.6 / M3): `--source` points at the per-run staging dir holding ONLY the routed
+    // files (whole workspace on the staging-failure fallback). --no-banner + report-format json +
+    // --no-git so we don't need a .git dir.
     return [
       this.gitleaksPath,
       "detect",
@@ -98,8 +158,59 @@ export class GitleaksInWorkerRunner implements AnalysisRunner {
       "--report-format=json",
       "--report-path=/dev/stdout",
       "--no-git",
-      `--source=${workspace}`,
+      `--source=${scanRoot}`,
     ];
+  }
+}
+
+/**
+ * Stage the routed files under `stagingRoot`, preserving their workspace-relative structure.
+ * Hardlink first (same filesystem — zero-copy), `copyFile` fallback (e.g. a filesystem refusing
+ * links). Per-file fail-OPEN: a file that is missing on disk (deleted in the PR) or escapes the
+ * workspace root (path traversal — never followed) is skipped with a WARN; the rest still stage.
+ * Throws only on root-level failures (mkdir/rm of the staging root) — the caller falls back to the
+ * whole-tree scan.
+ */
+async function stageChangedFiles(
+  workspace: string,
+  stagingRoot: string,
+  files: ReadonlyArray<string>,
+): Promise<void> {
+   
+  await fs.rm(stagingRoot, { recursive: true, force: true });
+  // eslint-disable-next-line security/detect-non-literal-fs-filename -- stagingRoot is workspace + a const dirname
+  await fs.mkdir(stagingRoot, { recursive: true });
+
+  const workspacePrefix = workspace.endsWith(path.sep) ? workspace : workspace + path.sep;
+  for (const file of files) {
+    const src = path.resolve(workspace, file);
+    if (!src.startsWith(workspacePrefix)) {
+      console.warn(
+        JSON.stringify({ event: "gitleaks.staging_skipped_outside_workspace", file }),
+      );
+      continue;
+    }
+    const dest = path.join(stagingRoot, path.relative(workspace, src));
+    try {
+      // eslint-disable-next-line security/detect-non-literal-fs-filename -- dest is staging root + the workspace-relative path verified above
+      await fs.mkdir(path.dirname(dest), { recursive: true });
+      try {
+        // eslint-disable-next-line security/detect-non-literal-fs-filename -- src/dest verified under workspace/staging roots above
+        await fs.link(src, dest);
+      } catch {
+         
+        await fs.copyFile(src, dest);
+      }
+    } catch (e) {
+      // Deleted-in-PR / unreadable file: skip it (the file has no scannable content here anyway).
+      console.warn(
+        JSON.stringify({
+          event: "gitleaks.staging_skipped_file",
+          file,
+          error: e instanceof Error ? e.message : String(e),
+        }),
+      );
+    }
   }
 }
 

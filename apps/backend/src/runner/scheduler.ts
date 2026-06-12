@@ -154,6 +154,15 @@ export type SchedulerEnqueuePort = {
   enqueue(a: EnqueueArgs): Promise<string>;
 };
 
+/**
+ * W4.1 (L8): the scheduled-row envelope version this scheduler build understands
+ * (core.scheduled_jobs.schema_version — migration 0045). A row stamped NEWER (rolling-deploy skew /
+ * an operator pre-staging next-version config) is SKIPPED via the W4a.2 per-schedule isolation —
+ * left unadvanced + WARN'd, re-attempted every poll until a scheduler that understands it polls.
+ * Same two-phase bump discipline as the background-jobs envelope (background_jobs_repo.ts).
+ */
+export const SCHEDULED_JOB_ENVELOPE_SCHEMA_VERSION = 1;
+
 /** The columns one poll pass reads off a due core.scheduled_jobs row. */
 type DueScheduleRow = {
   schedule_id: string;
@@ -164,6 +173,9 @@ type DueScheduleRow = {
   /** The instant the row became due — read for the OM11 cadence-lateness signal (the tick instant
    *  minus this is the lateness) as well as being the advance UPDATE's predecessor value. */
   next_run_at: Date;
+  /** W4.1 (L8): the row's envelope version — gated against
+   *  {@link SCHEDULED_JOB_ENVELOPE_SCHEMA_VERSION} before any side effect. */
+  schema_version: number;
 };
 
 /**
@@ -205,7 +217,7 @@ export async function pollAndEnqueue(
     const now = o.clock.now();
     // core.scheduled_jobs is platform-global (no installation_id column) — no tenancy filter applies.
     const due = await sql<DueScheduleRow>`
-      SELECT schedule_id, job_type, cadence_kind, cadence_spec, input, next_run_at
+      SELECT schedule_id, job_type, cadence_kind, cadence_spec, input, next_run_at, schema_version
         FROM core.scheduled_jobs
        WHERE enabled AND next_run_at <= ${now}
          FOR UPDATE SKIP LOCKED`.execute(trx);
@@ -236,6 +248,17 @@ export async function pollAndEnqueue(
       const savepoint = `cs7_schedule_${i}`;
       await sql.raw(`SAVEPOINT ${savepoint}`).execute(trx);
       try {
+        // W4.1 (L8): envelope-version gate FIRST — a row stamped newer than this build understands
+        // must not be interpreted through this build's contracts at all (its input/cadence may
+        // legitimately carry next-version shapes). The throw lands in the W4a.2 catch below:
+        // WARN + bounded counter + left unadvanced, never the whole pass.
+        if (row.schema_version > SCHEDULED_JOB_ENVELOPE_SCHEMA_VERSION) {
+          throw new Error(
+            `scheduled row schema_version ${row.schema_version} is newer than this scheduler ` +
+              `supports (${SCHEDULED_JOB_ENVELOPE_SCHEMA_VERSION}) — skipped for a newer build ` +
+              `(deploy skew / pre-staged config)`,
+          );
+        }
         // W3.8 (RM7): validate the UNTRUSTED row against the job_type's dispatch contract FIRST —
         // default-deny. `scheduled_jobs` is platform-global operator config with no row tenancy;
         // pre-RM7 a malformed/hostile row only failed at HANDLER dispatch (dead-letter after

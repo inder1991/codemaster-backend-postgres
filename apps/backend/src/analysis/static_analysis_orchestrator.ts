@@ -46,7 +46,7 @@ import { type Clock } from "#platform/clock.js";
 import { transportAbortSignal } from "#platform/transport_timeout.js";
 
 import { RunnerToolError } from "./eslint_runner.js";
-import { SubprocessLaunchError, SubprocessTimeoutError } from "./in_worker_runner.js";
+import { SubprocessLaunchError, SubprocessOomError, SubprocessTimeoutError } from "./in_worker_runner.js";
 import type { AnalysisRunner, ChangedLineRanges } from "./runner_port.js";
 
 /** One registered runner + the files it should scan. 1:1 with the Python `RunnerSpec`. */
@@ -56,6 +56,13 @@ export type RunnerSpec = {
   readonly runner: AnalysisRunner;
   /** Files (workspace-relative) routed to this runner. Empty ⇒ marked `skipped`, never spawned. */
   readonly files: ReadonlyArray<string>;
+  /**
+   * The FULL routed file count BEFORE any caller-side cap (W2.6 / M1: the activity bounds `files`
+   * at MAX_FILES_PER_RUNNER so a monster PR can't E2BIG the spawn). When present it feeds
+   * `ToolStatusV1.files_total`, so capped coverage is VISIBLE (files_scanned < files_total) instead
+   * of silently re-baselined. Defaults to `files.length` (no cap engaged).
+   */
+  readonly filesTotal?: number;
 };
 
 /**
@@ -96,6 +103,7 @@ type RunnerOutcome =
   | { readonly kind: "completed"; readonly findings: ReadonlyArray<AnalysisFindingV1> }
   | { readonly kind: "failed_startup"; readonly errorClass: string; readonly errorMessage: string }
   | { readonly kind: "failed_runtime"; readonly errorClass: string; readonly errorMessage: string }
+  | { readonly kind: "oom"; readonly errorClass: string; readonly errorMessage: string }
   | { readonly kind: "timed_out" };
 
 type RunnerTask = {
@@ -227,6 +235,11 @@ export class StaticAnalysisOrchestrator {
         // A runner timed out on ITS OWN safety guard (vs the orchestrator deadline) — still timed_out.
         return { kind: "timed_out" };
       }
+      if (e instanceof SubprocessOomError) {
+        // W2.6 (H15/M5): output-cap breach or external SIGKILL — the dedicated `oom` status, so
+        // resource exhaustion is distinguishable from a generic crash on dashboards.
+        return { kind: "oom", errorClass: e.name, errorMessage: e.message };
+      }
       if (e instanceof RunnerToolError) {
         return { kind: "failed_runtime", errorClass: e.name, errorMessage: e.message };
       }
@@ -255,7 +268,7 @@ export class StaticAnalysisOrchestrator {
     return failedStatus(spec, startedAt, finishedAt, {
       errorClass: outcome.errorClass,
       errorMessage: outcome.errorMessage,
-      statusLabel: outcome.kind, // "failed_startup" | "failed_runtime"
+      statusLabel: outcome.kind, // "failed_startup" | "failed_runtime" | "oom"
     });
   }
 }
@@ -267,7 +280,7 @@ function completedStatus(spec: RunnerSpec, startedAt: Date, finishedAt: Date, fi
     tool_name: spec.name,
     status: "completed",
     files_scanned: spec.files.length,
-    files_total: spec.files.length,
+    files_total: spec.filesTotal ?? spec.files.length,
     started_at: startedAt.toISOString(),
     finished_at: finishedAt.toISOString(),
     duration_ms: durationMs(startedAt, finishedAt),
@@ -282,7 +295,7 @@ function timedOutStatus(spec: RunnerSpec, startedAt: Date, deadlineSeconds: numb
     // later refinement, out of scope).
     status: "timed_out",
     files_scanned: 0,
-    files_total: spec.files.length,
+    files_total: spec.filesTotal ?? spec.files.length,
     started_at: startedAt.toISOString(),
     finished_at: null,
     duration_ms: Math.round(deadlineSeconds * 1000),
@@ -302,7 +315,7 @@ function failedStatus(
     tool_name: spec.name,
     status: statusLabel,
     files_scanned: 0,
-    files_total: spec.files.length,
+    files_total: spec.filesTotal ?? spec.files.length,
     started_at: startedAt.toISOString(),
     finished_at: finishedAt.toISOString(),
     duration_ms: durationMs(startedAt, finishedAt),

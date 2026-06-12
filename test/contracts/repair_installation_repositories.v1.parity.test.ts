@@ -42,6 +42,15 @@ describe("RepairInstallationRepositoriesPayloadV1 parity (Pydantic ↔ Zod)", ()
     }
   }, 30_000);
 
+  it("DELIBERATE DIVERGENCE (W3.6/RH12): TS accepts 'drift_sweep'; the frozen Python rejects it", async () => {
+    // The drift-reconcile cron is a TS-only producer (Temporal removed; no Python consumer exists).
+    // Pinning BOTH sides keeps the widening an explicit, reviewed divergence rather than drift.
+    const payload = { github_installation_id: 1, trigger_source: "drift_sweep" };
+    expect(RepairInstallationRepositoriesPayloadV1.safeParse(payload).success).toBe(true);
+    const r = await pyRef({ pyModule: PY, pyCallable: CALLABLE, kwargs: payload });
+    expect(r.ok).toBe(false);
+  }, 30_000);
+
   it("both REJECT github_installation_id below ge=1 (0)", async () => {
     const bad = { github_installation_id: 0, trigger_source: "pr_webhook" };
     const r = await pyRef({ pyModule: PY, pyCallable: CALLABLE, kwargs: bad });
