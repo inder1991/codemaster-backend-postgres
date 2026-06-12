@@ -30,7 +30,7 @@
  *     row moved off `ALLOCATED`). It then bumps `LeaseRepo.touchHeartbeat(workspace_id)` in the SAME
  *     transaction (1:1 with the Python `async with session.begin(): …`).
  *   - `heartbeat`: the production default ({@link defaultHeartbeat}) forwards the phase payload to
- *     Temporal's `Context.current().heartbeat(...)` (real Temporal heartbeat; works inside the worker
+ *     the job-lease heartbeat (the Postgres runtime's liveness signal; the per-phase payload
  *     activity context). Tests inject a no-op double (there is no Temporal context under unit/integration).
  *
  * The observable output ({@link ClonedRepoV1}) does NOT depend on either collaborator. The four
@@ -45,7 +45,6 @@
  *   - `byteSizeOfDir(workspace) > MAX_WORKSPACE_BYTES` → `WorkspaceTooLargeError`.
  */
 
-import { Context } from "@temporalio/activity";
 
 import { byteSizeOfDir } from "#backend/integrations/git/byte_size.js";
 import { type GitCloner, REPO_SUBDIR_NAME } from "#backend/integrations/git/cloner.js";
@@ -87,7 +86,7 @@ export type CloneRepoIntoWorkspaceDeps = {
   assertLeaseAllocated?: (workspaceId: string) => Promise<void>;
   /**
    * Temporal in-flight progress heartbeat. Production default: {@link defaultHeartbeat} (forwards to
-   * `Context.current().heartbeat(...)`). Tests inject a no-op (no Temporal context off-worker).
+   * {@link defaultHeartbeat}, a no-op in the Postgres runtime). Tests/clients may inject their own.
    */
   heartbeat?: (payload: unknown) => void;
 };
@@ -146,21 +145,14 @@ export async function defaultAssertLeaseAllocated(
 }
 
 /**
- * REAL production default for `heartbeat` — RUNTIME-AGNOSTIC (cutover fix, 2026-06-11): inside a
- * Temporal worker it forwards the phase payload to the activity heartbeat (1:1 with the Python
- * `activity.heartbeat({...})`); outside one (CODEMASTER_RUNTIME_MODE=postgres — the in-process
- * review path wires this REAL activity via runner/in_process_ports.ts buildClonerDeps) it is a
- * deliberate NO-OP: the review job's lease heartbeat (runOneJob's heartbeat loop) is that
- * runtime's liveness signal, and the phase payload has no consumer there. Pre-fix, the bare
- * Context.current() throw ("Activity context not initialized") dead-lettered every postgres-mode
- * review after 3 attempts — caught live by the postgres-mode live_cluster_smoke.
+ * Production default for `heartbeat` — a NO-OP in the Postgres runtime. The Python relied on the
+ * Temporal activity heartbeat to keep the lease-janitor's orphan timer fresh; with Temporal removed,
+ * the review job's lease heartbeat (runOneJob's heartbeat loop) is the runtime's sole liveness
+ * signal and the per-phase payload has no consumer. Kept as an injectable seam (tests/clients may
+ * override `heartbeat`) so the call sites in the clone body stay structurally 1:1 with the Python.
  */
-export function defaultHeartbeat(payload: unknown): void {
-  try {
-    Context.current().heartbeat(payload);
-  } catch {
-    /* no Temporal activity context — the postgres runtime's job-lease heartbeat owns liveness */
-  }
+export function defaultHeartbeat(_payload: unknown): void {
+  /* no-op: the job-lease heartbeat owns liveness in the Postgres runtime */
 }
 
 /**
