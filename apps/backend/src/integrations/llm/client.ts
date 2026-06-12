@@ -68,6 +68,7 @@ import {
   DISABLED_LANGFUSE_EXPORTER,
   redactSnippet,
 } from "#backend/observability/langfuse_exporter.js";
+import { recordPromptCacheUsage } from "#backend/observability/llm_prompt_cache_metrics.js";
 import { redactPii } from "#backend/redact/pii_redactor.js";
 import { OutputSafetyValidator } from "#backend/security/output_safety.js";
 
@@ -141,10 +142,27 @@ function estimateCentsPreCall(model: string, promptChars: number): number {
   return Math.max(1, Math.trunc(cents));
 }
 
-/** Post-response final cost. Mirrors `_final_cents`. */
-function finalCents(model: string, promptTokens: number, completionTokens: number): number {
+// W2.2 (prompt caching) — Anthropic/Bedrock prompt-cache price factors relative to the base prompt
+// rate: cache READS bill at ~0.1x, 5-minute-TTL cache WRITES at 1.25x. On the Anthropic usage shape,
+// `input_tokens` EXCLUDES the cached tokens (they arrive as `cache_read_input_tokens` /
+// `cache_creation_input_tokens`), so pricing only `input_tokens` would silently under-record a cached
+// chunk call in cost_daily and loosen the daily budget invariant.
+const CACHE_READ_PROMPT_COST_FACTOR = 0.1;
+const CACHE_WRITE_PROMPT_COST_FACTOR = 1.25;
+
+/** Post-response final cost. Mirrors `_final_cents`; W2.2 extends it with the prompt-cache token
+ *  classes (both 0 on every non-caching path, where the result is identical to the frozen Python). */
+function finalCents(
+  model: string,
+  promptTokens: number,
+  completionTokens: number,
+  cacheTokens: { readTokens: number; creationTokens: number },
+): number {
+  const promptRate = USD_CENTS_PER_PROMPT_TOKEN.get(model) ?? 0.0;
   const cents =
-    promptTokens * (USD_CENTS_PER_PROMPT_TOKEN.get(model) ?? 0.0) +
+    promptTokens * promptRate +
+    cacheTokens.readTokens * promptRate * CACHE_READ_PROMPT_COST_FACTOR +
+    cacheTokens.creationTokens * promptRate * CACHE_WRITE_PROMPT_COST_FACTOR +
     completionTokens * (USD_CENTS_PER_COMPLETION_TOKEN.get(model) ?? 0.0);
   return Math.max(1, Math.trunc(cents));
 }
@@ -708,7 +726,27 @@ export class LlmClient {
     const usage = asRecord(response["usage"]) ?? {};
     const promptTokens = intOrZero(usage["input_tokens"]);
     const completionTokens = intOrZero(usage["output_tokens"]);
-    const computedFinalCents = finalCents(model, promptTokens, completionTokens);
+    // W2.2 — the prompt-cache token classes (0 on every non-caching response/path). They feed the
+    // cache-aware cost below and the hit-rate telemetry; the contract field `prompt_tokens` stays the
+    // provider's `input_tokens` (the uncached remainder) unchanged.
+    const cacheReadTokens = intOrZero(usage["cache_read_input_tokens"]);
+    const cacheCreationTokens = intOrZero(usage["cache_creation_input_tokens"]);
+    const computedFinalCents = finalCents(model, promptTokens, completionTokens, {
+      readTokens: cacheReadTokens,
+      creationTokens: cacheCreationTokens,
+    });
+
+    // W2.2 — cache-hit-rate telemetry: ONLY for cache-marked requests on the paid (non-replay) edge,
+    // so ledger replays and legacy unmarked calls never pollute the hit rate. Bounded labels (the F9
+    // ledger-purpose vocabulary x the closed outcome enum).
+    if (!isReplay && args.cachePrefixMessages !== undefined) {
+      recordPromptCacheUsage({
+        purpose: ledgerPurpose,
+        cacheReadTokens,
+        cacheCreationTokens,
+        uncachedPromptTokens: promptTokens,
+      });
+    }
 
     // content_text = first content block's `.text` (empty when missing / not a dict / not present).
     // raw_blocks = ALL content blocks that are dicts, in order. Matches Python's `content or [{}]`

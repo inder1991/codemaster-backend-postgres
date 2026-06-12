@@ -10,7 +10,11 @@
 //
 // COUNTER-TIMING GOTCHA (same as chunk_response_parser.counters.test.ts): the metrics module caches
 // its Counter instruments at MODULE scope, so the MeterProvider is registered in beforeAll and the
-// client + metrics modules are DYNAMICALLY imported afterwards.
+// client module (whose import graph pulls llm_prompt_cache_metrics.ts) is DYNAMICALLY imported
+// afterwards. The cassette blob-store double imports the client module too, so it is also loaded
+// dynamically — NO static import in this file may reach client.js, or the counters bind to the no-op
+// meter before beforeAll runs (verified failure mode). Hand-written structural types stand in for the
+// dynamically-imported bindings (the `typeof import(...)` annotation form is lint-forbidden).
 
 import { metrics } from "@opentelemetry/api";
 import {
@@ -27,15 +31,31 @@ import { FakeClock } from "#platform/clock.js";
 import { InMemoryCostCapEnforcer } from "#backend/cost/enforcer.js";
 import type { LlmInvocationLedgerPort } from "#backend/integrations/llm/invocation_ledger.js";
 
-import { InMemoryBlobStoreAdapter } from "../../support/llm/cassette_sdk.js";
-
 import type { LlmMessage } from "#contracts/llm_message.v1.js";
 
-type ClientModule = typeof import("#backend/integrations/llm/client.js");
+/** Structural slice of LlmClient this test drives (the real class is dynamically imported). */
+type LlmClientLike = {
+  invokeModel(args: {
+    role: "primary" | "secondary";
+    model: string;
+    messages: Array<LlmMessage>;
+    installationId: string;
+    cachePrefixMessages?: number;
+    idempotency?: {
+      reviewId: string;
+      chunkId: string;
+      toolSchemaVersion: string;
+      ledgerPurpose?: string;
+    };
+  }): Promise<{ cost_usd_cents: number; prompt_tokens: number }>;
+};
+type LlmClientCtor = new (args: Record<string, unknown>) => LlmClientLike;
+type BlobStoreCtor = new () => unknown;
 
 let exporter: InMemoryMetricExporter;
 let provider: MeterProvider;
-let clientModule: ClientModule;
+let LlmClientClass: LlmClientCtor;
+let InMemoryBlobStoreAdapterClass: BlobStoreCtor;
 
 beforeAll(async () => {
   exporter = new InMemoryMetricExporter(AggregationTemporality.DELTA);
@@ -45,8 +65,15 @@ beforeAll(async () => {
   });
   provider = new MeterProvider({ readers: [reader] });
   metrics.setGlobalMeterProvider(provider);
-  // Dynamic import AFTER provider registration so module-scope counters bind to the real meter.
-  clientModule = await import("#backend/integrations/llm/client.js");
+  // Dynamic imports AFTER provider registration so module-scope counters bind to the real meter.
+  const clientModule = (await import("#backend/integrations/llm/client.js")) as unknown as {
+    LlmClient: LlmClientCtor;
+  };
+  LlmClientClass = clientModule.LlmClient;
+  const cassetteModule = (await import("../../support/llm/cassette_sdk.js")) as unknown as {
+    InMemoryBlobStoreAdapter: BlobStoreCtor;
+  };
+  InMemoryBlobStoreAdapterClass = cassetteModule.InMemoryBlobStoreAdapter;
 });
 
 afterAll(async () => {
@@ -54,12 +81,16 @@ afterAll(async () => {
   metrics.disable();
 });
 
-beforeEach(() => {
+beforeEach(async () => {
+  // Drain any uncollected deltas a prior (shuffled-order) test left in the meter, THEN clear the
+  // exporter — so each test asserts exactly its own adds regardless of vitest's sequence.shuffle.
+  await provider.forceFlush();
   exporter.reset();
 });
 
-async function flushedPointsFor(name: string): Promise<Array<DataPoint<number>>> {
-  await provider.forceFlush();
+/** Collect the points for `name` from the batches already flushed (flush ONCE per test — under DELTA
+ *  temporality every additional forceFlush appends a fresh zero-delta batch per known instrument). */
+function pointsFor(name: string): Array<DataPoint<number>> {
   const out: Array<DataPoint<number>> = [];
   for (const rm of exporter.getMetrics()) {
     for (const sm of rm.scopeMetrics) {
@@ -103,15 +134,15 @@ function responseWith(usage: Record<string, unknown>): Record<string, unknown> {
 function newClient(
   response: Record<string, unknown>,
   ledger?: LlmInvocationLedgerPort,
-): InstanceType<ClientModule["LlmClient"]> {
-  return new clientModule.LlmClient({
+): LlmClientLike {
+  return new LlmClientClass({
     sdk: {
       async createMessage(): Promise<Record<string, unknown>> {
         return response;
       },
     },
     costCap: new InMemoryCostCapEnforcer({ globalCapCents: 500_000, perOrgCapCents: 100_000 }),
-    blobStore: new InMemoryBlobStoreAdapter(),
+    blobStore: new InMemoryBlobStoreAdapterClass(),
     clock: new FakeClock(),
     ...(ledger !== undefined ? { ledger } : {}),
   });
@@ -136,20 +167,19 @@ describe("LlmClient — prompt-cache telemetry + cache-aware cost (W2.2)", () =>
       idempotency: IDEMPOTENCY,
     });
 
-    const read = await flushedPointsFor("codemaster_llm_prompt_cache_read_tokens_total");
+    await provider.forceFlush();
+    const read = pointsFor("codemaster_llm_prompt_cache_read_tokens_total");
     expect(read).toHaveLength(1);
     expect(read[0]!.value).toBe(100_000);
     expect(read[0]!.attributes).toEqual({ purpose: "bedrock_review_chunk" });
 
-    const creation = await flushedPointsFor("codemaster_llm_prompt_cache_creation_tokens_total");
+    const creation = pointsFor("codemaster_llm_prompt_cache_creation_tokens_total");
     expect(creation[0]!.value).toBe(8_000);
 
-    const uncached = await flushedPointsFor(
-      "codemaster_llm_prompt_cache_uncached_prompt_tokens_total",
-    );
+    const uncached = pointsFor("codemaster_llm_prompt_cache_uncached_prompt_tokens_total");
     expect(uncached[0]!.value).toBe(10_000);
 
-    const requests = await flushedPointsFor("codemaster_llm_prompt_cache_requests_total");
+    const requests = pointsFor("codemaster_llm_prompt_cache_requests_total");
     expect(requests).toHaveLength(1);
     expect(requests[0]!.value).toBe(1);
     expect(requests[0]!.attributes).toEqual({ purpose: "bedrock_review_chunk", outcome: "hit" });
@@ -188,8 +218,9 @@ describe("LlmClient — prompt-cache telemetry + cache-aware cost (W2.2)", () =>
       messages: MESSAGES,
       installationId: TEST_INSTALLATION_ID,
     });
-    expect(await flushedPointsFor("codemaster_llm_prompt_cache_requests_total")).toHaveLength(0);
-    expect(await flushedPointsFor("codemaster_llm_prompt_cache_read_tokens_total")).toHaveLength(0);
+    await provider.forceFlush();
+    expect(pointsFor("codemaster_llm_prompt_cache_requests_total")).toHaveLength(0);
+    expect(pointsFor("codemaster_llm_prompt_cache_read_tokens_total")).toHaveLength(0);
   });
 
   it("a ledger replay HIT emits NO cache counters (no provider request was made)", async () => {
@@ -207,6 +238,7 @@ describe("LlmClient — prompt-cache telemetry + cache-aware cost (W2.2)", () =>
       cachePrefixMessages: 2,
       idempotency: IDEMPOTENCY,
     });
-    expect(await flushedPointsFor("codemaster_llm_prompt_cache_requests_total")).toHaveLength(0);
+    await provider.forceFlush();
+    expect(pointsFor("codemaster_llm_prompt_cache_requests_total")).toHaveLength(0);
   });
 });
