@@ -33,6 +33,8 @@ import {
 
 import { type Clock, WallClock } from "#platform/clock.js";
 
+import { MIN_COSINE_SIMILARITY_FLOOR } from "./constants.js";
+
 import type { AnnPort } from "./ann_port.js";
 import type {
   KnowledgeQueryV1,
@@ -47,6 +49,12 @@ export type AnnRetrieverOptions = {
   embeddings: EmbeddingsPort;
   modelName: string;
   clock?: Clock;
+  /**
+   * W1.3 (RH10) — minimum cosine-similarity floor threaded into every port search. Default
+   * {@link MIN_COSINE_SIMILARITY_FLOOR}; the wiring resolves the `CODEMASTER_RETRIEVAL_MIN_SIMILARITY`
+   * env knob into this option.
+   */
+  minSimilarity?: number;
 };
 
 /** Embed query, delegate to {@link AnnPort}, wrap in {@link RetrievedKnowledgeV1}. */
@@ -55,14 +63,16 @@ export class AnnRetriever {
   private readonly embeddings: EmbeddingsPort;
   private readonly modelName: string;
   private readonly clock: Clock;
+  private readonly minSimilarity: number;
 
-  public constructor({ port, embeddings, modelName, clock }: AnnRetrieverOptions) {
+  public constructor({ port, embeddings, modelName, clock, minSimilarity }: AnnRetrieverOptions) {
     this.port = port;
     this.embeddings = embeddings;
     this.modelName = modelName;
     // Clock injection replaces the inline monotonic call that would violate the no-wall-clock gate;
     // WallClock() default keeps zero-arg compat (1:1 with the Python R-7 fix).
     this.clock = clock ?? new WallClock();
+    this.minSimilarity = minSimilarity ?? MIN_COSINE_SIMILARITY_FLOOR;
   }
 
   public async retrieve(query: KnowledgeQueryV1): Promise<RetrievedKnowledgeV1> {
@@ -97,6 +107,8 @@ export class AnnRetriever {
       repoId: query.repo_id,
       queryVector,
       topK: query.top_k,
+      // W1.3 (RH10): thread the configured minimum-similarity floor into the port.
+      minSimilarity: this.minSimilarity,
     });
     this.clock.monotonic();
 

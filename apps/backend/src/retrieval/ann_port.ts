@@ -29,6 +29,7 @@
 
 import { type Kysely, sql } from "kysely";
 
+import { MIN_COSINE_SIMILARITY_FLOOR } from "#backend/retrieval/constants.js";
 import { formatPgvectorLiteral } from "#backend/retrieval/pgvector_literal.js";
 
 import {
@@ -44,6 +45,12 @@ export type AnnSearchArgs = {
   queryVector: ReadonlyArray<number>;
   topK: number;
   includeStale?: boolean;
+  /**
+   * W1.3 (RH10) — minimum cosine similarity a hit must reach to be returned. Default
+   * {@link MIN_COSINE_SIMILARITY_FLOOR} (0.3); pass `0` to keep only non-anti-correlated matches or
+   * `-1` for the exact legacy no-floor padding.
+   */
+  minSimilarity?: number;
 };
 
 /**
@@ -147,11 +154,14 @@ export class PostgresAnnPort implements AnnPort {
     args: AnnSearchArgs,
   ): Promise<ReadonlyArray<readonly [KnowledgeChunkV1, number]>> {
     const includeStale = args.includeStale ?? false;
+    const minSimilarity = args.minSimilarity ?? MIN_COSINE_SIMILARITY_FLOOR;
     const qvec = formatPgvectorLiteral(args.queryVector);
     // The `_sql_no_cache` SQL: cosine SIMILARITY = `1 - (vector <=> :qvec)`; tenancy filtered on
     // `installation_id` AND `repository_id`; ordered by ascending DISTANCE (= descending similarity);
-    // `LIMIT :top_k` is the only cut. The `installation_id` token satisfies the raw-SQL tenancy gate.
-    // The stale predicate is appended via two sql fragments so the bound params stay parameterized.
+    // cut by `LIMIT :top_k` AND (W1.3 / RH10) the minimum-similarity floor, so an irrelevant corpus
+    // returns fewer/zero rows instead of padding to top_k. The `installation_id` token satisfies the
+    // raw-SQL tenancy gate. The stale predicate is appended via two sql fragments so the bound params
+    // stay parameterized.
     const stalePredicate = includeStale ? sql`` : sql` AND doc_status = 'active' `;
     const result = await sql<AnnRow>`
       SELECT chunk_id, installation_id, repository_id,
@@ -161,6 +171,7 @@ export class PostgresAnnPort implements AnnPort {
         FROM core.knowledge_chunks
        WHERE installation_id = ${args.installationId}::uuid
          AND repository_id = ${args.repoId}::uuid${stalePredicate}
+         AND (1 - (vector <=> ${qvec}::vector)) >= ${minSimilarity}
        ORDER BY vector <=> ${qvec}::vector
        LIMIT ${args.topK}
     `.execute(this.db);
@@ -186,12 +197,16 @@ export class InMemoryAnnPort implements AnnPort {
     args: AnnSearchArgs,
   ): Promise<ReadonlyArray<readonly [KnowledgeChunkV1, number]>> {
     const includeStale = args.includeStale ?? false;
+    const minSimilarity = args.minSimilarity ?? MIN_COSINE_SIMILARITY_FLOOR;
     const scored: Array<readonly [KnowledgeChunkV1, number]> = [];
     for (const [chunk, vec] of this.rows) {
       if (chunk.installation_id !== args.installationId) continue;
       if (chunk.repo_id !== args.repoId) continue;
       if (!includeStale && chunk.doc_status !== "active") continue;
-      scored.push([chunk, cosine(args.queryVector, vec)] as const);
+      const score = cosine(args.queryVector, vec);
+      // W1.3 (RH10): same minimum-similarity floor as the production SQL predicate.
+      if (score < minSimilarity) continue;
+      scored.push([chunk, score] as const);
     }
     scored.sort((p, q) => q[1] - p[1]);
     return scored.slice(0, args.topK);

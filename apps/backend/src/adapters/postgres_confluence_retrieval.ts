@@ -41,6 +41,7 @@
 import { type Kysely, sql } from "kysely";
 
 import type { ConfluenceRetrievedChunk } from "#backend/retrieval/confluence_source.js";
+import { MIN_COSINE_SIMILARITY_FLOOR } from "#backend/retrieval/constants.js";
 import { formatPgvectorLiteral } from "#backend/retrieval/pgvector_literal.js";
 
 /**
@@ -110,6 +111,12 @@ export type PostgresConfluenceRetrievalOptions = {
    * the legacy `cc.embedding` direct query is used.
    */
   embedderCache?: EmbedderCache | null;
+  /**
+   * W1.3 (RH10) — minimum cosine-similarity floor applied in every SQL variant (legacy / Phase A /
+   * Phase C). Default {@link MIN_COSINE_SIMILARITY_FLOOR}; the wiring resolves the
+   * `CODEMASTER_RETRIEVAL_MIN_SIMILARITY` env knob into this option. Pass `0`/`-1` to opt out.
+   */
+  minSimilarity?: number;
 };
 
 /**
@@ -119,10 +126,12 @@ export type PostgresConfluenceRetrievalOptions = {
 export class PostgresConfluenceRetrieval {
   private readonly db: Kysely<unknown>;
   private readonly embedderCache: EmbedderCache | null;
+  private readonly minSimilarity: number;
 
   public constructor(opts: PostgresConfluenceRetrievalOptions) {
     this.db = opts.db;
     this.embedderCache = opts.embedderCache ?? null;
+    this.minSimilarity = opts.minSimilarity ?? MIN_COSINE_SIMILARITY_FLOOR;
   }
 
   /**
@@ -211,6 +220,7 @@ export class PostgresConfluenceRetrieval {
               NOT ('default' = ANY(cc.labels))
               OR cpa.approval_id IS NOT NULL
           )
+          AND (1 - (cc.embedding <=> ${args.qvec}::vector)) >= ${this.minSimilarity}
       ORDER BY cc.embedding <=> ${args.qvec}::vector
       LIMIT ${args.topK}
     `.execute(this.db);
@@ -261,6 +271,7 @@ export class PostgresConfluenceRetrieval {
               NOT ('default' = ANY(cc.labels))
               OR cpa.approval_id IS NOT NULL
           )
+          AND (1 - (COALESCE(ce.embedding, cc.embedding) <=> ${args.qvec}::vector)) >= ${this.minSimilarity}
       ORDER BY COALESCE(ce.embedding, cc.embedding) <=> ${args.qvec}::vector
       LIMIT ${args.topK}
     `.execute(this.db);
@@ -310,6 +321,7 @@ export class PostgresConfluenceRetrieval {
               NOT ('default' = ANY(cc.labels))
               OR cpa.approval_id IS NOT NULL
           )
+          AND (1 - (ce.embedding <=> ${args.qvec}::vector)) >= ${this.minSimilarity}
       ORDER BY ce.embedding <=> ${args.qvec}::vector
       LIMIT ${args.topK}
     `.execute(this.db);

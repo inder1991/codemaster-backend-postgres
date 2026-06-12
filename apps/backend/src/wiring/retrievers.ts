@@ -50,8 +50,32 @@ import { HybridRetriever } from "#backend/retrieval/hybrid_retriever.js";
 import { IdentityRerankPort, LlmRerank } from "#backend/retrieval/llm_rerank.js";
 import type { RerankLlmCacheLike } from "#backend/retrieval/llm_backed_rerank.js";
 
+import { MIN_COSINE_SIMILARITY_FLOOR } from "#backend/retrieval/constants.js";
+
 import { tenantKysely } from "#platform/db/database.js";
 import { WallClock } from "#platform/clock.js";
+
+/**
+ * W1.3 (RH10) — resolve the minimum cosine-similarity floor from `CODEMASTER_RETRIEVAL_MIN_SIMILARITY`
+ * (operator knob), defaulting to the platform {@link MIN_COSINE_SIMILARITY_FLOOR} (0.3 — the fail-open
+ * bottom of the audit's 0.3–0.5 band). Fail-loud on an unparseable/out-of-range value — a silently
+ * ignored misconfiguration would leave an operator believing they tuned retrieval when they did not.
+ * Exported for unit tests.
+ */
+export function resolveMinSimilarity(
+  raw: string | undefined = process.env.CODEMASTER_RETRIEVAL_MIN_SIMILARITY,
+): number {
+  if (raw === undefined || raw === "") {
+    return MIN_COSINE_SIMILARITY_FLOOR;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < -1 || parsed > 1) {
+    throw new Error(
+      `CODEMASTER_RETRIEVAL_MIN_SIMILARITY must be a number in [-1, 1]; got ${JSON.stringify(raw)}`,
+    );
+  }
+  return parsed;
+}
 
 /** Resolve the raw `CODEMASTER_PG_CORE_DSN` (fail-loud on unset; see header). */
 function resolveCoreDsn(): string {
@@ -110,7 +134,12 @@ export function buildAnnPort(): AnnPort {
 export function buildConfluencePort(): ConfluenceRetrievalPort {
   const dsn = resolveCoreDsn();
   const embedderCache = makeLazyEmbedderCache(dsn, { clock: new WallClock() });
-  return new PostgresConfluenceRetrieval({ db: tenantKysely<unknown>(dsn), embedderCache });
+  return new PostgresConfluenceRetrieval({
+    db: tenantKysely<unknown>(dsn),
+    embedderCache,
+    // W1.3 (RH10): the operator-tunable minimum-similarity floor (default 0.3).
+    minSimilarity: resolveMinSimilarity(),
+  });
 }
 
 export type BuildRetrieveKnowledgeActivityOptions = {
@@ -151,6 +180,8 @@ export function buildRetrieveKnowledgeActivity({
     port: buildAnnPort(),
     embeddings: embedder,
     modelName,
+    // W1.3 (RH10): the operator-tunable minimum-similarity floor (default 0.3).
+    minSimilarity: resolveMinSimilarity(),
   });
   // Sub-spec B T12 — the hybrid retriever shares the SAME BM25 / ANN instances (1:1 with the Python R-43
   // "share one core session_factory across both ports"). The IdentityRerankPort is the no-op the frozen
