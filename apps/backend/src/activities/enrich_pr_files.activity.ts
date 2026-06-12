@@ -94,7 +94,7 @@ const LOW_VALUE_PATTERNS: ReadonlyArray<RegExp> = [
 /** Security-relevant infra shapes — highest review value; they survive the cap FIRST. */
 const SECURITY_RELEVANT_PATTERNS: ReadonlyArray<RegExp> = [
   /(^|\/)\.github\/workflows\//,
-  /(^|\/)Dockerfile([._-][\w.-]+)?$/,
+  /(^|\/)Dockerfile[^/]*$/,
   /\.(tf|tfvars)$/,
 ];
 
