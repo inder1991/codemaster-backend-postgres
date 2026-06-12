@@ -11,13 +11,17 @@
 // (login.ts); this layer is the HTTP edge: CSRF gate → rate-limit gate → dispatch → metrics → cookie →
 // status mapping.
 //
-// W4.7 / EC4 closed the deferred CSRF seam: the double-submit *verification* hook (csrf.ts) mounts on
-// this scope whenever csrfSecret is wired (production always wires it), and the session cookie is
-// SameSite=Strict. Still deferred: login.success/.failure audit emission (auditCallbackFactory /
-// auditSessionFactory) — FOLLOW-UP-login-audit-emit-wiring.
+// W4.7 closed both deferred seams: CSRF *verification* (EC4 — csrf.ts; mounted whenever csrfSecret is
+// wired, session cookie SameSite=Strict) and login.success/.failure audit emission (EH7 — audit.ts;
+// active whenever auditDb is wired). The audit wiring is three-pronged, 1:1 with the Python router:
+// the same-TX auditCallbackFactory threaded into authenticate() (the R8 contract — the audit INSERT
+// commits/rolls back WITH recordLoginAttempt's user-state UPDATE), a fail-safe post-authenticate emit
+// for outcomes that bypass recordLoginAttempt (locked / disabled / ldap_unreachable), and a fail-safe
+// emit on the pre-dispatch rate-limited 429 (the credential-spray forensic trail — R5).
 
 import cookie from "@fastify/cookie";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { Kysely } from "kysely";
 
 import type { Clock } from "#platform/clock.js";
 
@@ -28,6 +32,7 @@ import {
   MeResponseV1,
 } from "#contracts/auth.v1.js";
 
+import { emitLoginEvent } from "#backend/api/auth/audit.js";
 import type { CoreUserRepo } from "#backend/api/auth/core_user_repo.js";
 import {
   CSRF_COOKIE_NAME,
@@ -37,7 +42,7 @@ import {
 import { makeScopedErrorHandler } from "#backend/api/auth/error_envelope.js";
 import type { LdapClientPort } from "#backend/api/auth/ldap_client.js";
 import type { LocalUserRepo } from "#backend/api/auth/local_user_repo.js";
-import { type LoginOutcome, authenticate } from "#backend/api/auth/login.js";
+import { type AuditCallbackFactory, type LoginOutcome, authenticate } from "#backend/api/auth/login.js";
 import { recordLoginAttempt } from "#backend/api/auth/metrics.js";
 import { LoginRateLimiter } from "#backend/api/auth/rate_limit.js";
 import type { RoleResolver } from "#backend/api/auth/role_resolver.js";
@@ -47,8 +52,10 @@ import {
   issueCookie,
   verifyCookie,
 } from "#backend/api/auth/session.js";
+import { PLATFORM_SCOPE_AUDIT_INSTALLATION_ID } from "#backend/infra/sentinels.js";
 
 export const SESSION_COOKIE_NAME = "session";
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type AuthRoutesOptions = {
   localRepo: LocalUserRepo;
@@ -63,6 +70,10 @@ export type AuthRoutesOptions = {
   /** core.users dispatch step (the ENABLE_CORE_USERS_LOCAL_AUTH flag); both required to activate it. */
   coreRepo?: CoreUserRepo;
   roleResolver?: RoleResolver;
+  /** W4.7 / EH7 — the audit-emit executor (the core pool; audit.audit_events shares the core DSN).
+   *  When wired, login.success/.failure rows are emitted (same-TX where possible, fail-safe
+   *  elsewhere). Absent → audit emission is disabled (the Python's audit_session_factory=None). */
+  auditDb?: Kysely<unknown>;
 };
 
 // LoginOutcome → (HTTP status, detail). 'ok' is handled separately (cookie + 200).
@@ -154,10 +165,45 @@ export async function registerAuthRoutes(
           outcome: "rate_limited",
           latencySeconds: opts.clock.monotonic() - tStart,
         });
+        // EH7 / R5 — the rate-limited path leaves a login.failure row too; without it a credential
+        // spray leaves an audit hole exactly where forensic evidence is needed. user_id=null (the
+        // submitted username is untrusted pre-dispatch); fail-safe inside emitLoginEvent.
+        if (opts.auditDb !== undefined) {
+          await emitLoginEvent({
+            executor: opts.auditDb,
+            outcome: "rate_limited",
+            authSource: null,
+            userId: null,
+            installationId: PLATFORM_SCOPE_AUDIT_INSTALLATION_ID,
+            clientIp: ip,
+            clock: opts.clock,
+          });
+        }
         return reply
           .code(429)
           .send({ detail: "rate limited — too many failed attempts; try again later" });
       }
+
+      // EH7 / R8 — same-TX audit-callback factory bound to request context. authenticate() invokes it
+      // at each recordLoginAttempt site and threads the callback into the repo's open transaction, so
+      // the audit INSERT and the user-state UPDATE commit atomically (strict=true: an audit failure
+      // rolls the UPDATE back). undefined → audit emission disabled.
+      const auditDb = opts.auditDb;
+      const auditCallbackFactory: AuditCallbackFactory | undefined =
+        auditDb === undefined
+          ? undefined
+          : (outcome, authSource, userId) => async (executor) => {
+              await emitLoginEvent({
+                executor,
+                outcome,
+                authSource,
+                userId,
+                installationId: PLATFORM_SCOPE_AUDIT_INSTALLATION_ID,
+                clientIp: ip,
+                clock: opts.clock,
+                strict: true,
+              });
+            };
 
       const result = await authenticate({
         username: parsed.data.username,
@@ -167,6 +213,7 @@ export async function registerAuthRoutes(
         now,
         ...(opts.coreRepo !== undefined ? { coreRepo: opts.coreRepo } : {}),
         ...(opts.roleResolver !== undefined ? { roleResolver: opts.roleResolver } : {}),
+        ...(auditCallbackFactory !== undefined ? { auditCallbackFactory } : {}),
       });
 
       recordLoginAttempt({
@@ -174,6 +221,22 @@ export async function registerAuthRoutes(
         outcome: result.outcome,
         latencySeconds: opts.clock.monotonic() - tStart,
       });
+
+      // EH7 — fallback emit for the outcomes that never reach recordLoginAttempt (locked, disabled,
+      // ldap_unreachable; plus InMemory repos, which accept the callback but never invoke it).
+      // result.audit_emitted is the authoritative "the same-TX path already handled this" flag.
+      // Fail-safe: emitLoginEvent swallows its own errors here.
+      if (auditDb !== undefined && !result.audit_emitted) {
+        await emitLoginEvent({
+          executor: auditDb,
+          outcome: result.outcome,
+          authSource: result.auth_source,
+          userId: result.user_id !== null && UUID_RE.test(result.user_id) ? result.user_id : null,
+          installationId: PLATFORM_SCOPE_AUDIT_INSTALLATION_ID,
+          clientIp: ip,
+          clock: opts.clock,
+        });
+      }
 
       // Success clears the IP's history; any non-ok outcome (incl. ldap_unreachable) records a failure.
       if (result.outcome === "ok") {

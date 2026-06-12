@@ -11,7 +11,15 @@
 //     {auth_source, outcome, client_ip_hashed} (IP sha256-truncated, never plaintext), including the
 //     rate-limited 429 path; FAIL-SAFE: audit-storage outage must never block a legitimate login.
 
-import { Kysely, PostgresDialect, sql } from "kysely";
+import {
+  type DatabaseConnection,
+  Kysely,
+  PostgresAdapter,
+  PostgresDialect,
+  PostgresIntrospector,
+  PostgresQueryCompiler,
+  sql,
+} from "kysely";
 import { Pool } from "pg";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 
@@ -23,7 +31,7 @@ import { makePgAuditEmitter } from "#backend/api/admin/audit_emit_adapter.js";
 import { registerAdminRoutes } from "#backend/api/admin/admin_routes.js";
 import { emitLoginEvent } from "#backend/api/auth/audit.js";
 import { registerAuthRoutes, SESSION_COOKIE_NAME } from "#backend/api/auth/auth_routes.js";
-import { InMemoryLocalUserRepo, type LocalUser } from "#backend/api/auth/local_user_repo.js";
+import { type LocalUser, PostgresLocalUserRepo } from "#backend/api/auth/local_user_repo.js";
 import { NoOpLdapClient } from "#backend/api/auth/noop_ldap.js";
 import { LoginRateLimiter } from "#backend/api/auth/rate_limit.js";
 import { issueCookie } from "#backend/api/auth/session.js";
@@ -48,6 +56,7 @@ const PW_HASH = "$argon2id$v=19$m=65536,t=3,p=4$B5QfWyYH3WdHYy1TH9rkoA$SomedFZGU
 
 let pool: Pool;
 let db: Kysely<unknown>;
+let registry: KeyRegistry;
 
 type AuditRow = {
   installation_id: string;
@@ -71,6 +80,7 @@ async function auditRows(action: string): Promise<Array<AuditRow>> {
 async function cleanup(): Promise<void> {
   await sql`DELETE FROM audit.audit_events WHERE created_at = ${NOW}`.execute(db);
   await sql`DELETE FROM core.integrations WHERE config_json->>'space_key' = 'AUDITWIRE'`.execute(db);
+  await sql`DELETE FROM core.local_users WHERE user_id = ${ACTOR}`.execute(db);
   await sql`DELETE FROM core.installations WHERE installation_id = ${INST}`.execute(db);
 }
 
@@ -81,6 +91,7 @@ beforeAll(async () => {
   const reg = new KeyRegistry();
   reg.set(makeKeySet({ currentVersion: "1", keys: new Map([["1", new Uint8Array(32).fill(7)]]) }));
   setAuditKeyRegistry(reg);
+  registry = reg;
   await cleanup();
   await sql`INSERT INTO core.installations (installation_id, github_installation_id, account_login, account_type)
             VALUES (${INST}, 980000210, 'itest-audit-wire', 'Organization')
@@ -99,10 +110,42 @@ afterAll(async () => {
   await db?.destroy();
 });
 
+/** A Kysely whose every query throws — a genuinely-broken audit pool. (A destroyed PostgresDialect
+ *  Kysely still serves queries in this driver version, so `db.destroy()` is NOT a failure fixture.) */
+function throwingKysely(): Kysely<unknown> {
+  const connection: DatabaseConnection = {
+    async executeQuery() {
+      throw new Error("audit pool is down");
+    },
+    // eslint-disable-next-line require-yield
+    async *streamQuery() {
+      throw new Error("audit pool is down");
+    },
+  };
+  return new Kysely<unknown>({
+    dialect: {
+      createAdapter: () => new PostgresAdapter(),
+      createDriver: () => ({
+        async init() {},
+        async acquireConnection() {
+          return connection;
+        },
+        async beginTransaction() {},
+        async commitTransaction() {},
+        async rollbackTransaction() {},
+        async releaseConnection() {},
+        async destroy() {},
+      }),
+      createIntrospector: (innerDb) => new PostgresIntrospector(innerDb),
+      createQueryCompiler: () => new PostgresQueryCompiler(),
+    },
+  });
+}
+
 function superAdmin(): LocalUser {
   return {
     user_id: ACTOR,
-    username: "root",
+    username: "itest-audit-root",
     email: "root@internal",
     full_name: "Root",
     password_hash: PW_HASH,
@@ -117,8 +160,12 @@ function superAdmin(): LocalUser {
   };
 }
 
+/** Auth app over the PRODUCTION PostgresLocalUserRepo, so the same-TX audit callback actually runs
+ *  inside recordLoginAttempt's transaction (the InMemory repo accepts the callback but never invokes
+ *  it — vacuous same-TX semantics, test-only). */
 async function makeAuthApp(args?: { auditDb?: Kysely<unknown>; rateLimiter?: LoginRateLimiter }) {
-  const localRepo = new InMemoryLocalUserRepo();
+  const localRepo = new PostgresLocalUserRepo({ db, registry });
+  await sql`DELETE FROM core.local_users WHERE user_id = ${ACTOR}`.execute(db);
   await localRepo.insert(superAdmin());
   const app = buildApp({});
   await registerAuthRoutes(app, {
@@ -134,12 +181,16 @@ async function makeAuthApp(args?: { auditDb?: Kysely<unknown>; rateLimiter?: Log
   return app;
 }
 
-async function login(app: Awaited<ReturnType<typeof makeAuthApp>>, password: string) {
+async function login(
+  app: Awaited<ReturnType<typeof makeAuthApp>>,
+  password: string,
+  username = "itest-audit-root",
+) {
   return app.inject({
     method: "POST",
     url: "/api/auth/login",
     headers: { "content-type": "application/json" },
-    payload: JSON.stringify({ username: "root", password }),
+    payload: JSON.stringify({ username, password }),
   });
 }
 
@@ -218,7 +269,7 @@ describeDb("W4.7/EH7 concrete audit emission (disposable PG)", () => {
     await app.close();
   });
 
-  it("login ok → a login.success row with {auth_source, outcome, client_ip_hashed} (no plaintext IP)", async () => {
+  it("login ok → a SAME-TX login.success row with {auth_source, outcome, client_ip_hashed} (no plaintext IP)", async () => {
     const app = await makeAuthApp({ auditDb: db });
     expect((await login(app, PW)).statusCode).toBe(200);
     const rows = await auditRows("login.success");
@@ -232,9 +283,20 @@ describeDb("W4.7/EH7 concrete audit emission (disposable PG)", () => {
     await app.close();
   });
 
-  it("login failure → a login.failure row (actor null for an unproven identity)", async () => {
+  it("wrong password for a KNOWN user → a same-TX login.failure row carrying the actor", async () => {
     const app = await makeAuthApp({ auditDb: db });
     expect((await login(app, "wrong")).statusCode).toBe(401);
+    const rows = await auditRows("login.failure");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.actor_id).toBe(ACTOR);
+    const after = decryptAuditJsonBytea(rows[0]!.after!, AUDIT_AFTER_AAD) as Record<string, unknown>;
+    expect(after.outcome).toBe("bad_credentials");
+    await app.close();
+  });
+
+  it("UNKNOWN username → the post-authenticate fallback emits login.failure with actor null", async () => {
+    const app = await makeAuthApp({ auditDb: db });
+    expect((await login(app, "wrong", "no-such-user")).statusCode).toBe(401);
     const rows = await auditRows("login.failure");
     expect(rows).toHaveLength(1);
     expect(rows[0]!.actor_id).toBeNull();
@@ -259,23 +321,24 @@ describeDb("W4.7/EH7 concrete audit emission (disposable PG)", () => {
     await app.close();
   });
 
-  it("FAIL-SAFE: a dead audit pool never blocks a legitimate login", async () => {
+  it("FAIL-SAFE: a broken audit pool never blocks the auditDb-routed paths (fallback + rate-limited)", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
-    const deadPool = new Pool({ connectionString: INTEGRATION_DSN, max: 1 });
-    const deadDb = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: deadPool }) });
-    await deadDb.destroy();
-    const app = await makeAuthApp({ auditDb: deadDb });
-    expect((await login(app, PW)).statusCode).toBe(200);
+    const clock = new FakeClock({ now: NOW });
+    const app = await makeAuthApp({
+      auditDb: throwingKysely(),
+      rateLimiter: new LoginRateLimiter({ maxAttempts: 1, windowMs: 300_000, lockoutMs: 300_000, clock }),
+    });
+    // Fallback path (unknown user) → emit swallows the broken pool → still 401, never 500.
+    expect((await login(app, "wrong", "no-such-user")).statusCode).toBe(401);
+    // Rate-limited path → emit swallows → still 429.
+    expect((await login(app, PW)).statusCode).toBe(429);
     await app.close();
   });
 
   it("emitLoginEvent strict mode re-raises (the same-TX R8 contract); non-strict swallows", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
-    const deadPool = new Pool({ connectionString: INTEGRATION_DSN, max: 1 });
-    const deadDb = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: deadPool }) });
-    await deadDb.destroy();
     const args = {
-      executor: deadDb,
+      executor: throwingKysely(),
       outcome: "ok" as const,
       authSource: "local" as const,
       userId: ACTOR,

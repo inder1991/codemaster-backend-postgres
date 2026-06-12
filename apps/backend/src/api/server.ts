@@ -3,6 +3,7 @@
 // register onto the app here as they land in subsequent slices.
 
 import { VaultHttpPort } from "#backend/adapters/vault_http.js";
+import { makePgAuditEmitter } from "#backend/api/admin/audit_emit_adapter.js";
 import { registerAdminRoutes } from "#backend/api/admin/admin_routes.js";
 import { OutboxPageResyncDispatcher } from "#backend/api/admin/page_resync_dispatcher.js";
 import { getPreflightValidator } from "#backend/integrations/llm/preflight_validator_real.js";
@@ -88,6 +89,9 @@ export async function runServer(deps: RunServerDeps = {}): Promise<void> {
       signingKey,
       csrfSecret,
       secureCookies: (process.env["CODEMASTER_SECURE_COOKIES"] ?? "true") !== "false",
+      // W4.7 / EH7 — login.success/.failure audit emission (same-TX via authenticate; fail-safe
+      // elsewhere). audit.audit_events shares the core DSN (the Python bootstrap's G7 note).
+      auditDb: coreDb,
     });
     // D2 — admin READ + WRITE endpoints, behind the same makeRequireRole gate + signing key. vault +
     // getPreflightValidator make the LLM credential-rotation routes (llm-provider-config / bedrock-config /
@@ -105,6 +109,9 @@ export async function runServer(deps: RunServerDeps = {}): Promise<void> {
       pageResyncDispatcher: new OutboxPageResyncDispatcher({ db: coreDb }),
       // W4.7 / EC4 — mounts the CSRF double-submit verification hook on the admin scope.
       csrfSecret,
+      // W4.7 / EH7 — the CONCRETE audit emitter: every admin write's `opts.audit?.(...)` now lands a
+      // decryptable audit.audit_events row (credential rotation, repo enable, role changes, …).
+      audit: makePgAuditEmitter({ db: coreDb }),
     });
   }
 
