@@ -64,6 +64,10 @@ import { SystemRandom } from "#platform/randomness.js";
 
 import { BedrockBudgetExceededError, CostCapLockTimeoutError, type CostCapEnforcer } from "#backend/cost/enforcer.js";
 import {
+  type CostJournalShadowPort,
+  recordCostJournalShadowWriteFailed,
+} from "#backend/cost/cost_journal.js";
+import {
   type LangfuseExporterPort,
   DISABLED_LANGFUSE_EXPORTER,
   redactSnippet,
@@ -365,6 +369,14 @@ export class LlmClient {
   // shell path is provably ledgered (gate ②). A replay HIT is unaffected (it never reaches the paid
   // edge); a ledger MISS WITH an idempotency context pays + stores normally.
   private readonly strictLedger: boolean;
+  // de-Temporal Phase 0 — OPTIONAL compensating cost journal, SHADOW-write-only (dual-read seam).
+  // Absent (the default every composition root builds until CODEMASTER_COST_JOURNAL_SHADOW=1) means
+  // NO journal write anywhere — byte-identical paths. Present, the paid path appends signed rows
+  // BESIDE the aggregate cost-cap calls (reserve beside checkOrRaise; settle beside recordCallCost /
+  // the failure release), keyed by call_id = the ADR-0068 idempotencyKey (requestId for un-ledgered
+  // calls). The journal NEVER decides anything here — the aggregate enforcer stays the sole cap
+  // authority — and every write is guarded fail-safe via shadowJournalAppend.
+  private readonly costJournal: CostJournalShadowPort | undefined;
 
   public constructor(args: {
     sdk: LlmSdk;
@@ -386,6 +398,9 @@ export class LlmClient {
     // de-Temporal Phase 2 (F4) — STRICT-LEDGER mode. Default false (Temporal-legacy: pay un-ledgered when
     // no idempotency context). The shell sets true so an un-ledgered paid call throws LedgerRequiredError.
     strictLedger?: boolean;
+    // de-Temporal Phase 0 — OPTIONAL shadow cost journal (dual-read seam). Absent → no journal writes
+    // (the production default until the CODEMASTER_COST_JOURNAL_SHADOW=1 cutover-prep flip).
+    costJournal?: CostJournalShadowPort;
   }) {
     this.clock = args.clock ?? new WallClock();
     this.sdk = args.sdk;
@@ -398,6 +413,7 @@ export class LlmClient {
     this.random = new SystemRandom();
     this.ledger = args.ledger;
     this.strictLedger = args.strictLedger ?? false;
+    this.costJournal = args.costJournal;
     // F5 (review remediation) — CONSTRUCTOR fail-fast guard. Strict-ledger mode is meaningless without a
     // ledger to store into: a `strictLedger:true` client with NO `ledger` would mint a null idempotencyKey
     // even when handed an idempotency context, so the paid call could PROCEED + PAY while storing nothing.
@@ -540,6 +556,13 @@ export class LlmClient {
     // replay key never diverge. Absent context → "unknown" (a wiring smell; never a normal shell path).
     const ledgerPurpose = args.idempotency?.ledgerPurpose ?? "unknown";
 
+    // de-Temporal Phase 0 — the cost-journal call_id (checklist #1: "call_id derivation = the
+    // ADR-0068 ledger idempotency_key"). For un-ledgered paid calls (platform jobs — no ledger /
+    // no idempotency context, the frozen-Python-parity path) the per-call requestId uuid4 is the
+    // fallback so the reserve/settle rows of one call still PAIR for the reconciler. Derived once,
+    // outside the replay branch, so the success-path settle (below the branch) keys identically.
+    const journalCallId = idempotencyKey ?? requestId;
+
     const started = this.clock.monotonic();
     const replayed =
       this.ledger !== undefined && idempotencyKey !== null
@@ -612,6 +635,17 @@ export class LlmClient {
         }
       }
 
+      // de-Temporal Phase 0 — SHADOW journal reserve BESIDE the aggregate reservation just made
+      // (dual-read seam). Paid-MISS path only, same estimate, same `today`: a refused / twice-lock-
+      // failed checkOrRaise threw above, so exactly like the aggregate, a refusal journals nothing.
+      // Guarded fail-safe inside shadowJournalAppend — the journal never perturbs the paid path.
+      await this.shadowJournalAppend("reserve", {
+        callId: journalCallId,
+        installationId: telemetryIid,
+        amountCents: estimated,
+        today: todayForCheck,
+      });
+
       // Archive request payload BEFORE invocation (forensics even if the SDK raises). Off the observable
       // path; the BlobRef is discarded (the result carries the RESPONSE blob ref).
       const redactedMessages = args.messages.map((m) => ({
@@ -668,6 +702,15 @@ export class LlmClient {
           status: failureStatus,
         });
         await this.releaseCostCapReservation({ installationId: telemetryIid, estimated });
+        // de-Temporal Phase 0 — the FAILURE-path settle twin: the release above is modeled as
+        // recordCallCost(cost=0), so the journal mirrors it as settle(0 − estimated) under the SAME
+        // call_id — the reconciler's proof this call COMPLETED (failed), not orphaned.
+        await this.shadowJournalAppend("settle", {
+          callId: journalCallId,
+          installationId: telemetryIid,
+          amountCents: 0 - estimated,
+          today: isoDate(this.clock.now()),
+        });
         await this.maybeExportLangfuseTrace({
           requestId,
           installationId: telemetryIid,
@@ -802,6 +845,15 @@ export class LlmClient {
         today: isoDate(this.clock.now()),
         estimatedCents: estimated,
       });
+      // de-Temporal Phase 0 — the SUCCESS-path settle twin (actual − estimated; the aggregate
+      // applies the same diff above). Runs for output-safety-BLOCKED completions too — the tokens
+      // were burned either way — and is skipped on a replay HIT exactly like the aggregate call.
+      await this.shadowJournalAppend("settle", {
+        callId: journalCallId,
+        installationId: telemetryIid,
+        amountCents: computedFinalCents - estimated,
+        today: isoDate(this.clock.now()),
+      });
     }
 
     // Langfuse trace export (fire-and-forget). Carries the validator-aware status so blocked completions
@@ -919,6 +971,32 @@ export class LlmClient {
     } catch {
       // Defense in depth — a release failure may over-count the daily total by `estimated` for this
       // call, but must not mask the original SDK error. Mirrors the Python warning-and-continue.
+    }
+  }
+
+  /**
+   * de-Temporal Phase 0 — one GUARDED shadow write to the compensating cost journal. A no-op when no
+   * `costJournal` was injected (the default posture — production behavior byte-identical). When the
+   * shadow seam is on, a journal failure is swallowed (the aggregate enforcer already accounted the
+   * spend — the paid path must not fail over shadow bookkeeping) and surfaced via the bounded
+   * shadow_write_failed counter, mirroring the ledger store_failed idiom; the resulting journal gap
+   * is exactly what `divergenceFromAggregate` reports.
+   */
+  private async shadowJournalAppend(
+    entry: "reserve" | "settle",
+    args: { callId: string; installationId: string; amountCents: number; today: string },
+  ): Promise<void> {
+    if (this.costJournal === undefined) {
+      return;
+    }
+    try {
+      if (entry === "reserve") {
+        await this.costJournal.appendReserve(args);
+      } else {
+        await this.costJournal.appendSettle(args);
+      }
+    } catch {
+      recordCostJournalShadowWriteFailed(entry);
     }
   }
 

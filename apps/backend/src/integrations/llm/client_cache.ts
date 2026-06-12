@@ -53,6 +53,11 @@
 import { type Clock, WallClock } from "#platform/clock.js";
 
 import { BlobStorePostgresAdapter } from "#backend/adapters/blobstore_postgres.js";
+import {
+  type CostJournalShadowPort,
+  costJournalShadowEnabled,
+  PostgresCostJournal,
+} from "#backend/cost/cost_journal.js";
 import { PostgresCostCapEnforcer } from "#backend/cost/postgres_enforcer.js";
 import { KeyedMutex } from "#backend/integrations/github/installation_token.js";
 import { AnthropicBedrockSdkAdapter } from "#backend/integrations/llm/bedrock_sdk_adapter.js";
@@ -144,6 +149,10 @@ export type ClientCollaborators = {
   readonly telemetry: LlmCallsTelemetryWriter;
   readonly langfuse: LangfuseExporterPort;
   readonly clock: Clock;
+  // de-Temporal Phase 0 — the OPTIONAL shadow cost journal (dual-read seam). `undefined` unless
+  // CODEMASTER_COST_JOURNAL_SHADOW="1" at build time (the strict default-OFF predicate in
+  // cost_journal.ts), so production behavior is unchanged until the deliberate cutover-prep flip.
+  readonly costJournal: CostJournalShadowPort | undefined;
 };
 
 /**
@@ -187,6 +196,12 @@ export function sharedClientCollaborators(dsn: string): ClientCollaborators {
     costCap: PostgresCostCapEnforcer.fromDsn({ dsn, clock, readCapsFromDb: true }),
     blobStore: BlobStorePostgresAdapter.fromDsn({ dsn, clock }),
     telemetry: PostgresLlmCallsTelemetryWriter.fromDsn({ dsn }),
+    // de-Temporal Phase 0 — the shadow cost journal, env-gated DEFAULT OFF (strict "1" only). When
+    // off this is `undefined` and the LlmClient seam is invisible; when flipped, every role's client
+    // shares this one journal over the same ADR-0062 single pool as its sibling collaborators.
+    costJournal: costJournalShadowEnabled(process.env)
+      ? PostgresCostJournal.fromDsn({ dsn, clock })
+      : undefined,
     // Langfuse exporter from env — env-gated OFF (no POST) until LANGFUSE_HOST / LANGFUSE_API_KEY are
     // set. Shared per-process like the other collaborators (the Python `_client_factory` captures the
     // spine's shared exporter). NOT keyed on the DSN — the env config is process-global — but lives in
@@ -207,10 +222,20 @@ export function sharedClientCollaborators(dsn: string): ClientCollaborators {
  * tests construct their own `LlmClient` with the in-memory test doubles and NEVER call this factory.
  */
 export const defaultClientFactory: ClientFactory = (args: { sdk: LlmSdk }): LlmClient => {
-  const { costCap, blobStore, telemetry, langfuse, clock } = sharedClientCollaborators(
+  const { costCap, blobStore, telemetry, langfuse, clock, costJournal } = sharedClientCollaborators(
     requireCoreDsn(),
   );
-  return new LlmClient({ sdk: args.sdk, costCap, blobStore, telemetry, langfuse, clock });
+  return new LlmClient({
+    sdk: args.sdk,
+    costCap,
+    blobStore,
+    telemetry,
+    langfuse,
+    clock,
+    // Phase-0 shadow journal — spread only when the env seam built one (exactOptionalPropertyTypes
+    // forbids an explicit `undefined`); absent → the pre-seam client, byte-identical.
+    ...(costJournal !== undefined ? { costJournal } : {}),
+  });
 };
 
 // ─── Cache envelope ────────────────────────────────────────────────────────────────────────────
