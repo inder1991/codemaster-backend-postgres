@@ -220,7 +220,6 @@ function sortKeysForTest(value: unknown): unknown {
     const src = value as Record<string, unknown>;
     const out: Record<string, unknown> = {};
     for (const k of Object.keys(src).sort()) {
-      // eslint-disable-next-line security/detect-object-injection
       out[k] = sortKeysForTest(src[k]);
     }
     return out;

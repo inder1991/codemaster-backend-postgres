@@ -151,8 +151,9 @@ export async function defaultAssertLeaseAllocated(
  * signal and the per-phase payload has no consumer. Kept as an injectable seam (tests/clients may
  * override `heartbeat`) so the call sites in the clone body stay structurally 1:1 with the Python.
  */
-export function defaultHeartbeat(_payload: unknown): void {
-  /* no-op: the job-lease heartbeat owns liveness in the Postgres runtime */
+export function defaultHeartbeat(): void {
+  /* no-op: the job-lease heartbeat owns liveness in the Postgres runtime. (A 0-arg fn is assignable
+     to the `(payload) => void` heartbeat seam — callers may still pass a phase payload; it is ignored.) */
 }
 
 /**
