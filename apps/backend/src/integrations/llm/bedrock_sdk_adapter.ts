@@ -106,12 +106,14 @@ export type BedrockRequestOptions = {
   readonly signal?: AbortSignal;
 };
 
-/** The `messages.create` request shape — the kwargs the Python builds (system/tools are conditional). */
+/** The `messages.create` request shape — the kwargs the Python builds (system/tools are conditional).
+ *  W2.2: `system` widens to the Messages-API block-array form so a `cache_control` breakpoint can ride
+ *  on the system text block (a plain string carries the legacy no-caching shape byte-identically). */
 export type BedrockCreateParams = {
   readonly model: string;
   readonly messages: Array<Record<string, unknown>>;
   readonly max_tokens: number;
-  readonly system?: string;
+  readonly system?: string | ReadonlyArray<Record<string, unknown>>;
   readonly tools?: Array<Record<string, unknown>>;
 };
 
@@ -151,6 +153,73 @@ export function hoistSystemMessages(
   }
   const systemPrompt = systemParts.length > 0 ? systemParts.join("\n\n") : null;
   return [systemPrompt, userAssistantMessages];
+}
+
+// ─── W2.2 — cache_control placement at the stable/variable boundary ──────────────────────────────
+
+/** The Anthropic prompt-cache breakpoint marker (5-minute default TTL). Bedrock serves the same
+ *  Messages API shape, so the marker is identical across both adapters. */
+const EPHEMERAL_CACHE_CONTROL: { readonly type: "ephemeral" } = { type: "ephemeral" };
+
+/**
+ * Hoist system messages AND place the prompt-cache breakpoints for a request whose leading
+ * `cachePrefixMessages` messages form the byte-stable cacheable prefix (W2.2).
+ *
+ * The Messages API renders tools → system → messages and caches PREFIXES at explicit
+ * `cache_control: {type: "ephemeral"}` block markers, so:
+ *
+ *   * the hoisted `system` becomes ONE text block carrying the marker — this breakpoint caches
+ *     tools + system (reused across PRs sharing the same policy revision) — but ONLY when every
+ *     system message sits inside the stable prefix (a marker over variable bytes would write
+ *     per-chunk cache entries nothing ever reads);
+ *   * the LAST stable non-system message's content becomes a text-block array carrying the marker —
+ *     this breakpoint caches tools + system + the PR-stable prefix (the per-chunk fan-out reuse);
+ *   * everything after the boundary is left EXACTLY as the legacy hoist produced it.
+ *
+ * With `cachePrefixMessages` absent the output is byte-identical to the plain
+ * {@link hoistSystemMessages} result (no marker anywhere) — the legacy request shape.
+ */
+export function buildAnthropicMessageParams(args: {
+  messages: Array<Record<string, unknown>>;
+  cachePrefixMessages?: number;
+}): {
+  system: string | ReadonlyArray<Record<string, unknown>> | null;
+  messages: Array<Record<string, unknown>>;
+} {
+  const [systemPrompt, userAssistantMessages] = hoistSystemMessages(args.messages);
+  const prefixCount = args.cachePrefixMessages ?? 0;
+  if (prefixCount <= 0) {
+    return { system: systemPrompt, messages: userAssistantMessages };
+  }
+
+  const isSystem = (m: Record<string, unknown>): boolean => m["role"] === "system";
+  const systemTotal = args.messages.filter(isSystem).length;
+  const prefix = args.messages.slice(0, prefixCount);
+  const systemInPrefix = prefix.filter(isSystem).length;
+  const stableUserCount = prefixCount - systemInPrefix;
+
+  // Mark the system block only when EVERY system message is part of the stable prefix.
+  const system: string | ReadonlyArray<Record<string, unknown>> | null =
+    systemPrompt !== null && systemInPrefix === systemTotal
+      ? [{ type: "text", text: systemPrompt, cache_control: EPHEMERAL_CACHE_CONTROL }]
+      : systemPrompt;
+
+  // Mark the LAST stable non-system message (defensively clamped; the LlmClient already validates
+  // that a variable tail exists past the boundary).
+  const lastStableIdx = Math.min(stableUserCount, userAssistantMessages.length) - 1;
+  const messages = userAssistantMessages.map((m, idx) => {
+    if (idx !== lastStableIdx) {
+      return m;
+    }
+    const content = m["content"];
+    const text = typeof content === "string" ? content : String(content);
+    return {
+      ...m,
+      content: [{ type: "text", text, cache_control: EPHEMERAL_CACHE_CONTROL }],
+    };
+  });
+
+  return { system, messages };
 }
 
 // ─── exception mapping (port of `_map_anthropic_exception`) ──────────────────────────────────────
@@ -310,17 +379,25 @@ export class AnthropicBedrockSdkAdapter {
     // in-flight Bedrock call RECEIVES it and aborts when the job is cancelled mid-flight. Absent → the
     // 2nd `messages.create` arg is omitted entirely (byte-identical to the pre-W4.2b / Temporal path).
     signal?: AbortSignal;
+    // W2.2 (prompt caching) — OPTIONAL stable-prefix boundary; see {@link buildAnthropicMessageParams}.
+    // Absent → the legacy wire shape byte-identically (no cache_control anywhere).
+    cachePrefixMessages?: number;
   }): Promise<Record<string, unknown>> {
     const creds = await this.provider.current(args.role);
     const sdk = await this.sdkFor(creds);
 
-    const [systemPrompt, userAssistantMessages] = hoistSystemMessages(args.messages);
+    const { system, messages } = buildAnthropicMessageParams({
+      messages: args.messages,
+      ...(args.cachePrefixMessages !== undefined
+        ? { cachePrefixMessages: args.cachePrefixMessages }
+        : {}),
+    });
     const params: BedrockCreateParams = {
       model: args.model,
-      messages: userAssistantMessages,
+      messages,
       max_tokens: args.maxTokens,
       // exactOptionalPropertyTypes: only spread the optional keys when present.
-      ...(systemPrompt !== null ? { system: systemPrompt } : {}),
+      ...(system !== null ? { system } : {}),
       ...(args.tools !== null && args.tools !== undefined ? { tools: args.tools } : {}),
     };
 

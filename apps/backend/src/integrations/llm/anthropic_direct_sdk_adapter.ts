@@ -26,7 +26,7 @@
  */
 
 import {
-  hoistSystemMessages,
+  buildAnthropicMessageParams,
   mapAnthropicException,
 } from "#backend/integrations/llm/bedrock_sdk_adapter.js";
 import {
@@ -35,12 +35,14 @@ import {
 } from "#backend/integrations/llm/credentials_provider.js";
 import { LlmInvocationError } from "#backend/integrations/llm/errors.js";
 
-/** The `messages.create` request shape (the kwargs the Python builds; system/tools are conditional). */
+/** The `messages.create` request shape (the kwargs the Python builds; system/tools are conditional).
+ *  W2.2: `system` widens to the Messages-API block-array form so a `cache_control` breakpoint can ride
+ *  on the system text block (a plain string carries the legacy no-caching shape byte-identically). */
 export type AnthropicDirectCreateParams = {
   readonly model: string;
   readonly messages: Array<Record<string, unknown>>;
   readonly max_tokens: number;
-  readonly system?: string;
+  readonly system?: string | ReadonlyArray<Record<string, unknown>>;
   readonly tools?: Array<Record<string, unknown>>;
 };
 
@@ -127,18 +129,27 @@ export class AnthropicDirectSdkAdapter {
     // in-flight Anthropic Direct call RECEIVES it and aborts when the job is cancelled mid-flight. Absent
     // → the 2nd `messages.create` arg is omitted entirely (byte-identical to the pre-W4.2b path).
     signal?: AbortSignal;
+    // W2.2 (prompt caching) — OPTIONAL stable-prefix boundary; see {@link buildAnthropicMessageParams}
+    // (the SHARED helper — the marker shape is identical across Bedrock and the direct API). Absent →
+    // the legacy wire shape byte-identically (no cache_control anywhere).
+    cachePrefixMessages?: number;
   }): Promise<Record<string, unknown>> {
     const creds = await this.provider.current(args.role);
     // Per-call construct (+ close) — NO caching, so a key rotation propagates on the next call.
     const sdk = await this.sdkFactory(creds);
 
-    const [systemPrompt, userAssistantMessages] = hoistSystemMessages(args.messages);
+    const { system, messages } = buildAnthropicMessageParams({
+      messages: args.messages,
+      ...(args.cachePrefixMessages !== undefined
+        ? { cachePrefixMessages: args.cachePrefixMessages }
+        : {}),
+    });
     const params: AnthropicDirectCreateParams = {
       model: args.model,
-      messages: userAssistantMessages,
+      messages,
       max_tokens: args.maxTokens,
       // exactOptionalPropertyTypes: only spread the optional keys when present.
-      ...(systemPrompt !== null ? { system: systemPrompt } : {}),
+      ...(system !== null ? { system } : {}),
       ...(args.tools !== null && args.tools !== undefined ? { tools: args.tools } : {}),
     };
 
