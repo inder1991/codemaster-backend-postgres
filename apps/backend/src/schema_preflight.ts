@@ -21,6 +21,8 @@ export const EXPECTED_MIGRATIONS = [
   // into ONE up-only baseline for first go-live — semantic-diff verified (byte-identical schema + seed
   // vs applying all pre-fusion migrations). The pre-fusion migrations are preserved in git history.
   "0001_baseline",
+  // Go-live Step 4c: UI-editable Confluence creds (field-codec ciphertext). First incremental after the fuse.
+  "0002_confluence_settings",
 ] as const satisfies ReadonlyArray<string>;
 
 /** The DB's applied migration sequence diverges from the image's compiled-in expectation — the pod
