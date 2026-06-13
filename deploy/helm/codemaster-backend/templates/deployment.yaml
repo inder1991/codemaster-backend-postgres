@@ -39,7 +39,9 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "codemaster-backend.serviceAccountName" . }}
-      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      # secretSource=vault uses Vault Kubernetes auth → the projected SA JWT MUST be mounted (overrides the
+      # least-privilege default). Otherwise honour the configured value.
+      automountServiceAccountToken: {{ if eq .Values.secretSource "vault" }}true{{ else }}{{ .Values.serviceAccount.automountServiceAccountToken }}{{ end }}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

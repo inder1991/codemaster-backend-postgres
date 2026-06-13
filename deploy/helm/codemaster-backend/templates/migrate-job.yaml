@@ -36,7 +36,8 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: {{ include "codemaster-backend.serviceAccountName" . }}
-      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      # secretSource=vault → the migrate job resolves the DSN from Vault via SA-auth, so the SA JWT must mount.
+      automountServiceAccountToken: {{ if eq .Values.secretSource "vault" }}true{{ else }}{{ .Values.serviceAccount.automountServiceAccountToken }}{{ end }}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -63,6 +64,14 @@ spec:
               . {{ .Values.vault.secretsDir }}/runtime-env
               set +a
               exec npm run migrate:up
+          {{- else if eq .Values.secretSource "vault" }}
+          # vault SA-auth: there is no agent-rendered env-file, so resolve the DB DSN from Vault (the pod's
+          # ServiceAccount login) and export it before migrating. resolve_dsn fails loud if Vault is unreachable.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              export CODEMASTER_PG_CORE_DSN="$(node apps/backend/src/resolve_dsn.js)"
+              exec npm run migrate:up
           {{- else }}
           command: ["npm", "run", "migrate:up"]
           {{- end }}
@@ -76,8 +85,11 @@ spec:
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- if or (eq .Values.vault.mode "token") .Values.extraEnvFrom }}
           envFrom:
+            # The config (CODEMASTER_SECRET_SOURCE, VAULT_ADDR + the SA-auth selectors for resolve_dsn, the
+            # PG DSN parts in openshift mode) the migrate step reads — same ConfigMap as the app.
+            - configMapRef:
+                name: {{ include "codemaster-backend.fullname" . }}-config
             {{- if eq .Values.vault.mode "token" }}
             {{- if .Values.vault.token.existingSecret }}
             - secretRef:
@@ -90,7 +102,6 @@ spec:
             {{- with .Values.extraEnvFrom }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- end }}
           resources:
             {{- toYaml .Values.migrate.resources | nindent 12 }}
           securityContext:

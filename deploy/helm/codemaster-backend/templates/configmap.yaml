@@ -79,6 +79,23 @@ data:
   {{- end }}
   # Rendered unconditionally: REQUIRED in agent mode too (empty => app fails loud at boot; NOTES warns).
   VAULT_ADDR: {{ .Values.vault.addr | quote }}
+  # ---- Go-live bootstrap-secret source (DB credentials + the field-encryption key) ----
+  CODEMASTER_SECRET_SOURCE: {{ .Values.secretSource | quote }}
+  {{- if eq .Values.vault.mode "agent" }}
+  # Agent mode renders the field-encryption keyset to a file (it can't be agent-file-flattened as flat
+  # strings, but the loader reads the nested file via vault-agent) — read it there, not env/Vault-API.
+  CODEMASTER_FIELD_KEY_SOURCE: "vault-agent"
+  {{- end }}
+  {{- if eq .Values.secretSource "vault" }}
+  # SA-auth: the pod logs in to Vault with its projected ServiceAccount JWT (no static token). The DB
+  # credentials + field-encryption key are read over the Vault HTTP API under this login.
+  CODEMASTER_VAULT_AUTH: "kubernetes"
+  CODEMASTER_VAULT_K8S_ROLE: {{ .Values.vault.kubernetes.role | quote }}
+  {{- with .Values.vault.kubernetes.authPath }}
+  CODEMASTER_VAULT_K8S_AUTH_PATH: {{ . | quote }}
+  {{- end }}
+  CODEMASTER_VAULT_KV_MOUNT: {{ .Values.vault.kvMount | quote }}
+  {{- end }}
   {{- range $k, $v := .Values.config.extra }}
   {{ $k }}: {{ $v | quote }}
   {{- end }}

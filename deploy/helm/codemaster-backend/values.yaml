@@ -282,8 +282,19 @@ tests:
   image: curlimages/curl:8.10.1
 
 # =============================================================================
-# Secrets — Vault Agent injection (no cleartext anywhere).
+# Secrets — bootstrap-secret source + Vault wiring.
 # =============================================================================
+# How the pod obtains its TWO BLOCKING secrets — the DB credentials + the field-encryption key. (Everything
+# else — LLM / GitHub / Confluence / admin-auth — is NON-blocking, configured later via the UI / env / Vault.)
+#   openshift -> read from ENV (a Kubernetes Secret). The SIMPLEST path: provide CODEMASTER_PG_CORE_DSN +
+#                CODEMASTER_FIELD_ENCRYPTION_KEYSET (+ CODEMASTER_SESSION_SIGNING_KEY / CODEMASTER_CSRF_SECRET
+#                for the admin UI) via `extraEnvFrom` -> a Secret. In vault.mode=agent the Vault Agent renders
+#                these into the sourced runtime-env, so agent mode pairs with secretSource=openshift.
+#   vault     -> read from Vault, the pod authenticating with its ServiceAccount JWT (Vault Kubernetes auth;
+#                see vault.kubernetes below). The chart sets CODEMASTER_VAULT_AUTH=kubernetes + mounts the SA
+#                token. Requires vault.addr + vault.kubernetes.role.
+secretSource: openshift   # openshift | vault
+
 vault:
   # agent    -> HashiCorp Vault Agent Injector (PROD default; ADR-0071).
   #             File secrets read natively (agent-file); env secrets sourced
@@ -300,6 +311,15 @@ vault:
   addr: ""
   secretsDir: /vault/secrets            # CODEMASTER_VAULT_SECRETS_DIR (agent renders here)
   tokenPath: /var/run/secrets/vault/token  # VAULT_AGENT_TOKEN_PATH for token/vault-api mode (agent mode uses {secretsDir}/token)
+
+  # Vault Kubernetes auth — used when `secretSource: vault` (the pod logs in with its projected
+  # ServiceAccount JWT; NO static token). The SA must be bound to this Vault role, whose policy grants
+  # read on the DB-credentials + field-encryption KV paths. The chart mounts the SA token automatically
+  # in this mode (overriding serviceAccount.automountServiceAccountToken).
+  kubernetes:
+    role: codemaster-backend     # CODEMASTER_VAULT_K8S_ROLE
+    authPath: ""                 # CODEMASTER_VAULT_K8S_AUTH_PATH (empty => the default auth/kubernetes)
+  kvMount: secret                # CODEMASTER_VAULT_KV_MOUNT (the KV-v2 mount the bootstrap secrets live under)
 
   agent:
     role: codemaster-backend
