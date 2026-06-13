@@ -20,6 +20,7 @@
     "validate-fast": "git submodule update --init && npm run gates && npm run lint && npm run typecheck && npm run test",
     "migrate:up": "node-pg-migrate up -m migrations -d CODEMASTER_PG_CORE_DSN --no-check-order",
     "deploy:check": "tsx apps/backend/src/deploy_check.ts",
+    "gen:deploy-artifacts": "tsx scripts/gen_deploy_artifacts.ts",
     "migrate:down": "node -e \"console.error('migrate:down is disabled: codemaster migrations are up-only (the squashed baseline is irreversible by design). Recreate a throwaway database and re-run migrate:up. NEVER migrate a shared/cluster DB.'); process.exit(1)\""
   },
   "dependencies": {
