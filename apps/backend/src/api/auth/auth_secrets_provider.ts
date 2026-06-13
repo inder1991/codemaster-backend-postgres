@@ -51,12 +51,34 @@ export class VaultAuthSecretsProvider {
   }
 }
 
+/** openshift-mode reader: the session signing key + CSRF secret come from env vars (a k8s Secret),
+ *  mapped onto the same record shape {@link VaultAuthSecretsProvider} reads — so the >=32-char + missing-key
+ *  validation in {@link readKey} applies identically. Never touches Vault. */
+function envAuthSecretsReader(): VaultKvReadPort {
+  return {
+    kvRead: () => {
+      const signing = process.env["CODEMASTER_SESSION_SIGNING_KEY"];
+      const csrf = process.env["CODEMASTER_CSRF_SECRET"];
+      const data: Record<string, string> = {
+        ...(signing !== undefined && signing !== "" ? { [SIGNING_KEY]: signing } : {}),
+        ...(csrf !== undefined && csrf !== "" ? { [CSRF_KEY]: csrf } : {}),
+      };
+      return Promise.resolve(data);
+    },
+  };
+}
+
 /**
  * Source-select the auth-secrets provider by env (ADR-0071), mirroring makeWebhookSecretProvider.
  * `agent-file` reads the Vault-Agent-rendered file; anything else lazily builds the Vault HTTP port (so the
  * server boots without VAULT_ADDR and only the first read touches Vault).
  */
 export function makeAuthSecretsProvider(): VaultAuthSecretsProvider {
+  // openshift mode (the bootstrap-secret switch): the auth secrets come from env (a k8s Secret), never
+  // Vault — so the API server boots with no VAULT_ADDR. (vault mode keeps the ADR-0071 agent-file/API selector.)
+  if (process.env["CODEMASTER_SECRET_SOURCE"] === "openshift") {
+    return new VaultAuthSecretsProvider({ vault: envAuthSecretsReader() });
+  }
   const source = process.env["CODEMASTER_VAULT_SECRET_SOURCE"] ?? "vault-api";
   if (source === "agent-file") {
     return new VaultAuthSecretsProvider({ vault: new FileKvReader() });

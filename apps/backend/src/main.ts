@@ -103,6 +103,16 @@ async function main(): Promise<void> {
     await assertSchemaRevision(db);
   }
 
+  // Go-live P0-A: install the field-encryption key registry source-aware (openshift → the
+  // CODEMASTER_FIELD_ENCRYPTION_KEYSET env var; vault → Vault) ONCE, BEFORE the HTTP bind — so admin /
+  // encrypted-config paths never observe a null registry (the runner installs it again later as a boot
+  // task; this closes that window) and openshift-no-Vault boots with no Vault round-trip. Idempotent;
+  // "skipped" in dev/test with no source. Fail-loud: a bad keyset throws here, before serving.
+  {
+    const { installFieldKeyRegistryAtBoot } = await import("#backend/security/boot_field_keys.js");
+    await installFieldKeyRegistryAtBoot(process.env);
+  }
+
   // HTTP API first — app.listen() returns once bound; the server keeps serving on the event loop.
   await runServer(serverDeps);
   console.info(
