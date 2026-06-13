@@ -306,3 +306,34 @@ describe("installFieldKeyRegistryAtBoot — keyset file content never leaks into
     }
   });
 });
+
+describe("installFieldKeyRegistryAtBoot — env source + CODEMASTER_SECRET_SOURCE derivation", () => {
+  it("(E1) source=env: loads the keyset JSON from CODEMASTER_FIELD_ENCRYPTION_KEYSET (no Vault, no file)", async () => {
+    const result = await installFieldKeyRegistryAtBoot({
+      NODE_ENV: "production",
+      CODEMASTER_FIELD_KEY_SOURCE: "env",
+      CODEMASTER_FIELD_ENCRYPTION_KEYSET: JSON.stringify(KEYSET_PAYLOAD),
+    });
+    expect(result).toBe("installed");
+    expect(getAuditKeyRegistry()).not.toBeNull();
+  });
+
+  it("(E2) source=env with the keyset env unset: throws FieldKeyBootError naming the env var", async () => {
+    const err = await installFieldKeyRegistryAtBoot({
+      NODE_ENV: "production",
+      CODEMASTER_FIELD_KEY_SOURCE: "env",
+    }).then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(FieldKeyBootError);
+    expect((err as Error).message).toContain("CODEMASTER_FIELD_ENCRYPTION_KEYSET");
+    expect(getAuditKeyRegistry()).toBeNull();
+  });
+
+  it("(E3) CODEMASTER_SECRET_SOURCE=openshift derives the env source (one switch, no explicit FIELD_KEY_SOURCE)", async () => {
+    const result = await installFieldKeyRegistryAtBoot({
+      NODE_ENV: "production",
+      CODEMASTER_SECRET_SOURCE: "openshift",
+      CODEMASTER_FIELD_ENCRYPTION_KEYSET: JSON.stringify(KEYSET_PAYLOAD),
+    });
+    expect(result).toBe("installed");
+  });
+});

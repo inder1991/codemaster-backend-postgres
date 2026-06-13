@@ -53,8 +53,11 @@ import {
   type VaultKvRawReadPort,
 } from "./field_encryption_keys_loader.js";
 
-const VALID_SOURCES = ["vault", "vault-agent", "file"] as const;
+const VALID_SOURCES = ["env", "vault", "vault-agent", "file"] as const;
 type FieldKeySource = (typeof VALID_SOURCES)[number];
+
+/** The env var holding the keyset JSON when source=env (OpenShift Secret injected as env). */
+const FIELD_KEYSET_ENV = "CODEMASTER_FIELD_ENCRYPTION_KEYSET";
 
 /** The boot-time key install failed — the pod MUST NOT run audit-emitting paths without keys in
  *  production; each entrypoint's fail-loud `.catch` exits 1 on this. */
@@ -118,6 +121,15 @@ function resolveFieldKeySource(env: NodeJS.ProcessEnv, hasReaderOverride: boolea
   const isProduction = env["NODE_ENV"] === "production";
   const rawSource = env["CODEMASTER_FIELD_KEY_SOURCE"];
   if (rawSource === undefined || rawSource === "") {
+    // No explicit field-key source: follow the one bootstrap-secret switch when it is set —
+    // openshift → the keyset env var, vault → Vault — so operators set CODEMASTER_SECRET_SOURCE once.
+    const secretSource = env["CODEMASTER_SECRET_SOURCE"];
+    if (secretSource === "openshift") {
+      return "env";
+    }
+    if (secretSource === "vault") {
+      return "vault";
+    }
     if (!isProduction && !hasReaderOverride) {
       return null;
     }
@@ -136,6 +148,15 @@ function resolveFieldKeySource(env: NodeJS.ProcessEnv, hasReaderOverride: boolea
  *  {@link VaultKvRawReadPort} shape so loadFieldEncryptionKeyRegistry stays the single parser. */
 async function resolveReader(source: FieldKeySource, env: NodeJS.ProcessEnv): Promise<VaultKvRawReadPort> {
   switch (source) {
+    case "env": {
+      const raw = env[FIELD_KEYSET_ENV];
+      if (raw === undefined || raw === "") {
+        throw new FieldKeyBootError(
+          `field-encryption key source 'env' requires ${FIELD_KEYSET_ENV} to hold the keyset JSON`,
+        );
+      }
+      return envKeysetReader(raw);
+    }
     case "vault": {
       // Dynamic import keeps the Vault adapter graph off this module's static imports (the same
       // deferred-Vault posture as the event handlers' lazy ports).
@@ -157,6 +178,25 @@ async function resolveReader(source: FieldKeySource, env: NodeJS.ProcessEnv): Pr
       return fileKeysetReader(file);
     }
   }
+}
+
+/** The keyset JSON carried in an env var (OpenShift Secret → env), adapted to the loader port.
+ *  Content-free parse errors: the value is AES key material and must never reach the boot logs. */
+function envKeysetReader(raw: string): VaultKvRawReadPort {
+  return {
+    kvReadRaw: (): Promise<Record<string, unknown>> => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        throw new FieldKeyBootError(`${FIELD_KEYSET_ENV} is not valid JSON`);
+      }
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new FieldKeyBootError(`${FIELD_KEYSET_ENV} must contain a JSON object`);
+      }
+      return Promise.resolve(parsed as Record<string, unknown>);
+    },
+  };
 }
 
 /** A keyset file holding the raw `{current_version, keys}` JSON, adapted to the loader port. */
