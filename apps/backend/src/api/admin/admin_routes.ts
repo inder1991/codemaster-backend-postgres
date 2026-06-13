@@ -236,6 +236,7 @@ import { type VaultPort } from "#backend/adapters/vault_port.js";
 import { PostgresLlmProviderSettingsRepo } from "#backend/integrations/llm/llm_provider_settings_repo.js";
 import { getAuditKeyRegistry, requireAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
 import { PostgresGitHubAppSettingsRepo } from "#backend/integrations/github/github_app_settings_repo.js";
+import { PostgresConfluenceSettingsRepo } from "#backend/integrations/confluence/confluence_settings_repo.js";
 import { type GetPreflightValidator } from "#backend/integrations/llm/preflight_validator.js";
 import { PLATFORM_SCOPE_AUDIT_INSTALLATION_ID } from "#backend/infra/sentinels.js";
 import { insertTaxonomySuggestion } from "#backend/api/admin/taxonomy_write.js";
@@ -424,8 +425,10 @@ export async function registerAdminRoutes(
         return envFileItems;
       }
       const githubRow = await new PostgresGitHubAppSettingsRepo({ db: opts.db, registry }).read();
+      const confluenceRow = await new PostgresConfluenceSettingsRepo({ db: opts.db, registry }).read();
       const items = envFileItems.map((it) =>
-        githubRow !== null && it.key.startsWith("github_app.")
+        (githubRow !== null && it.key.startsWith("github_app.")) ||
+        (confluenceRow !== null && it.key.startsWith("confluence."))
           ? { ...it, state: "configured" as const, source: "db" as const }
           : it,
       );
@@ -536,6 +539,70 @@ export async function registerAdminRoutes(
           targetId: "platform",
           before: null,
           after: { app_id: body.app_id, enabled },
+          now: opts.clock.now(),
+        });
+        return reply.code(200).send({ ok: true });
+      },
+    );
+
+    // Confluence config (UI-editable; go-live Step 4c). Secrets stored field-codec-encrypted; GET NEVER
+    // returns the token (only base_url + auth_email + enabled + configured), PUT (super_admin) writes the
+    // platform singleton. At runtime the token provider resolves DB > env > Vault, so a UI save takes
+    // effect without a redeploy. Mirrors github-config (4b).
+    scope.get(
+      "/api/admin/confluence-config",
+      { preHandler: requireRole(["platform_owner", "super_admin"]) },
+      async () => {
+        const repo = new PostgresConfluenceSettingsRepo({ db: opts.db, registry: requireAuditKeyRegistry() });
+        const cfg = await repo.read();
+        return cfg === null
+          ? { configured: false }
+          : { configured: true, baseUrl: cfg.baseUrl, authEmail: cfg.authEmail, enabled: cfg.enabled };
+      },
+    );
+    scope.put(
+      "/api/admin/confluence-config",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const body = request.body as {
+          base_url?: unknown;
+          auth_email?: unknown;
+          token?: unknown;
+          enabled?: unknown;
+        };
+        if (typeof body.base_url !== "string" || typeof body.token !== "string") {
+          return reply.code(422).send({ detail: "base_url + token are required strings" });
+        }
+        if (!/^https?:\/\//.test(body.base_url) || body.base_url.length > 2048) {
+          return reply.code(422).send({ detail: "base_url must be an http(s) URL" });
+        }
+        if (body.token.length === 0 || body.token.length > 4096) {
+          return reply.code(422).send({ detail: "token must be a non-empty secret (<=4096 chars)" });
+        }
+        const authEmail =
+          typeof body.auth_email === "string" && body.auth_email !== "" ? body.auth_email : null;
+        if (authEmail !== null && authEmail.length > 320) {
+          return reply.code(422).send({ detail: "auth_email is too long" });
+        }
+        const principal = request.authPrincipal!;
+        const enabled = typeof body.enabled === "boolean" ? body.enabled : true;
+        const repo = new PostgresConfluenceSettingsRepo({ db: opts.db, registry: requireAuditKeyRegistry() });
+        await repo.write({
+          baseUrl: body.base_url,
+          authEmail,
+          token: body.token,
+          enabled,
+          rotatedByUserId: principal.userId,
+        });
+        // Forensic record — base_url + auth_email + enabled only, NEVER the token.
+        await opts.audit?.({
+          actorUserId: principal.userId,
+          installationId: principal.installationId,
+          action: "confluence_settings.rotated",
+          targetKind: "confluence_settings",
+          targetId: "platform",
+          before: null,
+          after: { base_url: body.base_url, auth_email: authEmail, enabled },
           now: opts.clock.now(),
         });
         return reply.code(200).send({ ok: true });
