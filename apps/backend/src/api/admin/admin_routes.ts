@@ -373,6 +373,10 @@ export type AdminRoutesOptions = {
   /** Review-timeline reader (per-delivery webhook/outbox/bedrock chain links). Optional — defaults to
    *  `new ReviewTimelineRepo(opts.db)`. */
   reviewTimelineRepo?: ReviewTimelineRepo;
+  /** Provider for GET /api/admin/config-status — the non-blocking feature-config (LLM/GitHub/Confluence)
+   *  state for the UI setup-checklist. Defaults to observing env/Vault/DB via the deploy contract;
+   *  tests inject a stub. Never returns secret VALUES — only presence/source. */
+  configStatusProvider?: () => Promise<ReadonlyArray<{ key: string; state: string; source: string; gates?: string }>>;
 };
 
 /** The static dashboard summary (1:1 with the shipped Python: _HealthyProbe for the 4 services +
@@ -400,6 +404,18 @@ export async function registerAdminRoutes(
   const requireRole = makeRequireRole({ signingKey: opts.signingKey, clock: opts.clock });
   const statusRepo = opts.statusRepo ?? new StatusRepo(opts.db);
   const reviewTimelineRepo = opts.reviewTimelineRepo ?? new ReviewTimelineRepo(opts.db);
+  // The non-blocking feature-config (LLM/GitHub/Confluence) status for the UI setup-checklist —
+  // observes env/Vault/DB via the deploy contract. Default uses the real observer; tests inject a stub.
+  const configStatusProvider =
+    opts.configStatusProvider ??
+    (async () => {
+      const { DEPLOY_CONTRACT, getConfigStatus, observeDeployState } = await import(
+        "#backend/deploy_preflight.js"
+      );
+      const { makeObserveDeps } = await import("#backend/deploy_preflight_io.js");
+      const observed = await observeDeployState(DEPLOY_CONTRACT, makeObserveDeps({ db: opts.db }));
+      return getConfigStatus(DEPLOY_CONTRACT, observed);
+    });
 
   await app.register(async (scope) => {
     await scope.register(cookie);
@@ -414,6 +430,15 @@ export async function registerAdminRoutes(
     if (opts.csrfSecret !== undefined) {
       scope.addHook("onRequest", makeCsrfProtect());
     }
+
+    // GET /api/admin/config-status — non-blocking feature-config state for the UI setup-checklist.
+    // Reports configured|pending + source per feature; NEVER returns secret values. The pod is ready
+    // regardless of these (they don't block boot — only DB + field key do).
+    scope.get(
+      "/api/admin/config-status",
+      { preHandler: requireRole(["platform_operator", "platform_owner", "super_admin"]) },
+      async () => ({ items: await configStatusProvider() }),
+    );
 
     scope.get(
       "/api/admin/orgs",
