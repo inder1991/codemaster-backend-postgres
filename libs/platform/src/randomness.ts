@@ -91,9 +91,8 @@ export class SystemRandom implements Random {
 }
 
 /**
- * Test implementation with a deterministic seed. Bit-for-bit identical to CPython's
- * `random.Random(seed)` because it delegates to the {@link Mt19937} engine. Proven against the
- * against the Python impl by `test/parity/randomness.parity.test.ts`.
+ * Test implementation with a deterministic seed — bit-for-bit reproducible because it delegates to
+ * the {@link Mt19937} engine (the MT19937 algorithm).
  *
  * @example
  * ```ts

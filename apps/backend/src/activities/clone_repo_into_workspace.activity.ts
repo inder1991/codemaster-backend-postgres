@@ -27,7 +27,7 @@
  *     activity context). Tests inject a no-op double (there is no Temporal context under unit/integration).
  *
  * The observable output ({@link ClonedRepoV1}) does NOT depend on either collaborator. The four
- * The four heartbeat call sites sit at the same four phase boundaries so the granularity matches.
+ * heartbeat call sites sit at the same four phase boundaries so the granularity matches.
  *
  * ## Error-wrapping rule (parity-significant)
  *
@@ -77,8 +77,8 @@ export type CloneRepoIntoWorkspaceDeps = {
    */
   assertLeaseAllocated?: (workspaceId: string) => Promise<void>;
   /**
-   * Temporal in-flight progress heartbeat. Production default: {@link defaultHeartbeat} (forwards to
-   * {@link defaultHeartbeat}, a no-op in the Postgres runtime). Tests/clients may inject their own.
+   * In-flight progress heartbeat. Production default: {@link defaultHeartbeat} — a no-op in the
+   * Postgres runtime (the job-lease heartbeat is the liveness signal). Tests/clients may inject their own.
    */
   heartbeat?: (payload: unknown) => void;
 };
