@@ -525,8 +525,14 @@ export async function registerAdminRoutes(
             .code(422)
             .send({ detail: "webhook_secret must be a non-empty secret (<=512 chars)" });
         }
+        // `enabled` is OPTIONAL (defaults true when omitted) but must be a boolean when present — a
+        // non-boolean (e.g. the string "false") must 422, NOT silently coerce to true (a fail-OPEN enable
+        // of a sensitive credential — review P2).
+        if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
+          return reply.code(422).send({ detail: "enabled must be a boolean" });
+        }
         const principal = request.authPrincipal!;
-        const enabled = typeof body.enabled === "boolean" ? body.enabled : true;
+        const enabled = body.enabled ?? true;
         const repo = new PostgresGitHubAppSettingsRepo({ db: opts.db, registry: requireAuditKeyRegistry() });
         await repo.write({
           appId: body.app_id,
@@ -592,8 +598,12 @@ export async function registerAdminRoutes(
         if (authEmail !== null && authEmail.length > 320) {
           return reply.code(422).send({ detail: "auth_email is too long" });
         }
+        // `enabled` optional (defaults true) but must be a boolean when present — no fail-OPEN coercion (P2).
+        if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
+          return reply.code(422).send({ detail: "enabled must be a boolean" });
+        }
         const principal = request.authPrincipal!;
-        const enabled = typeof body.enabled === "boolean" ? body.enabled : true;
+        const enabled = body.enabled ?? true;
         const repo = new PostgresConfluenceSettingsRepo({ db: opts.db, registry: requireAuditKeyRegistry() });
         await repo.write({
           baseUrl: body.base_url,

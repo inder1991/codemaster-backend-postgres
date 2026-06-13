@@ -123,6 +123,15 @@ describeDb("admin github-config (disposable)", () => {
     expect(
       (await app.inject({ method: "PUT", url: "/api/admin/github-config", cookies: cookie("super_admin"), payload: { app_id: "1" } })).statusCode,
     ).toBe(422);
+    // review P2: a non-boolean `enabled` must 422, NOT coerce to true (fail-open enable).
+    expect(
+      (await app.inject({
+        method: "PUT",
+        url: "/api/admin/github-config",
+        cookies: cookie("super_admin"),
+        payload: { app_id: "123456", private_key_pem: PEM, webhook_secret: "w", enabled: "false" },
+      })).statusCode,
+    ).toBe(422);
     await app.close();
   });
 

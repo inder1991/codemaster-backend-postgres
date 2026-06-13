@@ -123,6 +123,10 @@ describeDb("admin confluence-config (disposable)", () => {
     expect(
       (await app.inject({ method: "PUT", url: "/api/admin/confluence-config", cookies: cookie("super_admin"), payload: { base_url: "not-a-url", token: "t" } })).statusCode,
     ).toBe(422);
+    // review P2: a non-boolean `enabled` must 422, NOT coerce to true (fail-open enable).
+    expect(
+      (await app.inject({ method: "PUT", url: "/api/admin/confluence-config", cookies: cookie("super_admin"), payload: { base_url: BASE_URL, token: "t", enabled: "false" } })).statusCode,
+    ).toBe(422);
     await app.close();
   });
 
