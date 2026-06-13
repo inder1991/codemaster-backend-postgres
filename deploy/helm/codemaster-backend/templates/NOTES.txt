@@ -37,6 +37,7 @@ Ingress hosts:
 {{- if eq .Values.vault.mode "agent" -}}
   {{- if and .Values.config.api.authRoutesEnabled (not .Values.vault.addr) -}}{{- $warnings = append $warnings "vault.mode=agent + authRoutesEnabled=true but vault.addr is EMPTY — the field-encryption keyset loads over the Vault HTTP API at boot (it can't be agent-file-flattened) and REQUIRES VAULT_ADDR, or the pod crashloops. Set vault.addr (e.g. http://vault.vault:8200)." -}}{{- end -}}
 {{- end -}}
+{{- if and (eq .Values.secretSource "vault") (not .Values.vault.addr) -}}{{- $warnings = append $warnings "secretSource=vault but vault.addr is EMPTY — the pod resolves the DB DSN + the field-encryption keyset over the Vault HTTP API via ServiceAccount auth at boot and REQUIRES VAULT_ADDR, or it crashloops. Set vault.addr (e.g. http://vault.vault:8200)." -}}{{- end -}}
 {{- if .Values.podSecurityContext.runAsNonRoot -}}
   {{- if not .Values.image.digest -}}{{- end -}}
 {{- end -}}

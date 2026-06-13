@@ -21,8 +21,8 @@ integration config.
 
 ## 1. Provision Postgres
 
-On your Postgres instance, create the database and install the two extensions (the single baseline
-migration creates the `core/audit/cache/telemetry/partman` schemas + seed):
+On your Postgres instance, create the database and install the two extensions (the migrations create the
+`core/audit/cache/telemetry/partman` schemas + seed):
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_partman WITH SCHEMA partman;
@@ -35,8 +35,10 @@ needs only DML. **Never point migrations at a shared/cluster DB.** PgBouncer **t
 every advisory lock the app takes is transaction-scoped (`pg_try_advisory_xact_lock`), released at
 commit/rollback — so the pool can hand the connection to another client between transactions.
 
-> Migrations are a **single fused baseline** (`migrations/0001_baseline.sql`, up-only). The pre-install
-> migrate Job applies it; on a fresh DB it is one step.
+> Migrations are an up-only sequence: a **fused baseline** (`migrations/0001_baseline.sql`) plus the
+> incremental migrations after it (currently `0002_confluence_settings`, `0003_auth_secrets`). The
+> pre-install migrate Job applies ALL pending migrations; the runtime refuses to boot unless the full set
+> is applied (the schema preflight). On a fresh DB this is one `migrate:up` that applies them in order.
 
 ## 2. Generate the field-encryption key
 
