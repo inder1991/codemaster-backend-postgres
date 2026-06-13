@@ -175,11 +175,11 @@ describe("OutboxDispatchActivities", () => {
     ).rejects.toThrow(/nope/);
   });
 
-  it("markDispatched delegates to repo.markDispatched", async () => {
+  it("markDispatched delegates to repo.markDispatched with the R-6 expectedAttempts fence", async () => {
     const markDispatched = vi.fn(async () => null);
     const acts = makeActs({ markDispatched } as unknown as Partial<PostgresOutboxRepo>);
-    await acts.markDispatched({ row_id: ROW_3 });
-    expect(markDispatched).toHaveBeenCalledWith({ db: dummyDb, id: ROW_3 });
+    await acts.markDispatched({ row_id: ROW_3, expected_attempts: 2 });
+    expect(markDispatched).toHaveBeenCalledWith({ db: dummyDb, id: ROW_3, expectedAttempts: 2 });
   });
 
   it("markAttemptFailed injects maxAttempts + expectedAttempts and dead-letters exactly once on 'dead'", async () => {

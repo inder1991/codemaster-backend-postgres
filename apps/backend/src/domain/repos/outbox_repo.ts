@@ -246,16 +246,23 @@ export class PostgresOutboxRepo {
    * the `AND state = 'pending'` guard makes a duplicate execution a rowcount-0 no-op. RETURNING the timing
    * columns feeds the dispatch-to-done histogram (the activity records it; the OTel emit is deferred).
    * Returns `null` when the row was already dispatched (redrive).
+   *
+   * R-6 multi-pod fence: ALSO guards `attempts = expectedAttempts` (the pre-attempt snapshot from
+   * claimPendingRows) — same fence markAttemptFailed uses. A STALE pod (its lease expired, the row
+   * re-claimed + failed by a newer pod → attempts incremented) would otherwise overwrite that newer pod's
+   * failure/dead-letter with a 'dispatched' (and the side-effect may have run twice). The fence makes the
+   * stale settle a rowcount-0 no-op. The legitimate worker's attempts is unchanged on success, so it passes.
    */
   public async markDispatched(args: {
     db: Executor;
     id: string;
+    expectedAttempts: number;
   }): Promise<{ lastAttemptedAt: Date | null; createdAt: Date | null } | null> {
-    // tenant:exempt reason=CAS-update-by-outbox-id-PK follow_up=PERMANENT-EXEMPTION-pk-scoped-writes
+    // tenant:exempt reason=CAS-update-by-outbox-id-PK-attempts-fenced follow_up=PERMANENT-EXEMPTION-pk-scoped-writes
     const result = await sql<{ last_attempted_at: Date | null; created_at: Date | null }>`
       UPDATE core.outbox
          SET state = 'dispatched', dispatched_at = ${this.#clock.now()}, leased_until = NULL
-       WHERE id = ${args.id} AND state = 'pending'
+       WHERE id = ${args.id} AND state = 'pending' AND attempts = ${args.expectedAttempts}
        RETURNING last_attempted_at, created_at
     `.execute(args.db);
     const row = result.rows[0];

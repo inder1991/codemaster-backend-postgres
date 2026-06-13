@@ -140,7 +140,7 @@ export class OutboxDispatchActivities {
    */
   public readonly markDispatched = async (input: MarkDispatchedInputV1): Promise<void> => {
     const v = MarkDispatchedInputV1.parse(input);
-    await this.#repo.markDispatched({ db: this.#db, id: v.row_id });
+    await this.#repo.markDispatched({ db: this.#db, id: v.row_id, expectedAttempts: v.expected_attempts });
     // SEAM (OTel — DEFER §D5): on a non-null return, record the dispatch-to-done histogram from the timing.
   };
 

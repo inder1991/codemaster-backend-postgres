@@ -61,9 +61,13 @@ export const DispatchRowInputV1 = z
   });
 export type DispatchRowInputV1 = z.infer<typeof DispatchRowInputV1>;
 
-/** Input for the `markDispatched` activity. */
+/** Input for the `markDispatched` activity. `expected_attempts` (R-6, same fence as markAttemptFailed) is
+ *  the pre-attempt count from claimPendingRows; the repo UPDATE guards on `attempts = expected_attempts`
+ *  so a STALE pod (resumed after lease expiry, whose row another pod has since re-claimed + failed →
+ *  attempts incremented) can't overwrite the newer pod's failure/dead-letter outcome with a 'dispatched'. */
 export const MarkDispatchedInputV1 = z.object({
   row_id: z.string().uuid(),
+  expected_attempts: z.number().int().nonnegative(),
 });
 export type MarkDispatchedInputV1 = z.infer<typeof MarkDispatchedInputV1>;
 

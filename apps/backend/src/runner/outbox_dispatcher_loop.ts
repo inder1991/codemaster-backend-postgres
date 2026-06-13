@@ -194,7 +194,9 @@ export class OutboxDispatcherLoop {
           // W3.2 RM1 per-dispatch bound — the two hardenings compose.
           { deliveryId: row.deliveryId },
         );
-        await this.o.activities.markDispatched({ row_id: row.id });
+        // R-6 fence: expected_attempts = row.attempts (the claim-time snapshot) — same as markAttemptFailed
+        // — so a stale pod whose row was re-claimed + failed elsewhere can't overwrite that outcome (N2).
+        await this.o.activities.markDispatched({ row_id: row.id, expected_attempts: row.attempts });
       } catch (e) {
         // RC7 — sink error taxonomy (cutover-safety CS4.2; mirrors the background runner's W4a.1
         // PermanentJobError split). Classification of the dispatch failure:

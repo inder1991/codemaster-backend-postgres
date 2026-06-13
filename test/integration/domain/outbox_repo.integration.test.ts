@@ -162,7 +162,7 @@ describeDb("PostgresOutboxRepo (integration, disposable PG)", () => {
       const claim3 = await cRepo.claimPending({ db, leaseSeconds: 60 });
       expect(claim3.some((r) => r.id === id)).toBe(true); // lease expired → re-claimable
 
-      await cRepo.markDispatched({ db, id });
+      await cRepo.markDispatched({ db, id, expectedAttempts: 0 });
     });
 
     it("markAttemptFailed below maxAttempts → stays pending, attempts+1, leased_until deferred by backoff, returns {state,sink}", async () => {
@@ -231,12 +231,28 @@ describeDb("PostgresOutboxRepo (integration, disposable PG)", () => {
       const db = tenantKysely(INTEGRATION_DSN!);
       const id = await seedPending("dispatched");
 
-      const r = await cRepo.markDispatched({ db, id });
+      const r = await cRepo.markDispatched({ db, id, expectedAttempts: 0 });
       expect(r).not.toBeNull();
       expect(r).toHaveProperty("createdAt");
       expect((await rowOf(id)).state).toBe("dispatched");
       // Idempotent under redrive: a second markDispatched on a now-dispatched row updates nothing → null.
-      expect(await cRepo.markDispatched({ db, id })).toBeNull();
+      expect(await cRepo.markDispatched({ db, id, expectedAttempts: 0 })).toBeNull();
+    });
+
+    it("markDispatched is FENCED on attempts (N2): a stale settle after another pod re-claimed+failed is a no-op", async () => {
+      fakeClock.set({ now: new Date("2026-06-06T12:00:00.000Z") });
+      const db = tenantKysely(INTEGRATION_DSN!);
+      const id = await seedPending("fenced");
+      // Pod A claims at attempts=0. Pod A stalls; lease expires; Pod B re-claims + FAILS → attempts=1, still pending.
+      await cRepo.claimPending({ db, leaseSeconds: 60 });
+      await cRepo.markAttemptFailed({ db, id, error: "pod-B transient", maxAttempts: 5, expectedAttempts: 0 });
+      expect((await rowOf(id)).attempts).toBe(1);
+      // Pod A wakes and tries to settle SUCCESS with its STALE claim snapshot (attempts=0) → fenced → no-op.
+      expect(await cRepo.markDispatched({ db, id, expectedAttempts: 0 })).toBeNull();
+      expect((await rowOf(id)).state).toBe("pending"); // NOT clobbered to dispatched
+      // The pod that actually owns the row now (attempts=1) CAN settle it.
+      expect(await cRepo.markDispatched({ db, id, expectedAttempts: 1 })).not.toBeNull();
+      expect((await rowOf(id)).state).toBe("dispatched");
     });
 
     it("extendLease pushes leased_until forward from the injected clock", async () => {
