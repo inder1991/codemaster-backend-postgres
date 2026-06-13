@@ -3,6 +3,13 @@ Non-secret application configuration. Secrets (PG DSN, GitHub App key,
 field-encryption keys, auth secrets, embedder/Langfuse keys) are NEVER here —
 they come from Vault (see _helpers.tpl + the deployment).
 */ -}}
+{{- /* Coherence guard (review P1): secretSource=vault means the app reads Vault DIRECTLY via ServiceAccount
+   auth. That is mutually exclusive with the agent injector (vault.mode=agent — renders secrets to env/files)
+   and the dev static token (vault.mode=token). Mixing them makes the migrate Job and the app resolve the DB
+   DSN from DIFFERENT sources — you could migrate one database and run against another. Reject at render. */ -}}
+{{- if and (eq .Values.secretSource "vault") (ne .Values.vault.mode "external") -}}
+{{- fail (printf "secretSource=vault requires vault.mode=external (got vault.mode=%s). secretSource=vault has the app read Vault directly via its ServiceAccount; vault.mode=agent/token inject/render the DSN separately, so the migrate Job and the app would resolve the DB from DIFFERENT sources (migrate one database, run against another). Set vault.mode=external." .Values.vault.mode) -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -81,9 +88,10 @@ data:
   VAULT_ADDR: {{ .Values.vault.addr | quote }}
   # ---- Go-live bootstrap-secret source (DB credentials + the field-encryption key) ----
   CODEMASTER_SECRET_SOURCE: {{ .Values.secretSource | quote }}
-  {{- if eq .Values.vault.mode "agent" }}
-  # Agent mode renders the field-encryption keyset to a file (it can't be agent-file-flattened as flat
-  # strings, but the loader reads the nested file via vault-agent) — read it there, not env/Vault-API.
+  {{- if and (eq .Values.secretSource "openshift") (eq .Values.vault.mode "agent") }}
+  # openshift + agent: the Vault Agent renders the field-encryption keyset to a file (the loader reads the
+  # nested file via vault-agent) — read it there, not env/Vault-API. (secretSource=vault is incompatible with
+  # agent — guarded above — so this is correctly scoped to the agent-injection path only.)
   CODEMASTER_FIELD_KEY_SOURCE: "vault-agent"
   {{- end }}
   {{- if eq .Values.secretSource "vault" }}

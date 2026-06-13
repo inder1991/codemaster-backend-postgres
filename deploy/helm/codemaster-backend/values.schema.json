@@ -3,6 +3,7 @@
   "title": "codemaster-backend Helm values",
   "type": "object",
   "properties": {
+    "secretSource": { "type": "string", "enum": ["openshift", "vault"] },
     "nameOverride": { "type": "string" },
     "fullnameOverride": { "type": "string" },
     "commonLabels": { "type": "object" },

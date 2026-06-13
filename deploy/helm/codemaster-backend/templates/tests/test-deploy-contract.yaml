@@ -24,7 +24,9 @@ metadata:
 spec:
   restartPolicy: Never
   serviceAccountName: {{ include "codemaster-backend.serviceAccountName" . }}
-  automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+  # secretSource=vault resolves the DSN from Vault via SA-auth (same as the app + migrate Job), so the SA JWT
+  # must mount — else helm test false-fails on a valid SA-auth deploy.
+  automountServiceAccountToken: {{ if eq .Values.secretSource "vault" }}true{{ else }}{{ .Values.serviceAccount.automountServiceAccountToken }}{{ end }}
   {{- with .Values.image.pullSecrets }}
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
@@ -43,23 +45,29 @@ spec:
           . {{ .Values.vault.secretsDir }}/runtime-env
           set +a
           exec node apps/backend/src/deploy_check.js
+      {{- else if eq .Values.secretSource "vault" }}
+      # vault SA-auth: resolve the DSN from Vault (the pod's SA login) before deploy_check — same preamble as
+      # the migrate Job + the app, so the check validates the SAME contract the real pod sees (review P1).
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          export CODEMASTER_PG_CORE_DSN="$(node apps/backend/src/resolve_dsn.js)"
+          exec node apps/backend/src/deploy_check.js
       {{- else }}
       command: ["node", "apps/backend/src/deploy_check.js"]
       {{- end }}
       env:
         - name: HOME
           value: /tmp
-        - name: CODEMASTER_VAULT_SECRETS_DIR
-          value: {{ .Values.vault.secretsDir | quote }}
-        - name: CODEMASTER_RUNTIME_MODE
-          value: {{ .Values.config.runtime.mode | quote }}
-        - name: CODEMASTER_EMBEDDINGS_PROVIDER
-          value: {{ .Values.config.embeddings.provider | quote }}
         {{- with .Values.extraEnv }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- if or (eq .Values.vault.mode "token") .Values.extraEnvFrom }}
       envFrom:
+        # Same ConfigMap the app + migrate Job read — so the check sees CODEMASTER_SECRET_SOURCE + VAULT_ADDR
+        # + the SA-auth selectors (for resolve_dsn) + the PG DSN parts (openshift), NOT a hand-picked subset
+        # that could diverge from the real pod and pass/fail a different contract (review P1).
+        - configMapRef:
+            name: {{ include "codemaster-backend.fullname" . }}-config
         {{- if eq .Values.vault.mode "token" }}
         {{- if .Values.vault.token.existingSecret }}
         - secretRef:
@@ -72,7 +80,6 @@ spec:
         {{- with .Values.extraEnvFrom }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- end }}
       securityContext:
         {{- toYaml .Values.containerSecurityContext | nindent 8 }}
       volumeMounts:
