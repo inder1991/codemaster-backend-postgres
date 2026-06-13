@@ -121,6 +121,58 @@ describe("VaultHttpPort — SA-auth tokenProvider", () => {
   });
 });
 
+// ─── SA-auth 401/403 invalidate-and-retry (review P1) ──────────────────────────────────────────────
+
+describe("VaultHttpPort — SA-auth 401/403 invalidate-and-retry", () => {
+  function saPort(http: VaultHttpClient, onAuthInvalid: () => void): VaultHttpPort {
+    return new VaultHttpPort({
+      addr: "https://vault.internal:8200",
+      tokenProvider: () => Promise.resolve("sa-token"),
+      onAuthInvalid,
+      http,
+      clock: new FakeClock(),
+    });
+  }
+
+  it("invalidates the cached token + retries ONCE on a 403, then succeeds with a fresh login", async () => {
+    const http = new StubVaultHttpClient([
+      jsonResponse(403, { errors: ["permission denied"] }),
+      jsonResponse(200, { data: { data: { k: "v" } } }),
+    ]);
+    let invalidations = 0;
+    const port = saPort(http, () => {
+      invalidations += 1;
+    });
+
+    expect(await port.kvRead({ path: "foo" })).toEqual({ k: "v" });
+    expect(invalidations).toBe(1); // cached token cleared so the retry re-logins
+    expect(http.requests).toHaveLength(2);
+  });
+
+  it("retries at most ONCE — a persistent 403 throws (no invalidate loop)", async () => {
+    const http = new StubVaultHttpClient([
+      jsonResponse(403, { errors: ["denied"] }),
+      jsonResponse(403, { errors: ["denied"] }),
+    ]);
+    let invalidations = 0;
+    const port = saPort(http, () => {
+      invalidations += 1;
+    });
+
+    await expect(port.kvRead({ path: "foo" })).rejects.toThrow(VaultConnectivityError);
+    expect(invalidations).toBe(1);
+    expect(http.requests).toHaveLength(2);
+  });
+
+  it("does NOT retry a 403 for a static-token port (not re-mintable) — returned as-is", async () => {
+    const http = new StubVaultHttpClient([jsonResponse(403, { errors: ["denied"] })]);
+    const port = portWith(http, new FakeClock(), { token: "static" });
+
+    await expect(port.kvRead({ path: "foo" })).rejects.toThrow(VaultConnectivityError);
+    expect(http.requests).toHaveLength(1); // no onAuthInvalid → no invalidate-retry
+  });
+});
+
 // ─── KV read ───────────────────────────────────────────────────────────────────────────────────
 
 describe("VaultHttpPort — kvRead", () => {

@@ -48,6 +48,8 @@ export const INITIAL_BACKOFF_SECONDS = 0.5;
 const HTTP_OK = 200;
 const HTTP_NO_CONTENT = 204;
 const HTTP_BAD_REQUEST = 400;
+const HTTP_UNAUTHORIZED = 401;
+const HTTP_FORBIDDEN = 403;
 const HTTP_NOT_FOUND = 404;
 const HTTP_CLIENT_ERROR_FLOOR = 400;
 const HTTP_SERVER_ERROR_FLOOR = 500;
@@ -148,6 +150,11 @@ export type VaultHttpPortOptions = {
   /** Async token source (e.g. VaultK8sAuth.token) for SA-auth (kubernetes) mode; takes precedence over
    *  `token`/`tokenPath` when set, and is re-invoked per request attempt so lease-renewal is transparent. */
   tokenProvider?: () => Promise<string>;
+  /** Invalidate the cached token (SA-auth: VaultK8sAuth.invalidate) so the next request re-logins. When set,
+   *  a 401/403 triggers ONE invalidate-and-retry — recovering from an EARLY-revoked SA token (revoke / reseal
+   *  / leader-change / policy change) without waiting for the 90%-lease renew point (review P1). Unset
+   *  (static token / agent-file — not re-mintable) → a 401/403 is returned as-is. */
+  onAuthInvalid?: () => void | Promise<void>;
   kvMount?: string;
   transitMount?: string;
   timeoutSeconds?: number;
@@ -176,6 +183,7 @@ export class VaultHttpPort implements VaultPort {
   private readonly tokenPath: string;
   private readonly token: string | undefined;
   private readonly tokenProvider: (() => Promise<string>) | undefined;
+  private readonly onAuthInvalid: (() => void | Promise<void>) | undefined;
   private readonly kvMount: string;
   private readonly transitMount: string;
   private readonly http: VaultHttpClient;
@@ -186,6 +194,7 @@ export class VaultHttpPort implements VaultPort {
     tokenPath = DEFAULT_TOKEN_PATH,
     token,
     tokenProvider,
+    onAuthInvalid,
     kvMount = "secret",
     transitMount = "transit",
     timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
@@ -196,6 +205,7 @@ export class VaultHttpPort implements VaultPort {
     this.tokenPath = tokenPath;
     this.token = token;
     this.tokenProvider = tokenProvider;
+    this.onAuthInvalid = onAuthInvalid;
     this.kvMount = kvMount;
     this.transitMount = transitMount;
     this.http = http ?? new FetchVaultHttpClient({ timeoutSeconds });
@@ -221,7 +231,15 @@ export class VaultHttpPort implements VaultPort {
     if (process.env["CODEMASTER_VAULT_AUTH"] === "kubernetes") {
       const clock = new WallClock();
       const auth = makeVaultK8sAuthFromEnv({ env: process.env, now: () => clock.now().getTime(), addr });
-      return new VaultHttpPort({ addr, tokenProvider: () => auth.token() });
+      // onAuthInvalid clears the cached SA token on a 401/403 so the next request re-logins — recovers
+      // from an early-revoked token without waiting for the lease-renew point (review P1).
+      return new VaultHttpPort({
+        addr,
+        tokenProvider: () => auth.token(),
+        onAuthInvalid: () => {
+          auth.invalidate();
+        },
+      });
     }
     const tokenEnv = process.env["VAULT_TOKEN"];
     if (tokenEnv) {
@@ -269,6 +287,30 @@ export class VaultHttpPort implements VaultPort {
   }
 
   /**
+   * Every Vault call. Delegates to {@link requestOnce} (transport/5xx retry+backoff), then — on a 401/403
+   * with a re-mintable token source ({@link onAuthInvalid} set, i.e. SA-auth) — invalidates the cached token
+   * and retries ONCE with a fresh login. This recovers from an EARLY-revoked SA token instead of 403-looping
+   * until the lease-renew point (review P1). Bounded to one retry; a static-token/agent-file port (no
+   * onAuthInvalid) returns the 401/403 unchanged.
+   */
+  private async request(
+    method: string,
+    path: string,
+    jsonBody?: unknown,
+  ): Promise<VaultHttpResponse> {
+    const resp = await this.requestOnce(method, path, jsonBody);
+    if (
+      (resp.status === HTTP_UNAUTHORIZED || resp.status === HTTP_FORBIDDEN) &&
+      this.onAuthInvalid !== undefined
+    ) {
+      logVaultEvent({ attempt: MAX_RETRIES, method, path, status: resp.status });
+      await this.onAuthInvalid();
+      return this.requestOnce(method, path, jsonBody);
+    }
+    return resp;
+  }
+
+  /**
    * Drives the retry / backoff decision loop; returns the {@link VaultHttpResponse} (any status;
    * per-method status mapping happens at the call site) or raises {@link VaultConnectivityError}
    * once retries are exhausted.
@@ -276,7 +318,7 @@ export class VaultHttpPort implements VaultPort {
    * The token is re-read at the TOP of EACH attempt (per-attempt rotation safety). Log lines carry
    * ONLY `{ attempt, method, path, status }` — never the token.
    */
-  private async request(
+  private async requestOnce(
     method: string,
     path: string,
     jsonBody?: unknown,
