@@ -76,6 +76,19 @@ export function getAuditKeyRegistry(): KeyRegistry | null {
   return registry;
 }
 
+/** Return the installed field-encryption registry, or throw — for callers (LLM provider settings,
+ *  feature-config repos) that REQUIRE it at use-time. In production it is boot-installed (the field
+ *  key is a hard boot requirement); a null here means the keyset never loaded. */
+export function requireAuditKeyRegistry(): KeyRegistry {
+  if (registry === null) {
+    throw new Error(
+      "field-encryption key registry is not installed — it is required to read/write encrypted config " +
+        "(provision the field-encryption key via CODEMASTER_SECRET_SOURCE)",
+    );
+  }
+  return registry;
+}
+
 /** Test-only: clear the installed registry so each test starts pristine. */
 export function resetAuditKeyRegistryForTesting(): void {
   registry = null;

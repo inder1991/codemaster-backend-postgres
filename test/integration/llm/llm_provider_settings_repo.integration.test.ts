@@ -23,13 +23,13 @@ import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 
 import { PostgresLlmProviderSettingsRepo } from "#backend/integrations/llm/llm_provider_settings_repo.js";
 
-import { InMemoryVault } from "#backend/adapters/vault_port.js";
-
+import { decryptField, encryptField } from "#platform/crypto/aes_gcm_aad.js";
+import { KeyRegistry, makeKeySet } from "#platform/crypto/key_registry.js";
 import { disposeAllPools, getPool, tenantKysely } from "#platform/db/database.js";
 
 import { describeDb, INTEGRATION_DSN } from "../_db.js";
 
-const VAULT_KEY_NAME = "llm_provider_settings";
+const LLM_API_KEY_AAD = new TextEncoder().encode("core.llm_provider_settings.api_key_ciphertext");
 // A fixed non-zero actor UUID for the NOT-NULL last_rotated_by_user_id column (sentinel-shaped).
 const SYSTEM_ACTOR_UUID = "00000000-0000-0000-0000-0000000000aa";
 
@@ -37,20 +37,20 @@ describeDb("PostgresLlmProviderSettingsRepo (integration)", () => {
   // ADR-0062: the repo's Kysely routes through the shared single pool; the raw seed/cleanup reads
   // share THAT pool via getPool(dsn). Guarded on the DSN so the module never opens a live connection
   // when SKIPPED.
-  const vault = new InMemoryVault();
+  const registry = new KeyRegistry();
+  registry.set(
+    makeKeySet({ currentVersion: "v1", keys: new Map([["v1", new Uint8Array(32).fill(7)]]) }),
+  );
   const repo = new PostgresLlmProviderSettingsRepo({
     db: tenantKysely<unknown>(INTEGRATION_DSN as string),
-    vault,
+    registry,
   });
   const pool = getPool(INTEGRATION_DSN as string);
 
-  // Encrypt a plaintext token through the SAME InMemoryVault the repo decrypts with, returning the
-  // ciphertext blob to seed into the DB.
-  const encrypt = async (plaintext: string): Promise<string> =>
-    vault.transitEncrypt({
-      keyName: VAULT_KEY_NAME,
-      plaintext: new TextEncoder().encode(plaintext),
-    });
+  // Encrypt a plaintext token with the SAME field-codec registry + per-column AAD the repo decrypts
+  // with, returning the ciphertext blob to seed into the DB.
+  const encrypt = (plaintext: string): string =>
+    encryptField({ plaintext: new TextEncoder().encode(plaintext), registry, aad: LLM_API_KEY_AAD });
 
   // Seed (UPSERT) one platform-scope row. installation_id MUST be NULL for scope='platform' (the
   // ck_..._scope_installation_consistency CHECK). fingerprint is the last 4 chars (the length-4 CHECK).
@@ -63,7 +63,7 @@ describeDb("PostgresLlmProviderSettingsRepo (integration)", () => {
     enabled: boolean;
     lastRotatedAt: string;
   }): Promise<void> => {
-    const ciphertext = await encrypt(args.apiKeyPlaintext);
+    const ciphertext = encrypt(args.apiKeyPlaintext);
     const fingerprint = args.apiKeyPlaintext.slice(-4);
     await pool.query(
       `INSERT INTO core.llm_provider_settings
@@ -247,10 +247,10 @@ describeDb("PostgresLlmProviderSettingsRepo (integration)", () => {
     const got = await repo.readDecryptedSettings("primary");
     expect(got?.apiKey).toBe("sk-keyed-FFFF");
 
-    // Sanity: the same fixture refuses an unknown ciphertext under the same key (no silent plaintext).
-    await expect(
-      vault.transitDecrypt({ keyName: VAULT_KEY_NAME, ciphertext: "vault:v1:bogus:999" }),
-    ).rejects.toThrow();
+    // Sanity: the field codec refuses a bogus ciphertext under the same key (no silent plaintext).
+    expect(() =>
+      decryptField({ ciphertext: "kms2:v1:bogus", registry, aad: LLM_API_KEY_AAD }),
+    ).toThrow();
   });
 
   it("writeSettings encrypts via Vault Transit + UPSERTs; round-trips through readDecryptedSettings", async () => {

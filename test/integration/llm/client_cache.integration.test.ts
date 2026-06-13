@@ -24,22 +24,25 @@ import { LlmClientCache, type SdkFactory } from "#backend/integrations/llm/clien
 import { LlmCredentialsProvider } from "#backend/integrations/llm/credentials_provider.js";
 import { PostgresLlmProviderSettingsRepo } from "#backend/integrations/llm/llm_provider_settings_repo.js";
 
-import { InMemoryVault } from "#backend/adapters/vault_port.js";
-
+import { encryptField } from "#platform/crypto/aes_gcm_aad.js";
+import { KeyRegistry, makeKeySet } from "#platform/crypto/key_registry.js";
 import { disposeAllPools, getPool, tenantKysely } from "#platform/db/database.js";
 
 import { describeDb, INTEGRATION_DSN } from "../_db.js";
 
 import type { LlmSdk } from "#backend/integrations/llm/client.js";
 
-const VAULT_KEY_NAME = "llm_provider_settings";
+const LLM_API_KEY_AAD = new TextEncoder().encode("core.llm_provider_settings.api_key_ciphertext");
 const SYSTEM_ACTOR_UUID = "00000000-0000-0000-0000-0000000000aa";
 
 describeDb("LlmClientCache (integration)", () => {
-  const vault = new InMemoryVault();
+  const registry = new KeyRegistry();
+  registry.set(
+    makeKeySet({ currentVersion: "v1", keys: new Map([["v1", new Uint8Array(32).fill(7)]]) }),
+  );
   const repo = new PostgresLlmProviderSettingsRepo({
     db: tenantKysely<unknown>(INTEGRATION_DSN as string),
-    vault,
+    registry,
   });
   const provider = new LlmCredentialsProvider({ repo });
   const pool = getPool(INTEGRATION_DSN as string);
@@ -60,11 +63,8 @@ describeDb("LlmClientCache (integration)", () => {
   const newCache = (): LlmClientCache =>
     new LlmClientCache({ repo, credentialsProvider: provider, sdkFactory: recordedSdkFactory });
 
-  const encrypt = async (plaintext: string): Promise<string> =>
-    vault.transitEncrypt({
-      keyName: VAULT_KEY_NAME,
-      plaintext: new TextEncoder().encode(plaintext),
-    });
+  const encrypt = (plaintext: string): string =>
+    encryptField({ plaintext: new TextEncoder().encode(plaintext), registry, aad: LLM_API_KEY_AAD });
 
   const seedRow = async (args: {
     role: "primary" | "secondary";
@@ -75,7 +75,7 @@ describeDb("LlmClientCache (integration)", () => {
     enabled: boolean;
     lastRotatedAt: string;
   }): Promise<void> => {
-    const ciphertext = await encrypt(args.apiKeyPlaintext);
+    const ciphertext = encrypt(args.apiKeyPlaintext);
     const fingerprint = args.apiKeyPlaintext.slice(-4);
     await pool.query(
       `INSERT INTO core.llm_provider_settings

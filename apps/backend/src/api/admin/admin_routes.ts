@@ -234,6 +234,7 @@ import {
 import { type DnsResolver } from "#backend/security/url_validator.js";
 import { type VaultPort } from "#backend/adapters/vault_port.js";
 import { PostgresLlmProviderSettingsRepo } from "#backend/integrations/llm/llm_provider_settings_repo.js";
+import { requireAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
 import { type GetPreflightValidator } from "#backend/integrations/llm/preflight_validator.js";
 import { PLATFORM_SCOPE_AUDIT_INSTALLATION_ID } from "#backend/infra/sentinels.js";
 import { insertTaxonomySuggestion } from "#backend/api/admin/taxonomy_write.js";
@@ -2115,7 +2116,7 @@ export async function registerAdminRoutes(
         if (params.provider !== "bedrock" && params.provider !== "anthropic_direct") {
           return noCreds(params.provider);
         }
-        const repo = new PostgresLlmProviderSettingsRepo({ db: opts.db, vault: opts.vault, clock: opts.clock });
+        const repo = new PostgresLlmProviderSettingsRepo({ db: opts.db, registry: requireAuditKeyRegistry(), clock: opts.clock });
         const creds = await repo.readDecryptedForProvider(params.provider);
         if (creds === null) {
           return noCreds(params.provider);
@@ -2229,7 +2230,7 @@ export async function registerAdminRoutes(
           }
         }
         const rotatedAt = opts.clock.now();
-        const repo = new PostgresLlmProviderSettingsRepo({ db: opts.db, vault: opts.vault, clock: opts.clock });
+        const repo = new PostgresLlmProviderSettingsRepo({ db: opts.db, registry: requireAuditKeyRegistry(), clock: opts.clock });
         await repo.writeSettings({
           role: body.role,
           provider: body.provider,
@@ -2457,7 +2458,7 @@ export async function registerAdminRoutes(
           }
         }
         const rotatedAt = opts.clock.now();
-        const repo = new PostgresLlmProviderSettingsRepo({ db: opts.db, vault: opts.vault, clock: opts.clock });
+        const repo = new PostgresLlmProviderSettingsRepo({ db: opts.db, registry: requireAuditKeyRegistry(), clock: opts.clock });
         await repo.writeSettings({
           role: "primary",
           provider: "bedrock",

@@ -84,6 +84,7 @@ import { LlmClient } from "#backend/integrations/llm/client.js";
 import { LlmCredentialsProvider } from "#backend/integrations/llm/credentials_provider.js";
 import { LlmInvocationLedger } from "#backend/integrations/llm/invocation_ledger.js";
 import { PostgresLlmProviderSettingsRepo } from "#backend/integrations/llm/llm_provider_settings_repo.js";
+import { requireAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
 
 import { buildActivities } from "#backend/worker/build_activities.js";
 
@@ -131,8 +132,7 @@ export function withAbortGate<I, O>(
 // deferred-Vault pattern; the cache façade defers the real build to first `forRole`.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 function buildStrictLedgerCache(dsn: string): LlmClientCache {
-  const vault = VaultHttpPort.fromEnv();
-  const repo = PostgresLlmProviderSettingsRepo.fromDsn({ dsn, vault });
+  const repo = PostgresLlmProviderSettingsRepo.fromDsn({ dsn, registry: requireAuditKeyRegistry() });
   const credentialsProvider = new LlmCredentialsProvider({ repo });
 
   const strictLedgerClientFactory: ClientFactory = ({ sdk }) => {

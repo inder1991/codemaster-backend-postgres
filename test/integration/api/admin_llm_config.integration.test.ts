@@ -9,8 +9,14 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, expect, it } from "vitest";
 
 import { FakeClock } from "#platform/clock.js";
+import { decryptField, encryptField } from "#platform/crypto/aes_gcm_aad.js";
+import { KeyRegistry, makeKeySet } from "#platform/crypto/key_registry.js";
 
 import { buildApp } from "#backend/api/app.js";
+import {
+  resetAuditKeyRegistryForTesting,
+  setAuditKeyRegistry,
+} from "#backend/security/audit_field_codec.js";
 import {
   getLlmProviderConfig,
   listLlmModels,
@@ -29,6 +35,13 @@ const SIGNING_KEY = Buffer.from("test-signing-key-0123456789abcdef");
 const M1 = "itest-llm-aaa"; // anthropic_direct
 const M2 = "itest-llm-bbb"; // bedrock
 const ROTATOR = "abababab-1111-2222-3333-444444444444";
+// The field-encryption registry the LLM routes decrypt with (boot-installed in prod; here installed
+// in beforeAll). Seeds/asserts use the SAME registry + per-column AAD.
+const LLM_API_KEY_AAD = new TextEncoder().encode("core.llm_provider_settings.api_key_ciphertext");
+const fieldRegistry = new KeyRegistry();
+fieldRegistry.set(
+  makeKeySet({ currentVersion: "v1", keys: new Map([["v1", new Uint8Array(32).fill(7)]]) }),
+);
 
 let pool: Pool;
 let db: Kysely<unknown>;
@@ -40,6 +53,7 @@ async function cleanup(): Promise<void> {
 
 beforeAll(async () => {
   if (!INTEGRATION_DSN) return;
+  setAuditKeyRegistry(fieldRegistry); // the LLM routes decrypt the api key via this registry
   pool = new Pool({ connectionString: INTEGRATION_DSN, max: 4 });
   db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) });
   await cleanup();
@@ -51,6 +65,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (INTEGRATION_DSN) await cleanup();
+  resetAuditKeyRegistryForTesting();
   await db?.destroy();
 });
 
@@ -112,7 +127,6 @@ describeDb("admin llm-config (disposable :5434)", () => {
   // asserts secondary IS null) and DELETEs it inside its own `it` so the sequential file stays isolated.
   // The seeded primary/itest-prov-model row is never touched.
   type AuditEv = { actorUserId: string; installationId: string | null; action: string; targetId: string };
-  const VAULT_KEY_NAME = "llm_provider_settings";
   const PUT_BODY = {
     provider: "bedrock",
     role: "secondary",
@@ -169,7 +183,7 @@ describeDb("admin llm-config (disposable :5434)", () => {
       expect(body.api_key_fingerprint).toBe("6789"); // last 4 of the written key
       // But the SECONDARY slot WAS written — its ciphertext decrypts back to the plaintext under the same Vault.
       const row = await sql<{ api_key_ciphertext: string }>`SELECT api_key_ciphertext FROM core.llm_provider_settings WHERE scope='platform' AND role='secondary'`.execute(db);
-      const dec = await vault.transitDecrypt({ keyName: VAULT_KEY_NAME, ciphertext: row.rows[0]!.api_key_ciphertext });
+      const dec = decryptField({ ciphertext: row.rows[0]!.api_key_ciphertext, registry: fieldRegistry, aad: LLM_API_KEY_AAD });
       expect(new TextDecoder().decode(dec)).toBe(PUT_BODY.api_key);
       // Dual rotation audit (legacy + new action strings), target_id "global".
       expect(audited.map((e) => e.action)).toEqual(["bedrock_credential.rotated", "llm_provider_credential.rotated"]);
@@ -284,8 +298,8 @@ describeDb("admin llm-config (disposable :5434)", () => {
   // fake literal ('kms2:1:x') InMemoryVault can't decrypt, so the round-trip tests write a real ciphertext
   // onto it and restore in finally. setValidation targets the seeded catalog rows M1/M2 (afterAll cleans them).
   const testUrl = (provider: string, modelId: string): string => `/api/admin/llm-models/${provider}/${modelId}/test`;
-  const setPrimaryCiphertext = async (vault: InMemoryVault, plaintext: string): Promise<void> => {
-    const ct = await vault.transitEncrypt({ keyName: VAULT_KEY_NAME, plaintext: new TextEncoder().encode(plaintext) });
+  const setPrimaryCiphertext = async (plaintext: string): Promise<void> => {
+    const ct = encryptField({ plaintext: new TextEncoder().encode(plaintext), registry: fieldRegistry, aad: LLM_API_KEY_AAD });
     await sql`UPDATE core.llm_provider_settings SET api_key_ciphertext = ${ct} WHERE scope='platform' AND role='primary' AND provider='bedrock'`.execute(db);
   };
   const restorePrimaryCiphertext = async (): Promise<void> => {
@@ -348,7 +362,7 @@ describeDb("admin llm-config (disposable :5434)", () => {
     const vault = new InMemoryVault();
     const app = await makeAppWithVault({ vault, ok: false, message: "upstream returned 403: forbidden" });
     try {
-      await setPrimaryCiphertext(vault, "sk-real-bedrock-0123456789");
+      await setPrimaryCiphertext("sk-real-bedrock-0123456789");
       const res = await app.inject({ method: "POST", url: testUrl("bedrock", M2), cookies: superCookie() });
       expect(res.statusCode).toBe(200);
       expect(res.json<{ ok: boolean; message: string }>()).toEqual({ ok: false, message: "upstream returned 403: forbidden" });
@@ -364,7 +378,7 @@ describeDb("admin llm-config (disposable :5434)", () => {
     const vault = new InMemoryVault();
     const app = await makeAppWithVault({ vault, ok: true });
     try {
-      await setPrimaryCiphertext(vault, "sk-real-bedrock-0123456789");
+      await setPrimaryCiphertext("sk-real-bedrock-0123456789");
       const res = await app.inject({ method: "POST", url: testUrl("bedrock", M2), cookies: superCookie() });
       expect(res.statusCode).toBe(200);
       expect(res.json<{ ok: boolean; message: string }>()).toEqual({ ok: true, message: "validated" });
@@ -421,7 +435,7 @@ describeDb("admin llm-config (disposable :5434)", () => {
       expect(body.api_key_fingerprint).toBe("6789");
       expect(body.last_validation_status).toBe("ok");
       const row = await sql<{ api_key_ciphertext: string }>`SELECT api_key_ciphertext FROM core.llm_provider_settings WHERE scope='platform' AND role='primary'`.execute(db);
-      const dec = await vault.transitDecrypt({ keyName: VAULT_KEY_NAME, ciphertext: row.rows[0]!.api_key_ciphertext });
+      const dec = decryptField({ ciphertext: row.rows[0]!.api_key_ciphertext, registry: fieldRegistry, aad: LLM_API_KEY_AAD });
       expect(new TextDecoder().decode(dec)).toBe(BEDROCK_BODY.api_key);
       expect(audited.map((e) => e.action)).toEqual(["bedrock_credential.rotated", "llm_provider_credential.rotated"]);
     } finally {

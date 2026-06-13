@@ -25,7 +25,6 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeEach, expect, it } from "vitest";
 
 import { BlobStorePostgresAdapter } from "#backend/adapters/blobstore_postgres.js";
-import { InMemoryVault } from "#backend/adapters/vault_port.js";
 import { PostgresCostCapEnforcer } from "#backend/cost/postgres_enforcer.js";
 import { LlmClient, PostgresLlmCallsTelemetryWriter } from "#backend/integrations/llm/client.js";
 import {
@@ -36,28 +35,34 @@ import {
 import { LlmCredentialsProvider } from "#backend/integrations/llm/credentials_provider.js";
 import { PostgresLlmProviderSettingsRepo } from "#backend/integrations/llm/llm_provider_settings_repo.js";
 
+import { encryptField } from "#platform/crypto/aes_gcm_aad.js";
+import { KeyRegistry, makeKeySet } from "#platform/crypto/key_registry.js";
 import { disposeAllPools, getPool, tenantKysely } from "#platform/db/database.js";
 
 import { describeDb, INTEGRATION_DSN } from "../_db.js";
 
 import type { LlmSdk } from "#backend/integrations/llm/client.js";
 
-const VAULT_KEY_NAME = "llm_provider_settings";
+const LLM_API_KEY_AAD = new TextEncoder().encode("core.llm_provider_settings.api_key_ciphertext");
 const SYSTEM_ACTOR_UUID = "00000000-0000-0000-0000-0000000000aa";
 
 describeDb("LlmClientCache production forRole path is fully real (de-stub step 3)", () => {
-  const vault = new InMemoryVault();
+  const registry = new KeyRegistry();
+  registry.set(
+    makeKeySet({ currentVersion: "v1", keys: new Map([["v1", new Uint8Array(32).fill(7)]]) }),
+  );
   const dsn = INTEGRATION_DSN as string;
   // Fetch the pool / repo fresh per-call (never captured once at block scope) so a `disposeAllPools`
   // teardown anywhere never leaves a stale reference — `getPool` / `tenantKysely` rebuild transparently.
   const pool = (): ReturnType<typeof getPool> => getPool(dsn);
   const makeRepo = (): PostgresLlmProviderSettingsRepo =>
-    new PostgresLlmProviderSettingsRepo({ db: tenantKysely<unknown>(dsn), vault });
+    new PostgresLlmProviderSettingsRepo({ db: tenantKysely<unknown>(dsn), registry });
 
   const seedPrimaryRow = async (apiKeyPlaintext: string): Promise<void> => {
-    const ciphertext = await vault.transitEncrypt({
-      keyName: VAULT_KEY_NAME,
+    const ciphertext = encryptField({
       plaintext: new TextEncoder().encode(apiKeyPlaintext),
+      registry,
+      aad: LLM_API_KEY_AAD,
     });
     await pool().query(
       `INSERT INTO core.llm_provider_settings

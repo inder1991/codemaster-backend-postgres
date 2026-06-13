@@ -47,12 +47,16 @@ import { type Kysely, sql } from "kysely";
 import { type Clock, WallClock } from "#platform/clock.js";
 import { tenantKysely } from "#platform/db/database.js";
 
-import { type VaultPort } from "#backend/adapters/vault_port.js";
+import { decryptField, encryptField } from "#platform/crypto/aes_gcm_aad.js";
+import { type KeyRegistry } from "#platform/crypto/key_registry.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────────────────────
 
-/** Vault Transit key name. */
-const VAULT_KEY_NAME = "llm_provider_settings";
+/** Per-column AAD binding the api-key ciphertext to this table+column (field codec, local keyset).
+ *  Replaces the former Vault Transit key — so UI-saved LLM creds encrypt with OR without Vault. */
+const LLM_API_KEY_AAD: Uint8Array = new TextEncoder().encode(
+  "core.llm_provider_settings.api_key_ciphertext",
+);
 
 /** Provider-slot role discriminator — the two values the `role` CHECK constraint permits. */
 export type LlmProviderRole = "primary" | "secondary";
@@ -115,13 +119,29 @@ type LastRotatedAtRow = {
  */
 export class PostgresLlmProviderSettingsRepo {
   private readonly db: Kysely<unknown>;
-  private readonly vault: VaultPort;
+  private readonly registry: KeyRegistry;
   private readonly clock: Clock;
 
-  public constructor(args: { db: Kysely<unknown>; vault: VaultPort; clock?: Clock }) {
+  public constructor(args: { db: Kysely<unknown>; registry: KeyRegistry; clock?: Clock }) {
     this.db = args.db;
-    this.vault = args.vault;
+    this.registry = args.registry;
     this.clock = args.clock ?? new WallClock();
+  }
+
+  /** Decrypt an api-key ciphertext (field codec, local keyset + per-column AAD). Transient plaintext. */
+  private decryptApiKey(ciphertext: string): string {
+    return new TextDecoder("utf-8").decode(
+      decryptField({ ciphertext, registry: this.registry, aad: LLM_API_KEY_AAD }),
+    );
+  }
+
+  /** Encrypt an api-key plaintext → the `kms2:vN:<base64>` envelope (field codec). */
+  private encryptApiKey(plaintext: string): string {
+    return encryptField({
+      plaintext: new TextEncoder().encode(plaintext),
+      registry: this.registry,
+      aad: LLM_API_KEY_AAD,
+    });
   }
 
   /**
@@ -129,10 +149,10 @@ export class PostgresLlmProviderSettingsRepo {
    * Mirrors the `*.fromDsn(...)` convenience constructor the sibling spine repos expose for the
    * lazy-fallback wiring.
    */
-  public static fromDsn(args: { dsn: string; vault: VaultPort; clock?: Clock }): PostgresLlmProviderSettingsRepo {
+  public static fromDsn(args: { dsn: string; registry: KeyRegistry; clock?: Clock }): PostgresLlmProviderSettingsRepo {
     return new PostgresLlmProviderSettingsRepo({
       db: tenantKysely<unknown>(args.dsn),
-      vault: args.vault,
+      registry: args.registry,
       // Spread only when present — `exactOptionalPropertyTypes` forbids passing an explicit
       // `undefined` for the optional `clock?` field.
       ...(args.clock !== undefined ? { clock: args.clock } : {}),
@@ -170,11 +190,7 @@ export class PostgresLlmProviderSettingsRepo {
       return null;
     }
 
-    const plaintextBytes = await this.vault.transitDecrypt({
-      keyName: VAULT_KEY_NAME,
-      ciphertext: row.api_key_ciphertext,
-    });
-    const apiKey = new TextDecoder("utf-8").decode(plaintextBytes);
+    const apiKey = this.decryptApiKey(row.api_key_ciphertext);
 
     return {
       provider: row.provider,
@@ -256,10 +272,7 @@ export class PostgresLlmProviderSettingsRepo {
     rotatedAt: Date;
     rotatedByUserId: string;
   }): Promise<{ fingerprint: string }> {
-    const ciphertext = await this.vault.transitEncrypt({
-      keyName: VAULT_KEY_NAME,
-      plaintext: new TextEncoder().encode(args.apiKeyPlaintext),
-    });
+    const ciphertext = this.encryptApiKey(args.apiKeyPlaintext);
     const fingerprint = args.apiKeyPlaintext.slice(-4);
     // tenant:exempt reason=platform-config follow_up=PERMANENT-EXEMPTION-platform-llm-config
     await sql`
@@ -310,11 +323,7 @@ export class PostgresLlmProviderSettingsRepo {
       return null;
     }
 
-    const plaintextBytes = await this.vault.transitDecrypt({
-      keyName: VAULT_KEY_NAME,
-      ciphertext: row.api_key_ciphertext,
-    });
-    const apiKey = new TextDecoder("utf-8").decode(plaintextBytes);
+    const apiKey = this.decryptApiKey(row.api_key_ciphertext);
 
     return { provider: row.provider, modelId: row.model_id, region: row.region, apiKey, enabled: row.enabled };
   }

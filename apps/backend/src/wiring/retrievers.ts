@@ -40,9 +40,9 @@ import { RetrieveKnowledgeActivity } from "#backend/activities/retrieve_knowledg
 import { PostgresConfluenceRetrieval } from "#backend/adapters/postgres_confluence_retrieval.js";
 import { makeLazyEmbedderCache } from "#backend/adapters/embedder_cache.js";
 import { type EmbeddingsPort } from "#backend/adapters/embeddings_port.js";
-import { VaultHttpPort } from "#backend/adapters/vault_http.js";
 import { readRerankSettings } from "#backend/api/admin/llm_catalog_write.js";
 import { PostgresLlmProviderSettingsRepo } from "#backend/integrations/llm/llm_provider_settings_repo.js";
+import { requireAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
 import { AnnRetriever } from "#backend/retrieval/ann_retriever.js";
 import { type AnnPort, PostgresAnnPort } from "#backend/retrieval/ann_port.js";
 import {
@@ -166,7 +166,7 @@ export function buildBedrockRerankResolverFromDsn(
   const parsedEnv = parseRerankEnv(env);
   let repo: PostgresLlmProviderSettingsRepo | undefined;
   const credentials: BedrockRerankCredentialsSource = async () => {
-    repo ??= PostgresLlmProviderSettingsRepo.fromDsn({ dsn, vault: VaultHttpPort.fromEnv() });
+    repo ??= PostgresLlmProviderSettingsRepo.fromDsn({ dsn, registry: requireAuditKeyRegistry() });
     const settings = await repo.readDecryptedForProvider("bedrock");
     return settings === null ? null : { apiKey: settings.apiKey, region: settings.region };
   };

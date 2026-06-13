@@ -221,6 +221,7 @@ import { LlmClient } from "#backend/integrations/llm/client.js";
 import { LlmCredentialsProvider } from "#backend/integrations/llm/credentials_provider.js";
 import { LlmInvocationLedger } from "#backend/integrations/llm/invocation_ledger.js";
 import { PostgresLlmProviderSettingsRepo } from "#backend/integrations/llm/llm_provider_settings_repo.js";
+import { requireAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
 
 import {
   type LlmClientCacheLike,
@@ -477,8 +478,7 @@ function makeLazyRetentionGithubClient(): GitHubApiClient {
  * `bedrockReviewChunk` dispatch), matching the deferred-Vault pattern.
  */
 function buildLlmClientCache(dsn: string): LlmClientCache {
-  const vault = VaultHttpPort.fromEnv();
-  const repo = PostgresLlmProviderSettingsRepo.fromDsn({ dsn, vault });
+  const repo = PostgresLlmProviderSettingsRepo.fromDsn({ dsn, registry: requireAuditKeyRegistry() });
   const credentialsProvider = new LlmCredentialsProvider({ repo });
 
   // ADR-0068 — the ledger-wired client factory. The default `defaultClientFactory` builds the LlmClient
