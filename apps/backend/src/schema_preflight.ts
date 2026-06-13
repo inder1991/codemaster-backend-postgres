@@ -17,30 +17,10 @@ import { sql, type Kysely } from "kysely";
 /** The compiled-in expected migration sequence (names as journaled by node-pg-migrate — no `.sql`),
  *  in application order. MUST mirror the migrations/ directory exactly (CI-pinned). */
 export const EXPECTED_MIGRATIONS = [
+  // Go-live Step 6 (2026-06-13): the prior 18-migration sequence (0001_baseline + 0002..0049) was FUSED
+  // into ONE up-only baseline for first go-live — semantic-diff verified (byte-identical schema + seed
+  // vs applying all pre-fusion migrations). The pre-fusion migrations are preserved in git history.
   "0001_baseline",
-  "0002_seed",
-  "0003_llm_invocation_ledger",
-  "0004_review_runs_superseded_fk_deferrable",
-  "0035_outbox_delivery_id_index_verify",
-  "0036_review_jobs",
-  "0037_review_job_shell",
-  "0038_review_jobs_payload_check",
-  "0039_background_jobs",
-  "0040_scheduled_jobs",
-  "0041_background_jobs_deadletter_cols",
-  "0042_background_jobs_state_and_indexes",
-  "0044_review_jobs_claim_indexes",
-  // Wave-2: w2-admin's login-rate-limit + w2-scale's payload-version both landed as 0045 on their
-  // branches; reconciled — login keeps 0045 (lexically first), payload renumbered to 0046.
-  "0045_login_rate_limit",
-  "0046_payload_schema_version",
-  // Phase 0 cost-journal (was 0043 on its branch; renumbered to 0047 — 0044–0046 landed first).
-  "0047_cost_journal",
-  // W1.3 RH9 re-ranker config row. Was 0047 on feat/w2-rerank (collided with cost_journal); the two
-  // were built off the same wave-2 base, so at final integration it renumbers to 0048 (file renamed).
-  "0048_rerank_settings",
-  // Go-live Step 4b: UI-editable GitHub App creds (field-codec ciphertext). Folds into 0001_baseline at Step 6.
-  "0049_github_app_settings",
 ] as const satisfies ReadonlyArray<string>;
 
 /** The DB's applied migration sequence diverges from the image's compiled-in expectation — the pod
