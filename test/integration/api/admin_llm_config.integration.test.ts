@@ -48,7 +48,10 @@ let db: Kysely<unknown>;
 
 async function cleanup(): Promise<void> {
   await sql`DELETE FROM core.llm_models WHERE model_id IN (${M1}, ${M2})`.execute(db);
-  await sql`DELETE FROM core.llm_provider_settings WHERE scope = 'platform' AND role = 'primary' AND model_id = 'itest-prov-model'`.execute(db);
+  // Broad (all platform llm rows, not just this file's model) so a leftover platform row from another
+  // shuffled file can't collide with this file's beforeAll INSERT (P2 flake #14: duplicate key on
+  // ux_llm_provider_settings_scope_role_install).
+  await sql`DELETE FROM core.llm_provider_settings WHERE scope = 'platform'`.execute(db);
 }
 
 beforeAll(async () => {

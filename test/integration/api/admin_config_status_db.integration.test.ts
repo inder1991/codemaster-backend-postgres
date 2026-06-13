@@ -75,10 +75,21 @@ describeDb("admin config-status — DB tier (P1)", () => {
     db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) });
   });
   beforeEach(async () => {
+    // The DEFAULT config-status provider decrypts the github + confluence + llm singleton rows. Clean ALL
+    // THREE (not just the two this file seeds) so a leftover row from another admin-config test — encrypted
+    // with a DIFFERENT per-file key — can't make the provider's decrypt throw (500) under shuffled serial
+    // runs (the P2 cross-file flake: every failing run was "expected 500 to be 200").
     await sql`DELETE FROM core.github_app_settings WHERE scope = 'platform'`.execute(db);
     await sql`DELETE FROM core.llm_provider_settings WHERE scope = 'platform'`.execute(db);
+    await sql`DELETE FROM core.confluence_settings WHERE scope = 'platform'`.execute(db);
   });
   afterAll(async () => {
+    // Don't leak seeded singleton rows to the next shuffled file (P2 flake #14): a leftover platform
+    // llm row would collide with another file's beforeAll INSERT (ux_llm_provider_settings_scope_role_install),
+    // and a leftover foreign-key-encrypted row would make config-status's decrypt throw (500). Clean broadly.
+    await sql`DELETE FROM core.github_app_settings WHERE scope = 'platform'`.execute(db);
+    await sql`DELETE FROM core.llm_provider_settings WHERE scope = 'platform'`.execute(db);
+    await sql`DELETE FROM core.confluence_settings WHERE scope = 'platform'`.execute(db);
     resetAuditKeyRegistryForTesting();
     await db?.destroy();
   });
