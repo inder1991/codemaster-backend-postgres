@@ -318,10 +318,13 @@ vault:
     # Secrets the app reads from ENV (PG DSN etc.). Each maps an env var to a
     # Vault path+key; all are rendered into one sourced `runtime-env` file.
     envSecrets:
-      - env: CODEMASTER_PG_CORE_DSN
+      - env: CODEMASTER_PG_CORE_DSN          # REQUIRED — the app database (deploy:check enforces it)
         path: secret/data/codemaster/postgres/app
         key: dsn
+      # RECOMMENDED — the pg_partman maintenance DSN. Uncomment + seed it; WITHOUT it the
+      # partition_maintenance cron has no DSN and partitions stop being maintained (Day-2 table bloat).
       # - { env: CODEMASTER_PG_MAINT_DSN, path: secret/data/codemaster/postgres/maint, key: dsn }
+      # Optional integrations (uncomment + seed if used):
       # - { env: CODEMASTER_EMBEDDER_API_KEY, path: secret/data/codemaster/embedder, key: api_key }
       # - { env: LANGFUSE_API_KEY, path: secret/data/codemaster/langfuse, key: api_key }
     extraAnnotations: {}

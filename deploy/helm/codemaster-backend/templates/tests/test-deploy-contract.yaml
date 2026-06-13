@@ -1,0 +1,84 @@
+{{- /*
+`helm test` deploy-contract preflight: runs the SAME assertDeployReady the pod runs at boot
+(node apps/backend/src/deploy_check.js), but standalone — validates that every required secret is
+seeded, the pg_partman/vector extensions + schemas exist, and config is coherent. Exits non-zero
+with an actionable remediation list if not. Uses the FULL Vault injection (file secrets + env DSN,
+NOT onlyEnv) so it sees exactly what the app will. agent-pre-populate-only so the Pod can complete.
+*/ -}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "codemaster-backend.fullname" . }}-test-deploy-contract
+  labels:
+    {{- include "codemaster-backend.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    {{- with (include "codemaster-backend.vaultAgentAnnotations" (dict "root" . "onlyEnv" false)) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+    {{- if eq .Values.vault.mode "agent" }}
+    vault.hashicorp.com/agent-pre-populate-only: "true"
+    {{- end }}
+spec:
+  restartPolicy: Never
+  serviceAccountName: {{ include "codemaster-backend.serviceAccountName" . }}
+  automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+  {{- with .Values.image.pullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    {{- toYaml .Values.podSecurityContext | nindent 4 }}
+  containers:
+    - name: deploy-check
+      image: {{ include "codemaster-backend.image" . }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      {{- if include "codemaster-backend.usesEnvWrapper" . }}
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -a
+          . {{ .Values.vault.secretsDir }}/runtime-env
+          set +a
+          exec node apps/backend/src/deploy_check.js
+      {{- else }}
+      command: ["node", "apps/backend/src/deploy_check.js"]
+      {{- end }}
+      env:
+        - name: HOME
+          value: /tmp
+        - name: CODEMASTER_VAULT_SECRETS_DIR
+          value: {{ .Values.vault.secretsDir | quote }}
+        - name: CODEMASTER_RUNTIME_MODE
+          value: {{ .Values.config.runtime.mode | quote }}
+        - name: CODEMASTER_EMBEDDINGS_PROVIDER
+          value: {{ .Values.config.embeddings.provider | quote }}
+        {{- with .Values.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if or (eq .Values.vault.mode "token") .Values.extraEnvFrom }}
+      envFrom:
+        {{- if eq .Values.vault.mode "token" }}
+        {{- if .Values.vault.token.existingSecret }}
+        - secretRef:
+            name: {{ .Values.vault.token.existingSecret }}
+        {{- else if .Values.vault.token.create }}
+        - secretRef:
+            name: {{ include "codemaster-backend.devSecretName" . }}
+        {{- end }}
+        {{- end }}
+        {{- with .Values.extraEnvFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.containerSecurityContext | nindent 8 }}
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir:
+        sizeLimit: 64Mi

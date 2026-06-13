@@ -1,6 +1,10 @@
 codemaster-backend {{ .Chart.AppVersion }} — release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
 
-This release runs ONE combined pod: HTTP API + Temporal review worker + outbox-dispatcher worker.
+This release runs ONE combined pod: HTTP API + the Postgres background runtime (review-job runner +
+scheduler + outbox-drain loops). First deploy? See docs/runbooks/first-deploy.md.
+
+Validate the deploy contract (required secrets + DB extensions/schemas + config) in-cluster:
+  helm test {{ .Release.Name }}     # runs deploy:check + the /healthz,/readyz smoke
 
 Image:      {{ include "codemaster-backend.image" . }}
 Replicas:   {{ if .Values.autoscaling.enabled }}HPA {{ .Values.autoscaling.minReplicas }}–{{ .Values.autoscaling.maxReplicas }}{{ else }}{{ .Values.replicaCount }}{{ end }}
