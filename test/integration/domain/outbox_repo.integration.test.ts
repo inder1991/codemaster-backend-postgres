@@ -147,6 +147,34 @@ describeDb("PostgresOutboxRepo (integration, disposable PG)", () => {
       return { state: r.state, attempts: Number(r.attempts), leasedUntil: r.leased_until };
     }
 
+    it("W3.1 dead-letter: listDead surfaces dead rows (no payload); replayDead resets fences + returns prior", async () => {
+      const db = tenantKysely(INTEGRATION_DSN!);
+      const id = await seedPending("dead-letter");
+      await cRepo.markDead({ db, id, error: "boom: permanent sink failure" });
+      await pool.query(`UPDATE core.outbox SET attempts = 3 WHERE id = $1`, [id]);
+
+      const dead = await cRepo.listDead({ db, limit: 100 });
+      const mine = dead.find((d) => d.id === id);
+      expect(mine).toBeDefined();
+      expect(mine!.last_error).toContain("boom");
+      expect(mine!.attempts).toBe(3);
+      expect(mine).not.toHaveProperty("payload"); // never surfaces the (possibly secret-bearing) payload
+
+      const prior = await cRepo.replayDead({ db, id });
+      expect(prior).toEqual({ priorAttempts: 3, priorError: "boom: permanent sink failure" });
+      const after = await rowOf(id);
+      expect(after.state).toBe("pending"); // re-claimable by the dispatcher
+      expect(after.attempts).toBe(0); // fence cleared
+      expect(after.leasedUntil).toBeNull();
+    });
+
+    it("W3.1 dead-letter: replayDead on a NON-dead row is a no-op → null (fenced to state='dead')", async () => {
+      const db = tenantKysely(INTEGRATION_DSN!);
+      const id = await seedPending("replay-noop"); // still 'pending'
+      expect(await cRepo.replayDead({ db, id })).toBeNull();
+      expect((await rowOf(id)).state).toBe("pending"); // untouched
+    });
+
     it("claimPending claims a pending row, holds the lease, then re-claims after expiry", async () => {
       fakeClock.set({ now: new Date("2026-06-06T12:00:00.000Z") });
       const db = tenantKysely(INTEGRATION_DSN!);

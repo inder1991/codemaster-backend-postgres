@@ -50,6 +50,19 @@ export const REVIEW_WORKFLOW_TYPES: ReadonlySet<string> = new Set(["reviewPullRe
 /** A Kysely instance or an open Transaction — the executor the raw `sql` runs on. */
 type Executor = Kysely<unknown>;
 
+/** A dead outbox row's inspection view for the W3.1 operator dead-letter surface — routing + failure
+ *  metadata ONLY (never the payload, which can be large or secret-bearing). */
+export type DeadOutboxRow = {
+  id: string;
+  sink: string;
+  attempts: number;
+  last_error: string | null;
+  last_attempted_at: Date | null;
+  created_at: Date;
+  installation_id: string | null;
+  run_id: string | null;
+};
+
 /** A claimed outbox row projected by {@link PostgresOutboxRepo.claimPending} for the dispatcher
  *  (run_id/review_id/provider feed the stale-write guard + the INGESTED emit). `deliveryId` (W1.9e)
  *  carries the row's webhook delivery id so the Postgres drain loop can thread it into the SinkContext
@@ -347,5 +360,46 @@ export class PostgresOutboxRepo {
              last_attempted_at = ${this.#clock.now()}, leased_until = NULL
        WHERE id = ${args.id}
     `.execute(args.db);
+  }
+
+  /** W3.1 operator dead-letter surface: the dead outbox rows for inspection (NEVER the payload — it can be
+   *  large/secret-bearing; only the routing + failure metadata). Newest-failure first, bounded. */
+  public async listDead(args: { db: Executor; limit: number }): Promise<ReadonlyArray<DeadOutboxRow>> {
+    // tenant:exempt reason=platform-operator-dead-letter-inspection follow_up=PERMANENT-EXEMPTION-dead-letter-ops
+    const r = await sql<DeadOutboxRow>`
+      SELECT id, sink, attempts, last_error, last_attempted_at, created_at, installation_id, run_id
+        FROM core.outbox
+       WHERE state = 'dead'
+       ORDER BY last_attempted_at DESC NULLS LAST
+       LIMIT ${args.limit}
+    `.execute(args.db);
+    return r.rows;
+  }
+
+  /** W3.1 operator dead-letter REPLAY: reset a DEAD row back to 'pending' with its fence columns cleared
+   *  (attempts→0, leased_until→NULL, last_error→NULL) so the dispatcher re-attempts it after a fix. Fenced
+   *  to `state='dead'` (a no-op on any non-dead row → returns null, so the route 404s). RETURNs the prior
+   *  {attempts, last_error} so the caller can archive them into the audit before they're cleared. */
+  public async replayDead(args: {
+    db: Executor;
+    id: string;
+  }): Promise<{ priorAttempts: number; priorError: string | null } | null> {
+    // CTE so we return the PRIOR attempts/last_error (a plain RETURNING would give the post-UPDATE 0/NULL).
+    // `old` captures + FOR UPDATE locks the dead row; `upd` resets it; the final SELECT yields the old values.
+    // tenant:exempt reason=PK-update-by-outbox-id-operator-replay follow_up=PERMANENT-EXEMPTION-dead-letter-ops
+    const r = await sql<{ attempts: number; last_error: string | null }>`
+      WITH old AS (
+        SELECT id, attempts, last_error FROM core.outbox
+         WHERE id = ${args.id} AND state = 'dead' FOR UPDATE
+      ), upd AS (
+        UPDATE core.outbox
+           SET state = 'pending', attempts = 0, leased_until = NULL, last_error = NULL
+         WHERE id IN (SELECT id FROM old)
+        RETURNING id
+      )
+      SELECT old.attempts, old.last_error FROM old
+    `.execute(args.db);
+    const row = r.rows[0];
+    return row === undefined ? null : { priorAttempts: row.attempts, priorError: row.last_error };
   }
 }

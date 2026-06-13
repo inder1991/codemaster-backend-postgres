@@ -237,6 +237,7 @@ import { PostgresLlmProviderSettingsRepo } from "#backend/integrations/llm/llm_p
 import { getAuditKeyRegistry, requireAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
 import { PostgresGitHubAppSettingsRepo } from "#backend/integrations/github/github_app_settings_repo.js";
 import { PostgresConfluenceSettingsRepo } from "#backend/integrations/confluence/confluence_settings_repo.js";
+import { PostgresOutboxRepo } from "#backend/domain/repos/outbox_repo.js";
 import { type GetPreflightValidator } from "#backend/integrations/llm/preflight_validator.js";
 import { PLATFORM_SCOPE_AUDIT_INSTALLATION_ID } from "#backend/infra/sentinels.js";
 import { insertTaxonomySuggestion } from "#backend/api/admin/taxonomy_write.js";
@@ -680,6 +681,51 @@ export async function registerAdminRoutes(
             ? "Connected to Confluence."
             : `Confluence connectivity failed${result.errorCode ? ` (${result.errorCode})` : ""}${result.errorDetail ? `: ${result.errorDetail}` : ""}`,
         });
+      },
+    );
+
+    // ─── Dead-letter operator surface (W3.1) ──────────────────────────────────────────────────────
+    // List + replay dead outbox rows (the meta-boundary that drives review enqueue + every GitHub post).
+    // Replaying resets a dead row → pending with its fence columns cleared so the dispatcher re-attempts it
+    // after a fix/transient outage. GET is platform_operator+ (inspection); POST replay is super_admin +
+    // audited. (Other dead-letter classes — review_jobs / background_jobs / stranded mutex / blocked
+    // installations — follow the same list+replay+audit shape; outbox is the first + most general.)
+    scope.get(
+      "/api/admin/dead-letter/outbox",
+      { preHandler: requireRole(["platform_operator", "platform_owner", "super_admin"]) },
+      async (request) => {
+        const raw = Number((request.query as { limit?: string }).limit ?? "100");
+        const limit = Number.isInteger(raw) && raw > 0 && raw <= 500 ? raw : 100;
+        const rows = await new PostgresOutboxRepo({ clock: opts.clock }).listDead({ db: opts.db, limit });
+        return { rows };
+      },
+    );
+    scope.post(
+      "/api/admin/dead-letter/outbox/:id/replay",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const id = (request.params as { id: string }).id;
+        if (!UUID_RE.test(id)) {
+          return reply.code(422).send({ detail: "id must be a UUID" });
+        }
+        const prior = await new PostgresOutboxRepo({ clock: opts.clock }).replayDead({ db: opts.db, id });
+        if (prior === null) {
+          // Not dead (already replayed / dispatched / pending / unknown id) — nothing to replay.
+          return reply.code(404).send({ detail: "no dead outbox row with that id" });
+        }
+        const principal = request.authPrincipal!;
+        // Archive the dead state into the audit BEFORE it was cleared (prior attempts + truncated error).
+        await opts.audit?.({
+          actorUserId: principal.userId,
+          installationId: principal.installationId,
+          action: "outbox.replayed",
+          targetKind: "outbox",
+          targetId: id,
+          before: { state: "dead", attempts: prior.priorAttempts, last_error: (prior.priorError ?? "").slice(0, 256) },
+          after: { state: "pending" },
+          now: opts.clock.now(),
+        });
+        return reply.code(200).send({ ok: true });
       },
     );
 
