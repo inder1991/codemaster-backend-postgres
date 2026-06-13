@@ -23,7 +23,6 @@
 import { type Clock } from "#platform/clock.js";
 import { type Random, SystemRandom } from "#platform/randomness.js";
 
-import { type VaultPort } from "#backend/adapters/vault_port.js";
 import * as metrics from "#backend/observability/confluence_token_metrics.js";
 
 // ─── Operational defaults (locked per plan doc) ───────────────────────────────────────────────────
@@ -73,8 +72,16 @@ export class TransientConfluenceTokenError extends ConfluenceTokenError {
 
 // ─── Provider ─────────────────────────────────────────────────────────────────────────────────────
 
+/** The narrow Vault read surface this provider needs: refreshOnce reads the {base_url, token, email}
+ *  record at {@link VAULT_KV_PATH}. A resolving reader (DB > env > Vault — see confluence_config_resolver)
+ *  satisfies this structurally, so the provider stays agnostic about WHERE the creds come from. The full
+ *  VaultPort + the InMemoryVault test double both satisfy it (they have `kvRead`). */
+export type ConfluenceVaultReader = {
+  kvRead(args: { path: string; version?: number }): Promise<Record<string, string>>;
+};
+
 export type ConfluenceTokenProviderOptions = {
-  vault: VaultPort;
+  vault: ConfluenceVaultReader;
   clock: Clock;
   refreshIntervalSeconds?: number;
   jitterRangeSeconds?: number;
@@ -87,7 +94,7 @@ export type ConfluenceTokenProviderOptions = {
 };
 
 export class ConfluenceTokenProvider {
-  private readonly vault: VaultPort;
+  private readonly vault: ConfluenceVaultReader;
   private readonly clock: Clock;
   private readonly refreshInterval: number;
   private readonly jitterRange: number;

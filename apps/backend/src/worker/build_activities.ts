@@ -182,6 +182,7 @@ import { PostgresConfluenceChunksRepo } from "#backend/domain/repos/confluence_c
 import { PostgresConfluencePageApprovalsRepo } from "#backend/domain/repos/confluence_page_approvals_repo.js";
 import { makeLazyEmbedderCache } from "#backend/adapters/embedder_cache.js";
 import { ConfluenceClient } from "#backend/integrations/confluence/client.js";
+import { makeResolvingConfluenceReader } from "#backend/integrations/confluence/confluence_config_resolver.js";
 import { ConfluenceTokenProvider } from "#backend/integrations/confluence/token_provider.js";
 import { tenantKysely } from "#platform/db/database.js";
 
@@ -206,7 +207,6 @@ import { PostgresKnowledgeChunkRepo } from "#backend/domain/repos/knowledge_chun
 import { type TokenProvider } from "#backend/integrations/github/api_client.js";
 
 import { resolveEmbeddingsConsumer } from "#backend/adapters/resolve_embeddings.js";
-import { VaultHttpPort } from "#backend/adapters/vault_http.js";
 
 import { FetchGitHubHttpClient } from "#backend/integrations/github/api_client.js";
 import { GitSubprocessCloner } from "#backend/integrations/git/cloner.js";
@@ -664,8 +664,12 @@ function makeCodeOwnersFilePort(): CodeOwnersFilePort {
  */
 async function buildConfluenceClient(): Promise<ConfluenceClient> {
   const clock = new WallClock();
-  const vault = VaultHttpPort.fromEnv();
-  const tokenProvider = await ConfluenceTokenProvider.fromVault({ vault, clock });
+  // Resolve creds DB > env > Vault at use-time (review P0-C parity) — a UI-saved Confluence config takes
+  // effect without a redeploy; the Vault tier is built lazily so openshift-no-Vault never touches Vault.
+  const tokenProvider = await ConfluenceTokenProvider.fromVault({
+    vault: makeResolvingConfluenceReader(),
+    clock,
+  });
   tokenProvider.startRefreshLoop();
   // `authEmail` selects HTTP-Basic (Atlassian Cloud) vs Bearer (Server/DC PAT). It is OMITTED (not set to
   // `undefined`) when the provider has no Cloud email, per exactOptionalPropertyTypes — a `null` email keeps

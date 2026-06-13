@@ -97,9 +97,14 @@ export function makeLazyConfluenceChunkClient(
             const { ConfluenceTokenProvider } = await import(
               "#backend/integrations/confluence/token_provider.js"
             );
-            const { VaultHttpPort } = await import("#backend/adapters/vault_http.js");
-            const vault = VaultHttpPort.fromEnv();
-            return await ConfluenceTokenProvider.fromVault({ vault, clock });
+            // Resolve creds DB > env > Vault at use-time (review P0-C parity); Vault tier built lazily.
+            const { makeResolvingConfluenceReader } = await import(
+              "#backend/integrations/confluence/confluence_config_resolver.js"
+            );
+            return await ConfluenceTokenProvider.fromVault({
+              vault: makeResolvingConfluenceReader(),
+              clock,
+            });
           });
         const tokenProvider = await makeTokenProvider();
         provider = tokenProvider;
