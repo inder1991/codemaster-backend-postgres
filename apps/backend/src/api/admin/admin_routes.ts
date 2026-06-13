@@ -347,9 +347,9 @@ export type AdminRoutesOptions = {
   /** Optional audit-emit seam for the admin WRITE endpoints (members role-changes). Undefined → no-op
    *  (the TS audit-emit pg-client wiring is dormant — FOLLOW-UP). Mirrors login.ts's audit callback. */
   audit?: MemberAuditEmitter;
-  /** Vault Transit port for the llm-provider-config credential write (encrypt). Undefined → the
-   *  PUT/preflight/test-credentials credential-write routes 503 (unwired at the composition root). */
-  vault?: VaultPort;
+  /** Vault port for the platform-credentials routes only (the LLM/GitHub routes encrypt via the field-key
+   *  registry, not Vault). Undefined in openshift mode (no Vault) → the platform-credentials routes 503. */
+  vault?: VaultPort | undefined;
   /** Injected preflight-validator factory. Undefined → the llm-provider-config credential routes 503.
    *  Production wires the real Bedrock/AnthropicDirect SDK validators; tests inject a stub. */
   getPreflightValidator?: GetPreflightValidator;
@@ -2147,8 +2147,8 @@ export async function registerAdminRoutes(
       { preHandler: requireRole(["super_admin"]) },
       async (request, reply) => {
         const params = request.params as { provider: string; model_id: string };
-        if (opts.vault === undefined || opts.getPreflightValidator === undefined) {
-          return reply.code(503).send({ detail: "llm-models preflight not configured (vault + preflight validator unwired)" });
+        if (opts.getPreflightValidator === undefined) {
+          return reply.code(503).send({ detail: "llm-models preflight not configured (preflight validator unwired)" });
         }
         const noCreds = (provider: string) =>
           reply.code(200).send(
@@ -2258,10 +2258,10 @@ export async function registerAdminRoutes(
         if (!parsed.success) {
           return reply.code(422).send({ detail: "request body failed schema validation" });
         }
-        if (opts.vault === undefined || opts.getPreflightValidator === undefined) {
+        if (opts.getPreflightValidator === undefined) {
           return reply
             .code(503)
-            .send({ detail: "llm-provider-config write not configured (vault + preflight validator unwired)" });
+            .send({ detail: "llm-provider-config write not configured (preflight validator unwired)" });
         }
         const body = parsed.data;
         // Skip preflight when disabling — the intent is to halt traffic, not validate the token.
@@ -2484,8 +2484,8 @@ export async function registerAdminRoutes(
         if (!parsed.success) {
           return reply.code(422).send({ detail: "request body failed schema validation" });
         }
-        if (opts.vault === undefined || opts.getPreflightValidator === undefined) {
-          return reply.code(503).send({ detail: "bedrock-config write not configured (vault + preflight validator unwired)" });
+        if (opts.getPreflightValidator === undefined) {
+          return reply.code(503).send({ detail: "bedrock-config write not configured (preflight validator unwired)" });
         }
         request.log.warn(
           { rule: "bedrock-config-deprecated", installation_id: principal.installationId },

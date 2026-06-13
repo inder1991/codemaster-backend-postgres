@@ -14,8 +14,7 @@ import { NoOpLdapClient } from "#backend/api/auth/noop_ldap.js";
 import { PostgresLoginRateLimiter } from "#backend/api/auth/rate_limit.js";
 import { persistWebhook } from "#backend/ingest/github_webhook_persistence.js";
 import { makeWebhookSecretProvider } from "#backend/ingest/webhook_secret_provider.js";
-import { setAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
-import { loadFieldEncryptionKeyRegistry } from "#backend/security/field_encryption_keys_loader.js";
+import { getAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
 
 import { tenantKysely } from "#platform/db/database.js";
 import { WallClock } from "#platform/clock.js";
@@ -72,10 +71,22 @@ export async function runServer(deps: RunServerDeps = {}): Promise<void> {
         "CODEMASTER_AUTH_ROUTES_ENABLED=true requires CODEMASTER_PG_CORE_DSN (the core.local_users pool).",
       );
     }
-    const vault = VaultHttpPort.fromEnv();
-    const registry = await loadFieldEncryptionKeyRegistry(vault);
-    // The audit-events READ endpoint decrypts before/after via the shared field-encryption registry.
-    setAuditKeyRegistry(registry);
+    // The field-encryption key registry is installed source-aware by the composition root (main.ts
+    // installFieldKeyRegistryAtBoot) BEFORE this bind — openshift→env keyset, vault→Vault. Consume it
+    // here (the local-user repo + the audit-events READ endpoint decrypt through it); fail loud if a
+    // boot without a key source left it null.
+    const registry = getAuditKeyRegistry();
+    if (registry === null) {
+      throw new Error(
+        "CODEMASTER_AUTH_ROUTES_ENABLED=true requires the field-encryption key registry, which must be " +
+          "installed at boot: set CODEMASTER_FIELD_ENCRYPTION_KEYSET (openshift) or a Vault key source " +
+          "(see installFieldKeyRegistryAtBoot).",
+      );
+    }
+    // Vault is OPTIONAL now: the LLM/GitHub admin routes encrypt via the field-key registry, so only the
+    // platform-credentials routes still need it. openshift (no VAULT_ADDR) → undefined, and those routes
+    // 503 (correct degradation) while the field-codec routes work.
+    const vault = (process.env["VAULT_ADDR"] ?? "") === "" ? undefined : VaultHttpPort.fromEnv();
     const authSecrets = makeAuthSecretsProvider();
     const [signingKey, csrfSecret] = await Promise.all([
       authSecrets.sessionSigningKey(),

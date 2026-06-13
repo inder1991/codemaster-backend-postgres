@@ -266,6 +266,31 @@ describeDb("admin llm-config (disposable :5434)", () => {
     }
   });
 
+  it("PUT llm-provider-config works WITHOUT opts.vault — the field codec needs only the registry + validator (P0-A.2d)", async () => {
+    // openshift mode wires no vault; after the 4a field-codec swap the LLM write encrypts via the
+    // installed field-key registry, so it must NOT 503 just because opts.vault is undefined.
+    const app = buildApp({});
+    await registerAdminRoutes(app, {
+      db,
+      signingKey: SIGNING_KEY,
+      clock: new FakeClock({ now: NOW }),
+      getPreflightValidator: stubFactory(true, null),
+    });
+    await app.ready();
+    try {
+      const res = await app.inject({
+        method: "PUT",
+        url: "/api/admin/llm-provider-config",
+        cookies: superCookie(),
+        payload: PUT_BODY,
+      });
+      expect(res.statusCode).toBe(200);
+    } finally {
+      await deleteSecondary();
+      await app.close();
+    }
+  });
+
   it("POST preflight + test-credentials → 200 {ok,message} regardless of outcome", async () => {
     const vault = new InMemoryVault();
     const appOk = await makeAppWithVault({ vault, ok: true });
