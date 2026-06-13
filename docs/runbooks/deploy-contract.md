@@ -24,6 +24,7 @@ Vault. `/config-status` reports which are configured vs pending.
 | `github_app.app_id` | file | `codemaster/github/app` | app_id | no | GitHub App authentication (no PR reviews until configured) |
 | `github_app.private_key_pem` | file | `codemaster/github/app` | private_key_pem | no | GitHub App authentication (clone + post review) |
 | `github_app.webhook_secret` | file | `codemaster/github/app` | webhook_secret | no | inbound webhook HMAC verification |
+| `confluence.base_url` | file | `codemaster/confluence/token` | base_url | no | Confluence ingestion (knowledge corpus) |
 | `confluence.token` | file | `codemaster/confluence/token` | token | no | Confluence ingestion (knowledge corpus) |
 | `api_auth.session_signing_key` | file | `codemaster/api/auth` | session_signing_key | no | session signing key (auth routes) — auto-generated + persisted if unset |
 | `api_auth.csrf_secret` | file | `codemaster/api/auth` | csrf_secret | no | CSRF secret (auth routes) — auto-generated + persisted if unset |

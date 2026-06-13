@@ -251,6 +251,18 @@ export const DEPLOY_CONTRACT: DeployContract = {
       required: false,
       gates: "inbound webhook HMAC verification",
     },
+    // Confluence is a TWO-key secret at one Vault path: the provider (ConfluenceTokenProvider.refreshOnce)
+    // REQUIRES base_url AND token, so config-status must track BOTH — else it reports "configured" with only
+    // the token seeded while the runtime throws "missing base_url" (review: configured-but-broken).
+    {
+      name: "confluence.base_url",
+      source: "file",
+      fileName: "codemaster_confluence_token",
+      vaultPath: "codemaster/confluence/token",
+      key: "base_url",
+      required: false,
+      gates: "Confluence ingestion (knowledge corpus)",
+    },
     {
       name: "confluence.token",
       source: "file",

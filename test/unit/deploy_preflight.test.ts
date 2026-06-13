@@ -279,4 +279,20 @@ describe("getConfigStatus (advisory, non-blocking)", () => {
     expect(status[0]?.state).toBe("pending");
     expect(status[0]?.source).toBe("none");
   });
+
+  it("tracks confluence.base_url AND confluence.token — token-only is NOT all-configured (configured-but-broken gap)", async () => {
+    const { DEPLOY_CONTRACT, getConfigStatus, observeDeployState } = await import(
+      "#backend/deploy_preflight.js"
+    );
+    // Only the token is seeded at the confluence Vault path (the old seeder's shape) — base_url absent.
+    const observed = await observeDeployState(
+      DEPLOY_CONTRACT,
+      fakeDeps({ files: { codemaster_confluence_token: { token: "atlassian-tok" } } }),
+    );
+    const status = getConfigStatus(DEPLOY_CONTRACT, observed);
+    const baseUrl = status.find((s) => s.key === "confluence.base_url");
+    const token = status.find((s) => s.key === "confluence.token");
+    expect(token?.state).toBe("configured"); // token present
+    expect(baseUrl?.state).toBe("pending"); // base_url missing → NOT configured (the provider requires it)
+  });
 });
