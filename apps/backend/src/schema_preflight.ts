@@ -39,6 +39,8 @@ export const EXPECTED_MIGRATIONS = [
   // W1.3 RH9 re-ranker config row. Was 0047 on feat/w2-rerank (collided with cost_journal); the two
   // were built off the same wave-2 base, so at final integration it renumbers to 0048 (file renamed).
   "0048_rerank_settings",
+  // Go-live Step 4b: UI-editable GitHub App creds (field-codec ciphertext). Folds into 0001_baseline at Step 6.
+  "0049_github_app_settings",
 ] as const satisfies ReadonlyArray<string>;
 
 /** The DB's applied migration sequence diverges from the image's compiled-in expectation — the pod
