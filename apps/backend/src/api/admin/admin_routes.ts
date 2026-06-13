@@ -235,6 +235,7 @@ import { type DnsResolver } from "#backend/security/url_validator.js";
 import { type VaultPort } from "#backend/adapters/vault_port.js";
 import { PostgresLlmProviderSettingsRepo } from "#backend/integrations/llm/llm_provider_settings_repo.js";
 import { requireAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
+import { PostgresGitHubAppSettingsRepo } from "#backend/integrations/github/github_app_settings_repo.js";
 import { type GetPreflightValidator } from "#backend/integrations/llm/preflight_validator.js";
 import { PLATFORM_SCOPE_AUDIT_INSTALLATION_ID } from "#backend/infra/sentinels.js";
 import { insertTaxonomySuggestion } from "#backend/api/admin/taxonomy_write.js";
@@ -439,6 +440,51 @@ export async function registerAdminRoutes(
       "/api/admin/config-status",
       { preHandler: requireRole(["platform_operator", "platform_owner", "super_admin"]) },
       async () => ({ items: await configStatusProvider() }),
+    );
+
+    // GitHub App config (UI-editable; go-live Step 4b). Secrets are stored field-codec-encrypted; GET
+    // NEVER returns them (only app_id + enabled + configured), PUT (super_admin) writes the platform
+    // singleton. The app resolves creds DB > env > Vault > disabled at use-time, so this is non-blocking.
+    scope.get(
+      "/api/admin/github-config",
+      { preHandler: requireRole(["platform_owner", "super_admin"]) },
+      async () => {
+        const repo = new PostgresGitHubAppSettingsRepo({ db: opts.db, registry: requireAuditKeyRegistry() });
+        const cfg = await repo.read();
+        return cfg === null
+          ? { configured: false }
+          : { configured: true, appId: cfg.appId, enabled: cfg.enabled };
+      },
+    );
+    scope.put(
+      "/api/admin/github-config",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const body = request.body as {
+          app_id?: unknown;
+          private_key_pem?: unknown;
+          webhook_secret?: unknown;
+          enabled?: unknown;
+        };
+        if (
+          typeof body.app_id !== "string" ||
+          typeof body.private_key_pem !== "string" ||
+          typeof body.webhook_secret !== "string"
+        ) {
+          return reply
+            .code(422)
+            .send({ detail: "app_id, private_key_pem, webhook_secret are required strings" });
+        }
+        const repo = new PostgresGitHubAppSettingsRepo({ db: opts.db, registry: requireAuditKeyRegistry() });
+        await repo.write({
+          appId: body.app_id,
+          privateKeyPem: body.private_key_pem,
+          webhookSecret: body.webhook_secret,
+          enabled: typeof body.enabled === "boolean" ? body.enabled : true,
+          rotatedByUserId: request.authPrincipal!.userId,
+        });
+        return reply.code(200).send({ ok: true });
+      },
     );
 
     scope.get(
