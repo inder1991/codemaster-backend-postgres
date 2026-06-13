@@ -25,8 +25,9 @@ CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 
 You need two DSNs: the app DSN (`CODEMASTER_PG_CORE_DSN`) and — recommended — a maintenance DSN
 (`CODEMASTER_PG_MAINT_DSN`) for `pg_partman`. Migrations run with DDL/owner privileges; the runtime
-needs only DML. **Never point migrations at a shared/cluster DB.** If you front Postgres with PgBouncer,
-use **session** mode (the cost-journal uses advisory locks; transaction mode breaks them).
+needs only DML. **Never point migrations at a shared/cluster DB.** PgBouncer **transaction** mode is fine:
+every advisory lock the app takes is transaction-scoped (`pg_try_advisory_xact_lock`), released at
+commit/rollback — so the pool can hand the connection to another client between transactions.
 
 ## 2. Create the GitHub App
 

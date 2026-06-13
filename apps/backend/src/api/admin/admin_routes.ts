@@ -500,6 +500,22 @@ export async function registerAdminRoutes(
             .code(422)
             .send({ detail: "app_id, private_key_pem, webhook_secret are required strings" });
         }
+        // Format/bound validation at save (review P2): reject at the API, not later at token-mint. app_id
+        // must be the base-10 GitHub App ID (the token provider's int() parity); the PEM must look like one
+        // and stay sane-sized; the webhook secret non-empty. Bounds cap encrypt/store cost (BODY_LIMIT is 10MB).
+        if (!/^\s*[0-9]+\s*$/.test(body.app_id) || body.app_id.length > 64) {
+          return reply.code(422).send({ detail: "app_id must be a base-10 integer (the GitHub App ID)" });
+        }
+        if (!body.private_key_pem.includes("BEGIN") || body.private_key_pem.length > 16_384) {
+          return reply
+            .code(422)
+            .send({ detail: "private_key_pem must be a PEM-encoded private key (<=16KB)" });
+        }
+        if (body.webhook_secret.length === 0 || body.webhook_secret.length > 512) {
+          return reply
+            .code(422)
+            .send({ detail: "webhook_secret must be a non-empty secret (<=512 chars)" });
+        }
         const principal = request.authPrincipal!;
         const enabled = typeof body.enabled === "boolean" ? body.enabled : true;
         const repo = new PostgresGitHubAppSettingsRepo({ db: opts.db, registry: requireAuditKeyRegistry() });

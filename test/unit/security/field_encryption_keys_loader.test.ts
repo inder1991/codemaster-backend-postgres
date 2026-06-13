@@ -35,6 +35,15 @@ describe("field_encryption_keys_loader (parity with key_loader.py)", () => {
       expect(keys.get("v2")).toEqual(new Uint8Array(32).fill(7));
     });
 
+    it("rejects an empty current_version (degenerate kms2:: envelope) (P2)", () => {
+      expect(() => parseKeysetPayload({ current_version: "", keys: { v1: ZERO_KEY_B64 } })).toThrow(
+        FieldKeyLoaderError,
+      );
+      expect(() => parseKeysetPayload({ current_version: "   ", keys: { v1: ZERO_KEY_B64 } })).toThrow(
+        FieldKeyLoaderError,
+      );
+    });
+
     it("rejects a missing current_version / keys", () => {
       expect(() => parseKeysetPayload({ keys: { v1: ZERO_KEY_B64 } })).toThrow(FieldKeyLoaderError);
       expect(() => parseKeysetPayload({ current_version: "v1" })).toThrow(FieldKeyLoaderError);

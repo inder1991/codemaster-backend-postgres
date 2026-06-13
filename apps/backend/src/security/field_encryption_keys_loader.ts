@@ -43,6 +43,11 @@ export function parseKeysetPayload(payload: Record<string, unknown>): {
   if (typeof currentVersion !== "string") {
     throw new FieldKeyLoaderError(`current_version must be str, got ${typeof currentVersion}`);
   }
+  // Reject an empty current_version (review P2): "" passes the typeof guard but produces a degenerate
+  // `kms2::<base64>` envelope (the version segment between the colons is empty), a confused key identity.
+  if (currentVersion.trim() === "") {
+    throw new FieldKeyLoaderError("current_version must be a non-empty version label (e.g. 'v1')");
+  }
   const keysRaw = payload["keys"];
   if (keysRaw === undefined) {
     throw new FieldKeyLoaderError("payload missing 'keys' field");

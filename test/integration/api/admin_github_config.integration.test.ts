@@ -126,6 +126,21 @@ describeDb("admin github-config (disposable)", () => {
     await app.close();
   });
 
+  it("PUT 422 on malformed fields — non-numeric app_id, non-PEM key, empty webhook (P2)", async () => {
+    const app = await makeApp();
+    const put = (payload: object) =>
+      app.inject({ method: "PUT", url: "/api/admin/github-config", cookies: cookie("super_admin"), payload });
+    try {
+      expect((await put({ app_id: "not-a-number", private_key_pem: PEM, webhook_secret: "w" })).statusCode).toBe(422);
+      expect((await put({ app_id: "123", private_key_pem: "plaintext-not-a-pem", webhook_secret: "w" })).statusCode).toBe(422);
+      expect((await put({ app_id: "123", private_key_pem: PEM, webhook_secret: "" })).statusCode).toBe(422);
+      // a well-formed body still validates (control)
+      expect((await put({ app_id: "123", private_key_pem: PEM, webhook_secret: "whsec" })).statusCode).toBe(200);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("GET returns configured:false when unconfigured", async () => {
     const app = await makeApp();
     const get = await app.inject({ method: "GET", url: "/api/admin/github-config", cookies: cookie("super_admin") });

@@ -48,6 +48,7 @@ export class PostgresGitHubAppSettingsRepo {
       SELECT app_id, private_key_pem_ciphertext, webhook_secret_ciphertext, enabled
         FROM core.github_app_settings
        WHERE scope = 'platform'
+       LIMIT 1
     `.execute(this.db);
     const row = result.rows[0];
     if (row === undefined || !row.enabled) {

@@ -1,9 +1,9 @@
 /**
- * `core.llm_provider_settings` Postgres adapter — REAL Kysely + Vault-Transit (de-stub step 1).
+ * `core.llm_provider_settings` Postgres adapter — REAL Kysely + the local field codec.
  * No stub, no mock, no no-op on the shipped path. Runs three reads
  * against `core.llm_provider_settings` over the shared single-pool Kysely seam ({@link tenantKysely})
- * and decrypts `api_key_ciphertext` via the REAL Vault Transit key `"llm_provider_settings"` through
- * the injected {@link VaultPort}. The ported subset is the three reads named by the de-stub task:
+ * and decrypts `api_key_ciphertext` via the local field codec (AES-256-GCM + a per-column AAD) through
+ * the injected {@link KeyRegistry} — NOT Vault Transit (go-live Step 4a). The three reads:
  *
  *   1. {@link PostgresLlmProviderSettingsRepo.readDecryptedSettings} — worker-side decrypted read.
  *      Returns {@link LlmProviderSettings} (plaintext `apiKey` + provider + modelId + region +
@@ -18,12 +18,13 @@
  * the Python module are OUT OF SCOPE for this de-stub step (worker-side read path only) and are NOT
  * ported here.
  *
- * ── Vault key + decrypt path ──
- * The Vault Transit key is `"llm_provider_settings"` (Python `_VAULT_KEY_NAME`). The decrypt goes
- * `vault.transitDecrypt({ keyName, ciphertext }) -> Uint8Array`, then `TextDecoder("utf-8")` to the
- * plaintext token — mirroring the Python `self._vault.decrypt(...).decode("utf-8")`. The plaintext
- * token is consumed transiently by the caller (the SDK adapter / cache); it must never be logged,
- * stored, or returned beyond the {@link LlmProviderSettings} value.
+ * ── Field-codec encrypt/decrypt path ──
+ * `api_key_ciphertext` is a `kms2:vN:<base64>` envelope produced by `encryptField`/`decryptField`
+ * (#platform/crypto/aes_gcm_aad) under the per-column AAD `core.llm_provider_settings.api_key_ciphertext`
+ * and the boot-installed {@link KeyRegistry} — local AES-256-GCM, NO Vault Transit (Step 4a closed the
+ * last Transit dependency, so UI-saved LLM creds work with or without Vault). The plaintext token is
+ * consumed transiently by the caller (the SDK adapter / cache); it must never be logged, stored, or
+ * returned beyond the {@link LlmProviderSettings} value.
  *
  * ── Tenancy (platform-scope) ──
  * `core.llm_provider_settings` is scope-discriminated, NOT per-installation: tenancy is expressed via
@@ -114,8 +115,8 @@ type LastRotatedAtRow = {
  * Real adapter for the `core.llm_provider_settings` table — worker-side decrypted read path.
  *
  * One instance per process; wired at bootstrap with an injected `Kysely` (over the shared ADR-0062
- * single pool), a {@link VaultPort}, and an optional {@link Clock}. Stateless beyond the injected
- * dependencies — safe to share across concurrent async tasks.
+ * single pool), a {@link KeyRegistry} (the field-codec key set), and an optional {@link Clock}. Stateless
+ * beyond the injected dependencies — safe to share across concurrent async tasks.
  */
 export class PostgresLlmProviderSettingsRepo {
   private readonly db: Kysely<unknown>;
@@ -177,6 +178,7 @@ export class PostgresLlmProviderSettingsRepo {
       SELECT provider, model_id, region, api_key_ciphertext, enabled
         FROM core.llm_provider_settings
        WHERE role = ${role} AND scope = 'platform'
+       LIMIT 1
     `.execute(this.db);
 
     const row = result.rows[0];
@@ -241,6 +243,7 @@ export class PostgresLlmProviderSettingsRepo {
       SELECT last_rotated_at
         FROM core.llm_provider_settings
        WHERE scope = ${args.scope} AND role = ${args.role}
+       LIMIT 1
     `.execute(this.db);
 
     const row = result.rows[0];
@@ -255,7 +258,7 @@ export class PostgresLlmProviderSettingsRepo {
    * rows post-write through the dormant `AdminRoutesOptions.audit` no-op seam (consistent with every
    * other admin write).
    *
-   * Encrypts the plaintext token via the REAL Vault Transit key `"llm_provider_settings"` and UPSERTs the
+   * Encrypts the plaintext token via the field codec (local AES-256-GCM + per-column AAD) and UPSERTs the
    * platform-scope row (scope='platform', installation_id=NULL) on the
    * `(scope, role, COALESCE(installation_id, zero-uuid))` expression-index conflict target. Returns the
    * 4-char fingerprint (last 4 plaintext chars; the length-4 CHECK) the route surfaces in its response.

@@ -118,8 +118,9 @@ export function renderSeeder(): string {
 set -euo pipefail
 : "\${VAULT_ADDR:?set VAULT_ADDR (e.g. https://vault.vault:8200)}"
 : "\${VAULT_TOKEN:?set VAULT_TOKEN}"
-# KV-v2 mount (the chart's vault paths sit under this). Override if your mount differs.
-MOUNT="\${CODEMASTER_VAULT_MOUNT:-secret}"
+# KV-v2 mount (the chart's vault paths sit under this). Override if your mount differs. This is the SAME
+# env var the app reads (vault_reader_factory) — keep them in lockstep, else the app reads a different mount.
+MOUNT="\${CODEMASTER_VAULT_KV_MOUNT:-secret}"
 
 ${blocks.join("\n\n")}
 

@@ -18,7 +18,10 @@ export function assembleDsn(parts: {
   database: string;
 }): string {
   const port = parts.port === undefined || parts.port === "" ? DEFAULT_PG_PORT : parts.port;
-  return `postgresql://${encodeURIComponent(parts.user)}:${encodeURIComponent(parts.password)}@${parts.host}:${port}/${parts.database}`;
+  // user/password AND the database path segment are URL-encoded (they may carry reserved chars like @ / :).
+  // host/port come from the operator's ConfigMap (trusted, non-secret) and are interpolated as-is —
+  // encoding the host would corrupt an IPv6 literal like [::1]. (review P3)
+  return `postgresql://${encodeURIComponent(parts.user)}:${encodeURIComponent(parts.password)}@${parts.host}:${port}/${encodeURIComponent(parts.database)}`;
 }
 
 export type DbCredentialDeps = {
