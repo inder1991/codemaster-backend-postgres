@@ -80,4 +80,26 @@ describeDb("superadmin bootstrap (integration)", () => {
     `.execute(db);
     expect(Number(r.rows[0]?.n ?? "0")).toBe(1);
   });
+
+  it("recovers a DISABLED 'admin' (real reactivateWithPassword UPDATE) — no lockout, no duplicate", async () => {
+    // Seed admin, then disable it directly → zero active super-admins (the real lockout state). A blind
+    // re-insert would hit uq_local_users_username; bootstrap must reactivate the existing row in place.
+    await run([]);
+    await sql`UPDATE core.local_users SET state = 'disabled', failed_attempts = 5, password_hash = 'x'
+              WHERE username = ${DEFAULT_SUPERADMIN_USERNAME}`.execute(db);
+    expect(await repo.listActiveSuperAdmins()).toHaveLength(0);
+
+    const warnings: Array<string> = [];
+    await run(warnings); // must NOT throw, must recover
+
+    const admin = await repo.getByUsername({ username: DEFAULT_SUPERADMIN_USERNAME });
+    expect(admin?.state).toBe("active");
+    expect(admin?.failed_attempts).toBe(0);
+    expect(await verifyPassword(admin!.password_hash, DEFAULT_SUPERADMIN_PASSWORD)).toBe(true);
+    const count = await sql<{ n: string }>`
+      SELECT count(*) AS n FROM core.local_users WHERE username = ${DEFAULT_SUPERADMIN_USERNAME}
+    `.execute(db);
+    expect(Number(count.rows[0]?.n ?? "0")).toBe(1); // reactivated in place, not duplicated
+    expect(await repo.listActiveSuperAdmins()).toHaveLength(1);
+  });
 });

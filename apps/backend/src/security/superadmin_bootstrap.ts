@@ -44,6 +44,23 @@ export async function bootstrapSuperAdmin(deps: SuperAdminBootstrapDeps): Promis
 
 async function seedDefault(deps: SuperAdminBootstrapDeps): Promise<void> {
   const now = deps.now();
+  // An 'admin' row may already exist while NO super-admin is active — it was disabled, or locked out. A
+  // blind INSERT would violate uq_local_users_username; the catch would then see getByUsername('admin') !=
+  // null (the disabled row) and SWALLOW, leaving the platform with ZERO active super-admins (lockout). So
+  // RECOVER it in place: re-activate + reset to the default password + clear any lockout.
+  const existing = await deps.repo.getByUsername({ username: DEFAULT_SUPERADMIN_USERNAME });
+  if (existing !== null) {
+    await deps.repo.reactivateWithPassword({
+      userId: existing.user_id,
+      newHash: await deps.hashPassword(DEFAULT_SUPERADMIN_PASSWORD),
+      now,
+    });
+    deps.warn(
+      `superadmin bootstrap: re-activated the '${DEFAULT_SUPERADMIN_USERNAME}' account with the default ` +
+        `password (the platform had no active super-admin) — log in and CHANGE THE PASSWORD via the UI immediately.`,
+    );
+    return;
+  }
   try {
     await deps.repo.insert({
       user_id: deps.newUserId(),
@@ -61,9 +78,12 @@ async function seedDefault(deps: SuperAdminBootstrapDeps): Promise<void> {
       created_by_user_id: null,
     });
   } catch (e) {
-    // Concurrent boot: another replica won the insert race. Idempotent — if 'admin' now exists, swallow;
-    // otherwise the failure is real (rethrow).
-    if ((await deps.repo.getByUsername({ username: DEFAULT_SUPERADMIN_USERNAME })) === null) {
+    // Concurrent boot: another replica won the insert race between our getByUsername check and this insert.
+    // The race winner inserts an ACTIVE super-admin, so swallow ONLY if one now exists — otherwise the
+    // failure is real (rethrow). Checking the active set (not just getByUsername) is what closes the
+    // disabled-row lockout hole: a non-null-but-disabled 'admin' no longer counts as success.
+    const active = await deps.repo.listActiveSuperAdmins();
+    if (active.length === 0) {
       throw e;
     }
     return;

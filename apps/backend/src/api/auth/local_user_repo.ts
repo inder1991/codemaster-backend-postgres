@@ -67,6 +67,10 @@ export type LocalUserRepo = {
   getById(args: { userId: string }): Promise<LocalUser | null>;
   insert(user: LocalUser): Promise<void>;
   updatePassword(args: { userId: string; newHash: string; now: Date }): Promise<void>;
+  /** Lockout-recovery: re-activate an existing row + reset its password and clear any lockout (state→active,
+   *  failed_attempts→0, locked_until→NULL). Used by the superadmin bootstrap to recover a disabled/locked
+   *  'admin' WITHOUT a blind insert (which would collide with the existing username). */
+  reactivateWithPassword(args: { userId: string; newHash: string; now: Date }): Promise<void>;
   recordLoginAttempt(args: {
     userId: string;
     success: boolean;
@@ -123,6 +127,26 @@ export class InMemoryLocalUserRepo implements LocalUserRepo {
       ...user,
       password_hash: args.newHash,
       last_password_change: args.now,
+    });
+  }
+
+  public async reactivateWithPassword(args: {
+    userId: string;
+    newHash: string;
+    now: Date;
+  }): Promise<void> {
+    const user = this.#rows.get(args.userId);
+    if (user === undefined) {
+      throw new LocalUserNotFoundError(args.userId);
+    }
+    this.#rows.set(args.userId, {
+      ...user,
+      state: "active",
+      role: "super_admin",
+      password_hash: args.newHash,
+      last_password_change: args.now,
+      failed_attempts: 0,
+      locked_until: null,
     });
   }
 
@@ -270,6 +294,23 @@ export class PostgresLocalUserRepo implements LocalUserRepo {
     // tenant:exempt reason=local_users-platform-super-admin-table-no-installation_id-column follow_up=PERMANENT-EXEMPTION-platform-super-admin-users
     const r = await sql`
       UPDATE core.local_users SET password_hash = ${args.newHash}, last_password_change = ${args.now}
+      WHERE user_id = ${args.userId}
+    `.execute(this.#db);
+    if ((r.numAffectedRows ?? 0n) === 0n) {
+      throw new LocalUserNotFoundError(args.userId);
+    }
+  }
+
+  public async reactivateWithPassword(args: {
+    userId: string;
+    newHash: string;
+    now: Date;
+  }): Promise<void> {
+    // tenant:exempt reason=local_users-platform-super-admin-table-no-installation_id-column follow_up=PERMANENT-EXEMPTION-platform-super-admin-users
+    const r = await sql`
+      UPDATE core.local_users
+      SET state = 'active', role = 'super_admin', password_hash = ${args.newHash},
+          last_password_change = ${args.now}, failed_attempts = 0, locked_until = NULL
       WHERE user_id = ${args.userId}
     `.execute(this.#db);
     if ((r.numAffectedRows ?? 0n) === 0n) {

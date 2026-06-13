@@ -89,4 +89,41 @@ describe("bootstrapSuperAdmin", () => {
 
     expect(await repo.getByUsername({ username: DEFAULT_SUPERADMIN_USERNAME })).not.toBeNull();
   });
+
+  it("RECOVERS from a DISABLED 'admin' row (no active super-admins) — reactivates + resets, no lockout", async () => {
+    // The lockout the prior re-seed test missed: the disabled row IS 'admin' itself. A blind INSERT would
+    // hit the unique-username constraint, the catch would see getByUsername('admin') != null (the disabled
+    // row) and SWALLOW → platform left with ZERO active super-admins, reported as success.
+    const repo = new InMemoryLocalUserRepo();
+    await repo.insert({ ...ROTATED, state: "disabled", password_hash: "hashed:not-the-default" });
+    const warnings: Array<string> = [];
+
+    await bootstrapSuperAdmin(deps(repo, warnings));
+
+    const active = await repo.listActiveSuperAdmins();
+    expect(active).toHaveLength(1); // NOT zero — the platform can log in
+    const admin = await repo.getByUsername({ username: DEFAULT_SUPERADMIN_USERNAME });
+    expect(admin?.state).toBe("active");
+    expect(await fakeVerify(admin!.password_hash, DEFAULT_SUPERADMIN_PASSWORD)).toBe(true); // reset to default
+    expect(repo.allRows()).toHaveLength(1); // reactivated in place, not a duplicate row
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("recovers a LOCKED-OUT default 'admin' (failed_attempts maxed, locked_until set) → clears lockout", async () => {
+    const repo = new InMemoryLocalUserRepo();
+    await repo.insert({
+      ...ROTATED,
+      state: "disabled",
+      failed_attempts: 99,
+      locked_until: new Date("2099-01-01T00:00:00.000Z"),
+    });
+    const warnings: Array<string> = [];
+
+    await bootstrapSuperAdmin(deps(repo, warnings));
+
+    const admin = await repo.getByUsername({ username: DEFAULT_SUPERADMIN_USERNAME });
+    expect(admin?.state).toBe("active");
+    expect(admin?.failed_attempts).toBe(0);
+    expect(admin?.locked_until).toBeNull();
+  });
 });
