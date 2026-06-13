@@ -21,6 +21,8 @@ export type SecretReq = {
   readonly vaultPath: string;
   /** The key within the Vault secret (for source=env / multi-key file secrets). */
   readonly key?: string;
+  /** For source=file: the Agent-rendered filename under secretsDir (sanitized KV path). */
+  readonly fileName?: string;
   readonly required: boolean;
   readonly format?: SecretFormat;
   /** Human note: which feature this secret gates (sharpens the failure message). */
@@ -160,4 +162,181 @@ export function evaluateDeployContract(
   }
 
   return failures;
+}
+
+/**
+ * THE deploy contract — the single source of truth a first deploy is validated against. The doc,
+ * the Helm chart, and the seeding helper all derive from this. Conditional/auth-gated secrets
+ * (field-encryption keyset, api/auth) are marked optional here because the eager key-load already
+ * fails loud when auth routes are on; the UNCONDITIONAL hard requirements below are what a turnkey
+ * deploy most often misses.
+ */
+export const DEPLOY_CONTRACT: DeployContract = {
+  secrets: [
+    {
+      name: "CODEMASTER_PG_CORE_DSN",
+      source: "env",
+      vaultPath: "codemaster/postgres/app",
+      key: "dsn",
+      required: true,
+      format: "dsn",
+      gates: "the primary application database — nothing works without it",
+    },
+    {
+      name: "CODEMASTER_PG_MAINT_DSN",
+      source: "env",
+      vaultPath: "codemaster/postgres/maint",
+      key: "dsn",
+      required: false,
+      format: "dsn",
+      gates: "partition maintenance (pg_partman) — unset means partitions stop being maintained",
+    },
+    {
+      name: "github_app.app_id",
+      source: "file",
+      fileName: "codemaster_github_app",
+      vaultPath: "codemaster/github/app",
+      key: "app_id",
+      required: true,
+      gates: "GitHub App authentication — no PR reviews are possible without it",
+    },
+    {
+      name: "github_app.private_key_pem",
+      source: "file",
+      fileName: "codemaster_github_app",
+      vaultPath: "codemaster/github/app",
+      key: "private_key_pem",
+      required: true,
+      format: "pem",
+      gates: "GitHub App authentication (clone + post review)",
+    },
+    {
+      name: "github_app.webhook_secret",
+      source: "file",
+      fileName: "codemaster_github_app",
+      vaultPath: "codemaster/github/app",
+      key: "webhook_secret",
+      required: true,
+      gates: "inbound webhook HMAC verification",
+    },
+    {
+      name: "field_encryption.keys",
+      source: "file",
+      fileName: "codemaster_field_encryption_keys",
+      vaultPath: "codemaster/field-encryption/keys",
+      key: "keys",
+      required: false,
+      gates: "field-level encryption keyset (eager-loaded at boot when auth routes are on)",
+    },
+    {
+      name: "api_auth",
+      source: "file",
+      fileName: "codemaster_api_auth",
+      vaultPath: "codemaster/api/auth",
+      required: false,
+      gates: "session / auth-route secrets (required only when auth routes are enabled)",
+    },
+  ],
+  extensions: [
+    { name: "pg_partman", createSql: "CREATE EXTENSION IF NOT EXISTS pg_partman WITH SCHEMA partman;" },
+    { name: "vector", createSql: "CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;" },
+  ],
+  schemas: ["core", "audit", "cache", "telemetry", "partman"],
+  config: [
+    { env: "CODEMASTER_RUNTIME_MODE", required: false, default: "postgres", oneOf: ["postgres", "shadow"] },
+    {
+      env: "CODEMASTER_EMBEDDINGS_PROVIDER",
+      required: false,
+      default: "platform",
+      oneOf: ["platform", "openai_compat"],
+    },
+  ],
+};
+
+/** IO seams the observer needs (injected for tests; real wiring reads env + Vault files + the DB). */
+export type ObserveDeps = {
+  /** Read an env var (real: name => process.env[name]). */
+  readonly env: (name: string) => string | undefined;
+  /** Read a Vault-Agent-rendered secret file by its sanitized filename; null when absent. */
+  readonly readSecretFile: (fileName: string) => Promise<Record<string, string> | null>;
+  /** Installed Postgres extension names. */
+  readonly listExtensions: () => Promise<ReadonlyArray<string>>;
+  /** Present schema names. */
+  readonly listSchemas: () => Promise<ReadonlyArray<string>>;
+};
+
+/** Resolve the {@link ObservedState} the validator judges against. Reads each rendered file at most once. */
+export async function observeDeployState(
+  contract: DeployContract,
+  deps: ObserveDeps,
+): Promise<ObservedState> {
+  const fileCache = new Map<string, Record<string, string> | null>();
+  const readFileOnce = async (fileName: string): Promise<Record<string, string> | null> => {
+    if (!fileCache.has(fileName)) {
+      fileCache.set(fileName, await deps.readSecretFile(fileName));
+    }
+    return fileCache.get(fileName) ?? null;
+  };
+
+  const secrets: Record<string, string | undefined> = {};
+  for (const s of contract.secrets) {
+    if (s.source === "env") {
+      secrets[s.name] = deps.env(s.name);
+      continue;
+    }
+    const data = s.fileName === undefined ? null : await readFileOnce(s.fileName);
+    if (data === null) {
+      secrets[s.name] = undefined;
+    } else if (s.key !== undefined) {
+      secrets[s.name] = data[s.key];
+    } else {
+      // Presence-only file secret (keys vary): satisfied if the file rendered with any content.
+      secrets[s.name] = Object.keys(data).length > 0 ? "present" : undefined;
+    }
+  }
+
+  const [extensions, schemas] = await Promise.all([deps.listExtensions(), deps.listSchemas()]);
+
+  const config: Record<string, string | undefined> = {};
+  for (const c of contract.config) {
+    config[c.env] = deps.env(c.env);
+  }
+
+  return { secrets, extensions, schemas, config };
+}
+
+/** The deploy contract is not satisfied — the pod MUST NOT serve. Carries the full failure list. */
+export class DeployContractError extends Error {
+  public readonly failures: ReadonlyArray<DeployFailure>;
+  public constructor(failures: ReadonlyArray<DeployFailure>) {
+    super(formatDeployFailures(failures));
+    this.name = "DeployContractError";
+    this.failures = failures;
+  }
+}
+
+/** Render failures as one operator-facing remediation list (what / why / fix, numbered). */
+export function formatDeployFailures(failures: ReadonlyArray<DeployFailure>): string {
+  const lines = failures.map(
+    (f, i) => `  ${i + 1}. ${f.what}\n     why: ${f.why}\n     fix: ${f.fix}`,
+  );
+  return (
+    `deploy preflight failed — ${failures.length} unmet requirement(s); refusing to serve:\n` +
+    lines.join("\n")
+  );
+}
+
+/**
+ * Observe + validate the deploy contract; throw {@link DeployContractError} (listing EVERY problem
+ * at once) if anything is unmet. The composition root awaits this before the HTTP bind.
+ */
+export async function assertDeployReady(
+  deps: ObserveDeps,
+  contract: DeployContract = DEPLOY_CONTRACT,
+): Promise<void> {
+  const observed = await observeDeployState(contract, deps);
+  const failures = evaluateDeployContract(contract, observed);
+  if (failures.length > 0) {
+    throw new DeployContractError(failures);
+  }
 }
