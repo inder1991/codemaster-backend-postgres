@@ -1,11 +1,15 @@
 /**
- * Integration test for platform-credentials (GET / PATCH / POST test, confluence + embedder/qwen) against
- * the DISPOSABLE Postgres (localhost:5434 — NEVER the cluster). Runs ONLY when CODEMASTER_PG_CORE_DSN is set.
+ * Integration test for platform-credentials (GET / PATCH / POST test) against the DISPOSABLE Postgres.
+ * Runs ONLY when CODEMASTER_PG_CORE_DSN is set.
  *
- * 1:1 port of platform_credentials.py. Secrets live in Vault KV (the InMemoryVault double); the meta table
- * holds rotation/validation metadata. core.platform_credentials_meta is a GLOBAL singleton (PK credential_key,
- * 2 possible rows) — this file owns its lifecycle exclusively (beforeEach/afterAll DELETE both keys). The
- * qwen config-bump test snapshots core.embedder_runtime_state.config_version and asserts +1.
+ * Confluence is INTENTIONALLY no longer served here — its single canonical write path is the DB-backed
+ * /api/admin/confluence-config (tested in admin_confluence_config.integration.test.ts). This route serves
+ * embedder.qwen ONLY, so these tests exercise the shared platform-credentials machinery (probe-first write,
+ * SSRF base_url validation, ?force override, /test) via qwen.
+ *
+ * Secrets live in Vault KV (the InMemoryVault double); the meta table holds rotation/validation metadata.
+ * core.platform_credentials_meta is a GLOBAL singleton — this file owns its lifecycle (beforeEach/afterAll
+ * DELETE). The qwen config-bump test snapshots core.embedder_runtime_state.config_version and asserts +1.
  */
 
 import { Kysely, PostgresDialect, sql } from "kysely";
@@ -31,7 +35,6 @@ import { describeDb, INTEGRATION_DSN } from "../_db.js";
 
 const NOW = new Date("2026-06-07T12:00:00.000Z");
 const SIGNING_KEY = Buffer.from("test-signing-key-0123456789abcdef");
-const CONFLUENCE_PATH = "codemaster/confluence/token";
 const QWEN_PATH = "codemaster/embedder/qwen";
 
 let pool: Pool;
@@ -108,18 +111,31 @@ async function makeApp(args: {
   return app;
 }
 
-const CONF = "/api/admin/platform-credentials/confluence";
 const QWEN = "/api/admin/platform-credentials/embedder/qwen";
+const CONF = "/api/admin/platform-credentials/confluence";
 
-describeDb("admin platform-credentials (disposable :5434)", () => {
+describeDb("admin platform-credentials (disposable)", () => {
+  it("Confluence is NOT served here — its canonical surface is /api/admin/confluence-config (404)", async () => {
+    const app = await makeApp({ vault: new InMemoryVault(), probe: stubProbe(), dnsResolver: dnsTo("93.184.216.34") });
+    try {
+      // GET + PATCH + /test for confluence are all unregistered now (single write path is the DB).
+      expect((await app.inject({ method: "GET", url: CONF, cookies: cookie("platform_owner") })).statusCode).toBe(404);
+      expect(
+        (await app.inject({ method: "PATCH", url: CONF, cookies: cookie("super_admin"), payload: { base_url: "https://c.example.com", token: "t" } })).statusCode,
+      ).toBe(404);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("GET: no Vault payload → base_url null, token_present false; 503 when vault unwired", async () => {
     const vault = new InMemoryVault();
     const app = await makeApp({ vault });
     try {
-      const res = await app.inject({ method: "GET", url: CONF, cookies: cookie("platform_owner") });
+      const res = await app.inject({ method: "GET", url: QWEN, cookies: cookie("platform_owner") });
       expect(res.statusCode).toBe(200);
       const body = res.json<{ base_url: string | null; token_present: boolean; credential_key: string }>();
-      expect(body.credential_key).toBe("confluence");
+      expect(body.credential_key).toBe("embedder.qwen");
       expect(body.base_url).toBeNull();
       expect(body.token_present).toBe(false);
     } finally {
@@ -127,7 +143,7 @@ describeDb("admin platform-credentials (disposable :5434)", () => {
     }
     const bare = await makeApp({});
     try {
-      expect((await bare.inject({ method: "GET", url: CONF, cookies: cookie("platform_owner") })).statusCode).toBe(503);
+      expect((await bare.inject({ method: "GET", url: QWEN, cookies: cookie("platform_owner") })).statusCode).toBe(503);
     } finally {
       await bare.close();
     }
@@ -158,12 +174,12 @@ describeDb("admin platform-credentials (disposable :5434)", () => {
     const app = await makeApp({ vault, probe: stubProbe(), dnsResolver: dnsTo("93.184.216.34") });
     try {
       for (const role of ["reader", "platform_operator"] as const) {
-        expect((await app.inject({ method: "GET", url: CONF, cookies: cookie(role) })).statusCode).toBe(403);
+        expect((await app.inject({ method: "GET", url: QWEN, cookies: cookie(role) })).statusCode).toBe(403);
         expect(
-          (await app.inject({ method: "PATCH", url: CONF, cookies: cookie(role), payload: { base_url: "https://x.example.com", token: "t" } })).statusCode,
+          (await app.inject({ method: "PATCH", url: QWEN, cookies: cookie(role), payload: { base_url: "https://x.example.com", token: "t" } })).statusCode,
         ).toBe(403);
       }
-      expect((await app.inject({ method: "GET", url: CONF })).statusCode).toBe(401);
+      expect((await app.inject({ method: "GET", url: QWEN })).statusCode).toBe(401);
     } finally {
       await app.close();
     }
@@ -176,21 +192,21 @@ describeDb("admin platform-credentials (disposable :5434)", () => {
     try {
       const res = await app.inject({
         method: "PATCH",
-        url: CONF,
+        url: QWEN,
         cookies: cookie("platform_owner"),
-        payload: { base_url: "https://confluence.example.com", token: "atatt-secret-token" },
+        payload: { base_url: "https://qwen.example.com", token: "qwen-secret-key" },
       });
       expect(res.statusCode).toBe(200);
       const body = res.json<{ token_present: boolean; last_rotated_by: string; last_validation_error: string | null }>();
       expect(body.token_present).toBe(true);
       expect(body.last_rotated_by).toBe("op@codemaster.test");
       expect(body.last_validation_error).toBeNull();
-      // Vault round-trip
-      const payload = await vault.kvRead({ path: CONFLUENCE_PATH });
-      expect(payload).toEqual({ base_url: "https://confluence.example.com", token: "atatt-secret-token" });
+      // Vault round-trip — qwen stores the secret under api_key
+      const payload = await vault.kvRead({ path: QWEN_PATH });
+      expect(payload).toEqual({ base_url: "https://qwen.example.com", api_key: "qwen-secret-key" });
       // audit
       expect(audited).toHaveLength(1);
-      expect(audited[0]!.action).toBe("platform_credentials.rotated.confluence");
+      expect(audited[0]!.action).toBe("platform_credentials.rotated.embedder_qwen");
       expect(audited[0]!.installationId).toBe("00000000-0000-0000-0000-000000000001"); // PLATFORM_SCOPE_AUDIT sentinel
       expect(audited[0]!.after).toMatchObject({ probe_ok: true, forced: false });
     } finally {
@@ -198,15 +214,15 @@ describeDb("admin platform-credentials (disposable :5434)", () => {
     }
   });
 
-  it("PATCH base_url-only rotation preserves the prior token", async () => {
+  it("PATCH base_url-only rotation preserves the prior api_key", async () => {
     const vault = new InMemoryVault();
-    await vault.kvWrite({ path: CONFLUENCE_PATH, data: { base_url: "https://old.example.com", token: "keep-me" } });
+    await vault.kvWrite({ path: QWEN_PATH, data: { base_url: "https://old.example.com", api_key: "keep-me" } });
     const app = await makeApp({ vault, probe: stubProbe(), dnsResolver: dnsTo("93.184.216.34") });
     try {
-      const res = await app.inject({ method: "PATCH", url: CONF, cookies: cookie("platform_owner"), payload: { base_url: "https://new.example.com" } });
+      const res = await app.inject({ method: "PATCH", url: QWEN, cookies: cookie("platform_owner"), payload: { base_url: "https://new.example.com" } });
       expect(res.statusCode).toBe(200);
-      const payload = await vault.kvRead({ path: CONFLUENCE_PATH });
-      expect(payload).toEqual({ base_url: "https://new.example.com", token: "keep-me" }); // token preserved
+      const payload = await vault.kvRead({ path: QWEN_PATH });
+      expect(payload).toEqual({ base_url: "https://new.example.com", api_key: "keep-me" }); // secret preserved
     } finally {
       await app.close();
     }
@@ -216,7 +232,7 @@ describeDb("admin platform-credentials (disposable :5434)", () => {
     const vault = new InMemoryVault();
     const app = await makeApp({ vault, probe: stubProbe(), dnsResolver: dnsTo("10.0.0.5") }); // private → ssrf
     const expect422 = async (payload: Record<string, unknown>, error: string): Promise<void> => {
-      const res = await app.inject({ method: "PATCH", url: CONF, cookies: cookie("platform_owner"), payload });
+      const res = await app.inject({ method: "PATCH", url: QWEN, cookies: cookie("platform_owner"), payload });
       expect(res.statusCode).toBe(422);
       expect(res.json<{ error: string }>().error).toBe(error);
     };
@@ -227,16 +243,16 @@ describeDb("admin platform-credentials (disposable :5434)", () => {
       // incomplete: empty vault + only token (no base_url ever)
       await expect422({ token: "t-only" }, "incomplete_credential");
       // no Vault write happened
-      await expect(vault.kvRead({ path: CONFLUENCE_PATH })).rejects.toThrow();
+      await expect(vault.kvRead({ path: QWEN_PATH })).rejects.toThrow();
       // meta untouched
-      expect((await sql`SELECT 1 FROM core.platform_credentials_meta WHERE credential_key='confluence'`.execute(db)).rows).toHaveLength(0);
+      expect((await sql`SELECT 1 FROM core.platform_credentials_meta WHERE credential_key='embedder.qwen'`.execute(db)).rows).toHaveLength(0);
     } finally {
       await app.close();
     }
     // https_required needs its own app (http URL never reaches dns)
     const app2 = await makeApp({ vault: new InMemoryVault(), probe: stubProbe(), dnsResolver: dnsTo("93.184.216.34") });
     try {
-      const res = await app2.inject({ method: "PATCH", url: CONF, cookies: cookie("platform_owner"), payload: { base_url: "http://x.example.com", token: "t" } });
+      const res = await app2.inject({ method: "PATCH", url: QWEN, cookies: cookie("platform_owner"), payload: { base_url: "http://x.example.com", token: "t" } });
       expect(res.statusCode).toBe(422);
       expect(res.json<{ error: string }>().error).toBe("https_required");
     } finally {
@@ -249,13 +265,13 @@ describeDb("admin platform-credentials (disposable :5434)", () => {
     const audited: Array<AuditEvent> = [];
     const app = await makeApp({ vault, probe: stubProbe({ ok: false, errorCode: "auth_error", errorDetail: "401 unauthorized" }), audited, dnsResolver: dnsTo("93.184.216.34") });
     try {
-      const res = await app.inject({ method: "PATCH", url: CONF, cookies: cookie("platform_owner"), payload: { base_url: "https://x.example.com", token: "bad" } });
+      const res = await app.inject({ method: "PATCH", url: QWEN, cookies: cookie("platform_owner"), payload: { base_url: "https://x.example.com", token: "bad" } });
       expect(res.statusCode).toBe(422);
       const body = res.json<{ error: string; msg: string }>();
       expect(body.error).toBe("auth_error");
       expect(body.msg).toContain("?force=true");
-      await expect(vault.kvRead({ path: CONFLUENCE_PATH })).rejects.toThrow();
-      expect((await sql`SELECT 1 FROM core.platform_credentials_meta WHERE credential_key='confluence'`.execute(db)).rows).toHaveLength(0);
+      await expect(vault.kvRead({ path: QWEN_PATH })).rejects.toThrow();
+      expect((await sql`SELECT 1 FROM core.platform_credentials_meta WHERE credential_key='embedder.qwen'`.execute(db)).rows).toHaveLength(0);
       expect(audited).toHaveLength(0);
     } finally {
       await app.close();
@@ -267,19 +283,19 @@ describeDb("admin platform-credentials (disposable :5434)", () => {
     const audited: Array<AuditEvent> = [];
     const app = await makeApp({ vault, probe: stubProbe({ ok: false, errorCode: "auth_error", errorDetail: "401" }), audited, dnsResolver: dnsTo("93.184.216.34") });
     try {
-      const res = await app.inject({ method: "PATCH", url: `${CONF}?force=true`, cookies: cookie("platform_owner"), payload: { base_url: "https://x.example.com", token: "forced" } });
+      const res = await app.inject({ method: "PATCH", url: `${QWEN}?force=true`, cookies: cookie("platform_owner"), payload: { base_url: "https://x.example.com", token: "forced" } });
       expect(res.statusCode).toBe(200);
       expect(res.json<{ last_validation_error: string }>().last_validation_error).toBe("auth_error");
-      expect((await vault.kvRead({ path: CONFLUENCE_PATH })).token).toBe("forced");
+      expect((await vault.kvRead({ path: QWEN_PATH })).api_key).toBe("forced");
       expect(audited[0]!.after).toMatchObject({ probe_ok: false, forced: true });
     } finally {
       await app.close();
     }
   });
 
-  it("PATCH qwen bumps config_version; confluence does NOT", async () => {
+  it("PATCH qwen bumps embedder config_version", async () => {
     const before = (await sql<{ config_version: string }>`SELECT config_version FROM core.embedder_runtime_state WHERE singleton = true`.execute(db)).rows[0];
-    expect(before).toBeDefined(); // seeded by 0002_seed.sql
+    expect(before).toBeDefined(); // seeded by the baseline
     const beforeN = Number(before!.config_version);
     const vault = new InMemoryVault();
     const app = await makeApp({ vault, probe: stubProbe(), dnsResolver: dnsTo("93.184.216.34") });
@@ -287,9 +303,6 @@ describeDb("admin platform-credentials (disposable :5434)", () => {
       await app.inject({ method: "PATCH", url: QWEN, cookies: cookie("platform_owner"), payload: { base_url: "https://qwen.example.com", token: "qk" } });
       const afterQwen = Number((await sql<{ config_version: string }>`SELECT config_version FROM core.embedder_runtime_state WHERE singleton = true`.execute(db)).rows[0]!.config_version);
       expect(afterQwen).toBe(beforeN + 1);
-      await app.inject({ method: "PATCH", url: CONF, cookies: cookie("platform_owner"), payload: { base_url: "https://c.example.com", token: "ck" } });
-      const afterConf = Number((await sql<{ config_version: string }>`SELECT config_version FROM core.embedder_runtime_state WHERE singleton = true`.execute(db)).rows[0]!.config_version);
-      expect(afterConf).toBe(afterQwen); // confluence skips the bump
     } finally {
       await app.close();
     }
@@ -299,10 +312,10 @@ describeDb("admin platform-credentials (disposable :5434)", () => {
     const bare = await makeApp({ vault: new InMemoryVault() }); // vault but no probe
     try {
       expect(
-        (await bare.inject({ method: "PATCH", url: CONF, cookies: cookie("platform_owner"), payload: { base_url: "https://x.example.com", token: "t" } })).statusCode,
+        (await bare.inject({ method: "PATCH", url: QWEN, cookies: cookie("platform_owner"), payload: { base_url: "https://x.example.com", token: "t" } })).statusCode,
       ).toBe(503);
       expect(
-        (await bare.inject({ method: "PATCH", url: CONF, cookies: cookie("platform_owner"), payload: { base_url: "https://x.example.com", token: "t", bogus: 1 } })).statusCode,
+        (await bare.inject({ method: "PATCH", url: QWEN, cookies: cookie("platform_owner"), payload: { base_url: "https://x.example.com", token: "t", bogus: 1 } })).statusCode,
       ).toBe(422); // .strict() rejects the extra field before the 503 guard
     } finally {
       await bare.close();
@@ -314,7 +327,7 @@ describeDb("admin platform-credentials (disposable :5434)", () => {
     const v1 = new InMemoryVault();
     const app1 = await makeApp({ vault: v1, probe: stubProbe() });
     try {
-      const res = await app1.inject({ method: "POST", url: `${CONF}/test`, cookies: cookie("platform_owner") });
+      const res = await app1.inject({ method: "POST", url: `${QWEN}/test`, cookies: cookie("platform_owner") });
       expect(res.statusCode).toBe(422);
       expect(res.json<{ error: string }>().error).toBe("no_credential");
     } finally {
@@ -363,12 +376,12 @@ describeDb("admin platform-credentials (disposable :5434)", () => {
       try {
         const res = await app.inject({
           method: "PATCH",
-          url: `${CONF}?force=${tok}`,
+          url: `${QWEN}?force=${tok}`,
           cookies: cookie("platform_owner"),
           payload: { base_url: "https://x.example.com", token: "forced" },
         });
         expect(res.statusCode).toBe(200); // override honored despite the failing probe (FastAPI bool parity)
-        expect((await vault.kvRead({ path: CONFLUENCE_PATH })).token).toBe("forced");
+        expect((await vault.kvRead({ path: QWEN_PATH })).api_key).toBe("forced");
       } finally {
         await app.close();
       }
@@ -379,7 +392,7 @@ describeDb("admin platform-credentials (disposable :5434)", () => {
     try {
       const res = await app.inject({
         method: "PATCH",
-        url: `${CONF}?force=bogus`,
+        url: `${QWEN}?force=bogus`,
         cookies: cookie("platform_owner"),
         payload: { base_url: "https://x.example.com", token: "t" },
       });

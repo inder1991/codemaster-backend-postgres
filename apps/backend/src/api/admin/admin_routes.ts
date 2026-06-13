@@ -650,6 +650,35 @@ export async function registerAdminRoutes(
         return reply.code(200).send({ ok: true });
       },
     );
+    // Connectivity probe (ported from the old platform-credentials /test seam — the canonical Confluence
+    // surface now owns it). super_admin; tests the creds in the body WITHOUT persisting (mirrors the LLM
+    // test-credentials UX). Reuses the SAME injected probe seam; 503 when the probe adapter is unwired
+    // (parity with how platform-credentials behaves today). Never returns the token.
+    scope.post(
+      "/api/admin/confluence-config/test",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const body = request.body as { base_url?: unknown; token?: unknown };
+        if (typeof body.base_url !== "string" || typeof body.token !== "string" || body.token === "") {
+          return reply.code(422).send({ detail: "base_url + token are required to test connectivity" });
+        }
+        if (opts.getPlatformCredentialProbe === undefined) {
+          return reply
+            .code(503)
+            .send({ detail: "connectivity test not available in this deployment (probe unwired)" });
+        }
+        const result = await opts.getPlatformCredentialProbe().testConfluence({
+          baseUrl: body.base_url,
+          token: body.token,
+        });
+        return reply.code(200).send({
+          ok: result.ok,
+          message: result.ok
+            ? "Connected to Confluence."
+            : `Confluence connectivity failed${result.errorCode ? ` (${result.errorCode})` : ""}${result.errorDetail ? `: ${result.errorDetail}` : ""}`,
+        });
+      },
+    );
 
     scope.get(
       "/api/admin/orgs",
@@ -1995,8 +2024,11 @@ export async function registerAdminRoutes(
     // 1:1 with platform_credentials.py. platform_owner+. GET (meta only — never the secret) / PATCH
     // (probe-first-then-write, ?force=true override) / POST /test (probe the existing Vault credential).
     // 503 when the vault/probe seam is unwired at the composition root.
+    // Confluence is INTENTIONALLY absent here: its single write path is the DB-backed /api/admin/confluence-
+    // config (canonical, like GitHub). Keeping a second Vault-writing UI for Confluence would silent-shadow
+    // the DB row (the runtime resolver is DB > env > Vault), so this route serves embedder.qwen ONLY. Vault
+    // remains a READ fallback for direct-seeded Confluence deployments (the resolver's Vault tier).
     const PLATFORM_CRED_ROUTES: ReadonlyArray<{ key: PlatformCredentialKey; segment: string }> = [
-      { key: "confluence", segment: "confluence" },
       { key: "embedder.qwen", segment: "embedder/qwen" },
     ];
     for (const { key, segment } of PLATFORM_CRED_ROUTES) {

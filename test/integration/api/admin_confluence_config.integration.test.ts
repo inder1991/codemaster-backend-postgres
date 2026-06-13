@@ -46,9 +46,28 @@ function cookie(role: Role): Record<string, string> {
   };
 }
 
-async function makeApp() {
+async function makeApp(opts: { probeOk?: boolean } = {}) {
   const app = buildApp({});
-  await registerAdminRoutes(app, { db, signingKey: SIGNING_KEY, clock: new FakeClock({ now: NOW }) });
+  await registerAdminRoutes(app, {
+    db,
+    signingKey: SIGNING_KEY,
+    clock: new FakeClock({ now: NOW }),
+    // The /test connectivity probe reuses the platform-credential probe seam; wire a stub when requested.
+    ...(opts.probeOk !== undefined
+      ? {
+          getPlatformCredentialProbe: () => ({
+            testConfluence: async () => ({
+              ok: opts.probeOk!,
+              errorCode: opts.probeOk ? null : ("auth_error" as const),
+              errorDetail: opts.probeOk ? null : "401 unauthorized",
+              latencyMs: 5,
+              detectedDimension: null,
+            }),
+            testQwen: async () => ({ ok: true, errorCode: null, errorDetail: null, latencyMs: 5, detectedDimension: null }),
+          }),
+        }
+      : {}),
+  });
   await app.ready();
   return app;
 }
@@ -111,6 +130,43 @@ describeDb("admin confluence-config (disposable)", () => {
     } finally {
       await app.close();
     }
+  });
+
+  it("POST /test: probe ok → {ok:true}; probe fail → {ok:false,message}; no probe wired → 503; bad body → 422", async () => {
+    // probe wired + ok
+    const appOk = await makeApp({ probeOk: true });
+    const ok = await appOk.inject({
+      method: "POST",
+      url: "/api/admin/confluence-config/test",
+      cookies: cookie("super_admin"),
+      payload: { base_url: BASE_URL, token: "tok" },
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json<{ ok: boolean }>().ok).toBe(true);
+    await appOk.close();
+    // probe wired + fail → 200 ok:false with a message (never the token)
+    const appFail = await makeApp({ probeOk: false });
+    const fail = await appFail.inject({
+      method: "POST",
+      url: "/api/admin/confluence-config/test",
+      cookies: cookie("super_admin"),
+      payload: { base_url: BASE_URL, token: "secret-tok" },
+    });
+    expect(fail.statusCode).toBe(200);
+    expect(fail.json<{ ok: boolean }>().ok).toBe(false);
+    expect(fail.body).not.toContain("secret-tok");
+    await appFail.close();
+    // no probe wired → 503; bad body → 422
+    const appBare = await makeApp();
+    expect(
+      (await appBare.inject({ method: "POST", url: "/api/admin/confluence-config/test", cookies: cookie("super_admin"), payload: { base_url: BASE_URL, token: "t" } })).statusCode,
+    ).toBe(503);
+    const appProbe = await makeApp({ probeOk: true });
+    expect(
+      (await appProbe.inject({ method: "POST", url: "/api/admin/confluence-config/test", cookies: cookie("super_admin"), payload: { base_url: BASE_URL } })).statusCode,
+    ).toBe(422); // token required to test
+    await appBare.close();
+    await appProbe.close();
   });
 
   it("PARTIAL UPDATE (review P2): toggle enabled / edit URL WITHOUT re-pasting the token; token kept", async () => {
