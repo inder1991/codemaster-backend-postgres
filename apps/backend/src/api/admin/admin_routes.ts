@@ -500,30 +500,30 @@ export async function registerAdminRoutes(
           webhook_secret?: unknown;
           enabled?: unknown;
         };
-        if (
-          typeof body.app_id !== "string" ||
-          typeof body.private_key_pem !== "string" ||
-          typeof body.webhook_secret !== "string"
-        ) {
-          return reply
-            .code(422)
-            .send({ detail: "app_id, private_key_pem, webhook_secret are required strings" });
+        if (typeof body.app_id !== "string") {
+          return reply.code(422).send({ detail: "app_id is a required string" });
         }
-        // Format/bound validation at save (review P2): reject at the API, not later at token-mint. app_id
-        // must be the base-10 GitHub App ID (the token provider's int() parity); the PEM must look like one
-        // and stay sane-sized; the webhook secret non-empty. Bounds cap encrypt/store cost (BODY_LIMIT is 10MB).
+        // app_id must be the base-10 GitHub App ID (the token provider's int() parity).
         if (!/^\s*[0-9]+\s*$/.test(body.app_id) || body.app_id.length > 64) {
           return reply.code(422).send({ detail: "app_id must be a base-10 integer (the GitHub App ID)" });
         }
-        if (!body.private_key_pem.includes("BEGIN") || body.private_key_pem.length > 16_384) {
+        // PARTIAL UPDATE (review P2): the two secrets are OPTIONAL on update — omit them to toggle enabled
+        // or fix app_id WITHOUT re-pasting the private key + webhook. They are a PAIR (both-or-neither), and
+        // REQUIRED for the initial config (no stored ciphertext to keep). Format/bound-validate any provided.
+        const pemProvided = typeof body.private_key_pem === "string" && body.private_key_pem !== "";
+        const whProvided = typeof body.webhook_secret === "string" && body.webhook_secret !== "";
+        if (pemProvided !== whProvided) {
           return reply
             .code(422)
-            .send({ detail: "private_key_pem must be a PEM-encoded private key (<=16KB)" });
+            .send({ detail: "private_key_pem and webhook_secret must be supplied together (rotate both)" });
         }
-        if (body.webhook_secret.length === 0 || body.webhook_secret.length > 512) {
-          return reply
-            .code(422)
-            .send({ detail: "webhook_secret must be a non-empty secret (<=512 chars)" });
+        if (pemProvided) {
+          if (!(body.private_key_pem as string).includes("BEGIN") || (body.private_key_pem as string).length > 16_384) {
+            return reply.code(422).send({ detail: "private_key_pem must be a PEM-encoded private key (<=16KB)" });
+          }
+          if ((body.webhook_secret as string).length > 512) {
+            return reply.code(422).send({ detail: "webhook_secret must be <=512 chars" });
+          }
         }
         // `enabled` is OPTIONAL (defaults true when omitted) but must be a boolean when present — a
         // non-boolean (e.g. the string "false") must 422, NOT silently coerce to true (a fail-OPEN enable
@@ -532,15 +532,26 @@ export async function registerAdminRoutes(
           return reply.code(422).send({ detail: "enabled must be a boolean" });
         }
         const principal = request.authPrincipal!;
-        const enabled = body.enabled ?? true;
         const repo = new PostgresGitHubAppSettingsRepo({ db: opts.db, registry: requireAuditKeyRegistry() });
-        await repo.write({
-          appId: body.app_id,
-          privateKeyPem: body.private_key_pem,
-          webhookSecret: body.webhook_secret,
-          enabled,
-          rotatedByUserId: principal.userId,
-        });
+        const existing = await repo.readNonSecret();
+        if (!pemProvided && existing === null) {
+          return reply
+            .code(422)
+            .send({ detail: "private_key_pem + webhook_secret are required for the initial GitHub config" });
+        }
+        const enabled = body.enabled ?? existing?.enabled ?? true;
+        if (pemProvided) {
+          await repo.write({
+            appId: body.app_id,
+            privateKeyPem: body.private_key_pem as string,
+            webhookSecret: body.webhook_secret as string,
+            enabled,
+            rotatedByUserId: principal.userId,
+          });
+        } else {
+          // Keep the stored secrets; update only app_id + enabled.
+          await repo.updateNonSecret({ appId: body.app_id, enabled, rotatedByUserId: principal.userId });
+        }
         // Forensic record for the platform's most sensitive credential. NEVER log the secrets — only
         // app_id + enabled go in `after` (the rotation audit, mirroring llm-provider-config).
         await opts.audit?.({
@@ -584,14 +595,17 @@ export async function registerAdminRoutes(
           token?: unknown;
           enabled?: unknown;
         };
-        if (typeof body.base_url !== "string" || typeof body.token !== "string") {
-          return reply.code(422).send({ detail: "base_url + token are required strings" });
+        if (typeof body.base_url !== "string") {
+          return reply.code(422).send({ detail: "base_url is a required string" });
         }
         if (!/^https?:\/\//.test(body.base_url) || body.base_url.length > 2048) {
           return reply.code(422).send({ detail: "base_url must be an http(s) URL" });
         }
-        if (body.token.length === 0 || body.token.length > 4096) {
-          return reply.code(422).send({ detail: "token must be a non-empty secret (<=4096 chars)" });
+        // PARTIAL UPDATE (review P2): the token is OPTIONAL on update — omit it to toggle enabled or edit
+        // the URL/email WITHOUT re-pasting it; REQUIRED for the initial config. Validate it when provided.
+        const tokenProvided = typeof body.token === "string" && body.token !== "";
+        if (tokenProvided && (body.token as string).length > 4096) {
+          return reply.code(422).send({ detail: "token must be <=4096 chars" });
         }
         const authEmail =
           typeof body.auth_email === "string" && body.auth_email !== "" ? body.auth_email : null;
@@ -603,15 +617,23 @@ export async function registerAdminRoutes(
           return reply.code(422).send({ detail: "enabled must be a boolean" });
         }
         const principal = request.authPrincipal!;
-        const enabled = body.enabled ?? true;
         const repo = new PostgresConfluenceSettingsRepo({ db: opts.db, registry: requireAuditKeyRegistry() });
-        await repo.write({
-          baseUrl: body.base_url,
-          authEmail,
-          token: body.token,
-          enabled,
-          rotatedByUserId: principal.userId,
-        });
+        const existing = await repo.readNonSecret();
+        if (!tokenProvided && existing === null) {
+          return reply.code(422).send({ detail: "token is required for the initial Confluence config" });
+        }
+        const enabled = body.enabled ?? existing?.enabled ?? true;
+        if (tokenProvided) {
+          await repo.write({
+            baseUrl: body.base_url,
+            authEmail,
+            token: body.token as string,
+            enabled,
+            rotatedByUserId: principal.userId,
+          });
+        } else {
+          await repo.updateNonSecret({ baseUrl: body.base_url, authEmail, enabled, rotatedByUserId: principal.userId });
+        }
         // Forensic record — base_url + auth_email + enabled only, NEVER the token.
         await opts.audit?.({
           actorUserId: principal.userId,

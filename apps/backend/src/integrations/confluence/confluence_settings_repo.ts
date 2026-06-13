@@ -113,4 +113,23 @@ export class PostgresConfluenceSettingsRepo {
         last_rotated_by_user_id = EXCLUDED.last_rotated_by_user_id
     `.execute(this.db);
   }
+
+  /** Partial update of the non-secret fields (base_url + auth_email + enabled) WITHOUT touching the
+   *  encrypted token column — so an operator can toggle enabled or edit the URL/email without re-pasting
+   *  the token (review P2). Returns true iff a platform row existed (was updated). */
+  public async updateNonSecret(args: {
+    baseUrl: string;
+    authEmail: string | null;
+    enabled: boolean;
+    rotatedByUserId: string;
+  }): Promise<boolean> {
+    // tenant:exempt reason=platform-config follow_up=PERMANENT-EXEMPTION-confluence-settings
+    const r = await sql`
+      UPDATE core.confluence_settings
+         SET base_url = ${args.baseUrl}, auth_email = ${args.authEmail}, enabled = ${args.enabled},
+             last_rotated_at = now(), last_rotated_by_user_id = ${args.rotatedByUserId}
+       WHERE scope = 'platform'
+    `.execute(this.db);
+    return (r.numAffectedRows ?? 0n) > 0n;
+  }
 }

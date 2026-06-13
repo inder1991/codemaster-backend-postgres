@@ -112,6 +112,24 @@ export class PostgresGitHubAppSettingsRepo {
     `.execute(this.db);
   }
 
+  /** Partial update of the non-secret fields (app_id + enabled) WITHOUT touching the encrypted secret
+   *  columns — so an operator can toggle enabled or fix the App ID without re-pasting the private key +
+   *  webhook secret (review P2). Returns true iff a platform row existed (was updated). */
+  public async updateNonSecret(args: {
+    appId: string;
+    enabled: boolean;
+    rotatedByUserId: string;
+  }): Promise<boolean> {
+    // tenant:exempt reason=platform-config follow_up=PERMANENT-EXEMPTION-github-app-settings
+    const r = await sql`
+      UPDATE core.github_app_settings
+         SET app_id = ${args.appId}, enabled = ${args.enabled},
+             last_rotated_at = now(), last_rotated_by_user_id = ${args.rotatedByUserId}
+       WHERE scope = 'platform'
+    `.execute(this.db);
+    return (r.numAffectedRows ?? 0n) > 0n;
+  }
+
   private decrypt(ciphertext: string, aad: Uint8Array): string {
     return new TextDecoder("utf-8").decode(decryptField({ ciphertext, registry: this.registry, aad }));
   }

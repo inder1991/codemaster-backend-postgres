@@ -10,6 +10,7 @@ import { KeyRegistry, makeKeySet } from "#platform/crypto/key_registry.js";
 
 import { buildApp } from "#backend/api/app.js";
 import { registerAdminRoutes } from "#backend/api/admin/admin_routes.js";
+import { PostgresGitHubAppSettingsRepo } from "#backend/integrations/github/github_app_settings_repo.js";
 import {
   resetAuditKeyRegistryForTesting,
   setAuditKeyRegistry,
@@ -81,6 +82,45 @@ describeDb("admin github-config (disposable)", () => {
     expect(get.json()).toEqual({ configured: true, appId: "123456", enabled: true });
     expect(get.body).not.toContain("whsec-abc"); // never returns secrets
     expect(get.body).not.toContain("RSA PRIVATE KEY");
+    await app.close();
+  });
+
+  it("PARTIAL UPDATE (review P2): toggle enabled / change app_id WITHOUT re-pasting secrets; secrets kept", async () => {
+    const app = await makeApp();
+    // 1. initial config
+    expect(
+      (await app.inject({ method: "PUT", url: "/api/admin/github-config", cookies: cookie("super_admin"),
+        payload: { app_id: "123456", private_key_pem: PEM, webhook_secret: "whsec-abc" } })).statusCode,
+    ).toBe(200);
+    // 2. disable WITHOUT secrets
+    expect(
+      (await app.inject({ method: "PUT", url: "/api/admin/github-config", cookies: cookie("super_admin"),
+        payload: { app_id: "123456", enabled: false } })).statusCode,
+    ).toBe(200);
+    // 3. re-enable + change app_id WITHOUT secrets
+    expect(
+      (await app.inject({ method: "PUT", url: "/api/admin/github-config", cookies: cookie("super_admin"),
+        payload: { app_id: "654321", enabled: true } })).statusCode,
+    ).toBe(200);
+    const get = await app.inject({ method: "GET", url: "/api/admin/github-config", cookies: cookie("super_admin") });
+    expect(get.json()).toEqual({ configured: true, appId: "654321", enabled: true });
+    // the SECRETS survived both partial updates (read decrypts them back to the originals)
+    const settings = await new PostgresGitHubAppSettingsRepo({ db, registry: reg }).read();
+    expect(settings).toEqual({ appId: "654321", privateKeyPem: PEM, webhookSecret: "whsec-abc", enabled: true });
+    await app.close();
+  });
+
+  it("PARTIAL UPDATE: the INITIAL config (no existing row) STILL requires both secrets → 422", async () => {
+    const app = await makeApp();
+    expect(
+      (await app.inject({ method: "PUT", url: "/api/admin/github-config", cookies: cookie("super_admin"),
+        payload: { app_id: "123456", enabled: true } })).statusCode,
+    ).toBe(422); // no stored secrets to keep
+    // and one-secret-without-the-other is rejected (they rotate as a pair)
+    expect(
+      (await app.inject({ method: "PUT", url: "/api/admin/github-config", cookies: cookie("super_admin"),
+        payload: { app_id: "123456", private_key_pem: PEM } })).statusCode,
+    ).toBe(422);
     await app.close();
   });
 

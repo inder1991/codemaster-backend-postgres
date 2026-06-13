@@ -11,6 +11,7 @@ import { KeyRegistry, makeKeySet } from "#platform/crypto/key_registry.js";
 
 import { buildApp } from "#backend/api/app.js";
 import { registerAdminRoutes } from "#backend/api/admin/admin_routes.js";
+import { PostgresConfluenceSettingsRepo } from "#backend/integrations/confluence/confluence_settings_repo.js";
 import {
   resetAuditKeyRegistryForTesting,
   setAuditKeyRegistry,
@@ -110,6 +111,36 @@ describeDb("admin confluence-config (disposable)", () => {
     } finally {
       await app.close();
     }
+  });
+
+  it("PARTIAL UPDATE (review P2): toggle enabled / edit URL WITHOUT re-pasting the token; token kept", async () => {
+    const app = await makeApp();
+    expect(
+      (await app.inject({ method: "PUT", url: "/api/admin/confluence-config", cookies: cookie("super_admin"),
+        payload: { base_url: BASE_URL, auth_email: "bot@acme.com", token: "secret-token-xyz" } })).statusCode,
+    ).toBe(200);
+    // disable then re-enable + edit base_url, NO token re-entered
+    expect(
+      (await app.inject({ method: "PUT", url: "/api/admin/confluence-config", cookies: cookie("super_admin"),
+        payload: { base_url: BASE_URL, auth_email: "bot@acme.com", enabled: false } })).statusCode,
+    ).toBe(200);
+    expect(
+      (await app.inject({ method: "PUT", url: "/api/admin/confluence-config", cookies: cookie("super_admin"),
+        payload: { base_url: "https://new.atlassian.net/wiki", auth_email: "bot@acme.com", enabled: true } })).statusCode,
+    ).toBe(200);
+    // token survived both partial updates
+    const settings = await new PostgresConfluenceSettingsRepo({ db, registry: reg }).read();
+    expect(settings).toEqual({ baseUrl: "https://new.atlassian.net/wiki", authEmail: "bot@acme.com", token: "secret-token-xyz", enabled: true });
+    await app.close();
+  });
+
+  it("PARTIAL UPDATE: the INITIAL config (no existing row) STILL requires the token → 422", async () => {
+    const app = await makeApp();
+    expect(
+      (await app.inject({ method: "PUT", url: "/api/admin/confluence-config", cookies: cookie("super_admin"),
+        payload: { base_url: BASE_URL, enabled: true } })).statusCode,
+    ).toBe(422);
+    await app.close();
   });
 
   it("PUT is 403 for non-super_admin and 422 on a bad body (missing token, non-URL base_url)", async () => {
