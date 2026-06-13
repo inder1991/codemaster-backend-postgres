@@ -321,6 +321,10 @@ export type ObserveDeps = {
   readonly listExtensions: () => Promise<ReadonlyArray<string>>;
   /** Present schema names. */
   readonly listSchemas: () => Promise<ReadonlyArray<string>>;
+  /** Read a Vault KV path (flattened to strings) via SA-auth — used to ACTUALLY validate the field-encryption
+   *  keyset in vault mode (presence of a top-level current_version) instead of inferring it from VAULT_ADDR.
+   *  Undefined in unit/test contexts → the vault branch falls back to VAULT_ADDR-presence. */
+  readonly readVaultKv?: (path: string) => Promise<Record<string, string>>;
 };
 
 /** Resolve the field-key source from the observe deps' env reader, swallowing a garbage-source throw
@@ -369,7 +373,29 @@ export async function observeDeployState(
         source = "env";
         envName = FIELD_KEYSET_ENV;
       } else if (fk === "vault") {
-        secrets[s.name] = deps.env("VAULT_ADDR") === undefined ? undefined : "present";
+        if (deps.env("VAULT_ADDR") === undefined) {
+          secrets[s.name] = undefined;
+        } else if (deps.readVaultKv !== undefined) {
+          // ACTUALLY read the keyset via SA-auth (review): a bad path/policy/malformed keyset now FAILS
+          // deploy:check with the path named, instead of passing on mere VAULT_ADDR presence. The flattened
+          // read keeps top-level current_version (a string); the nested keys object is the boot loader's
+          // deeper check. A read error → report missing (actionable) + log the specific cause.
+          try {
+            const kv = await deps.readVaultKv(s.vaultPath);
+            const cv = kv["current_version"];
+            secrets[s.name] = typeof cv === "string" && cv !== "" ? "present" : undefined;
+          } catch (err) {
+            console.warn(
+              `deploy preflight: field-encryption keyset read from Vault path '${s.vaultPath}' failed ` +
+                `(${err instanceof Error ? err.message : String(err)}) — check the path, the role's read ` +
+                `policy, and that the keyset is seeded.`,
+            );
+            secrets[s.name] = undefined;
+          }
+        } else {
+          // No Vault reader injected (unit/test) → legacy presence-by-VAULT_ADDR.
+          secrets[s.name] = "present";
+        }
         continue;
       } else {
         // file / vault-agent / null: the rendered file IS the whole keyset ({current_version, keys:{...}}).

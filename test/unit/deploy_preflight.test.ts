@@ -170,6 +170,32 @@ describe("observeDeployState", () => {
     expect(observed.secrets["field_encryption.keys"]).toBeDefined();
   });
 
+  // review N4: in vault mode the observer must ACTUALLY read the keyset (current_version), not infer
+  // presence from VAULT_ADDR — so deploy:check catches a bad path/policy/malformed keyset.
+  it("vault mode: reads the keyset via readVaultKv → present when current_version is set", async () => {
+    const observed = await observeDeployState(DEPLOY_CONTRACT, {
+      ...fakeDeps({ env: { CODEMASTER_SECRET_SOURCE: "vault", VAULT_ADDR: "https://v:8200" } }),
+      readVaultKv: () => Promise.resolve({ current_version: "v1" }),
+    });
+    expect(observed.secrets["field_encryption.keys"]).toBeDefined();
+  });
+
+  it("vault mode: a FAILED keyset read (bad path/policy) → reported MISSING, not falsely present (N4)", async () => {
+    const observed = await observeDeployState(DEPLOY_CONTRACT, {
+      ...fakeDeps({ env: { CODEMASTER_SECRET_SOURCE: "vault", VAULT_ADDR: "https://v:8200" } }),
+      readVaultKv: () => Promise.reject(new Error("permission denied")),
+    });
+    expect(observed.secrets["field_encryption.keys"]).toBeUndefined();
+  });
+
+  it("vault mode: a keyset WITHOUT current_version (malformed) → reported MISSING (N4)", async () => {
+    const observed = await observeDeployState(DEPLOY_CONTRACT, {
+      ...fakeDeps({ env: { CODEMASTER_SECRET_SOURCE: "vault", VAULT_ADDR: "https://v:8200" } }),
+      readVaultKv: () => Promise.resolve({ keys: "{}" }), // no top-level current_version
+    });
+    expect(observed.secrets["field_encryption.keys"]).toBeUndefined();
+  });
+
   // Regression guard for the P0 seed-shape bug: a keyset wrapped under a single `keys` string field
   // (the OLD `vault kv put .../keys keys="$KEYSET"` form) has NO top-level current_version — the loader
   // would crashloop on it, so the preflight must REJECT it (not pass, as the pre-fix observer did).

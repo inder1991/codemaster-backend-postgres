@@ -7,7 +7,10 @@ import { join } from "node:path";
 
 import { sql, type Kysely } from "kysely";
 
+import { WallClock } from "#platform/clock.js";
+
 import { DEFAULT_VAULT_SECRETS_DIR } from "./adapters/vault_file_kv.js";
+import { makeReadVaultKv } from "./config/vault_reader_factory.js";
 import { type ObserveDeps, parseRenderedSecret } from "./deploy_preflight.js";
 
 /**
@@ -22,9 +25,15 @@ export function makeObserveDeps(args: {
   const env = args.env ?? process.env;
   const secretsDir =
     args.secretsDir ?? env["CODEMASTER_VAULT_SECRETS_DIR"] ?? DEFAULT_VAULT_SECRETS_DIR;
+  // SA-auth Vault reader so the preflight can ACTUALLY read + validate the field-encryption keyset in vault
+  // mode (review N4). Lazy: makeReadVaultKv builds the K8s-auth client but only logs in on first call, and the
+  // observer calls it only on the vault field-key branch. clock for the lease timing (one-shot read).
+  const clock = new WallClock();
+  const readVaultKv = makeReadVaultKv({ env, now: () => clock.now().getTime() });
 
   return {
     env: (name) => env[name],
+    readVaultKv,
     readSecretFile: async (fileName) => {
       try {
         return parseRenderedSecret(await readFile(join(secretsDir, fileName), "utf-8"));
