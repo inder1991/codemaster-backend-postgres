@@ -40,7 +40,23 @@
  * {@link GitHubApiClient} + a fixed `installation_id`.
  */
 
-import { type GitHubApiClient } from "#backend/integrations/github/api_client.js";
+import { extractNextLink, type GitHubApiClient } from "#backend/integrations/github/api_client.js";
+
+// Hard cap on the number of check-run list pages the existence scan walks before giving up (W3.4 / XM9).
+// A head_sha with >30×this check-runs is pathological; the cap bounds a runaway Link chain. Mirrors
+// review_client's MARKER_SCAN_MAX_PAGES. The first page is the bare path so the single-page wire is unchanged.
+const CHECK_RUN_SCAN_MAX_PAGES = 20;
+
+/** Case-insensitive header lookup (mirrors review_client.headerOf). */
+function headerOf(headers: Record<string, string>, name: string): string | undefined {
+  const exact = headers[name];
+  if (exact !== undefined) return exact;
+  const lower = name.toLowerCase();
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === lower) return v;
+  }
+  return undefined;
+}
 
 // GitHub's documented limit is 65_535; we cap a bit lower to leave headroom for the truncation footer.
 export const SUMMARY_MAX_CHARS = 65_000;
@@ -129,14 +145,20 @@ export class GitHubApiCheckRunClient implements GhCheckRunClient {
   }): Promise<number | null> {
     // GitHub supports a `?check_name=` filter but we filter client-side too so the test surface verifies
     // the contract regardless of which way the API surfaces multi-name responses.
-    const path = `/repos/${owner}/${repo}/commits/${headSha}/check-runs`;
-    const resp = await this.api.get(path, { installationId: this.installationId });
-    const body = JSON.parse(resp.body_text ?? "{}") as { check_runs?: Array<Record<string, unknown>> };
-    const runs = body.check_runs ?? [];
-    for (const run of runs) {
-      if (run["name"] === name) {
-        return Number(run["id"]);
+    // W3.4 / XM9: PAGINATE via `Link: rel="next"` — our codemaster check-run can sit past the first page
+    // (≥30 other check-runs on the head_sha), and missing it would create a DUPLICATE on a review redrive.
+    // The first request stays at the bare path (single-page wire unchanged); subsequent pages follow the
+    // server-provided next link. Bounded by CHECK_RUN_SCAN_MAX_PAGES so a runaway chain can't spin.
+    let path: string | null = `/repos/${owner}/${repo}/commits/${headSha}/check-runs`;
+    for (let page = 0; path !== null && page < CHECK_RUN_SCAN_MAX_PAGES; page += 1) {
+      const resp = await this.api.get(path, { installationId: this.installationId });
+      const body = JSON.parse(resp.body_text ?? "{}") as { check_runs?: Array<Record<string, unknown>> };
+      for (const run of body.check_runs ?? []) {
+        if (run["name"] === name) {
+          return Number(run["id"]);
+        }
       }
+      path = extractNextLink(headerOf(resp.headers, "Link"));
     }
     return null;
   }
