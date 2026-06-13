@@ -50,6 +50,21 @@ describe("VaultK8sAuth", () => {
     expect(t2).toBe("vt-2");
   });
 
+  it("floors a zero/absent lease so the token caches (no per-call re-login storm) (P2)", async () => {
+    const { auth, posts, advance } = harness({ lease: 0 });
+    await auth.token();
+    advance(10); // a later call, still well within the floored lease
+    await auth.token();
+    expect(posts).toHaveLength(1);
+  });
+
+  it("de-duplicates concurrent cold-start logins — one POST, not N (P2)", async () => {
+    const { auth, posts } = harness();
+    const [a, b] = await Promise.all([auth.token(), auth.token()]);
+    expect(a).toBe(b);
+    expect(posts).toHaveLength(1);
+  });
+
   it("invalidate() forces a re-login on the next token()", async () => {
     const { auth, posts } = harness();
     await auth.token();

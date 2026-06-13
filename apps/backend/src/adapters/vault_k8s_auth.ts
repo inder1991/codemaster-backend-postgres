@@ -6,6 +6,10 @@
 
 const RENEW_AT = 0.9; // re-login once 90% of the lease has elapsed (avoid using a near-expired token)
 const DEFAULT_AUTH_PATH = "auth/kubernetes";
+// Floor for the cache TTL: a Vault role with token_ttl=0 (use-mount-default) or a backend that omits
+// lease_duration would otherwise yield renewAtMs == now → a re-login on EVERY token() call (a self-DoS
+// against Vault's login rate limiter). 60s is conservative; real leases are minutes-to-hours. (review P2)
+const MIN_LEASE_SECONDS = 60;
 
 /** A Vault login response (the subset we use). */
 type LoginBody = { auth?: { client_token?: unknown; lease_duration?: unknown } };
@@ -26,6 +30,7 @@ export class VaultK8sAuth {
   readonly #deps: VaultK8sAuthDeps;
   readonly #authPath: string;
   #cached: { token: string; renewAtMs: number } | null = null;
+  #loginPromise: Promise<string> | null = null;
 
   public constructor(deps: VaultK8sAuthDeps) {
     this.#deps = deps;
@@ -37,7 +42,13 @@ export class VaultK8sAuth {
     if (this.#cached !== null && this.#deps.now() < this.#cached.renewAtMs) {
       return this.#cached.token;
     }
-    return this.#login();
+    // De-dup concurrent cold-start logins: the first caller starts the single-flight login; others await
+    // the SAME promise rather than each POSTing their own SA-JWT login (review P2). Cleared on settle so a
+    // later past-lease refresh starts a fresh login.
+    this.#loginPromise ??= this.#login().finally(() => {
+      this.#loginPromise = null;
+    });
+    return this.#loginPromise;
   }
 
   /** Drop the cached token so the next {@link token} call re-logs-in (call this on a 403). */
@@ -71,7 +82,8 @@ export class VaultK8sAuth {
     if (auth === undefined || typeof auth.client_token !== "string") {
       throw new Error(`Vault kubernetes login for role "${this.#deps.role}" returned no client_token`);
     }
-    const leaseSeconds = typeof auth.lease_duration === "number" ? auth.lease_duration : 0;
+    const rawLease = typeof auth.lease_duration === "number" ? auth.lease_duration : 0;
+    const leaseSeconds = Math.max(rawLease, MIN_LEASE_SECONDS); // floor: never renewAtMs == now (P2)
     this.#cached = {
       token: auth.client_token,
       renewAtMs: this.#deps.now() + leaseSeconds * 1000 * RENEW_AT,
