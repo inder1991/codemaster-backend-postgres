@@ -398,4 +398,54 @@ describeDb("reviewRunReaperActivity (integration, disposable PG)", () => {
       await cleanup(installationId, [run]);
     }
   });
+
+  it("releases the PR mutex held by a reaped run's job, in lockstep (W3.3/OH9 — invariant: dead/cancelled ⇒ no live mutex)", async () => {
+    const installationId = newUuid();
+    await seedInstallation(installationId);
+    // A stale RUNNING run whose driving job has already gone DEAD (so the gate-④ NOT-EXISTS shield lets the
+    // reaper cancel the run) but whose PR mutex is STILL live (released_at IS NULL).
+    const run = await seedRun({
+      installationId,
+      lifecycleState: "RUNNING",
+      startedAtSql: "now() - interval '2 hours'",
+      linkRepo: true,
+    });
+    // The mutex.repository_id FK → core.repositories.repository_id (uuid PK), so use the repositories row
+    // seedRun(linkRepo:true) created for this run's github_repo_id.
+    const repoRow = await pool.query<{ repository_id: string }>(
+      `SELECT repository_id FROM core.repositories WHERE github_repo_id = $1`,
+      [run.repoIdRef],
+    );
+    const repositoryId = repoRow.rows[0]!.repository_id;
+    const mutexId = newUuid();
+    await pool.query(
+      `INSERT INTO core.pr_review_mutex
+         (mutex_id, installation_id, repository_id, pr_number, holder_workflow_id, acquired_at, lease_expires_at)
+       VALUES ($1, $2, $3, $4, $5, now(), now() + interval '30 minutes')`,
+      [mutexId, installationId, repositoryId, (uniqueBigint() % 9999) + 1, run.runId],
+    );
+    const jobId = newUuid();
+    await pool.query(
+      `INSERT INTO core.review_jobs
+         (job_id, run_id, review_id, installation_id, state, mutex_id, dead_reason, finished_at, payload, payload_sha256)
+       VALUES ($1, $2, $3, $4, 'dead', $5, 'exhausted', now(), '{}'::jsonb, repeat('0', 64))`,
+      [jobId, run.runId, run.reviewId, installationId, mutexId],
+    );
+    try {
+      // BEFORE the fix: the reaper cancels the run but leaves the mutex released_at IS NULL → the invariant
+      // "dead/cancelled ⇒ no live mutex" is violated (the PR's mutex stays live until lease-expiry reclaim).
+      await reviewRunReaperActivity({ dsn: INTEGRATION_DSN!, staleAfterSeconds: 3600 });
+
+      expect((await runRow(run.runId)).lifecycle_state).toBe("CANCELLED");
+      const mtx = await pool.query<{ released_at: Date | null }>(
+        `SELECT released_at FROM core.pr_review_mutex WHERE mutex_id = $1`,
+        [mutexId],
+      );
+      expect(mtx.rows[0]?.released_at).not.toBeNull(); // released in lockstep with the reap
+    } finally {
+      await pool.query(`DELETE FROM core.review_jobs WHERE job_id = $1`, [jobId]);
+      await pool.query(`DELETE FROM core.pr_review_mutex WHERE mutex_id = $1`, [mutexId]);
+      await cleanup(installationId, [run]);
+    }
+  });
 });

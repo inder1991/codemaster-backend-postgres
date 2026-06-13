@@ -197,6 +197,25 @@ export async function reviewRunReaperActivity(
       });
     }
 
+    // W3.3 / OH9 — release the PR mutex IN LOCKSTEP with the reap, in the SAME transaction. A reaped run's
+    // job (now terminal, so the gate-④ shield let us cancel) may still hold a live mutex; without this the
+    // PR's mutex stays `released_at IS NULL` until a future lease-expiry reclaim, violating the invariant
+    // "a dead/cancelled run holds no live mutex" and (until reclaim) blocking the unique-live-mutex slot for
+    // the next push on that PR. Idempotent (`released_at IS NULL` guard); joins via the job's mutex_id so it
+    // touches only mutexes actually held by a reaped run's job.
+    if (rows.length > 0) {
+      // tenant:exempt reason=cross-tenant-liveness-reaper follow_up=PERMANENT-EXEMPTION-review-run-reaper
+      await client.query(
+        "UPDATE core.pr_review_mutex m " +
+          "   SET released_at = now() " +
+          "  FROM core.review_jobs j " +
+          " WHERE j.run_id = ANY($1::uuid[]) " +
+          "   AND j.mutex_id = m.mutex_id " +
+          "   AND m.released_at IS NULL",
+        [rows.map((r) => r.run_id)],
+      );
+    }
+
     return rows.length;
   });
 
