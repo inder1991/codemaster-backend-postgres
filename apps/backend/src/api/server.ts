@@ -9,6 +9,7 @@ import { OutboxPageResyncDispatcher } from "#backend/api/admin/page_resync_dispa
 import { getPreflightValidator } from "#backend/integrations/llm/preflight_validator_real.js";
 import { registerAuthRoutes } from "#backend/api/auth/auth_routes.js";
 import { makeAuthSecretsProvider } from "#backend/api/auth/auth_secrets_provider.js";
+import { PostgresAuthSecretsRepo } from "#backend/api/auth/auth_secrets_repo.js";
 import { PostgresLocalUserRepo } from "#backend/api/auth/local_user_repo.js";
 import { NoOpLdapClient } from "#backend/api/auth/noop_ldap.js";
 import { hashPassword, verifyPassword } from "#backend/api/auth/password_hasher.js";
@@ -20,7 +21,7 @@ import { bootstrapSuperAdmin } from "#backend/security/superadmin_bootstrap.js";
 
 import { tenantKysely } from "#platform/db/database.js";
 import { WallClock } from "#platform/clock.js";
-import { uuid4 } from "#platform/randomness.js";
+import { SystemRandom, uuid4 } from "#platform/randomness.js";
 
 import { buildApp, type BuildAppDeps } from "./app.js";
 import { registerGithubWebhookRoutes } from "./github_webhook_routes.js";
@@ -90,13 +91,24 @@ export async function runServer(deps: RunServerDeps = {}): Promise<void> {
     // platform-credentials routes still need it. openshift (no VAULT_ADDR) → undefined, and those routes
     // 503 (correct degradation) while the field-codec routes work.
     const vault = (process.env["VAULT_ADDR"] ?? "") === "" ? undefined : VaultHttpPort.fromEnv();
-    const authSecrets = makeAuthSecretsProvider();
+    const coreDb = tenantKysely(dsn);
+    const clock = new WallClock();
+    // Auth secrets resolve env/Vault > DB(auto-generated): when neither env (openshift) nor Vault supplies
+    // BOTH, generate two 32-byte secrets + persist them field-codec-encrypted (race-safe across replicas).
+    // So the pod no longer crashloops when session/csrf weren't seeded (review P0) — they self-provision,
+    // stable across replicas + restarts via the shared DB row. An operator's env/Vault values still win.
+    const authSecretsRng = new SystemRandom();
+    const authSecrets = makeAuthSecretsProvider({
+      dbFallback: () =>
+        new PostgresAuthSecretsRepo({ db: coreDb, registry }).ensure(() => ({
+          sessionSigningKey: Buffer.from(authSecretsRng.tokenBytes(32)).toString("base64"),
+          csrfSecret: Buffer.from(authSecretsRng.tokenBytes(32)).toString("base64"),
+        })),
+    });
     const [signingKey, csrfSecret] = await Promise.all([
       authSecrets.sessionSigningKey(),
       authSecrets.csrfSecret(),
     ]);
-    const coreDb = tenantKysely(dsn);
-    const clock = new WallClock();
     // W4.7 / EM5 — trusted proxy depth for client-IP derivation (0 = socket peer; the OpenShift
     // router edge sets 1). Fail-loud on a malformed value: a silently-wrong hop count either
     // disables spray protection or buckets every client into the proxy's IP.

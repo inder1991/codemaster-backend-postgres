@@ -57,12 +57,49 @@ describe("makeAuthSecretsProvider — openshift env source (P0-A.2)", () => {
     expect(await p.csrfSecret()).toEqual(new TextEncoder().encode(VALID + "y"));
   });
 
-  it("fails loud (env source) when an auth secret env var is unset", async () => {
+  it("fails loud (env source, NO dbFallback) when an auth secret env var is unset", async () => {
     vi.stubEnv("CODEMASTER_SECRET_SOURCE", "openshift");
     vi.stubEnv("CODEMASTER_SESSION_SIGNING_KEY", VALID);
     vi.stubEnv("CODEMASTER_CSRF_SECRET", ""); // unset → empty
 
     const p = makeAuthSecretsProvider();
     await expect(p.csrfSecret()).rejects.toThrow();
+  });
+});
+
+describe("makeAuthSecretsProvider — DB fallback (review P0: auto-generate, no boot crashloop)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("falls back to the DB-persisted secrets when openshift env supplies neither (no throw)", async () => {
+    vi.stubEnv("CODEMASTER_SECRET_SOURCE", "openshift");
+    vi.stubEnv("CODEMASTER_SESSION_SIGNING_KEY", "");
+    vi.stubEnv("CODEMASTER_CSRF_SECRET", "");
+    let calls = 0;
+    const p = makeAuthSecretsProvider({
+      dbFallback: async () => {
+        calls += 1;
+        return { sessionSigningKey: VALID, csrfSecret: VALID + "z" };
+      },
+    });
+    expect(await p.sessionSigningKey()).toEqual(new TextEncoder().encode(VALID));
+    expect(await p.csrfSecret()).toEqual(new TextEncoder().encode(VALID + "z"));
+    expect(calls).toBe(1); // memoized — ONE ensure across both accessors
+  });
+
+  it("operator env (openshift) wins over the DB fallback; dbFallback is never invoked", async () => {
+    vi.stubEnv("CODEMASTER_SECRET_SOURCE", "openshift");
+    vi.stubEnv("CODEMASTER_SESSION_SIGNING_KEY", VALID);
+    vi.stubEnv("CODEMASTER_CSRF_SECRET", VALID + "e");
+    let calls = 0;
+    const p = makeAuthSecretsProvider({
+      dbFallback: async () => {
+        calls += 1;
+        return { sessionSigningKey: "DB".repeat(16), csrfSecret: "DB".repeat(16) };
+      },
+    });
+    expect(await p.sessionSigningKey()).toEqual(new TextEncoder().encode(VALID));
+    expect(calls).toBe(0);
   });
 });

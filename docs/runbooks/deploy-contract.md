@@ -25,8 +25,8 @@ Vault. `/config-status` reports which are configured vs pending.
 | `github_app.private_key_pem` | file | `codemaster/github/app` | private_key_pem | no | GitHub App authentication (clone + post review) |
 | `github_app.webhook_secret` | file | `codemaster/github/app` | webhook_secret | no | inbound webhook HMAC verification |
 | `confluence.token` | file | `codemaster/confluence/token` | token | no | Confluence ingestion (knowledge corpus) |
-| `api_auth.session_signing_key` | file | `codemaster/api/auth` | session_signing_key | no | session signing key (auth routes) |
-| `api_auth.csrf_secret` | file | `codemaster/api/auth` | csrf_secret | no | CSRF secret (auth routes) |
+| `api_auth.session_signing_key` | file | `codemaster/api/auth` | session_signing_key | no | session signing key (auth routes) — auto-generated + persisted if unset |
+| `api_auth.csrf_secret` | file | `codemaster/api/auth` | csrf_secret | no | CSRF secret (auth routes) — auto-generated + persisted if unset |
 
 Seed Vault secrets at once with `deploy/seed-vault.sh`, or by hand with its `vault kv put` commands.
 

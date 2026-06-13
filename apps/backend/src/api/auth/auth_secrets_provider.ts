@@ -8,6 +8,7 @@
 
 import { FileKvReader } from "#backend/adapters/vault_file_kv.js";
 import { VaultHttpPort } from "#backend/adapters/vault_http.js";
+import type { AuthSecrets } from "#backend/api/auth/auth_secrets_repo.js";
 
 import type { VaultKvReadPort } from "#backend/ingest/webhook_secret_provider.js";
 
@@ -73,23 +74,64 @@ function envAuthSecretsReader(): VaultKvReadPort {
  * `agent-file` reads the Vault-Agent-rendered file; anything else lazily builds the Vault HTTP port (so the
  * server boots without VAULT_ADDR and only the first read touches Vault).
  */
-export function makeAuthSecretsProvider(): VaultAuthSecretsProvider {
+/** The configured (non-DB) reader: env (openshift) / agent-file / lazy Vault HTTP API. */
+function selectBaseAuthReader(): VaultKvReadPort {
   // openshift mode (the bootstrap-secret switch): the auth secrets come from env (a k8s Secret), never
   // Vault — so the API server boots with no VAULT_ADDR. (vault mode keeps the ADR-0071 agent-file/API selector.)
   if (process.env["CODEMASTER_SECRET_SOURCE"] === "openshift") {
-    return new VaultAuthSecretsProvider({ vault: envAuthSecretsReader() });
+    return envAuthSecretsReader();
   }
   const source = process.env["CODEMASTER_VAULT_SECRET_SOURCE"] ?? "vault-api";
   if (source === "agent-file") {
-    return new VaultAuthSecretsProvider({ vault: new FileKvReader() });
+    return new FileKvReader();
   }
   // Lazy Vault HTTP: defer building the port until the first read.
   let port: VaultHttpPort | undefined;
-  const lazy: VaultKvReadPort = {
+  return {
     kvRead: async (args) => {
       port ??= VaultHttpPort.fromEnv();
       return port.kvRead(args);
     },
   };
-  return new VaultAuthSecretsProvider({ vault: lazy });
+}
+
+/**
+ * Source-select the auth-secrets provider, resolving env/Vault > DB(auto-generated). When neither env
+ * (openshift) nor Vault supplies BOTH keys, the `dbFallback` (PostgresAuthSecretsRepo.ensure — auto-generate
+ * + persist field-codec-encrypted, race-safe) provides them — so the pod boots on only the DB + the
+ * field-encryption key, and these are NOT operator bootstrap secrets (review P0). Without a dbFallback
+ * (tests / no DB) the configured source must supply both keys, or readKey throws.
+ */
+export function makeAuthSecretsProvider(opts?: {
+  dbFallback?: () => Promise<AuthSecrets>;
+}): VaultAuthSecretsProvider {
+  const base = selectBaseAuthReader();
+  const dbFallback = opts?.dbFallback;
+  if (dbFallback === undefined) {
+    return new VaultAuthSecretsProvider({ vault: base });
+  }
+  // Memoized so the two accessors (signing key + csrf) resolve — and ensure — exactly once per boot.
+  let cached: Record<string, string> | undefined;
+  const resolving: VaultKvReadPort = {
+    kvRead: async (args) => {
+      if (cached !== undefined) {
+        return cached;
+      }
+      let baseData: Record<string, string> = {};
+      try {
+        baseData = await base.kvRead(args);
+      } catch {
+        // Configured source unavailable (Vault down / path missing) → fall back to the persisted DB secrets.
+      }
+      if (typeof baseData[SIGNING_KEY] === "string" && typeof baseData[CSRF_KEY] === "string") {
+        cached = baseData; // operator-provided env/Vault wins
+        return cached;
+      }
+      const db = await dbFallback();
+      // env/Vault overrides DB for any key it DID provide; DB fills the rest (incl. the all-absent case).
+      cached = { [SIGNING_KEY]: db.sessionSigningKey, [CSRF_KEY]: db.csrfSecret, ...baseData };
+      return cached;
+    },
+  };
+  return new VaultAuthSecretsProvider({ vault: resolving });
 }

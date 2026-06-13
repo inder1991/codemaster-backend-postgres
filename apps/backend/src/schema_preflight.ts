@@ -23,6 +23,8 @@ export const EXPECTED_MIGRATIONS = [
   "0001_baseline",
   // Go-live Step 4c: UI-editable Confluence creds (field-codec ciphertext). First incremental after the fuse.
   "0002_confluence_settings",
+  // Review P0: auto-generated session signing key + CSRF secret (so they aren't operator bootstrap secrets).
+  "0003_auth_secrets",
 ] as const satisfies ReadonlyArray<string>;
 
 /** The DB's applied migration sequence diverges from the image's compiled-in expectation — the pod

@@ -261,8 +261,9 @@ export const DEPLOY_CONTRACT: DeployContract = {
       gates: "Confluence ingestion (knowledge corpus)",
     },
     // Two keys at the one codemaster/api/auth path — the seeder groups by path into a single `vault kv
-    // put session_signing_key=… csrf_secret=…` (review P1: the prior single keyless entry seeded `value=`,
-    // which auth_secrets_provider can't read). openshift mode reads these from env instead (P0-A.2b).
+    // put session_signing_key=… csrf_secret=…` (review P1). openshift mode reads these from env (P0-A.2b).
+    // ADVISORY (required:false) is CORRECT: when neither env nor Vault provides them the app AUTO-GENERATES
+    // + persists them in core.auth_secrets at boot (review P0) — they're optional, NOT bootstrap secrets.
     {
       name: "api_auth.session_signing_key",
       source: "file",
@@ -270,7 +271,7 @@ export const DEPLOY_CONTRACT: DeployContract = {
       vaultPath: "codemaster/api/auth",
       key: "session_signing_key",
       required: false,
-      gates: "session signing key (auth routes)",
+      gates: "session signing key (auth routes) — auto-generated + persisted if unset",
     },
     {
       name: "api_auth.csrf_secret",
@@ -279,7 +280,7 @@ export const DEPLOY_CONTRACT: DeployContract = {
       vaultPath: "codemaster/api/auth",
       key: "csrf_secret",
       required: false,
-      gates: "CSRF secret (auth routes)",
+      gates: "CSRF secret (auth routes) — auto-generated + persisted if unset",
     },
   ],
   extensions: [

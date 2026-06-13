@@ -27,7 +27,7 @@ vault kv put "${MOUNT}/codemaster/github/app" app_id='<APP_ID>' private_key_pem=
 # codemaster/confluence/token (optional) — Confluence ingestion (knowledge corpus)
 vault kv put "${MOUNT}/codemaster/confluence/token" token='<TOKEN>'
 
-# codemaster/api/auth (optional) — session signing key (auth routes)
+# codemaster/api/auth (optional) — session signing key (auth routes) — auto-generated + persisted if unset
 vault kv put "${MOUNT}/codemaster/api/auth" session_signing_key='<SESSION_SIGNING_KEY>' csrf_secret='<CSRF_SECRET>'
 
 echo "✓ seeded — now run 'npm run deploy:check' (or let the pod preflight) to verify."

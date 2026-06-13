@@ -56,14 +56,16 @@ the field-encryption keyset**. Both modes are first-class.
 
 ### Mode A — OpenShift / Kubernetes Secret (simplest; no Vault)
 
-Create a Secret with the bootstrap values, then reference it from the chart via `extraEnvFrom`:
+Create a Secret with the two bootstrap values, then reference it from the chart via `extraEnvFrom`:
 
 ```bash
 kubectl -n <ns> create secret generic codemaster-bootstrap \
   --from-literal=CODEMASTER_PG_CORE_DSN='postgresql://user:pass@pg-host:5432/codemaster' \
-  --from-literal=CODEMASTER_FIELD_ENCRYPTION_KEYSET="$KEYSET" \
-  --from-literal=CODEMASTER_SESSION_SIGNING_KEY="$(openssl rand -hex 32)" \
-  --from-literal=CODEMASTER_CSRF_SECRET="$(openssl rand -hex 32)"
+  --from-literal=CODEMASTER_FIELD_ENCRYPTION_KEYSET="$KEYSET"
+  # OPTIONAL — the session signing key + CSRF secret AUTO-GENERATE on first boot and persist (field-codec
+  # encrypted) in the DB if you don't set them. Add these two only if you want to pin/control them yourself:
+  #   --from-literal=CODEMASTER_SESSION_SIGNING_KEY="$(openssl rand -hex 32)" \
+  #   --from-literal=CODEMASTER_CSRF_SECRET="$(openssl rand -hex 32)"
 ```
 
 Chart values:
