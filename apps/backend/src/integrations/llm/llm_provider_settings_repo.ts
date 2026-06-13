@@ -1,11 +1,6 @@
 /**
- * `core.llm_provider_settings` Postgres adapter — REAL Kysely + Vault-Transit port (de-stub step 1).
- *
- * 1:1 TypeScript/Kysely port of the frozen Python spine repo
- * `vendor/codemaster-py/codemaster/api/admin/postgres_llm_provider_settings_repo.py`
- * (platform-scope rewrite; migration 0059 `scope` discriminator).
- *
- * This is the REAL adapter — no stub, no mock, no no-op on the shipped path. It runs three reads
+ * `core.llm_provider_settings` Postgres adapter — REAL Kysely + Vault-Transit (de-stub step 1).
+ * No stub, no mock, no no-op on the shipped path. Runs three reads
  * against `core.llm_provider_settings` over the shared single-pool Kysely seam ({@link tenantKysely})
  * and decrypts `api_key_ciphertext` via the REAL Vault Transit key `"llm_provider_settings"` through
  * the injected {@link VaultPort}. The ported subset is the three reads named by the de-stub task:
@@ -54,22 +49,21 @@ import { tenantKysely } from "#platform/db/database.js";
 
 import { type VaultPort } from "#backend/adapters/vault_port.js";
 
-// ─── Constants (1:1 with the frozen Python module constants) ──────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────────────────────
 
-/** Vault Transit key name — Python `_VAULT_KEY_NAME`. */
+/** Vault Transit key name. */
 const VAULT_KEY_NAME = "llm_provider_settings";
 
 /** Provider-slot role discriminator — the two values the `role` CHECK constraint permits. */
 export type LlmProviderRole = "primary" | "secondary";
 
-// ─── Decrypted-settings value (port of the frozen Python `LlmProviderSettings` dataclass) ─────────
+// ─── Decrypted-settings value ─────────────────────────────────────────────────────────────────────
 
 /**
  * Decrypted credentials + metadata returned by {@link PostgresLlmProviderSettingsRepo.readDecryptedSettings}.
  *
- * Port of the frozen Python `LlmProviderSettings` frozen dataclass. This is an in-process return
- * type, NOT a cross-process wire contract (no `schema_version`) — it never leaves the worker, so it
- * is a plain typed object rather than a Zod/Pydantic contract, faithful to the Python dataclass.
+ * In-process return type, NOT a cross-process wire contract (no `schema_version`) — it never leaves
+ * the worker, so it is a plain typed object rather than a Zod-validated contract.
  *
  * The `apiKey` field holds the PLAINTEXT token — it is consumed immediately by the SDK adapter and
  * MUST NOT be logged, stored, or surfaced outside the call frame.
@@ -154,8 +148,8 @@ export class PostgresLlmProviderSettingsRepo {
    * configured this slot yet) OR the row exists but `enabled=false` (the admin disabled this slot) —
    * the disabled case is treated as absent so callers fail-closed.
    *
-   * Scope: queries `scope='platform'` only — per-installation override reads are deferred (matching
-   * the frozen Python). The plaintext token is decoded transiently and must not be logged or stored.
+   * Scope: queries `scope='platform'` only — per-installation override reads are deferred.
+   * The plaintext token is decoded transiently and must not be logged or stored.
    */
   public async readDecryptedSettings(role: LlmProviderRole): Promise<LlmProviderSettings | null> {
     // tenant:exempt reason=platform-config follow_up=PERMANENT-EXEMPTION-platform-llm-config
@@ -241,10 +235,9 @@ export class PostgresLlmProviderSettingsRepo {
   }
 
   /**
-   * Admin-side credential write — 1:1 port of `write_settings_atomic` MINUS the in-transaction audit
-   * callback. The Python emits the dual rotation-audit rows inside the same transaction; in the TS port the
-   * admin route emits them post-write through the dormant `AdminRoutesOptions.audit` no-op seam (matching
-   * every other ported admin write), so this method is a single self-atomic UPSERT.
+   * Admin-side credential write — single self-atomic UPSERT. The admin route emits dual rotation-audit
+   * rows post-write through the dormant `AdminRoutesOptions.audit` no-op seam (consistent with every
+   * other admin write).
    *
    * Encrypts the plaintext token via the REAL Vault Transit key `"llm_provider_settings"` and UPSERTs the
    * platform-scope row (scope='platform', installation_id=NULL) on the
@@ -297,11 +290,10 @@ export class PostgresLlmProviderSettingsRepo {
   }
 
   /**
-   * Return decrypted credentials for `provider` or `null` — 1:1 port of `read_decrypted_for_provider`. Scans
-   * for an ENABLED platform-scope row whose `provider` matches, preferring `role='primary'` (the
-   * `ORDER BY (role = 'primary') DESC` makes primary win the `LIMIT 1`). Used by the llm-models `/test`
-   * per-model credential ping. The plaintext key is consumed transiently by the caller — never logged or
-   * returned. (No `enabled` post-filter: the `enabled = true` predicate is in the WHERE clause.)
+   * Return decrypted credentials for `provider` or `null`. Scans for an ENABLED platform-scope row
+   * whose `provider` matches, preferring `role='primary'` (`ORDER BY (role = 'primary') DESC` makes
+   * primary win the `LIMIT 1`). Used by the llm-models `/test` per-model credential ping. The
+   * plaintext key is consumed transiently by the caller — never logged or returned.
    */
   public async readDecryptedForProvider(provider: string): Promise<LlmProviderSettings | null> {
     // tenant:exempt reason=platform-config follow_up=PERMANENT-EXEMPTION-platform-llm-config

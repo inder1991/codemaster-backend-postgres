@@ -1,10 +1,6 @@
 /**
- * `AnthropicBedrockSdkAdapter` — REAL `@anthropic-ai/bedrock-sdk` adapter (de-stub step 3).
- *
- * 1:1 TypeScript port of the frozen Python spine adapter
- * `vendor/codemaster-py/codemaster/integrations/llm/sdk_adapter.py::AnthropicBedrockSdkAdapter`.
- *
- * This is the REAL adapter — NO stub on the shipped path. It satisfies the {@link LlmSdk} Protocol
+ * `AnthropicBedrockSdkAdapter` — REAL `@anthropic-ai/bedrock-sdk` adapter (de-stub step 3). Satisfies
+ * the {@link LlmSdk} Protocol
  * ({@link "./client.js"}) that {@link LlmClient} consumes, backed by the real
  * `@anthropic-ai/bedrock-sdk` `AnthropicBedrock` client. On every {@link AnthropicBedrockSdkAdapter.createMessage}
  * call it:
@@ -227,8 +223,7 @@ export function buildAnthropicMessageParams(args: {
 /**
  * Map an `@anthropic-ai/sdk` exception to a specific `Llm*` subclass.
  *
- * Per the frozen Python spec §6.2 — the same mapping the Python `_map_anthropic_exception` applies, so
- * the workflow-level retry behavior is symmetric:
+ * Per spec §6.2 — the mapping that keeps workflow-level retry behavior symmetric:
  *   - timeout            → {@link LlmTimeoutError}     (retryable)
  *   - 429 / rate limit   → {@link LlmRateLimitError}   (retryable with backoff)
  *   - 401 / 403          → {@link LlmAuthError}        (NON-retryable; operator-visible misconfig)
@@ -246,7 +241,7 @@ export function buildAnthropicMessageParams(args: {
 export function mapAnthropicException(exc: unknown): LlmInvocationError {
   const excMsg = errorMessage(exc);
 
-  // Check in order of specificity (mirrors the Python isinstance ladder).
+  // Check in order of specificity (most-specific subclass first).
   if (exc instanceof APIConnectionTimeoutError) {
     return new LlmTimeoutError(excMsg);
   }

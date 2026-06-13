@@ -1,5 +1,4 @@
-// Flags write — 1:1 port of flags.py put_flag + postgres_flags_repo.py (stage_first_approval /
-// commit_second_approval). Two-person kill-switch flip with optimistic concurrency + typed-confirm gate.
+// Flags write — two-person kill-switch flip with optimistic concurrency + typed-confirm gate.
 //
 // State machine (core.flags pending_* columns):
 //   * First PUT (owner A): CAS-stage the change — set pending_second_approver=true, pending_value_json,

@@ -1,13 +1,8 @@
 /**
- * TTL-refreshing LLM credentials provider — 1:1 port of the frozen Python spine
- * `vendor/codemaster-py/codemaster/integrations/llm/credentials_provider.py` (de-stub step 2,
- * part 1). NO stub: the shipped path reads the REAL settings repo + serves a real per-role cache.
- *
- * Source of fresh LLM provider credentials for the worker's SDK adapter. Sits between the Postgres
- * LLM provider settings repo ({@link LlmProviderSettingsRepoPort} — in production
- * `PostgresLlmProviderSettingsRepo` from `./llm_provider_settings_repo.ts`, which decrypts
- * `api_key_ciphertext` via the Vault Transit key `"llm_provider_settings"`) and the LLM SDK adapter
- * (the consumer, which builds an {@link LlmClient} per role from these creds).
+ * TTL-refreshing LLM credentials provider (de-stub step 2). Source of fresh LLM provider credentials
+ * for the worker's SDK adapter. Sits between the Postgres LLM provider settings repo
+ * ({@link LlmProviderSettingsRepoPort} — production `PostgresLlmProviderSettingsRepo`, which decrypts
+ * `api_key_ciphertext` via Vault Transit `"llm_provider_settings"`) and the LLM SDK adapter.
  *
  * ── Why TTL refresh + not pod-restart-on-rotation? ──
  * An admin clicking Save in the admin console expects the change to take effect within a
@@ -75,7 +70,7 @@ import {
   type LlmProviderSettings,
 } from "#backend/integrations/llm/llm_provider_settings_repo.js";
 
-// ─── Constants (1:1 with the frozen Python module constants) ──────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────────────────────
 
 /**
  * Default TTL between forced refreshes from the LLM provider settings row. 5 minutes balances
@@ -96,8 +91,8 @@ const MS_PER_SECOND = 1000;
 // ─── The credential triple the SDK adapter consumes ───────────────────────────────────────────
 
 /**
- * The credential triple the LLM SDK adapter consumes. Port of the frozen Python `LlmCredentials`
- * frozen dataclass. In-process value (no `schema_version`) — it never leaves the worker.
+ * The credential triple the LLM SDK adapter consumes. In-process value (no `schema_version`) — it
+ * never leaves the worker.
  *
  * The `apiKey` field holds the PLAINTEXT token — consumed immediately by the SDK adapter and MUST NOT
  * be logged, stored, or surfaced outside the call frame.

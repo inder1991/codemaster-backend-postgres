@@ -1,12 +1,8 @@
-// Issue-link parser — 1:1 port of the frozen Python
-// `vendor/codemaster-py/codemaster/ingest/issue_link_parser.py::parse_issue_links` (Sprint 21 / S21.DM.10).
+// Issue-link parser — pure function. Extracts `(github_issue_number, linkage_kind, source)` triples
+// from PR text (description, title, branch name, commit message). No I/O. Invoked on every PR-open /
+// PR-edit event; results land in `core.pr_issue_links` via the producer `replaceLinks`.
 //
-// Pure function. Extracts `(github_issue_number, linkage_kind, source)` triples from PR text (description,
-// title, branch name, commit message). No I/O. The webhook handler invokes this on every PR-open / PR-edit
-// event; results land in `core.pr_issue_links` via the producer `replaceLinks`.
-//
-// The `IssueLink` / `LinkageKind` / `LinkageSource` types live in `#contracts/issue_link.v1.js` (the Zod
-// port of the frozen `@dataclass`); we reuse them here rather than redefining.
+// `IssueLink` / `LinkageKind` / `LinkageSource` types live in `#contracts/issue_link.v1.js`.
 //
 // Trust-boundary: this is a PRE-LLM step. The parser does NOT skip text wrapped in
 // `<diff trust="untrusted">…</diff>` — extraction is a structural action, not an LLM action. An adversarial
@@ -35,20 +31,18 @@ const KEYWORD_TO_KIND: ReadonlyMap<string, LinkageKind> = new Map<string, Linkag
 const KEYWORD_RE = /\b(close[ds]?|fix(?:es|ed)?|resolve[ds]?)\s*[:\s]?\s*#(\d{1,9})\b/gi;
 
 // Bare `#N` mention. The `(?<![\w/])` negative lookbehind rejects `#9` that immediately follows a word char
-// or a slash (so `owner/repo#9` and `word#5` do NOT match). 1:1 with Python `_BARE_HASH_RE`.
+// or a slash (so `owner/repo#9` and `word#5` do NOT match).
 const BARE_HASH_RE = /(?<![\w/])#(\d{1,9})\b/g;
 
 /**
- * Extract distinct issue links from `text`. 1:1 with the frozen Python `parse_issue_links`.
- *
- * Two-pass dedup, EXACTLY as Python:
+ * Extract distinct issue links from `text`. Two-pass dedup:
  *   - Pass 1: keyword-prefixed links (closes / fixes / resolves), deduped on the `(n, kind)` tuple via
  *     keep-first (Python `dict.setdefault`).
  *   - Pass 2: bare `#N` → `mentioned`, but SKIP any issue number already captured by a keyword in pass 1
  *     (auto-closing wins over a bare mention).
  *
- * Empty text → []. `n <= 0` is ignored. Insertion order is preserved (the `Map` keyed on the `(n, kind)`
- * tuple mirrors Python's `tuple(seen.values())`).
+ * Empty text → []. `n <= 0` is ignored. Insertion order is preserved (the `Map` keyed on the
+ * `(n, kind)` tuple).
  *
  * Cross-SOURCE dedup is the caller's job — `replaceLinks`'s natural key
  * `(pr_id, github_issue_number, linkage_kind, source)` keeps the `source` axis distinct by design.

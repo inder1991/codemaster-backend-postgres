@@ -1,6 +1,6 @@
-// Repositories enable/disable write — 1:1 port of postgres_repositories_repo.py set_enabled +
-// get_by_github_id. Single PUT surface: flip core.repositories.enabled with a race-free CAS UPDATE
-// (`WHERE enabled <> :new`) that atomically decides change-vs-noop. Pure DB + audit (no Temporal).
+// Repositories enable/disable write — single PUT surface: flip core.repositories.enabled with a
+// race-free CAS UPDATE (`WHERE enabled <> :new`) that atomically decides change-vs-noop.
+// Pure DB + audit (no Temporal).
 
 import { type Kysely, sql } from "kysely";
 

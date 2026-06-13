@@ -1,7 +1,6 @@
-// Embedder admin WRITE handlers (Batch 4) — 1:1 port of the WRITE paths in
-// codemaster/api/admin/embedder.py over EmbedderGenerationService. The route layer (admin_routes.ts) owns
-// authz, body parse, the EmbeddingGenerationV1/EmbedderStateV1 serialization, the Temporal dispatch/signal,
-// and the audit emit; these thin wrappers delegate to the service so the typed errors propagate unchanged.
+// Embedder admin WRITE handlers (Batch 4). The route layer (admin_routes.ts) owns authz, body parse,
+// serialization, Temporal dispatch/signal, and audit emit; these thin wrappers delegate to the service
+// so the typed errors propagate unchanged.
 //
 // toEmbeddingGenerationV1 mirrors embedder_read.ts::toGenerationV1: it maps an EmbeddingGenerationRowV1
 // (repo dataclass) to the wire EmbeddingGenerationV1 (ISO timestamps + the migration-seed email coercion).

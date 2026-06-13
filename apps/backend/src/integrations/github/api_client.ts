@@ -1,10 +1,6 @@
 /**
- * GitHubApiClient — 1:1 port of `codemaster/integrations/github/api_client.py`
- * (frozen Python, Sprint 5 / S5.1.2; later sprints S15.E typed-4xx + S19.F.NS clock seam +
- * F-4 bootstrap-state-coverage paginated installation/repositories).
- *
- * Async client for the GitHub REST API. The byte-significant logic — the parts a downstream
- * consumer's behaviour depends on — is the `_request` decision loop:
+ * GitHubApiClient — async client for the GitHub REST API. The byte-significant logic is the
+ * `_request` decision loop:
  *
  *   - MAX_5XX_RETRIES (3) attempts with INITIAL_BACKOFF_SECONDS (0.5s) exponential backoff:
  *     a 5xx response sleeps `backoff` then DOUBLES it (0.5 → 1.0 → … ; pure doubling, NO jitter),
@@ -15,7 +11,7 @@
  *     (carrying the parsed `Retry-After`).
  *   - On a SUCCESSFUL response, the X-RateLimit-* window is parsed and, if `remaining <= 0`,
  *     {@link GitHubRateLimitExceeded} is raised (carrying `reset_at` from X-RateLimit-Reset).
- *     This is the frozen Python's `maybe_raise_for_window` behaviour: it RAISES, it does NOT
+ *     This is the `maybe_raise_for_window` behaviour: it RAISES, it does NOT
  *     block-and-wait for the reset. (The Temporal layer above is what reschedules.)
  *   - Other 4xx → typed non-retryable errors (403/404/422 → specific subclasses; rest →
  *     {@link GitHubClientError}).
@@ -46,18 +42,18 @@ import { z } from "zod";
 import { type Clock, WallClock } from "#platform/clock.js";
 import { transportAbortSignal } from "#platform/transport_timeout.js";
 
-// ─── Constants (1:1 with the frozen Python module constants) ──────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────────────────────
 
 export const DEFAULT_BASE_URL = "https://api.github.com";
 export const MAX_5XX_RETRIES = 3;
 export const INITIAL_BACKOFF_SECONDS = 0.5;
 
-/** GitHub REST API version header the Python client pins. */
+/** GitHub REST API version header. */
 const GITHUB_API_VERSION = "2022-11-28";
 const DEFAULT_ACCEPT = "application/vnd.github+json";
 const DEFAULT_TIMEOUT_SECONDS = 10;
 
-// HTTP status sentinels (module-scope, mirroring the Python `_HTTP_*` finals).
+// HTTP status sentinels (module-scope).
 const HTTP_OK_FLOOR = 200;
 const HTTP_NOT_MODIFIED = 304;
 const HTTP_CLIENT_ERROR_FLOOR = 400;
@@ -68,7 +64,7 @@ const HTTP_UNPROCESSABLE = 422;
 const HTTP_SERVER_ERROR_FLOOR = 500;
 const HTTP_SERVER_ERROR_CEIL = 600;
 
-// ─── Typed errors (1:1 with the Python error hierarchy) ───────────────────────────────────────
+// ─── Typed errors ─────────────────────────────────────────────────────────────────────────────
 
 /** Raised after 5xx retries are exhausted. Retryable at the Temporal layer. */
 export class GitHubApiUnavailableError extends Error {
@@ -329,8 +325,8 @@ export const PullRequestFileEnvelopeV1 = z
 export type PullRequestFileEnvelopeV1 = z.infer<typeof PullRequestFileEnvelopeV1>;
 
 /**
- * One entry from `GET /installation/repositories`. Co-located with the client (mirrors the Python
- * `InstallationRepositoryV1` dataclass living in api_client.py, distinct from the webhook shape).
+ * One entry from `GET /installation/repositories`. Co-located with the client (distinct from the
+ * webhook shape).
  */
 export type InstallationRepositoryV1 = {
   id: number;
@@ -395,8 +391,8 @@ export class GitHubApiClient {
   // ─── Internals ────────────────────────────────────────────────────────────────────────────
 
   /**
-   * The 1:1 port of Python `_request`. Drives the retry / 401-refresh / rate-limit decision loop;
-   * returns the successful {@link GitHubHttpResponse} or raises a typed error.
+   * Drives the retry / 401-refresh / rate-limit decision loop; returns the successful
+   * {@link GitHubHttpResponse} or raises a typed error.
    */
   private async _request(
     method: string,
@@ -540,8 +536,7 @@ export class GitHubApiClient {
       ...(signal !== undefined ? { signal } : {}),
     });
     const body = GitHubApiClient.jsonOf(resp, "get_pull_request") as Record<string, unknown>;
-    // Normalize the head SHA + base ref into the contract's expected fields (mirrors the Python
-    // setdefault of head_sha_extracted / base_ref_extracted onto the validation aliases).
+    // Normalize the head SHA + base ref into the contract's expected fields.
     const head = (body["head"] ?? {}) as Record<string, unknown>;
     const base = (body["base"] ?? {}) as Record<string, unknown>;
     if (body["head_sha"] === undefined) body["head_sha"] = head["sha"] ?? "";
@@ -627,13 +622,13 @@ export class GitHubApiClient {
 
   // ─── Manifest fetch (FOLLOW-UP-confluence-pr-context-manifests) ──────────────────────────────
   // These satisfy the `GithubContentsPort` shape the fetch_manifest_snapshots activity consumes
-  // (structural typing — no `implements` to avoid a circular import). `installationUuid` is accepted for
-  // that port shape (a Python telemetry param); the TS `_request` does not consume it.
+  // (structural typing — no `implements` to avoid a circular import). `installationUuid` is accepted
+  // for that port shape but not consumed by `_request`.
 
   /**
-   * GET /repos/{owner}/{repo}/contents/{path}?ref={ref} (1:1 with the Python `get_contents`). Returns
-   * `[contentBase64AsciiBytes, blobSha]` on 200 (content is base64 per GitHub's contents API — the caller
-   * base64-decodes), or `null` on 404 / non-file / malformed. `GitHubAppUnauthorized` propagates.
+   * GET /repos/{owner}/{repo}/contents/{path}?ref={ref}. Returns `[contentBase64AsciiBytes, blobSha]`
+   * on 200 (content is base64 per GitHub's contents API — the caller base64-decodes), or `null` on 404
+   * / non-file / malformed. `GitHubAppUnauthorized` propagates.
    */
   public async getContents(args: {
     installationId: number;
@@ -680,9 +675,9 @@ export class GitHubApiClient {
   }
 
   /**
-   * GET /repos/{owner}/{repo}/git/trees/{treeSha}?recursive=1 (1:1 with the Python `get_recursive_tree`).
-   * Returns `[blobPaths (ASCII-sorted), truncated]`; `truncated=true` when the repo exceeded GitHub's
-   * 100k tree-entry cap. Best-effort — callers wrap in try/catch + degrade the nearest-walk on any throw.
+   * GET /repos/{owner}/{repo}/git/trees/{treeSha}?recursive=1. Returns `[blobPaths (ASCII-sorted),
+   * truncated]`; `truncated=true` when the repo exceeded GitHub's 100k tree-entry cap. Best-effort —
+   * callers wrap in try/catch + degrade the nearest-walk on any throw.
    */
   public async getRecursiveTree(args: {
     installationId: number;

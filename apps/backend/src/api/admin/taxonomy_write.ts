@@ -1,9 +1,8 @@
-// Taxonomy-suggestion write — 1:1 port of postgres_taxonomy_repo.py insert. Pure DB, no audit, no
-// Temporal. Operators propose curating an `unrecognized:*` label; the IDP team triages out-of-band.
+// Taxonomy-suggestion write — pure DB, no audit, no Temporal. Operators propose curating an
+// `unrecognized:*` label; the IDP team triages out-of-band.
 //
-// 1:1-DIVERGENCE (mint): the Python mints suggestion_id app-side (uuid.uuid4) because the PK has no
-// default; the port uses gen_random_uuid() in the INSERT + RETURNING instead (HTTP handler, no replay
-// concern) — same outcome, no app-side CSPRNG seam needed.
+// DIVERGENCE (mint): uses gen_random_uuid() in the INSERT + RETURNING instead of app-side UUID mint
+// (HTTP handler, no replay concern) — same outcome, no app-side CSPRNG seam needed.
 
 import { type Kysely, sql } from "kysely";
 

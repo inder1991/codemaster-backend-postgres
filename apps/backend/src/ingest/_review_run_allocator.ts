@@ -1,5 +1,4 @@
-// allocateRun — the atomic SERIAL+SUPERSEDE allocator for core.review_runs (AD-2; 1:1 with the frozen
-// Python codemaster/ingest/_review_run_allocator.py). Composes 4 steps inside the caller's transaction:
+// allocateRun — the atomic SERIAL+SUPERSEDE allocator for core.review_runs (AD-2). Composes 4 steps inside the caller's transaction:
 // supersede the active run → INSERT the new PENDING run (uuid7) → flip current_run_id → emit
 // WEBHOOK_RECEIVED. The caller MUST already be in an open transaction.
 

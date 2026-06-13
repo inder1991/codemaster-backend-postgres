@@ -1,10 +1,7 @@
-// Knowledge write — 1:1 port of codemaster/api/admin/knowledge.py (update_learning_body /
-// approve_proposal / reject_proposal) + the KnowledgeApprovalWorkflow signal contract.
-//
-// PUT applies an optimistic-concurrency (If-Match on core.learnings.version) update and writes a
-// core.learnings_revisions row in the SAME transaction. approve/reject validate the proposal
-// preconditions (state machine + self-approval) and let the route signal the workflow — the workflow,
-// not this code, persists the proposal's terminal state (1:1 with the Python ApprovalSignalPort split).
+// Knowledge write — PUT applies an optimistic-concurrency (If-Match on core.learnings.version) update
+// and writes a core.learnings_revisions row in the SAME transaction. approve/reject validate the proposal
+// preconditions (state machine + self-approval) and signal the workflow — the workflow, not this code,
+// persists the proposal's terminal state.
 
 import { type Kysely, sql } from "kysely";
 
@@ -235,7 +232,7 @@ export async function validateRejectProposal(
 /**
  * Fenced CAS terminal-state transition (pending_approval → approved | rejected). This is the COMPLETE
  * effect the Temporal `knowledge_approval` workflow applied — its body did nothing but
- * `proposal_repo.transition_state(...)` (vendor/codemaster-py/codemaster/workflows/knowledge_approval.py).
+ * `proposal_repo.transition_state(...)`.
  * De-Temporal: the admin route applies it SYNCHRONOUSLY + idempotently instead of signalling a workflow.
  * The fence (`state = 'pending_approval'`) resolves the approve-vs-expire/decide race the workflow's CAS
  * handled: a row already off pending returns applied:false with its current_state (the 409 envelope). The
@@ -277,8 +274,7 @@ export async function transitionProposalToTerminal(
 // ─── Temporal signal helpers ──────────────────────────────────────────────────────────────────────
 
 /**
- * Proposal workflow ID format: `knowledge-approval-{proposal_id}` (1:1 with
- * codemaster/workflows/knowledge_approval.py::workflow_id_for / WORKFLOW_ID_PREFIX).
+ * Proposal workflow ID format: `knowledge-approval-{proposal_id}`.
  */
 export function workflowIdFor(proposalId: string): string {
   return `knowledge-approval-${proposalId}`;

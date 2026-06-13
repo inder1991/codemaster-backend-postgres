@@ -1,6 +1,4 @@
-// Embedder admin reads — 1:1 port of the READ paths in codemaster/api/admin/embedder.py
-// (_to_generation_v1 + _coerce_email_or_none) over EmbedderRuntimeStateRepo / EmbeddingGenerationsRepo /
-// EmbedderGenerationService.get_coverage. Three GET endpoints: /state, /coverage, /reembed/status.
+// Embedder admin reads — three GET endpoints: /state, /coverage, /reembed/status.
 //
 // All three are PLATFORM-SCOPE reads — embedder_runtime_state + embedding_generations have no
 // installation_id; the coverage anti-join over knowledge_chunks is a DELIBERATE cross-tenant aggregate
@@ -11,7 +9,7 @@
 // (coerceEmailOrNone) before it reaches the EmailStr-constrained contract.
 //
 // validation_report_json (JSONB) is parsed into ValidationReportV1; a malformed payload yields null +
-// an optional onWarn emit (mirrors the Python ValidationError catch + _LOG.warning) — never throws.
+// an optional onWarn emit — never throws.
 
 import { type Kysely, sql } from "kysely";
 
@@ -22,10 +20,10 @@ import type {
 } from "#contracts/admin.v1.js";
 import { ValidationReportV1 } from "#contracts/admin.v1.js";
 
-/** Optional structured-warning sink (mirrors the Python `_LOG.warning("malformed_validation_report_json")`). */
+/** Optional structured-warning sink for malformed validation_report_json. */
 export type GenerationWarn = (e: { generationId: number; error: string }) => void;
 
-/** Raised when the embedder_runtime_state singleton is absent (Python `.mappings().one()` throws). → 500. */
+/** Raised when the embedder_runtime_state singleton is absent (the row is required). → 500. */
 export class EmbedderStateMissingError extends Error {
   public constructor() {
     super("core.embedder_runtime_state singleton row is missing");
@@ -215,7 +213,7 @@ export async function buildEmbedderCoverage(db: Kysely<unknown>): Promise<Embedd
     schema_version: 1,
     confluence_missing: confluenceMissing,
     knowledge_missing: knowledgeMissing,
-    total_missing: confluenceMissing + knowledgeMissing, // computed in app code (1:1 with the Python service)
+    total_missing: confluenceMissing + knowledgeMissing, // computed in app code
     active_generation: g,
   };
 }

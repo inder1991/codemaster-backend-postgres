@@ -1,9 +1,5 @@
-// Argon2id password hashing (1:1 with codemaster/api/auth/password_hasher.py's PRODUCTION path, ADR-0072).
-// @node-rs/argon2 reads the cost params from the encoded PHC string on verify, so it cross-verifies hashes
-// the frozen Python wrote with argon2-cffi — proven by the parity fixture in password_hasher.test.ts.
-//
-// The Python `fallback$<salt>$<hmac>` path (only when argon2-cffi is absent in dev) is NOT ported —
-// production always has real Argon2id.
+// Argon2id password hashing (ADR-0072). @node-rs/argon2 reads cost params from the PHC string on verify —
+// cross-verifies existing hashes; proven by the parity fixture in password_hasher.test.ts.
 
 import { hash, verify, type Algorithm } from "@node-rs/argon2";
 
@@ -12,7 +8,7 @@ import { hash, verify, type Algorithm } from "@node-rs/argon2";
 // `type=Type.ID`). Cast the literal to the enum type for the options shape.
 const ARGON2ID = 2 as Algorithm;
 
-// OWASP-2023 params, matching the Python (time_cost=3, memory_cost=65536 KiB, parallelism=4).
+// OWASP-2023 params (time_cost=3, memory_cost=65536 KiB, parallelism=4).
 const HASH_OPTS = {
   algorithm: ARGON2ID,
   timeCost: 3,

@@ -1,7 +1,6 @@
-// Pure body extractors for the GitHub webhook persistence layer (1:1 with the `_extract_*` functions in
-// codemaster/ingest/github_webhook_persistence.py). Each parses the raw webhook body (a Buffer of JSON)
-// best-effort and fails CLOSED (returns null / absent) on malformed JSON or missing fields — the audit row
-// is still written upstream; only the dispatch path is skipped.
+// Pure body extractors for the GitHub webhook persistence layer. Each parses the raw webhook body
+// (a Buffer of JSON) best-effort and fails CLOSED (returns null / absent) on malformed JSON or missing
+// fields — the audit row is still written upstream; only the dispatch path is skipped.
 
 import { GitHubPullRequestPayloadV1 } from "#contracts/github_pull_request_payload.v1.js";
 
@@ -12,10 +11,8 @@ const PR_DESCRIPTION_MAX_CHARS = 10_000;
 
 /**
  * Normalize a GitHub ISO timestamp to byte-match the Python wire shape. Python's `created_at` is a Pydantic
- * `datetime` emitted via `.isoformat()`, which renders UTC as `+00:00` (NOT `Z`). GitHub sends
- * second-precision `...Z`; rewriting a trailing `Z` → `+00:00` yields the exact Python form. An explicit
- * offset (or null) passes through unchanged. Same instant either way; this only closes a byte-level
- * parity drift against the frozen Python at the outbox seam.
+ * GitHub sends second-precision `...Z`; rewriting a trailing `Z` → `+00:00` normalizes the format
+ * at the outbox seam (same instant). An explicit offset (or null) passes through unchanged.
  */
 function normalizeOpenedAt(createdAt: string | null): string | null {
   return createdAt !== null && createdAt.endsWith("Z") ? `${createdAt.slice(0, -1)}+00:00` : createdAt;
@@ -101,7 +98,6 @@ export function extractPrNodeId(body: Uint8Array): string | null {
 /**
  * GitHub's top-level `action` field (present on every event we route on — installation /
  * installation_repositories / pull_request) or null on malformed JSON / missing-or-non-string action.
- * 1:1 with the Python `_extract_action` (github_webhook_persistence.py).
  */
 export function extractAction(body: Uint8Array): string | null {
   const payload = parseJsonObject(body);
@@ -109,7 +105,7 @@ export function extractAction(body: Uint8Array): string | null {
   return typeof action === "string" ? action : null;
 }
 
-/** The pre-resolution slice of ReviewPullRequestPayloadV1 (1:1 with the Python `_PrMetadata` dataclass). */
+/** The pre-resolution slice of ReviewPullRequestPayloadV1. */
 export type PrMetadata = {
   action: string;
   prNumber: number;
@@ -139,7 +135,7 @@ export type PrMetadata = {
 /**
  * Validate the raw body against GitHubPullRequestPayloadV1 (the trust-tier boundary) and project the slice
  * the v2 outbox payload needs. Returns null for non-PR events / malformed JSON / any contract violation —
- * fail-CLOSED at the API trust boundary (1:1 with the Python `_extract_pr_metadata`).
+ * fail-CLOSED at the API trust boundary.
  */
 export function extractPrMetadata(body: Uint8Array): PrMetadata | null {
   let raw: unknown;

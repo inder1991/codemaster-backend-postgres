@@ -1,8 +1,7 @@
 /**
- * REAL preflight validators — 1:1 port of preflight_validator.py's BedrockPreflightValidator +
- * AnthropicDirectPreflightValidator + get_preflight_validator. Each issues a 1-token LLM ping (or a
- * model-less models.list for the anthropic_direct credentials-test) against the operator's NEW credentials,
- * mapping success/failure to a token-redacted ValidationResult.
+ * REAL preflight validators — each issues a 1-token LLM ping (or a model-less models.list for
+ * anthropic_direct) against the operator's NEW credentials, mapping success/failure to a
+ * token-redacted ValidationResult.
  *
  * The SDK client is constructed PER-CALL via an injectable factory (default: lazy-import the official
  * Anthropic SDK), matching the bedrock_sdk_adapter idiom — tests inject a fake client and never load the SDK.

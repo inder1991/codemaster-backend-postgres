@@ -1,5 +1,4 @@
-// Retrieval-trace inspector reads — 1:1 port of PostgresRetrievalTracesRepo.list_recent + get_by_id
-// (codemaster/api/admin/postgres_retrieval_traces_repo.py). Two GET endpoints:
+// Retrieval-trace inspector reads — two GET endpoints:
 //
 //   GET /api/admin/retrieval-traces            — offset-paginated list from the v_retrieval_traces_recent
 //                                                 MATERIALIZED VIEW (30-day window; flattened columns).
@@ -39,8 +38,8 @@ export async function listRetrievalTraces(
   db: Kysely<unknown>,
   args: { offset: number; pageSize: number; starvationOnly: boolean },
 ): Promise<{ rows: Array<RetrievalTraceListEntryV1>; nextCursor: string | null }> {
-  // The starvation filter is a conditional WHERE fragment (1:1 with the Python string-interpolated
-  // where_clause); the empty fragment is a no-op. starvation_observed = true hits the partial index.
+  // The starvation filter is a conditional WHERE fragment; the empty fragment is a no-op.
+  // starvation_observed = true hits the partial index.
   const whereClause = args.starvationOnly ? sql`WHERE starvation_observed = true` : sql``;
   const res = await sql<ListEntrySqlRow>`
     SELECT trace_id, review_id, pr_id, captured_at,

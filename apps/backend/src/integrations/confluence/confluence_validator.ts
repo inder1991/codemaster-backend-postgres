@@ -1,14 +1,7 @@
 /**
- * Confluence space-validation port — 1:1 port of the `ConfluenceValidatorPort` Protocol +
- * `ConfluenceValidationResult` in `vendor/codemaster-py/codemaster/api/admin/integrations.py:159-176`.
- *
- * When an operator registers a Confluence space via POST /api/admin/integrations/confluence-spaces, the
- * admin pod validates the service account can actually reach the space BEFORE persisting a row — an
- * unreachable space cannot create an integration. This module defines the PORT only (the injectable seam);
- * the REAL adapter over the Confluence v2 client is wired at the composition root (the route consumes a
- * {@link GetConfluenceValidator} factory from `AdminRoutesOptions`), exactly like the preflight-validator
- * port. Tests inject a stub. Per the live-untested Confluence surface, the real adapter MUST be exercised
- * against live Atlassian Cloud, not shipped blind.
+ * Confluence space-validation port — validates the service account can reach a space BEFORE persisting
+ * a row. PORT only (injectable seam); the REAL adapter is wired at the composition root. Tests inject a
+ * stub. The real adapter MUST be exercised against live Atlassian Cloud before shipping.
  */
 
 /** Outcome of a space-reachability probe. `detail` carries the upstream status/reason the route classifies

@@ -1,8 +1,6 @@
 /**
- * GitHub App JWT signer — 1:1 port of `codemaster/integrations/github/app_jwt.py`
- * (frozen Python, Sprint 4 / S4.1.1).
- *
- * Signs a 10-minute RS256 JWT from the App-level private key (PEM in Vault). The JWT bears
+ * GitHub App JWT signer — signs a 10-minute RS256 JWT from the App-level private key (PEM in Vault).
+ * The JWT bears
  * `iat = now - 60s` (clock-skew margin) and `exp = now + 9m` (under GitHub's 10-min cap). The
  * signed JWT is the App-level credential exchanged for an installation token.
  *
@@ -28,18 +26,16 @@ import { type Clock } from "#platform/clock.js";
 
 /**
  * GitHub caps App JWTs at 10 minutes. We use 9 minutes to leave a 1-minute safety margin against
- * clock skew on either side. Mirrors `APP_JWT_TTL_SECONDS` in the frozen Python.
+ * clock skew on either side.
  */
 export const APP_JWT_TTL_SECONDS = 9 * 60;
 
-/** Mirrors `APP_JWT_IAT_BACKDATE_SECONDS` in the frozen Python. */
+/** Back-date `iat` by this many seconds to tolerate clock skew at GitHub's end. */
 export const APP_JWT_IAT_BACKDATE_SECONDS = 60;
 
 /**
- * The private-key PEM cannot be parsed / used to sign. Mirrors the Python
- * `GitHubPrivateKeyMalformed` typed-error contract: PyJWT raises `InvalidKeyError` / `ValueError`
- * for a malformed PEM, which the Python wraps; here `node:crypto` `sign` throws for the same class
- * of input, which we wrap identically.
+ * The private-key PEM cannot be parsed / used to sign. `node:crypto` `sign` throws for a malformed
+ * PEM; this error wraps it.
  */
 export class GitHubPrivateKeyMalformed extends Error {
   public constructor(message: string) {

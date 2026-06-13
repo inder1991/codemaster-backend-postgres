@@ -1,12 +1,7 @@
 /**
  * PrDescriptionClient — production GitHub adapter for the `update_pr_description_summary` activity.
- *
- * 1:1 in intent with the frozen Python `PrDescriptionClient` Protocol
- * (vendor/codemaster-py/codemaster/activities/update_pr_description_summary.py:113-138) + its concrete
- * worker-wiring impl `_PrDescriptionGitHubAdapter`
- * (vendor/codemaster-py/codemaster/worker/main.py:1760-1808). The activity needs exactly two operations
- * on a PR's description (a metadata field — CLAUDE.md invariant 9: the bot edits the description, NOT the
- * review event; it remains advisory):
+ * The activity needs exactly two operations on a PR's description (a metadata field — CLAUDE.md
+ * invariant 9: the bot edits the description, NOT the review event; it remains advisory):
  *
  *   1. GET the current PR body, so the prior codemaster summary block can be stripped + recomposed.
  *   2. PATCH the PR body back with the original-author content + the fresh summary appended.
@@ -32,9 +27,8 @@
 import { type GitHubApiClient } from "#backend/integrations/github/api_client.js";
 
 /**
- * The minimal 2-method surface `updatePrDescriptionSummary` needs from the GitHub API — the TS analogue
- * of the frozen Python `PrDescriptionClient` Protocol. Keyword-only Python args → a single args object
- * per method (camelCase members), so the dispatch is positional-arg-free at the seam.
+ * The minimal 2-method surface `updatePrDescriptionSummary` needs from the GitHub API. Each method
+ * takes a single camelCase args object, so the dispatch is positional-arg-free at the seam.
  */
 export type GhPrDescriptionClient = {
   /**
@@ -60,10 +54,8 @@ export type GhPrDescriptionClient = {
 
 /**
  * Production {@link GhPrDescriptionClient}: implements the 2 methods over an injected
- * {@link GitHubApiClient}. 1:1 with the Python `_PrDescriptionGitHubAdapter` (which pins the same URL
- * shape + JSON envelope on the write side). `installationId` is fixed at construction — the worker is
- * single-installation-per-pod (mirrors the frozen worker wiring passing one `GitHubApiClient` + a fixed
- * installation id).
+ * {@link GitHubApiClient}. `installationId` is fixed at construction — the worker is
+ * single-installation-per-pod.
  */
 export class GitHubApiPrDescriptionClient implements GhPrDescriptionClient {
   private readonly api: GitHubApiClient;

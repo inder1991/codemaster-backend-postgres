@@ -1,6 +1,4 @@
-// Retrieval-trace aggregates — 1:1 port of retrieval_aggregate.py (pure aggregate() fold) +
-// postgres_retrieval_aggregate_repo.py (atomic CTE + cross-validation + row-level isolation).
-//
+// Retrieval-trace aggregates:
 //   GET /api/admin/retrieval-aggregates/reviews/{review_id}        — per-review historical rollup
 //   GET /api/admin/retrieval-aggregates/pull-requests/{pr_id}      — every review with traces for a PR
 //

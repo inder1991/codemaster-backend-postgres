@@ -1,10 +1,6 @@
 /**
- * `LlmClientCache` — REAL per-pod client cache keyed on role (de-stub step 3).
- *
- * 1:1 TypeScript port of the frozen Python spine cache
- * `vendor/codemaster-py/codemaster/integrations/llm/client_cache.py::LlmClientCache`.
- *
- * This is the REAL cache — NO stub on the shipped path. It holds at most two live {@link LlmClient}s
+ * `LlmClientCache` — REAL per-pod client cache keyed on role (de-stub step 3). Holds at most two
+ * live {@link LlmClient}s
  * (primary + secondary), each built over the REAL {@link AnthropicBedrockSdkAdapter}
  * (`@anthropic-ai/bedrock-sdk`). Freshness is a PK-scan against `core.llm_provider_settings` on every
  * call (sub-ms; no Vault decrypt); the Vault decrypt happens only on a true cache miss (the rotation
@@ -183,8 +179,8 @@ function requireCoreDsn(): string {
 
 /**
  * Build (or return the memoized) shared production collaborators for `dsn`. The cost-cap is constructed
- * with `readCapsFromDb: true` — the production posture the frozen Python worker wires (live caps from
- * `core.cost_cap_overrides` + `core.cost_cap_settings`, env-var seed as first-boot fallback).
+ * with `readCapsFromDb: true` — live caps from `core.cost_cap_overrides` + `core.cost_cap_settings`,
+ * env-var seed as first-boot fallback.
  */
 export function sharedClientCollaborators(dsn: string): ClientCollaborators {
   const existing = SHARED_COLLABORATORS.get(dsn);

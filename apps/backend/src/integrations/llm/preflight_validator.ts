@@ -1,17 +1,10 @@
 /**
- * LLM pre-save credential validator port — 1:1 port of the seam in
- * `vendor/codemaster-py/codemaster/integrations/llm/preflight_validator.py`.
+ * LLM pre-save credential validator port — when an operator saves new LLM credentials the admin pod
+ * issues a 1-token LLM ping to verify the token is recognised, has permission to invoke the model,
+ * and (Bedrock) the region is reachable. A failed ping → 400 with the sanitized error and NO DB write.
  *
- * When an operator saves new LLM credentials via PUT /api/admin/llm-provider-config (or hits the
- * "Test connection" buttons), the admin pod issues a 1-token LLM ping to verify the token is recognised,
- * has permission to invoke the model, and (Bedrock) the region is reachable. A failed ping turns into a 400
- * with the sanitized upstream error and NO DB write — catching operator typos at save time.
- *
- * This module defines the PORT only (the injectable seam). The REAL provider validators
- * (BedrockPreflightValidator over `@anthropic-ai/bedrock-sdk`, AnthropicDirectPreflightValidator over the
- * direct SDK) are wired at the composition root — the admin routes consume a {@link GetPreflightValidator}
- * factory from `AdminRoutesOptions`, exactly as the Python router injects `get_preflight_validator`.
- * Tests inject an in-memory stub. The validators NEVER echo the plaintext token in error strings.
+ * PORT only (injectable seam). REAL validators are wired at the composition root. Tests inject a stub.
+ * The validators NEVER echo the plaintext token in error strings.
  */
 
 /** Provider discriminator (matches the contract enum). */

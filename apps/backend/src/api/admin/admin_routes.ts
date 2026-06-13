@@ -1,11 +1,9 @@
-// Fastify admin router — port of the codemaster/api/admin/* READ endpoints (operator visibility).
-// Each route sits behind the makeRequireRole gate (Stage 5) with the SAME per-route allow-set as the
-// frozen Python require_role(...). Registered on an encapsulated scope (@fastify/cookie scoped here) like
-// the auth router.
+// Fastify admin router — admin READ+WRITE endpoints (operator visibility). Each route sits behind the
+// makeRequireRole gate. Encapsulated scope (@fastify/cookie scoped here) like the auth router.
 //
-// Batch 1 (the tsReady=ready READ endpoints from the admin-read-endpoint survey):
+// Batch 1 READ endpoints:
 //   GET /api/admin/orgs       — distinct orgs visible to the session (the Reviews org filter)
-//   GET /api/admin/dashboard  — operator landing summary (static zero-DB shim, 1:1 with the shipped Python)
+//   GET /api/admin/dashboard  — operator landing summary (static zero-DB shim)
 
 import cookie from "@fastify/cookie";
 import { type Kysely } from "kysely";
@@ -350,9 +348,8 @@ export type AdminRoutesOptions = {
   /** Vault Transit port for the llm-provider-config credential write (encrypt). Undefined → the
    *  PUT/preflight/test-credentials credential-write routes 503 (unwired at the composition root). */
   vault?: VaultPort;
-  /** Injected preflight-validator factory (1:1 with the Python get_preflight_validator). Undefined → the
-   *  llm-provider-config credential routes 503. Production wires the real Bedrock/AnthropicDirect SDK
-   *  validators; tests inject a stub. */
+  /** Injected preflight-validator factory. Undefined → the llm-provider-config credential routes 503.
+   *  Production wires the real Bedrock/AnthropicDirect SDK validators; tests inject a stub. */
   getPreflightValidator?: GetPreflightValidator;
   /** Injected Confluence space-validator factory. Undefined → the integrations CREATE route 503. Production
    *  wires the real Confluence v2 adapter (deferred — live-untested surface); tests inject a stub. */
@@ -628,10 +625,10 @@ export async function registerAdminRoutes(
     );
 
     // ─── Embedder WRITE lifecycle (Batch 4 — platform_owner / super_admin) ───────────────────────────
-    // 1:1 with codemaster/api/admin/embedder.py. The service is the sole authorized writer; the route owns
+    // The service is the sole authorized writer; the route owns
     // body parse, Temporal dispatch/signal, audit emit, and the wire serialization. Audit target_kind is
     // 'embedder_generation' for every endpoint (retrieval-mode uses target_id='singleton'); installation_id
-    // is the actor's session install (mirrors the Python _emit, which passes _require_owner()'s install id).
+    // is the actor's session install.
     const EMBEDDER_GENERATION_ID_BODY = z
       .object({ schema_version: z.literal(1).default(1), generation_id: z.number().int().min(1) })
       .strict();
@@ -646,8 +643,8 @@ export async function registerAdminRoutes(
           return reply.code(422).send({ detail: "request body failed schema validation" });
         }
         const body = parsed.data;
-        // 1:1 with the Python embedder.py handlers: resolve the actor's email and pass THAT as the
-        // service's triggered_by_email (the bare UUID would persist a non-email to *_by_email columns).
+        // Resolve the actor's email and pass THAT as triggered_by_email (the bare UUID would persist a
+        // non-email to *_by_email columns).
         const actorEmail = await (opts.userEmailResolver ?? shimUserEmailResolver).resolveEmail(
           principal.userId,
         );
@@ -684,7 +681,7 @@ export async function registerAdminRoutes(
         }
         const body = parsed.data;
         // Resolve the actor email once; pass it as triggered_by_email to both the service write and the
-        // dispatched workflow input (1:1 with the Python embedder.py start handler).
+        // dispatched workflow input.
         const actorEmail = await (opts.userEmailResolver ?? shimUserEmailResolver).resolveEmail(
           principal.userId,
         );
@@ -1575,7 +1572,7 @@ export async function registerAdminRoutes(
           }
           if (err instanceof IntegrationValidationError) {
             if (err.code === "rate_limited") {
-              // Retry-After header + 503 (1:1 with the Python rate-limit branch).
+              // Retry-After header + 503 on rate-limit.
               return reply
                 .code(503)
                 .header("Retry-After", "60")
@@ -1590,7 +1587,7 @@ export async function registerAdminRoutes(
     );
 
     // ─── Confluence pages (per-space page list + approval lifecycle + quarantined chunks) ────────────
-    // 1:1 with codemaster/api/admin/page_approvals.py + quarantined_chunks.py. platform_owner / super_admin.
+    // platform_owner / super_admin.
     // The page-approval POST/DELETE and the quarantined-chunks GET emit NO audit action (the Python routers
     // are audit-exempt — mirrored here). // audit-test-exempt
 
@@ -1601,8 +1598,8 @@ export async function registerAdminRoutes(
       { preHandler: requireRole(["platform_owner", "super_admin"]) },
       async (request, reply) => {
         const integrationId = (request.params as { integration_id: string }).integration_id;
-        // 1:1 with the Python list_pages_route(integration_id: uuid.UUID): a malformed UUID is 422 BEFORE
-        // the repo call (FastAPI path-param coercion). Without this the bad string would 404/500 from the DB.
+        // Validate integration_id is a UUID before the repo call; a malformed UUID is 422 (without this
+        // the bad string would 404/500 from the DB).
         if (!UUID_RE.test(integrationId)) {
           return reply.code(422).send({ detail: "integration_id must be a uuid" });
         }
@@ -1649,8 +1646,7 @@ export async function registerAdminRoutes(
               },
             });
           }
-          // 1:1 with the Python create_approval cross-check (page_approvals.py ~L224): the URL page_id is
-          // authoritative, so a body.page_id naming a DIFFERENT page is rejected (pre-fix the body won).
+          // URL page_id is authoritative; a body.page_id naming a different page is rejected.
           const urlPageId = (request.params as { page_id: string }).page_id;
           if (body.page_id !== urlPageId) {
             return reply.code(400).send({
@@ -1735,8 +1731,7 @@ export async function registerAdminRoutes(
       { preHandler: requireRole(["platform_owner", "super_admin"]) },
       async (request, reply) => {
         const integrationId = (request.params as { integration_id: string }).integration_id;
-        // 1:1 with the Python list_quarantined_chunks_route(integration_id: uuid.UUID): 422 on a malformed
-        // UUID BEFORE the repo call.
+        // Validate integration_id is a UUID (422 on malformed) before the repo call.
         if (!UUID_RE.test(integrationId)) {
           return reply.code(422).send({ detail: "integration_id must be a uuid" });
         }
@@ -2839,10 +2834,10 @@ export async function registerAdminRoutes(
       },
     );
 
-    // GET /api/admin/status/pilot-progress (owner/super). 1:1 with the Python status.py _safe_call +
-    // _pilot_fallback: schema-drift (missing table/column) graceful-degrades to the zero envelope with
-    // target_orgs=0; any real I/O / persistence error surfaces 503 (it does NOT silently zero the
-    // dashboard). Mirrors the /status/pipeline schema-drift detection above.
+    // GET /api/admin/status/pilot-progress (owner/super). Schema-drift (missing table/column)
+    // graceful-degrades to the zero envelope with target_orgs=0; any real I/O / persistence error
+    // surfaces 503 (it does NOT silently zero the dashboard). Mirrors the /status/pipeline
+    // schema-drift detection above.
     scope.get(
       "/api/admin/status/pilot-progress",
       { preHandler: requireRole(["platform_owner", "super_admin"]) },

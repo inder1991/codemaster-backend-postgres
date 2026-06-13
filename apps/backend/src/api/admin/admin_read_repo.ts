@@ -1,6 +1,4 @@
-// Admin read repo — net-new TS SELECTs for the admin READ endpoints (the Python orchestrating
-// Postgres*Repo classes are not ported; these are the straight queries those endpoints actually run).
-// Batch 1: listOrgs.
+// Admin read repo — direct Postgres SELECTs for the admin READ endpoints. Batch 1: listOrgs.
 
 import { type Kysely, sql } from "kysely";
 
@@ -426,8 +424,8 @@ function mapIntegration(row: IntegrationDbRow): IntegrationListItemV1 {
 }
 
 /** GET /api/admin/integrations — integrations paginated by the (created_at, integration_id) keyset,
- *  pushed into SQL (W2.7/EH9 — the legacy port fetched every platform integration then sliced in
- *  memory, 1:1 with the Python's fetch-all + _apply_keyset_slice_integrations). size clamped [1,200]. */
+ *  pushed into SQL (W2.7/EH9 — the earlier implementation fetched all rows then sliced in memory).
+ *  size clamped [1,200]. */
 export async function listIntegrationsPage(
   db: Kysely<unknown>,
   cursor: string | null,
@@ -730,10 +728,9 @@ function mapFindingRow(row: FindingDbRow): FindingRowV1 {
 }
 
 /**
- * Keyset-paginated findings, ordered created_at DESC, review_finding_id ASC. 1:1 with
- * postgres_findings_repo.list_findings: tenancy-filtered on installation_id, optional repository_id JOIN to
- * pull_requests, severity/category/file-substring/date filters, and the (created_at, review_finding_id)
- * keyset cursor. (The mixed DESC/ASC keyset is carried verbatim from the frozen Python.)
+ * Keyset-paginated findings, ordered created_at DESC, review_finding_id ASC. Tenancy-filtered on
+ * installation_id; optional repository_id JOIN to pull_requests; severity/category/file-substring/date
+ * filters; (created_at, review_finding_id) mixed DESC/ASC keyset cursor.
  */
 export async function listFindings(
   db: Kysely<unknown>,

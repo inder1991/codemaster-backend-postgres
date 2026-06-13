@@ -1,8 +1,5 @@
-// LDAP client port — 1:1 port of codemaster/api/auth/ldap_client.py (Sprint 12 / S12.1.2).
-//
-// Production wraps an LDAP library against the corporate host (TLS mandatory; service-account creds from
-// Vault; username RFC-4515-escaped before any search filter). Tests / the current deployment inject a stub
-// (see noop_ldap.ts). No real LDAP exists yet — the NoOp shim is the live wiring.
+// LDAP client port — production wraps an LDAP library (TLS mandatory; service-account creds from Vault;
+// username RFC-4515-escaped before any search filter). Current deployment injects NoOpLdapClient.
 
 /** Raised on bind failure (bad credentials OR LDAP unreachable). */
 export class LdapBindError extends Error {
@@ -31,7 +28,7 @@ export type LdapClientPort = {
   authenticate(args: { username: string; password: string }): Promise<AuthenticatedUser>;
 };
 
-// RFC 4515 LDAP search-filter escape table (byte-identical to the Python map).
+// RFC 4515 LDAP search-filter escape table.
 const LDAP_ESCAPE_RE = /[*()\\\0]/g;
 const LDAP_ESCAPE_MAP = new Map<string, string>([
   ["*", "\\2a"],

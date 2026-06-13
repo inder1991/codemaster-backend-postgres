@@ -1,7 +1,4 @@
-// F-5b (bootstrap-state-coverage plan v5) — shared `maybeEnqueueRepair` helper.
-//
-// FAITHFUL 1:1 port of the frozen Python `vendor/codemaster-py/codemaster/ingest/_repair_dispatcher.py`.
-// Used by BOTH:
+// F-5b (bootstrap-state-coverage plan v5) — shared `maybeEnqueueRepair` helper. Used by BOTH:
 //   * reconcile_installation (installation_created path)
 //   * github_webhook_persistence (PR-webhook drift detection path; the integrator wires the call site —
 //     this module does NOT edit the webhook handler).
@@ -60,7 +57,7 @@ export const REPAIR_INSTALLATION_REPOSITORIES_TASK_QUEUE = resolveReviewTaskQueu
 export const REPAIR_INSTALLATION_REPOSITORIES_WORKFLOW_TYPE = "repairInstallationRepositories";
 
 /**
- * Producer-side gated repair-dispatch (1:1 with the Python `maybe_enqueue_repair`).
+ * Producer-side gated repair-dispatch.
  *
  * Returns true if a repair workflow was enqueued; false if the enqueue was suppressed (cooldown OR
  * blocked). The caller's only responsibility on a false return: continue normal flow — the appropriate
@@ -112,7 +109,7 @@ export async function maybeEnqueueRepair(
 }
 
 /**
- * Construct the typed Temporal dispatch envelope (1:1 with the Python `_build_repair_envelope`).
+ * Construct the typed Temporal dispatch envelope.
  *
  * `workflow_id` is deterministic per-installation (`repair-installation-repositories/{github_iid}`) so
  * concurrent drift detections coalesce to one in-flight repair via Temporal's

@@ -1,10 +1,7 @@
-// Confluence chunk redactor — 1:1 port of the frozen Python
-// vendor/codemaster-py/codemaster/ingest/confluence/redactor.py::redact_chunk.
+// Confluence chunk redactor — wraps the Sprint-7 PII / secret redactor with a thin Confluence-specific
+// layer that adds extra masks for content patterns common in team docs but not in PR diffs.
 //
-// Wraps the Sprint-7 PII / secret redactor with a thin Confluence-specific layer that adds extra
-// masks for content patterns common in team docs but not in PR diffs.
-//
-// Locked behaviour (matching the frozen Python exactly):
+// Locked behaviour:
 //   * The chunk goes through the Sprint-7 redactor first (the already-ported redactPii, the analogue
 //     of the Python `_apply_sprint7_redactor`'s `RegexPiiRedactor().redact()` — its `rewritten` field
 //     is the Python `result[0]`).
@@ -48,8 +45,6 @@ export type RedactionResult = {
 
 /**
  * Apply Sprint-7 PII redaction + Confluence masks; wrap the result in the trust-tier tag.
- *
- * 1:1 with the frozen Python `redact_chunk`.
  */
 export function redactChunk(text: string): RedactionResult {
   let redactionApplied = false;

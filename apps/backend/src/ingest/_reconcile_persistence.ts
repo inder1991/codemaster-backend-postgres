@@ -1,10 +1,6 @@
-// Shared installations/repositories upsert helpers for the auto-registration journey. A FAITHFUL 1:1
-// port of two frozen-Python pieces:
+// Shared installations/repositories upsert helpers for the auto-registration journey.
 //
-//   - `upsertInstallation`  ← codemaster/activities/reconcile_installation.py::_upsert_installation
-//   - `upsertRepository`    ← codemaster/domain/repos/repositories_upsert.py::upsert_repository
-//
-// Both are raw `sql`...`.execute(tx)` ports mirroring `_pr_persistence.ts` — the queries key on the
+// `upsertInstallation` and `upsertRepository` use raw `sql`...`.execute(tx)` — the queries key on the
 // GitHub-side surrogate (`github_installation_id` / `github_repo_id`), NOT `installation_id`, so they
 // run as raw tagged-template SQL which BYPASSES the Kysely `TenancyPlugin` AST walk by construction
 // (the plugin only inspects ORM-built SELECT/UPDATE/DELETE nodes; raw `sql`...`` fragments are the
@@ -23,7 +19,7 @@ import { type Clock } from "#platform/clock.js";
 
 // ─── Installation upsert (port of reconcile_installation.py::_upsert_installation) ───────────────
 
-/** The `before` / `after` audit shape for an installation upsert (1:1 with the Python dicts). */
+/** The `before` / `after` audit shape for an installation upsert. */
 export type InstallationAuditState = {
   github_installation_id: number;
   account_login: string;
@@ -76,7 +72,7 @@ export async function upsertInstallation(
 ): Promise<UpsertInstallationResult> {
   const now = args.clock.now();
 
-  // Read prior state for the audit before/after (1:1 with the Python SELECT).
+  // Read prior state for the audit before/after.
   // tenant:exempt reason=installation-identity-edge-keys-on-github-surrogate follow_up=PERMANENT-EXEMPTION-global-identity-tables
   const prior = await sql<{
     installation_id: string;
@@ -213,7 +209,7 @@ export async function ensureSenderUser(
 
 // ─── Repository upsert (port of repositories_upsert.py::upsert_repository) ────────────────────────
 
-/** The `before` / `after` audit shape for a repository upsert (1:1 with the Python dicts). */
+/** The `before` / `after` audit shape for a repository upsert. */
 export type RepositoryAuditState = {
   github_repo_id: number;
   full_name: string;
@@ -261,7 +257,7 @@ export async function upsertRepository(
   const enabledOnInsert = args.enabledOnInsert ?? true;
   const now = args.clock.now();
 
-  // Prior-state read (1:1 with the Python SELECT). Keys on github_repo_id (globally unique).
+  // Prior-state read. Keys on github_repo_id (globally unique).
   // tenant:exempt reason=PK-lookup-on-globally-unique-github-repo-id follow_up=PERMANENT-EXEMPTION-global-github-keys
   const prior = await sql<{
     repository_id: string;
@@ -351,7 +347,7 @@ export async function removeRepository(
   `.execute(tx);
   const priorRow = prior.rows[0];
   if (priorRow === undefined) {
-    // Removing a repo we never recorded — best-effort no-op (1:1 with the Python).
+    // Removing a repo we never recorded — best-effort no-op.
     return { id: null, before: {}, after: {} };
   }
 

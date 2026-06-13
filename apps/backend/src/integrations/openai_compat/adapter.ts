@@ -1,10 +1,8 @@
-// OpenAICompatibleEmbeddingsAdapter — port of the frozen Python
-// vendor/codemaster-py/codemaster/integrations/openai_compat/adapter.py (ADR-0059).
+// OpenAICompatibleEmbeddingsAdapter (ADR-0059) — production {@link EmbeddingsPort} impl speaking the
+// OpenAI Embeddings API wire contract. Compatible providers: OpenAI, Ollama, vLLM, Together, LM Studio,
+// OpenRouter, TGI bridges.
 //
-// Production {@link EmbeddingsPort} impl speaking the OpenAI Embeddings API wire contract. Compatible
-// providers: OpenAI, Ollama (`/v1/embeddings`), vLLM, Together, LM Studio, OpenRouter, TGI bridges.
-//
-// Wire contract (FAITHFUL to the frozen Python):
+// Wire contract:
 //   - POST {base_url}/v1/embeddings              (base_url trailing slash stripped at construction)
 //   - Request body: {model: <constructor model_name>, input: [text, ...]}
 //   - Header: Authorization: Bearer <api_key>    (Ollama ignores it; OpenAI requires a real sk-...).
@@ -33,28 +31,27 @@ import {
   validateEmbedRequest,
 } from "#backend/adapters/embeddings_port.js";
 
-// HTTP status sentinels (module-scope, mirroring the Python named constants).
+// HTTP status sentinels (module-scope).
 const HTTP_OK = 200;
 const HTTP_TOO_MANY_REQUESTS = 429;
 const HTTP_CLIENT_ERROR_MIN = 400;
 const HTTP_SERVER_ERROR_MIN = 500;
 const HTTP_SERVER_ERROR_MAX = 600; // exclusive upper bound
 
-/** Strip a trailing slash; the adapter appends `/v1/embeddings` (Python `_normalise_base_url`). */
+/** Strip a trailing slash; the adapter appends `/v1/embeddings`. */
 function normaliseBaseUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, "");
 }
 
-/** Truncate a response-body snippet for an error message (Python `resp.text[:200]`). */
+/** Truncate a response-body snippet for an error message (first 200 chars). */
 function snippet(bodyText: string): string {
   return bodyText.slice(0, 200);
 }
 
 /**
- * Translate an OpenAI Embeddings response body to an {@link EmbedResult}. 1:1 with the Python
- * `_openai_body_to_embed_result`: `data[].embedding` lists → vectors; the response `model` echoes into
- * both `model_name` and `model_version`; `cache_hits` is 0. A wrong shape throws (the caller maps it to
- * a transient connectivity error).
+ * Translate an OpenAI Embeddings response body to an {@link EmbedResult}. `data[].embedding` lists →
+ * vectors; the response `model` echoes into both `model_name` and `model_version`; `cache_hits` is 0.
+ * A wrong shape throws (the caller maps it to a transient connectivity error).
  */
 function openaiBodyToEmbedResult(body: unknown): EmbedResult {
   if (typeof body !== "object" || body === null) {
@@ -119,7 +116,7 @@ export class OpenAICompatibleEmbeddingsAdapter implements EmbeddingsPort {
     this.http = http ?? new FetchEmbeddingsHttpClient({ timeoutSeconds });
   }
 
-  /** The construction-time model id sent in every request body (Python `model_name` property). */
+  /** The construction-time model id sent in every request body. */
   public get modelName(): string {
     return this.fixedModelName;
   }

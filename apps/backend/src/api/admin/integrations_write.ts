@@ -1,5 +1,4 @@
-// Integrations write — 1:1 port of integrations.py delete_integration + add_confluence_space +
-// postgres_integrations_repo (get / delete / find_duplicate / insert). core.integrations is PLATFORM-SHARED
+// Integrations write — delete_integration + add_confluence_space. core.integrations is PLATFORM-SHARED
 // (migration 0062 dropped installation_id), so writes are keyed without installation_id and audit rows carry
 // installation_id=NULL.
 
@@ -114,11 +113,10 @@ type IntegrationInsertRow = {
 };
 
 /**
- * Register a Confluence space — 1:1 port of integrations.py::add_confluence_space: app-level dedup →
- * validate against Confluence → INSERT → audit. App-mints integration_id (uuid v4, matching the Python
- * uuid.uuid4()) because the audit + 201 response need the id before commit. Throws IntegrationDuplicateError
- * (same kind+space_key → 409) and IntegrationValidationError (probe failed → 422/503). Returns the persisted
- * IntegrationListItemV1.
+ * Register a Confluence space — app-level dedup → validate against Confluence → INSERT → audit.
+ * App-mints integration_id (uuid v4) because the audit + 201 response need the id before commit.
+ * Throws IntegrationDuplicateError (same kind+space_key → 409) and IntegrationValidationError
+ * (probe failed → 422/503). Returns the persisted IntegrationListItemV1.
  */
 export async function insertConfluenceSpace(
   db: Kysely<unknown>,
@@ -193,7 +191,7 @@ export async function insertConfluenceSpace(
   `.execute(db);
   const row = inserted.rows[0]!;
 
-  // 4. Audit. installationId=null for platform-scope (1:1 with the Python emit installation_id=None).
+  // 4. Audit. installationId=null for platform-scope integrations.
   await args.audit?.({
     actorUserId: args.actorUserId,
     installationId: null,

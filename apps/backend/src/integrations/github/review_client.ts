@@ -1,11 +1,8 @@
 /**
- * GhReviewClient — 1:1 port of `codemaster/integrations/github/review_client.py`
- * (frozen Python, Sprint 15 / S15.X-post-review-wiring).
- *
- * The GitHub Reviews-API surface the (next, big) `post_review_results` activity depends on. Wraps the
- * ported {@link GitHubApiClient}'s generic GET / POST / PUT / DELETE helpers (already present on that
- * client) so all 6 methods route through the shared retry / 401-refresh / rate-limit-header /
- * typed-error envelope (`_request`). NO DB, NO Temporal — just the REST client.
+ * GhReviewClient — the GitHub Reviews-API surface the `post_review_results` activity depends on.
+ * Wraps {@link GitHubApiClient}'s GET / POST / PUT / DELETE helpers so all 6 methods route through
+ * the shared retry / 401-refresh / rate-limit-header / typed-error envelope (`_request`).
+ * NO DB, NO Temporal — just the REST client.
  *
  * ## CLAUDE.md invariant 9 — advisory, never blocks merge
  *
@@ -95,9 +92,8 @@ export type CreatedReviewV1 = {
 export type ReviewComment = Record<string, unknown>;
 
 /**
- * The 6-method GitHub Reviews-API surface the `post_review_results` activity needs — the TS analogue of
- * the frozen Python `GhReviewClient` Protocol. Keyword-only Python args → a single args object per
- * method (camelCase members), so the dispatch is positional-arg-free at the seam.
+ * The 6-method GitHub Reviews-API surface the `post_review_results` activity needs. Each method takes
+ * a single camelCase args object, so the dispatch is positional-arg-free at the seam.
  *
  * NOTE: `createReview` deliberately has NO `event` parameter — `event` is hard-coded to "COMMENT" in
  * the impl (CLAUDE.md invariant 9), making APPROVE / REQUEST_CHANGES structurally impossible.
@@ -174,7 +170,7 @@ export type GhReviewClient = {
   deleteIssueComment(args: { owner: string; repo: string; commentId: number }): Promise<void>;
 };
 
-/** JSON-decode a response body (mirrors the Python `resp.json()`); empty body → `{}` parse target. */
+/** JSON-decode a response body; empty body → `{}` parse target. */
 function jsonOf(resp: GitHubHttpResponse): unknown {
   return JSON.parse(resp.body_text ?? "{}");
 }
@@ -192,7 +188,6 @@ function headerOf(headers: Record<string, string>, name: string): string | undef
 
 /**
  * Production {@link GhReviewClient}: implements the 6 methods over an injected {@link GitHubApiClient}.
- * 1:1 with the Python `GhReviewHttpClient`.
  */
 export class GitHubApiReviewClient implements GhReviewClient {
   private readonly api: GitHubApiClient;

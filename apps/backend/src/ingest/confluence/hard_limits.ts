@@ -1,25 +1,22 @@
-// Hard-limit governance for default-tagged Confluence chunks — port of the frozen Python
-// vendor/codemaster-py/codemaster/ingest/confluence/hard_limits.py (Sub-spec A T11), adapted per
-// ADR-0075.
+// Hard-limit governance for default-tagged Confluence chunks (Sub-spec A T11 / ADR-0075).
 //
-// FAITHFUL DIVERGENCE (ADR-0075 "Deferrals"): platform_config_cache is NOT ported. The Python
-// `get_default_corpus_limits()` reads tunables from platform_config and falls back to spec-pinned
-// defaults; the TS port inlines those fallbacks directly (the same pattern review_run_reaper +
-// retrieve_knowledge already use). Tracked under FOLLOW-UP-platform-config-cache.
+// DIVERGENCE (ADR-0075 "Deferrals"): platform_config_cache is NOT ported. Spec-pinned defaults are
+// inlined directly (same pattern as review_run_reaper + retrieve_knowledge).
+// Tracked under FOLLOW-UP-platform-config-cache.
 //
 // FAITHFUL DIVERGENCE: the Python count/sum helpers run SQL against an AsyncSession. These are the
 // PURE primitives — they take chunk rows as arguments and apply the same active-default-tagged
 // predicate the SQL did. The SQL-bearing repo versions live in the repo track, not in this pure
 // module.
 //
-// The active + default-tagged predicate mirrors the Python SQL WHERE clauses exactly:
+// The active + default-tagged predicate matches the SQL WHERE clauses exactly:
 //   * count_default_chunks_in_space: space_key = :sk AND 'default' = ANY(labels) AND deleted_at IS NULL
 //   * sum_default_corpus_tokens:                      'default' = ANY(labels) AND deleted_at IS NULL
 //
 // PURE: no I/O, no clock, no random.
 
-// Spec-pinned fallbacks — MUST match platform_config_cache.DEFAULTS + the Python hard_limits.py
-// `_FALLBACK_*` values (migration 0095 seed): 25 chunks/space, 50 000 corpus tokens.
+// Spec-pinned fallbacks — MUST match platform_config_cache.DEFAULTS (migration 0095 seed):
+// 25 chunks/space, 50 000 corpus tokens.
 const FALLBACK_MAX_PER_SPACE = 25;
 const FALLBACK_MAX_TOKENS = 50_000;
 

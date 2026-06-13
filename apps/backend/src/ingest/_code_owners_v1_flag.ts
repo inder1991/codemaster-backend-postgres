@@ -1,11 +1,6 @@
 /**
- * `code_owners_v1` feature flag — 1:1 port of the frozen Python
- * `codemaster/ingest/_code_owners_v1_flag.py` (S23.AR.4 DM-WIRE T0 consumer wiring). Ported in
- * W4.6 [OM9], closing FOLLOW-UP-code-owners-v1-flag-reader: until this reader existed the TS
- * sync_code_owners producer was HARD-WIRED OFF (`async () => false`) with no way to enable it
- * without a code change, leaving suggested-reviewers reading empty/stale `core.code_owners`.
- *
- * Gates the `sync_code_owners` dispatch in the push-event webhook → background-jobs chain.
+ * `code_owners_v1` feature flag (W4.6 [OM9]) — gates the `sync_code_owners` dispatch in the
+ * push-event webhook → background-jobs chain.
  * Default: false. KEPT GATED (the 2026-05-24 drop-rollout-flags PR removed the other rollout
  * flags; this one stays because `sync_code_owners` makes a per-PR `GET .github/CODEOWNERS` API
  * call — GitHub-rate-limit pressure at the 60-org × 3000-repo target until a rate-limit-guarded
@@ -15,8 +10,7 @@
  * activity short-circuits when disabled; suggested-reviewers renders empty). NEVER throws.
  *
  * Tenancy: cross-tenant SELECT against `core.flags` (scope='global') — `core.flags` is a
- * platform-global config table outside TENANT_SCOPED_TABLES, per the frozen Python's CLAUDE.md
- * exemption for global config rows.
+ * platform-global config table outside TENANT_SCOPED_TABLES (permanent tenant:exempt).
  */
 
 import { type Kysely, sql } from "kysely";

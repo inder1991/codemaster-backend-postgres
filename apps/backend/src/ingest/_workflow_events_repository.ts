@@ -1,7 +1,5 @@
 /**
- * Repository writer for `audit.workflow_events` — 1:1 TypeScript/Kysely port of the frozen Python
- * spine primitive `vendor/codemaster-py/codemaster/ingest/_workflow_events_repository.py`
- * (Phase 2 / Task 5; Phase 2.1 stale-write gate part A1 of 3).
+ * Repository writer for `audit.workflow_events` (Phase 2 / Task 5).
  *
  * The single primitive every spine path uses to append a row to the per-run event audit stream.
  * `audit.workflow_events` is the R1 event-history table (AD-3 lifecycle/event split): the compact
@@ -9,7 +7,7 @@
  * milestones — `WEBHOOK_RECEIVED`, `PR_OPENED`, `INGESTED`, `ANALYZED`, `FINDINGS_PERSISTED`, etc. —
  * live here as one row each. The `persistAggregated`/`FINDINGS_PERSISTED` path consumes THIS writer.
  *
- * ## Contract (1:1 with the Python `emit_workflow_event`)
+ * ## Contract
  *
  * {@link emitWorkflowEvent} inserts exactly one row and returns its `event_id`. It:
  *   1. Validates `eventType` against {@link EVENT_TYPES} — a TS-level reject before any SQL
@@ -73,10 +71,10 @@ import { type Clock, WallClock } from "#platform/clock.js";
 //
 //   0x57424555 == 'WBEU' ASCII — workflow-events sequence-update. Fits in a signed int4.
 
-/** BF-1 per-run advisory-lock namespace (`0x57424555` == 'WBEU'). 1:1 with the Python constant. */
+/** BF-1 per-run advisory-lock namespace (`0x57424555` == 'WBEU'). */
 export const WORKFLOW_EVENTS_SEQ_LOCK_NAMESPACE = 0x5742_4555;
 
-// ─── Event-type registry (1:1 with codemaster/domain/audit_event_types.py::EVENT_TYPES) ──────────
+// ─── Event-type registry ─────────────────────────────────────────────────────────────────────────
 //
 // The R1 canonical event_type enum — kept in lockstep with the CHECK constraint
 // `ck_workflow_events_event_type` (migration 0071_workflow_events, extended by
@@ -114,7 +112,7 @@ export const EVENT_TYPES: ReadonlySet<string> = new Set<string>([
   "REVIEW_PLACEHOLDER_DELETED",
 ]);
 
-// ─── Orphan markers (1:1 with codemaster/ingest/_workflow_events_repository.py::ORPHAN_REASONS) ───
+// ─── Orphan markers ───────────────────────────────────────────────────────────────────────────────
 
 /**
  * Tagged-union markers a caller MUST set in `payload.orphan_reason` when passing
@@ -127,14 +125,14 @@ export const EVENT_TYPES: ReadonlySet<string> = new Set<string>([
  */
 export const ORPHAN_REASONS: ReadonlySet<string> = new Set<string>(["orphan_retire", "bootstrap_sink"]);
 
-// ─── BF3InstallationIdMissing (1:1 with the Python ValueError subclass) ──────────────────────────
+// ─── BF3InstallationIdMissing ──────────────────────────────────────────────────────────────────────
 
 /**
  * Raised when {@link emitWorkflowEvent} would write `installation_id=NULL` without a tagged
  * `orphan_reason` in payload. Indicates a propagation bug in a caller that didn't thread
  * `installationId` through. See {@link ORPHAN_REASONS} for the legitimate-orphan literals.
  *
- * Mirrors the Python `class BF3InstallationIdMissing(ValueError)`.
+ * Subclasses `Error` (treated as a non-retryable bug signal by the caller).
  */
 export class BF3InstallationIdMissing extends Error {
   public constructor(message: string) {
@@ -143,7 +141,7 @@ export class BF3InstallationIdMissing extends Error {
   }
 }
 
-// ─── runIdToLockKey (1:1 with the Python `_run_id_to_lock_key`) ──────────────────────────────────
+// ─── runIdToLockKey ───────────────────────────────────────────────────────────────────────────────
 
 /**
  * Derive a signed int4 advisory-lock key from a `run_id` UUID. EXACT port of the Python
@@ -210,8 +208,8 @@ export type EmitWorkflowEventArgs = {
 };
 
 /**
- * Insert one `audit.workflow_events` row and return the `event_id`. 1:1 with the Python
- * `emit_workflow_event`. See the module docstring for the full contract.
+ * Insert one `audit.workflow_events` row and return the `event_id`. See the module docstring for
+ * the full contract.
  *
  * @throws {Error}                    `eventType` not in {@link EVENT_TYPES} (the ValueError analogue),
  *                                    OR `dbOrTx` is not an open `Transaction` (the RuntimeError

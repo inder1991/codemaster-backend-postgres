@@ -1,6 +1,5 @@
-// Role resolver — 1:1 port of codemaster/api/auth/role_resolver.py (F1 / Task 4).
-//
-// Resolves the role for a core.users user at session-issue time from core.role_grants. A user's role is the
+// Role resolver — resolves the role for a core.users user at session-issue time from core.role_grants.
+// A user's role is the
 // HIGHEST-precedence active grant where subject_kind='user', subject_id=user_id, AND (scope='platform' OR
 // installation_id=user.installation_id). Cross-installation grants are NOT honored; platform-scope grants
 // ARE honored regardless of the user's home installation.

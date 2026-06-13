@@ -1,10 +1,7 @@
-// Session cookie — 1:1 port of codemaster/api/auth/session.py (Sprint 12 / S12.1.2).
-//
-// HMAC-SHA256-signed JSON envelope: `<b64url(body)>.<b64url(sig)>`. The body is compact
-// `JSON.stringify` (Python `json.dumps(separators=(",",":"))`) with the keys in the SAME insertion order
-// the Python builds them, and non-ASCII escaped to `\uXXXX` to mirror `ensure_ascii=True` — so the signed
-// bytes match the Python byte-for-byte. verify re-hashes the LITERAL decoded body bytes (never re-serializes),
-// so issue/verify are self-consistent regardless. Signing key: Vault Transit in prod, injected raw in tests.
+// Session cookie — HMAC-SHA256-signed JSON envelope: `<b64url(body)>.<b64url(sig)>`. Body is compact
+// JSON with keys in a fixed insertion order and non-ASCII escaped to `\uXXXX`. verify re-hashes the
+// LITERAL decoded body bytes (never re-serializes), so issue/verify are self-consistent regardless.
+// Signing key: Vault Transit in prod, injected raw in tests.
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 
@@ -17,7 +14,7 @@ export const IDLE_TIMEOUT_MS = 60 * 60 * 1000;
 
 export type AuthSource = "local" | "core_local" | "ldap";
 
-/** Decoded session principal. Field names mirror the frozen Python dataclass (the signed wire shape). */
+/** Decoded session principal (the signed wire shape). */
 export type AuthSession = {
   user_id: string;
   email: string;

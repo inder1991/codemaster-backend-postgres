@@ -1,4 +1,4 @@
-// Roles + precedence + LDAP group→role mapping (1:1 with codemaster/api/auth/roles.py).
+// Roles + precedence + LDAP group→role mapping.
 //
 // Locked precedence (high → low): super_admin > platform_owner > platform_operator > knowledge_curator
 // > security_auditor > org_owner > reader. super_admin is the implicit highest-privilege role and exists

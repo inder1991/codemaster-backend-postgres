@@ -1,12 +1,8 @@
 /**
- * Git-clone error taxonomy — 1:1 port of the frozen-Python error classes.
- *
- * Two families:
- *   - The subprocess-driver errors from `codemaster/integrations/git/cloner.py`:
- *     {@link GitClonerError} (base) and its two leaves {@link GitCloneFailedError} (non-zero exit)
- *     and {@link GitCloneTimeoutError} (timeout budget exceeded).
- *   - The activity-level errors from `codemaster/activities/_clone_common.py`:
- *     {@link CloneFailedError} (any clone failure, message keyed on repo + head_sha[:8]) and
+ * Git-clone error taxonomy — two families:
+ *   - Subprocess-driver errors: {@link GitClonerError} (base), {@link GitCloneFailedError} (non-zero
+ *     exit), {@link GitCloneTimeoutError} (timeout budget exceeded).
+ *   - Activity-level errors: {@link CloneFailedError} (any clone failure) and
  *     {@link WorkspaceTooLargeError} (cloned tree exceeds {@link MAX_WORKSPACE_BYTES}).
  *
  * The exact message strings are part of the parity surface — they are mirrored byte-for-byte,

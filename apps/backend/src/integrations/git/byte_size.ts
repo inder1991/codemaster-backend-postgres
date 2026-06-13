@@ -1,15 +1,7 @@
 /**
- * byteSizeOfDir — 1:1 port of `codemaster/activities/_clone_common.py::_byte_size_of_dir`.
- *
- * Sum of regular-file sizes under `path`, recursively. Symlinks are skipped (they don't carry their
- * own bytes — mirrors the Python `p.is_file() and not p.is_symlink()` guard). Files that `stat()`
- * cannot read (race against deletion, permission denied) are skipped silently — the workspace-size
- * cap is a safety net, not a precise accounting tool (mirrors the Python `except OSError: pass`).
- *
- * The Python `path.rglob("*")` walks the whole subtree; here we do the equivalent recursive walk with
- * `fs.readdir(..., { withFileTypes: true })`. We use `lstat` (NOT `stat`) so a symlink is detected as
- * a symlink rather than followed to its target — matching `p.is_symlink()`. Directory-entry stat
- * errors during the walk are swallowed too (a directory deleted mid-walk is the same race class).
+ * byteSizeOfDir — sum of regular-file sizes under `path`, recursively. Symlinks are skipped. Files
+ * that `stat()` cannot read are skipped silently — workspace-size cap is a safety net, not precise
+ * accounting. Uses `lstat` (NOT `stat`) so a symlink is detected as a symlink, not followed.
  */
 
 import { type Dirent, promises as fs } from "node:fs";

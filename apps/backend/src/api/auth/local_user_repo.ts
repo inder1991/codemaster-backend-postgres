@@ -1,14 +1,11 @@
-// Local-user repo — 1:1 port of codemaster/api/auth/local_user_repo.py +
-// codemaster/api/auth/postgres_local_user_repo.py (Sprint 20 / S17.AUTH.1).
+// Local-user repo — persistence for core.local_users (the super_admin bootstrap accounts).
 //
-// Persistence for core.local_users (the super_admin bootstrap accounts). INTENTIONALLY tenant-AGNOSTIC:
-// local super-admin auth crosses installation boundaries by design, so the table carries no
-// installation_id and the tenancy gate does not apply.
+// INTENTIONALLY tenant-AGNOSTIC: local super-admin auth crosses installation boundaries by design, so the
+// table carries no installation_id and the tenancy gate does not apply.
 //
-// LocalUser (the value object here) is the boundary shape carried across the port; the DB stores email
-// encrypted (email_ciphertext, AAD-bound) + fingerprinted (email_fingerprint, SHA-256 of lowercase) for
-// UNIQUE-by-email lookup without exposing plaintext at the index. The lockout state machine is the shared
-// credential_lockout primitive (one place to be correct).
+// DB stores email encrypted (email_ciphertext, AAD-bound) + fingerprinted (email_fingerprint, SHA-256 of
+// lowercase) for UNIQUE-by-email lookup without exposing plaintext at the index. Lockout state machine is
+// the shared credential_lockout primitive (one place to be correct).
 
 import { type Kysely, sql, type Transaction } from "kysely";
 
@@ -85,7 +82,7 @@ export function isLockedNow(user: LocalUser, now: Date): boolean {
   return isLocked(user.locked_until, now);
 }
 
-// ─── In-memory adapter (test-only; mirrors the Python carve-out) ──────────────────────────────────
+// ─── In-memory adapter (test-only) ────────────────────────────────────────────────────────────────
 
 /** Test-only impl backed by a Map. Synchronous mutations are atomic on the single-threaded event loop. */
 export class InMemoryLocalUserRepo implements LocalUserRepo {
@@ -129,8 +126,7 @@ export class InMemoryLocalUserRepo implements LocalUserRepo {
     });
   }
 
-  // The InMemory adapter has no session/transaction concept, so it ignores auditCallback (its same-TX
-  // semantics are vacuous) — matching the Python `# noqa: ARG002` Protocol-parity carve-out.
+  // InMemory has no transaction concept — ignores auditCallback (same-TX semantics are vacuous).
   public async recordLoginAttempt(args: {
     userId: string;
     success: boolean;

@@ -1,8 +1,5 @@
 /**
- * Confluence pages write — 1:1 with codemaster/api/admin/page_approvals.py (create_approval +
- * revoke_approval helpers).
- *
- * Two write operations:
+ * Confluence pages write — two write operations:
  *   1. createPageApproval — idempotent upsert via PostgresConfluencePageApprovalsRepo. Returns the
  *      freshly-minted approval_id.
  *   2. revokePageApproval — soft-delete via the repo; on success optionally dispatch the page-resync
@@ -22,9 +19,9 @@ import { PostgresConfluencePageApprovalsRepo } from "#backend/domain/repos/confl
 import type { UserEmailResolverPort } from "#backend/api/admin/platform_credentials_probe.js";
 
 /**
- * Optional Temporal dispatch seam for TriggerPageResyncWorkflow (1:1 with the Python
- * PageResyncDispatcherPort). Production threads a concrete dispatcher; absent → the resync is skipped (the
- * LEFT JOIN approval-drift safeguard already excludes the chunks from retrieval immediately).
+ * Optional Temporal dispatch seam for TriggerPageResyncWorkflow. Production threads a concrete
+ * dispatcher; absent → the resync is skipped (the LEFT JOIN approval-drift safeguard already excludes
+ * the chunks from retrieval immediately).
  */
 export type PageResyncDispatcherPort = {
   enqueueResync(args: {
@@ -34,7 +31,7 @@ export type PageResyncDispatcherPort = {
   }): Promise<void>;
 };
 
-/** Optional structured-warning sink (mirrors the Python `_LOG.warning("trigger_page_resync_enqueue_failed")`). */
+/** Optional structured-warning sink for resync-enqueue failures. */
 export type ResyncWarn = (e: {
   spaceKey: string;
   pageId: string;
@@ -43,7 +40,7 @@ export type ResyncWarn = (e: {
 }) => void;
 
 /**
- * Create or update a page approval (1:1 with the Python create_approval). Idempotent: the repo's upsert
+ * Create or update a page approval. Idempotent: the repo's upsert
  * revokes any current active approval (revoked_by = the NEW actor, F-28) and inserts the new one under a
  * per-page advisory lock (P0-3).
  *
@@ -65,10 +62,9 @@ export async function createPageApproval(
 }
 
 /**
- * Revoke the active approval for (space_key, page_id) (1:1 with the Python revoke_approval).
+ * Revoke the active approval for (space_key, page_id).
  *
- * Returns true iff a row was revoked; false if no active approval existed (the route maps to 404,
- * mirroring the Python ApprovalNotFoundError → 404).
+ * Returns true iff a row was revoked; false if no active approval existed (the route maps to 404).
  *
  * On success, optionally dispatch TriggerPageResyncWorkflow via the injected dispatcher so the page's
  * default-tagged chunks are flushed within minutes (eventual-consistency cleanup). A dispatch failure is

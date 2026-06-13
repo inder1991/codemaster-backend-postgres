@@ -1,7 +1,6 @@
-// Platform-credentials metadata repo — 1:1 port of platform_credentials_repo.py (+ the embedder
-// runtime-state config bump). core.platform_credentials_meta + core.embedder_runtime_state are platform
-// SINGLETON tables (no installation_id), so reads carry the tenant:exempt marker. Secrets live in Vault KV;
-// these tables hold only rotation/validation metadata.
+// Platform-credentials metadata repo — core.platform_credentials_meta + core.embedder_runtime_state are
+// platform SINGLETON tables (no installation_id), so reads carry the tenant:exempt marker. Secrets live
+// in Vault KV; these tables hold only rotation/validation metadata.
 
 import { type Kysely, sql } from "kysely";
 
@@ -16,7 +15,7 @@ export type PlatformCredentialsMetaRow = {
 export class PostgresPlatformCredentialsMetaRepo {
   public constructor(private readonly db: Kysely<unknown>) {}
 
-  /** Fetch the meta row for a credential_key, or null. 1:1 with the Python `get`. */
+  /** Fetch the meta row for a credential_key, or null. */
   public async get(credentialKey: string): Promise<PlatformCredentialsMetaRow | null> {
     // tenant:exempt reason=platform-singleton-no-installation-id follow_up=PERMANENT-EXEMPTION-platform-credentials-meta
     const r = await sql<{

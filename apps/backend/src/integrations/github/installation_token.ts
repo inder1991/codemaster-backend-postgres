@@ -1,8 +1,6 @@
 /**
- * GitHub installation-token exchange + cache — 1:1 port of
- * `codemaster/integrations/github/installation_token.py` (frozen Python, Sprint 4 / S4.1.1).
- *
- * Exchanges an App-level JWT (from `app_jwt.signAppJwt`) for a 1-hour installation token via
+ * GitHub installation-token exchange + cache — exchanges an App-level JWT for a 1-hour installation
+ * token via
  * `POST /app/installations/{id}/access_tokens`. The token is what {@link GitHubApiClient} uses to
  * act on behalf of the installation.
  *
@@ -43,7 +41,7 @@ import {
   type GitHubHttpClient,
 } from "#backend/integrations/github/api_client.js";
 
-// ─── Constants (1:1 with the frozen Python module constants) ──────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────────────────────
 
 /** Evict (treat as stale) at `expires_at - 30s` so a token is never presented near its expiry. */
 export const INSTALLATION_TOKEN_REFRESH_MARGIN_SECONDS = 30;

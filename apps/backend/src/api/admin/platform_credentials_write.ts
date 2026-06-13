@@ -1,5 +1,4 @@
-// Platform-credentials orchestration — 1:1 port of platform_credentials.py (_get_credential /
-// _patch_credential / _test_credential). Secrets live in Vault KV; the meta table holds rotation/validation
+// Platform-credentials orchestration — secrets live in Vault KV; the meta table holds rotation/validation
 // metadata. PATCH is probe-first-then-write: a failing probe aborts the rotation (422) unless ?force=true.
 // The handlers throw PlatformCredentialError for the {error,msg} 422 cases; the route maps + serializes.
 
@@ -39,7 +38,7 @@ export type PlatformCredentialKey = "confluence" | "embedder.qwen";
 
 const CORPUS_DIMENSION = 1024; // v4 §4.4 Qwen invariant
 
-/** A 422 the route serializes as `{ error: errorCode, msg }`. 1:1 with the Python HTTPException(422, {error,msg}). */
+/** A 422 the route serializes as `{ error: errorCode, msg }`. */
 export class PlatformCredentialError extends Error {
   public constructor(
     public readonly errorCode: string,
