@@ -1,5 +1,3 @@
-// 1:1 port of vendor/codemaster-py/codemaster/files/router.py::decide_route (frozen Python).
-//
 // decide_route — file routing for the review pipeline.
 //
 // Phase B (2026-05-16) — return type promoted from "review" | "sandbox" | "skip" to a SET of those

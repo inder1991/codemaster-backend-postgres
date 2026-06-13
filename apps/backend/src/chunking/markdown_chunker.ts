@@ -1,7 +1,6 @@
 // Section-anchored markdown chunker — pure function: turns one markdown file into a tuple of
 // section-anchored MarkdownChunkV1. Anchoring on ATX headings keeps each chunk a coherent thought;
 // the heading_path metadata makes the citation legible without re-parsing the source at render time.
-// Parity-proven byte-for-byte in test/parity/chunking.parity.test.ts.
 //
 // Algorithm (one linear pass):
 //   1. Walk lines, tracking fence state, the active H1/H2/H3 heading_path, and a pending line buffer.

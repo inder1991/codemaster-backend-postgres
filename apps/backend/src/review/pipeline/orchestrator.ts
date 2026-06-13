@@ -90,8 +90,7 @@ import { buildRetrievalQueryText } from "./retrieval_query.js";
 // path-config consumers, replacing the two Stage-1 placeholder implementations that used to live in this
 // module (the inline `filterReviewPaths` "minimal glob" AND the deferred `matched_path_instructions: []`):
 //   * filterReviewPaths(paths, pathFilters) — the `.codemaster.yaml::path_filters` review-set selector
-//     (gitignore last-match-wins, root-anchored, '!'-negation). Byte-parity-proven against the frozen Python
-//     `filter_review_paths` (test/parity/path_match.parity.test.ts).
+//     (gitignore last-match-wins, root-anchored, '!'-negation).
 //   * matchPathInstructions(rules, chunkPath) — the ADR-0001 per-glob `path_instructions` matcher that
 //     populates ReviewContextV1.matched_path_instructions (port of the Python workflow body's
 //     `match_path_instructions(path=..., rules=repo_config.path_instructions)` call in `_review_chunk`).

@@ -16,14 +16,12 @@ import { z } from "zod";
 // literal: z.number().int().default(N) so a future schema_version bump is not false-rejected
 // (matching the embed_query / aggregated_findings ports).
 //
-// BARE-FLOAT COLUMNS (cannot byte-round-trip through the repo canonicalizer, which REJECTS bare
-// floats — test/parity/canonical.ts):
+// BARE-FLOAT COLUMNS (Python emits e.g. `1.0`; JS emits `1` — not byte-equal in canonical JSON,
+// so these must be compared structurally when round-tripping between Python and JS):
 //  - KnowledgeChunkV1.age_days                  : float (default 0.0)
 //  - KnowledgeQueryV1.default_pool_token_reservation_pct : float (default 0.15)
 //  - KnowledgeQueryV1.query_vector_override     : tuple[float, ...] | None
 //  - ScoredKnowledgeChunkV1.score               : float (required)
-// The parity test strips these (incl. nested) before the canonical diff and asserts them
-// structurally + range-rejects them separately (see knowledge_chunks.v1.parity.test.ts).
 //
 // FROZENSET: KnowledgeQueryV1.effective_labels is a Python frozenset[str]; model_dump(mode="json")
 // emits a list in nondeterministic hash order, so the parity test uses ≤1-element values (order-

@@ -13,11 +13,10 @@ import { ReviewFindingV1 } from "./review_findings.v1.js";
 // `schema_version: int = 1` → z.number().int().default(1) (NOT z.literal — would false-reject 2).
 //
 // NOTE on the nested `confidence` float: `ReviewFindingV1.confidence` is a bare Python `float`, so
-// Pydantic `model_dump(mode="json")` emits e.g. `1.0` while a JS number `1` emits `1`. The repo
-// canonicalizer (test/parity/canonical.ts) therefore cannot reach byte-equal canonical JSON on any
-// nested finding's confidence column — see the parity test for how the nested confidence columns are
-// stripped from the canonical diff (Python-side float-serialization quirk, inherited from
-// review_findings.v1).
+// Pydantic `model_dump(mode="json")` emits e.g. `1.0` while a JS number `1` emits `1`. These forms
+// are not byte-equal in canonical JSON, so nested `confidence` values must be compared structurally
+// (not byte-for-byte) when round-tripping between Python and JS (Python-side float-serialization
+// quirk, inherited from review_findings.v1).
 
 // DroppedFindingV1 — ConfigDict(extra="forbid", frozen=True) → .strict().
 // `reason` is bounded 1..500 (R-45 audit 2026-05-22 wire-size bound).

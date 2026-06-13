@@ -1,6 +1,4 @@
-// `installation_reconcile` outbox sink — 1:1 with the dedicated Python sink
-// vendor/codemaster-py/codemaster/activities/outbox_sinks/installation_reconcile.py (worker boot:
-// codemaster/worker/main.py:990 `installation_reconcile.register(sdk_client)`).
+// `installation_reconcile` outbox sink.
 //
 // The reconcile/repair outbox rows are written with `sink="installation_reconcile"` (the schema exemption
 // that permits NULL installation_id; see PostgresOutboxRepo.appendReconcile). The dispatcher resolves the

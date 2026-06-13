@@ -13,10 +13,9 @@
 // appended; TL;DR + degradation note are preserved. The last-resort path drops the config / linked /
 // suggested sections by reconstructing a minimal envelope.
 //
-// PARITY NOTE — length counting: `len(str)` counts Unicode CODE POINTS, while JS `string.length`
-// counts UTF-16 code units (the 🤖 header emoji is 1 code point but 2 code units). The safety-cap
+// LENGTH COUNTING NOTE: `len(str)` counts Unicode CODE POINTS, while JS `string.length` counts
+// UTF-16 code units (the 🤖 header emoji is 1 code point but 2 code units). The safety-cap
 // comparison therefore uses `[...s].length` (code-point count) to match that boundary exactly.
-// Proven in test/parity/walkthrough_renderer.parity.test.ts.
 //
 // Sandbox-pure: no crypto, clock, RNG, I/O — safe inside the Temporal workflow sandbox (it renders the
 // post body the orchestrator hands to the post_review activity).

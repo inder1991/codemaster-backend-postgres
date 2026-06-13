@@ -1,5 +1,4 @@
-// RegexPiiRedactor — 1:1 TypeScript port of the frozen Python
-// codemaster/security/regex_pii_redactor.py::RegexPiiRedactor.
+// RegexPiiRedactor — TypeScript implementation of the PII redactor.
 //
 // Replaces PII spans in arbitrary text with stable `[REDACTED:<kind>]` placeholders. Intentionally
 // conservative: matches only kinds detectable with high precision so the Langfuse exporter, the
@@ -22,8 +21,7 @@
 //   - github_app_token  — ghs_ + 36+ chars
 //
 // Specific kinds take precedence; later passes don't re-match offsets already claimed by an earlier
-// finding (mirrors the Python `_claim` overlap reservation). Parity-proven byte-for-byte against the
-// source-of-truth over the full adversarial PII corpus in test/parity/redact_pii.parity.test.ts.
+// finding (mirrors the Python `_claim` overlap reservation).
 //
 // Python→JS regex translation notes (all VERIFIED against the live Python driver, not assumed):
 //   - `\b` (ASCII word boundary), `(?!…)` negative lookahead and `(?<!…)` negative lookbehind are all

@@ -19,9 +19,9 @@ import { z } from "zod";
 //
 // NOTE on `lambda_mmr` (Stage3Trace) — typed as a bare Python `float` (default 0.7, ge=0.0, le=1.0).
 // Pydantic `model_dump(mode="json")` preserves the float type (e.g. `0.7`, or `1.0` for an int input),
-// whereas a JS number `1` serializes as `1`. The repo canonicalizer (test/parity/canonical.ts) REJECTS
-// bare floats, so the parity test strips `lambda_mmr` from the canonical diff and asserts it
-// structurally (Zod keeps the [0,1] bound; Python emits the float form). See the parity test.
+// whereas a JS number `1` serializes as `1`. These forms are not byte-equal in canonical JSON, so
+// `lambda_mmr` must be compared structurally (not byte-for-byte) when round-tripping between Python
+// and JS. Zod keeps the [0,1] bound.
 //
 // UUID fields (trace_id / review_id / pr_id / selected_chunk_ids / dropped_chunk_ids) are emitted by
 // Pydantic model_dump(mode="json") as lowercase RFC4122 strings; on the wire they are strings, so the

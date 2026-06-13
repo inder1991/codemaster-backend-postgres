@@ -1,6 +1,6 @@
 /**
  * `emitAuditEvent` — the single helper every state-changing code path uses to emit an
- * `audit.audit_events` row. 1:1 port of vendor/codemaster-py/codemaster/audit/emit.py.
+ * `audit.audit_events` row.
  *
  * Refuses to write if no tenancy context is bound on the client ({@link AuditContextMissing}) — the
  * helper itself is a tenancy-policy gate beyond the SQLAlchemy/ORM tenancy hook (it writes via raw SQL

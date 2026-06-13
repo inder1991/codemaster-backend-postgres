@@ -10,10 +10,9 @@ import { z } from "zod";
 //
 // NOTE on `vector`: the Python contract types it as `tuple[float, ...]` (bare floats).
 // Pydantic `model_dump(mode="json")` preserves the float type, so e.g. `2.0` serializes
-// as `2.0` whereas a JS number `2` serializes as `2`. The repo canonicalizer
-// (test/parity/canonical.ts) therefore REJECTS bare floats and cannot reach byte-equal
-// canonical JSON on the vector field — see the parity test for how the vector column is
-// excluded from the canonical diff and instead asserted structurally (length + numeric).
+// as `2.0` whereas a JS number `2` serializes as `2`. These forms are not byte-equal in
+// canonical JSON, so the vector field must be compared structurally (length + numeric) rather
+// than byte-for-byte when round-tripping between Python and JS.
 //
 // `schema_version` is a plain `int` (default 1), NOT a literal: z.number().int().default(1)
 // so a future schema_version=2 is not false-rejected.

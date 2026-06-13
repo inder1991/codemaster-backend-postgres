@@ -11,10 +11,7 @@
 //     * _infer_pr_topology_kind             (~394)
 //
 // All seven are pure functions over their inputs — NO clock reads, NO random, NO uuid mint, NO env-var
-// access, NO I/O — so they are workflow-sandbox-safe (ADR-0065/0066) and replay-deterministic. The
-// Tier-1 parity check (test/parity/pipeline_helpers_oracle.ts) drives the frozen Python and byte-compares
-// canonical JSON (bare-float `confidence` is stripped before the compare per the established gotcha — the
-// canonicalizer rejects bare floats).
+// access, NO I/O — so they are workflow-sandbox-safe (ADR-0065/0066) and replay-deterministic.
 //
 // DEFERRED to Stage 1: _build_analyzed_payload (review_pull_request.py:269) depends on
 // ReviewPipelineResult, which is a Stage 1 build item (the orchestrator's typed return) and is NOT yet

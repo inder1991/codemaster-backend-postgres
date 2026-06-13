@@ -1,11 +1,9 @@
 // Span-level redaction of secret-shaped strings in LLM output.
 //
-// 1:1 port of the frozen Python codemaster/security/output_redaction.py::redact_text. Pure function:
-// takes the original LLM text + the secret-finding spans and returns a redacted copy with each
-// merged span replaced by `[REDACTED]`.
+// Pure function: takes the original LLM text + the secret-finding spans and returns a redacted copy
+// with each merged span replaced by `[REDACTED]`.
 //
-// Properties (mirrored exactly from the source-of-truth, parity-proven in
-// test/parity/redact_redactor.parity.test.ts):
+// Properties:
 //  - Pure: no I/O, no side effects; the caller's input string is never mutated.
 //  - Findings may arrive in any order; internally sorted by (start, end).
 //  - Overlapping / adjacent spans are unioned and redacted once.

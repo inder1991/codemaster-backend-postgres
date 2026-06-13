@@ -1,7 +1,6 @@
 // GitHub webhook HMAC-SHA256 signature verification (constant-time).
 //
 // Owns the verification edge ONLY — `verifyGithubSignature` + `GITHUB_SIGNATURE_PREFIX`.
-// Parity-proven in test/parity/webhook_hmac.parity.test.ts.
 //
 // KNOWN DIVERGENCE (non-conformant, attacker-crafted input only): if the provided digest contains a
 // NON-ASCII char, this port returns false (→ HTTP 401) instead of raising. Neither path accepts a forged

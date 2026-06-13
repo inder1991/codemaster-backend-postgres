@@ -20,8 +20,8 @@ import { ReviewFindingV1 } from "./review_findings.v1.js";
 //        (Pydantic lowercases the UUID on model_dump(mode="json"); parity payloads use lowercase.)
 //
 // `carried` elements are ReviewFindingV1, which carries a bare Python `float` (`confidence`).
-// The repo canonicalizer (test/parity/canonical.ts) rejects bare floats, so the parity test
-// strips `confidence` from each nested finding before the canonical diff — see that test header.
+// Python emits `1.0` while JS emits `1` — not byte-equal in canonical JSON — so nested `confidence`
+// values must be compared structurally when round-tripping between Python and JS.
 // The sibling Zod schemas (DiffChunkV1, ReviewFindingV1) are IMPORTED, not redefined.
 export const CarryForwardSelectionV1 = z
   .object({

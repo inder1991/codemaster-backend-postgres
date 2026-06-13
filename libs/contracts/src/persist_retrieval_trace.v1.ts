@@ -19,11 +19,10 @@ import { z } from "zod";
 // versions are accepted by both sides.
 //
 // FLOAT NOTE: several fields are bare Python `float` (freshness_score, lambda_mmr, and the
-// Stage-3 score components). model_dump(mode="json") emits e.g. `1.0` / `0.7` while a JS number
-// emits `1` / `0.7`; the repo canonicalizer (test/parity/canonical.ts) REJECTS bare floats outright.
-// So those columns cannot byte-match in a canonical diff — the parity test strips every bare-float
-// field before the diff and asserts them structurally (same pattern as review_findings.v1's
-// `confidence`). The Zod schema still enforces the numeric bounds.
+// Stage-3 score components). Python's model_dump(mode="json") emits e.g. `1.0` / `0.7` while a JS
+// number `1` serializes as `1` — the two forms are not byte-equal in canonical JSON. Those columns
+// must therefore be compared structurally (not byte-for-byte) when round-tripping between Python and
+// JS. The Zod schema still enforces the numeric bounds.
 
 // PriorityTierStr = Literal[...] (retrieval_trace/v1.py).
 export const PriorityTierStr = z.enum([

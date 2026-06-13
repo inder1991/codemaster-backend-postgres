@@ -5,8 +5,6 @@
  * size-bounded "paste into Claude Code" prompt with NO model call. It is ALSO the base the LLM
  * theme-synthesizer wraps. Pure functions only — no I/O — so it is trivially testable and replay-safe.
  *
- * Parity: every public function here is asserted byte-equal over the dedicated parity ref
- * (test/parity/fix_prompt_builder.parity.test.ts).
  *
  * ## Runtime context
  *

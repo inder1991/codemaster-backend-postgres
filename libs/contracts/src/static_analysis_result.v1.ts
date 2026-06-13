@@ -21,10 +21,10 @@ import { ToolStatusV1 } from "./tool_status.v1.js";
 // All four tuple fields use Field(default_factory=tuple)  → z.array(...).default([]).
 // `per_tool_errors`/`truncated_per_tool` are dict[str, X]  → z.record(z.string(), X).default({}).
 //
-// NOTE on `findings`: each embedded ReviewFindingV1 carries the bare-float `confidence` column,
-// which the repo canonicalizer (test/parity/canonical.ts) deliberately rejects (Python emits `1.0`,
-// JS emits `1`). The parity test strips nested `confidence` from BOTH sides before canonical diff,
-// then asserts the confidence values structurally — mirroring review_findings.v1.parity.test.ts.
+// NOTE on `findings`: each embedded ReviewFindingV1 carries the bare-float `confidence` column.
+// Python emits `1.0` while JS emits `1` — these are not byte-equal in canonical JSON, so nested
+// `confidence` values must be compared structurally (not byte-for-byte) when round-tripping between
+// Python and JS.
 
 // Annotated[int, Field(ge=0)] — non-negative-int alias used as the dict value type of
 // `truncated_per_tool` (per-tool drop-count when raw findings exceed MAX_RAW_PER_TOOL).

@@ -15,10 +15,9 @@ import { z } from "zod";
 //
 // NOTE on `confidence`: the Python contract types it as a bare `float`. Pydantic
 // `model_dump(mode="json")` preserves the float type, so it serializes as e.g. `1.0`,
-// whereas a JS number `1` serializes as `1`. The repo canonicalizer (test/parity/canonical.ts)
-// therefore cannot reach byte-equal canonical JSON on the confidence field — see the parity
-// test for how the confidence column is excluded from the canonical diff (Python-side
-// float-serialization quirk, documented in StructuredOutput notes).
+// whereas a JS number `1` serializes as `1`. These forms are not byte-equal in canonical JSON,
+// so `confidence` must be compared structurally (not byte-for-byte) when round-tripping between
+// Python and JS (Python-side float-serialization quirk, documented in StructuredOutput notes).
 
 // Module-level compiled pattern in Python (`_EV_ID_PATTERN`); mirrors the LLM tool-schema
 // `evidence_refs` regex (ADR-0051).

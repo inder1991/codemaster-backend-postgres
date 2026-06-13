@@ -13,8 +13,7 @@
 //     CurateParseError.
 //
 // The schema is key-ORDER-significant (the LLM sees the exact byte sequence in the function-calling
-// tool definition). The Tier-1 parity test (test/parity/curate.parity.test.ts) proves
-// parseCurateToolUse is byte-equal to the reference over adversarial tool-use blocks.
+// tool definition).
 
 import { coerceForContract } from "#backend/llm/contract_coercion.js";
 

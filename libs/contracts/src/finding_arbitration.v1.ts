@@ -17,8 +17,8 @@ import { z } from "zod";
 // ge/le range invariant by hand via .superRefine(); there is intentionally NO decimal-places cap.
 //
 // NOTE on `suppressed_at`: nullable Pydantic `datetime`; model_dump(mode="json") emits an RFC3339
-// string. The repo canonicalizer (test/parity/canonical.ts) normalizes both the Pydantic "...Z"
-// form and JS Date.toISOString to microsecond-precision UTC, so any RFC3339 string round-trips.
+// string. Both the Pydantic "...Z" form and JS Date.toISOString normalize to microsecond-precision
+// UTC, so any RFC3339 string round-trips correctly.
 
 export const MAX_REASON_CHARS = 2048;
 export const MAX_MODEL_CHARS = 200;

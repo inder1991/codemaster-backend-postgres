@@ -2,7 +2,7 @@
  * `selectCarryForward` activity (Sprint 8 / S8.4.1b) — decides which parent-review findings carry
  * forward unchanged into the current review and which chunks need fresh LLM analysis. The selector is
  * PURE deterministic line-range-overlap selection — no clock, no random, no DB, no LLM — replay-safe
- * by construction (proven in test/parity/carry_forward.parity.test.ts).
+ * by construction.
  *
  * ## Rule
  *

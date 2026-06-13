@@ -1,5 +1,4 @@
-// `temporal_workflow_start` outbox sink — 1:1 port of
-// vendor/codemaster-py/codemaster/activities/outbox_sinks/temporal_workflow_start.py (Sprint 0 / S0.3c).
+// `temporal_workflow_start` outbox sink (Sprint 0 / S0.3c).
 //
 // Triggered when ingest persists a webhook and needs to start a Temporal workflow. Wrapping the start in
 // the outbox makes Temporal unavailability non-fatal: the row is durable, the dispatcher retries until

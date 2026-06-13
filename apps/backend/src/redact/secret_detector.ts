@@ -1,5 +1,4 @@
-// PatternSecretDetector — 1:1 port of the frozen Python
-// codemaster/security/pattern_secret_detector.py::PatternSecretDetector.detect.
+// PatternSecretDetector — regex-based secret detector.
 //
 // Regex-based secret detector targeting the documented kinds:
 //   - aws_access_key_id     (AKIA + 16 upper-hex)
@@ -12,8 +11,6 @@
 // Every detection carries the redacted snippet (first/last 4 chars) so operators can identify which
 // credential leaked without exposing the full value to logs / Langfuse traces.
 //
-// Parity-proven byte-for-byte against the source-of-truth in test/parity/redact_secret.parity.test.ts
-// over the entire adversarial secrets corpus (offsets, dedup ordering, snippet masking, confidence).
 //
 // Python→JS regex notes (handled below):
 //   - `\b` is identical in both engines.

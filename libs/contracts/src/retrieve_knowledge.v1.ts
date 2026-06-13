@@ -24,12 +24,10 @@ import { PRContext } from "./pr_context.v1.js";
 // z.number().int().default(1) so a future schema_version bump is not false-rejected (matching the
 // knowledge_chunks / pr_context ports).
 //
-// BARE-FLOAT-bearing fields (cannot byte-round-trip through the repo canonicalizer, which REJECTS
-// bare floats — test/parity/canonical.ts):
+// BARE-FLOAT-bearing fields (Python emits e.g. `1.0`; JS emits `1` — not byte-equal in canonical
+// JSON, so these must be compared structurally when round-tripping between Python and JS):
 //  - RetrieveKnowledgeInputV1.query_vector_override : tuple[float, ...] | None
 //  - RetrieveKnowledgeResultV1.items[*].age_days    : nested KnowledgeChunkV1 float (default 0.0)
-// The parity test strips these (incl. nested) before the canonical diff and asserts them
-// structurally + range-rejects them separately.
 //
 // FROZENSET: RetrieveKnowledgeInputV1.platform_exposed_labels is a Python frozenset[str];
 // model_dump(mode="json") emits a list in nondeterministic hash order, so the parity test uses

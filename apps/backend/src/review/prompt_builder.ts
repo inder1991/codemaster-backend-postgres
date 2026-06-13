@@ -909,9 +909,8 @@ function priorFindingLine(f: ReviewFindingV1): string {
 // tools + system + stablePrefix prefix is billed full-price ONCE per review and at ~10% (cache read)
 // on the remaining chunk calls.
 //
-// The legacy buildUserMessage stays byte-frozen above for the Python parity oracle
-// (test/parity/review_prompt.parity.test.ts); this split builder deliberately REORDERS blocks (it
-// re-renders the same content — nothing gained or lost) and therefore has NO Python analogue.
+// The legacy buildUserMessage stays byte-frozen above; this split builder deliberately REORDERS
+// blocks (it re-renders the same content — nothing gained or lost).
 //
 // Deliberate divergences from the legacy render, both forced by byte-stability:
 //   * No "← THIS CHUNK" / "← contains THIS CHUNK" markers — the current chunk is identified by the

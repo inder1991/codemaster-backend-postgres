@@ -1,6 +1,5 @@
-// Retriever wiring — port of the frozen Python
-// vendor/codemaster-py/codemaster/wiring/retrievers.py (Sprint 26 / B-2 stage 6; R-31 single-call DI
-// factory). Wires the LEGACY (BM25 + ANN + RRF) path AND the Sub-spec B T12 confluence/hybrid path.
+// Retriever wiring (Sprint 26 / B-2 stage 6; R-31 single-call DI factory). Wires the LEGACY
+// (BM25 + ANN + RRF) path AND the Sub-spec B T12 confluence/hybrid path.
 //
 // ── HYBRID / CONFLUENCE wiring (1:1 with the Python `build_retrieve_knowledge_activity`) ──────────
 // The frozen Python `build_retrieve_knowledge_activity` wires a `HybridRetriever` (BM25 + ANN +

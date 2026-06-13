@@ -1,5 +1,4 @@
-// MagikaFileClassifier — TypeScript port of the frozen Python
-// vendor/codemaster-py/codemaster/files/magika_classifier.py::MagikaFileClassifier.
+// MagikaFileClassifier — TypeScript implementation of the file classifier.
 //
 // Wraps the npm `magika` package (v1.0.0) to identify a file's content type from its bytes, then
 // combines that ML-derived label with two path-based heuristics ported 1:1 from the frozen source:
@@ -13,8 +12,7 @@
 // 1.0.2 vs npm magika 1.0.0 may emit different labels for the same bytes. The acceptance contract is
 // a LABEL-AGREEMENT RATE (>=95%), NOT byte-parity. magika_label affects ROUTING only (never chunk_id
 // or evidence_id identity), and unknown/divergent labels fall through to the safe default {review},
-// so the blast radius of any single-file disagreement is contained. See ADR-0065 and the agreement
-// test at test/parity/magika_agreement.parity.test.ts.
+// so the blast radius of any single-file disagreement is contained. See ADR-0065.
 //
 // The npm model is loaded ONCE (memoized) — model load is expensive. Production wiring instantiates
 // one classifier per worker process and reuses it across all files, mirroring the Python lifecycle.
