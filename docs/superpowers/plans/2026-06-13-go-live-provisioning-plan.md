@@ -1,0 +1,152 @@
+# codemaster-backend — go-live provisioning: complete implementation plan
+
+**Date:** 2026-06-13 · **Status:** APPROVED design, ready to build · **Build on:** Opus, strict TDD,
+branch `feat/deploy-contract-preflight` (off `docs/turnkey-deploy-plan`).
+Companion: `2026-06-13-turnkey-deployment-operability.md` (the gap assessment + the existing preflight engine this re-tiers).
+
+## Goal & operating model
+
+**Deploy backend + frontend and have them come up with zero trouble.** The hard rule:
+
+> **You provision exactly TWO things — the Postgres credentials and the field-encryption key —
+> each from EITHER an OpenShift Secret OR a Vault path. Everything else (LLM, GitHub, Confluence,
+> the superadmin's later changes) is configured through the UI, stored in Postgres encrypted by that
+> key, and NEVER blocks the pod from starting or being reachable.**
+
+## Settled decisions (owner-aligned, do not relitigate)
+
+1. **Boot-blocking tier = {DB creds, field-encryption key}** only (+ Vault reachability *iff* those
+   come from Vault). GitHub / LLM / Confluence are **non-blocking**.
+2. **Source switch:** `CODEMASTER_SECRET_SOURCE = openshift | vault` (default `openshift`); optional
+   per-secret overrides `CODEMASTER_PG_SECRET_SOURCE` / `CODEMASTER_FIELD_KEY_SOURCE`. Read ONLY the
+   selected source — no fallback; errors name it.
+3. **Vault auth = OpenShift service-account (Kubernetes auth).**
+4. **Bootstrap secrets are read-only** — never copied into Vault/Postgres.
+5. **UI config → Postgres, encrypted by the field key** (switch off Vault Transit).
+6. **Superadmin `admin` / `admin`** on first boot, UI-changeable, **loud warning only** (no forced change).
+7. **Fuse 17 migrations → one `0001_baseline.sql`** (greenfield confirmed).
+8. **Key is provisioned, never auto-generated.**
+
+## Current state (what exists / what gets re-tiered)
+
+EXISTS: users + `super_admin` role + `local_user_repo`; config tables (`core.llm_provider_settings`,
+`platform_config`, `global_config`, `org_configs`, `repo_configs`, `config_revisions`); the field
+codec (`security/boot_field_keys.ts`, `audit_field_codec.ts`, `api/auth/email_codec.ts`,
+`field_encryption_keys_loader.ts`); a Vault HTTP client (`adapters/vault_http.ts`, token-based);
+`getPool` + `CODEMASTER_PG_CORE_DSN` read in several places.
+
+ALREADY BUILT (this branch) — **gets re-tiered, not discarded:** `deploy_preflight.ts` (pure evaluator
++ contract + observer + `assertDeployReady`), `deploy_preflight_io.ts`, `deploy_check.ts` +
+`npm run deploy:check`, `gen_deploy_artifacts.ts` (doc + seeder + drift test), the helm test, the
+first-deploy runbook. Step 3 below re-tiers the contract (drop GitHub/LLM from blocking).
+
+GAPS to build: two-source DB creds, Vault K8s-auth, the re-tier, the UI-config encryption switch,
+superadmin bootstrap, migration fusion, chart wiring.
+
+---
+
+## The build — 7 steps (each: objective · files · tests · edge cases · acceptance)
+
+### Step 1 — Source resolver + two-source DB credentials
+**Objective:** one switch decides where DB creds come from; resolve a DSN from OpenShift env or Vault.
+- **New `config/secret_source.ts`:** `resolveSecretSource(env, overrideKey?) → "openshift"|"vault"` (pure; default openshift; override wins; invalid throws naming the set).
+- **New `config/db_credentials.ts`:** `assembleDsn({user,password,host,port,database}) → string` (pure; URL-encodes user/password); `resolveDbDsn(deps) → Promise<string>` — openshift: `CODEMASTER_PG_CORE_DSN` else assemble from `PG_USER`/`PG_PASSWORD` + host/port/db (ConfigMap); vault: SA-read the KV path → `dsn` or `username`+`password` → assemble. Fail loud naming the chosen source + the missing field.
+- **Wire:** a single resolution at boot (main.ts) + the runner; the result feeds `getPool`. **Migrate edge:** node-pg-migrate reads `-d CODEMASTER_PG_CORE_DSN` from env — in vault-mode add a tiny `resolve_dsn.ts` (prints the resolved DSN) the migrate Job sources before `migrate:up`.
+- **Tests:** resolveSecretSource (default/global/override/invalid); assembleDsn (parts→DSN, special-char encode); resolveDbDsn (openshift full DSN; openshift parts; vault dsn; vault username+password; missing → throws naming source).
+- **Edge cases:** both sources populated → selector decides; password with `@`/`/`/`:` → encoded; incomplete parts → names missing field; vault path lacks keys → names them.
+- **Acceptance:** DSN resolves identically from a Secret or a Vault path; wrong/missing config → one clear message.
+
+### Step 2 — Vault Kubernetes-auth client (service-account login)
+**Objective:** in vault-mode the app authenticates to Vault with its OpenShift SA, no static token.
+- **New `adapters/vault_k8s_auth.ts`:** read SA JWT (`CODEMASTER_VAULT_SA_TOKEN_PATH`, default `/var/run/secrets/kubernetes.io/serviceaccount/token`) → `POST {auth path}/login {role, jwt}` → `{client_token, lease_duration}`; cache the token; renew/re-login before expiry and on 403. New env: `CODEMASTER_VAULT_AUTH = kubernetes|token|agent-file`, `CODEMASTER_VAULT_K8S_ROLE`, `CODEMASTER_VAULT_K8S_AUTH_PATH` (default `auth/kubernetes`).
+- **Integrate** with `vault_http.ts` so KV reads (DB creds + keyset) use the SA token in kubernetes mode; keep token + agent-file modes.
+- **Tests (inject HTTP client + token-file reader):** login request shape (role+jwt); token cached + reused; re-login on expiry/403; missing SA token file → clear error; non-200 login → clear error naming role.
+- **Edge cases:** Vault sealed/unreachable (clear error; blocks boot only if DB/key are vault-sourced); SA not bound to role → 403 "SA not authorized for role X"; token TTL renewal; auth-path/role typo.
+- **Acceptance:** with the SA bound to a Vault role granting read on the paths, the app reads DB creds + key via SA login; misbinding → one clear error.
+
+### Step 3 — Re-tier the deploy preflight (the inversion)
+**Objective:** only DB + key block boot; GitHub/LLM/Confluence become non-blocking + observable.
+- **Re-tier `DEPLOY_CONTRACT`:** blocking = DB reachable (connect with the resolved DSN) + field key present/wellformed + schema + extensions (+ Vault reachable iff vault-sourced). Move github/llm/confluence/api-auth out of blocking into an **advisory** set.
+- **New `/config-status`** (read-only API): reports each non-blocking config's state (configured via DB/env/vault, or pending) for the UI/operator. NOT wired into `/readyz` (pod is ready without them).
+- **`assertDeployReady`** checks only the blocking tier; `deploy:check` + the helm test follow.
+- **Tests:** blocking tier fails only on DB/key/schema/extension; `/readyz` green with github/llm unset; `/config-status` reports pending items; DB-unreachable (not just missing creds) blocks with a connect error.
+- **Edge cases:** creds present but DB down → block (connect error, not "missing"); key malformed → block; github unset → pod up + config-status "github: pending".
+- **Acceptance:** a pod with only DB+key provisioned reaches `/readyz` green; `/config-status` lists what still needs UI config.
+
+### Step 4 — UI-config encryption: Vault Transit → field codec
+**Objective:** UI-saved secrets encrypt with the local field key, so UI-config works with OR without Vault.
+- **Change `llm_provider_settings_repo.ts`** (+ any other Vault-Transit'd config) to encrypt/decrypt `api_key_ciphertext` via the field codec (versioned keyset) instead of `vault.transitDecrypt`.
+- Greenfield → **no existing Transit ciphertext to migrate.**
+- **Tests:** round-trip via field codec; repo persists field-codec ciphertext; decrypt path returns plaintext; zero Vault-Transit calls; keyset-version handled (decrypt old, encrypt new).
+- **Edge cases:** key rotation (versioned); malformed/!decryptable ciphertext → clear error, not crash; the LLM credentials_provider reads the field-codec key.
+- **Acceptance:** save an LLM API key via the repo with Vault OFF → it persists encrypted + decrypts on read.
+
+### Step 5 — Superadmin bootstrap
+**Objective:** first boot seeds `admin`/`admin`; idempotent; loud warning; UI-changeable.
+- **New `security/superadmin_bootstrap.ts`:** at boot (after DB + keyset ready), if no `super_admin` user exists, create one — username/password from `config.superadmin.*` (default `admin`/`admin`), argon2-hashed, email keyset-encrypted, role `super_admin`. Emit a **loud warning** (log + surfaced) whenever the password is still the default.
+- **Idempotent** via `INSERT … ON CONFLICT (username) DO NOTHING` (handles the multi-replica race).
+- **Tests:** seeds when absent; does NOT reset an existing admin (upgrade); password argon2-verifies; concurrent double-seed → one row; default-password → warning emitted.
+- **Edge cases:** two replicas boot together (ON CONFLICT); admin already changed creds (never reset); email-encode needs the keyset (ordering: after keyset load).
+- **Acceptance:** fresh DB → `admin`/`admin` logs in; upgrade with changed creds → unchanged; default unchanged → warning visible.
+
+### Step 6 — Fuse 17 migrations → one baseline
+**Objective:** a single `0001_baseline.sql` for first go-live.
+- **Procedure:** fresh DB → run all 17 → `pg_dump --schema-only` + the `0002_seed` data → assemble one idempotent `migrations/0001_baseline.sql` (extensions, schemas, partman config, seed). Remove the 17 (greenfield).
+- **Pin:** `EXPECTED_MIGRATIONS = ["0001_baseline"]`; update the schema_preflight test + the migrations-dir pin test.
+- **VERIFY (critical):** diff the schema of {fresh + fused baseline} vs {fresh + all 17} → must be empty. A throwaway script does this in CI/locally.
+- **Edge cases:** extensions in the baseline (`CREATE EXTENSION`); partman parent/retention config; seed rows (roles); node-pg-migrate journal = 1 entry; cold-only guards moot.
+- **Acceptance:** fresh DB migrates with one file; schema byte-identical to running all 17; `deploy:check`/preflight pass.
+
+### Step 7 — Helm chart wiring + runbook + regenerate artifacts
+**Objective:** the chart exposes the two-secret model + both sources + the SA→Vault path; docs match.
+- **values.yaml / configmap / deployment:** `CODEMASTER_SECRET_SOURCE`; openshift mode (DSN or PG_USER/PASSWORD from a Secret + host/port/db in ConfigMap; key from a Secret); vault mode (`CODEMASTER_VAULT_AUTH=kubernetes`, role, auth path, SA token mount); `config.superadmin.username/password` (defaults admin/admin); serviceAccount wired for Vault K8s-auth.
+- **Re-tier the deploy-check helm test** (DB+key only) + regenerate `deploy-contract.md` + `seed-vault.sh` from the re-tiered contract.
+- **NOTES.txt:** the superadmin warning ("logs in as admin/admin — change it in the UI"), the two-secret model.
+- **first-deploy.md:** rewrite for the model — provision 2 secrets (pick source), SA→Vault role setup, install (no shadow needed for "up"; still document shadow for safe first-run), log in as admin/admin, configure LLM/GitHub via UI.
+- **Acceptance:** `helm install` with only the two secrets (either source) → green pod, UI reachable, admin login; `helm test` validates the two-secret tier.
+
+---
+
+## Frontend touchpoints (codemaster-frontend)
+
+Backend exposes; frontend consumes (align contracts when building 3–5; fetch the repo to match):
+- **Login** (superadmin) + **change-password** flow.
+- **Config forms:** LLM, GitHub, Confluence → `PUT /api/admin/*-config` → Postgres (field-codec encrypted).
+- **`/config-status`** view — what's configured vs pending (drives a setup checklist in the UI).
+
+## Edge-case & scenario catalog (consolidated)
+
+| Scenario | Behavior |
+|---|---|
+| Both env + Vault hold DB creds | selector decides; no guessing |
+| Vault down, source=vault | boot blocked (clear); source=openshift → unaffected |
+| SA not bound to Vault role | 403 → "SA not authorized for role X" |
+| Key missing / malformed | boot blocked, named |
+| Pod restart / redeploy / scale-out | re-reads creds+key from source — nothing lost |
+| Multi-replica superadmin seed | ON CONFLICT → one row |
+| GitHub/LLM/Confluence unset | pod up, UI reachable, `/config-status` shows pending |
+| Webhook before GitHub configured | rejected gracefully, logged; pod fine |
+| Migrate in vault-mode | `resolve_dsn` pre-step exports the DSN before `migrate:up` |
+| Password special chars | URL-encoded in the assembled DSN |
+| Upgrade with changed admin creds | never reset |
+| Default admin/admin unchanged | login works + loud warning |
+| Key rotation | versioned keyset: decrypt old, encrypt new |
+
+## Definition of done
+
+- `helm install` with **only** DB creds + key (Secret **or** Vault) → pod Ready, `/readyz` green, UI reachable, `admin`/`admin` logs in — **no** GitHub/LLM/Confluence required.
+- Configure LLM via the UI (Vault optional) → stored encrypted in Postgres → a review runs.
+- **One** migration baseline; schema identical to all-17.
+- All steps TDD-green; `helm lint`+`template` clean; `deploy:check` green for the two-secret tier.
+
+## Risks & rollback
+
+- **Fused baseline diverges from the 17** → schema-diff verification (step 6) gates it; keep the 17 in git history for reference.
+- **Re-tier weakens a real guard** → the blocking tier still hard-fails on DB/key/schema; non-blocking items are surfaced, not silently dropped.
+- **K8s-auth misconfig** → clear 403 messaging; token/agent-file modes remain as fallbacks.
+- All work is on an unpushed branch; revert = drop the branch.
+
+## Sequencing
+
+1 → 2 (creds need the Vault reader) → 3 (re-tier uses resolved DSN) → 4 (independent, can parallel 3) →
+5 (needs keyset) → 6 (independent) → 7 (chart, last). Each step ships green before the next.
