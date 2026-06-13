@@ -45,6 +45,15 @@ describe("makeVaultKvReader", () => {
     expect(gets[1]?.token).toBe("tok-1");
   });
 
+  it("on 401 (expired/invalid token) ALSO invalidates + retries once (review P2 — parity with runtime path)", async () => {
+    const { reader, gets, invalidated } = harness([{ status: 401, body: {} }, kvOk]);
+    const out = await reader("codemaster/postgres/app");
+    expect(out).toEqual({ dsn: "postgresql://v/d", k: "v" });
+    expect(invalidated()).toBe(1);
+    expect(gets).toHaveLength(2);
+    expect(gets[1]?.token).toBe("tok-1");
+  });
+
   it("throws naming the path on 404", async () => {
     const { reader } = harness([{ status: 404, body: {} }]);
     await expect(reader("codemaster/postgres/app")).rejects.toThrow(/codemaster\/postgres\/app/);

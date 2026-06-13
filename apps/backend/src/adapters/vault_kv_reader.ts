@@ -1,6 +1,7 @@
 // Read a Vault KV-v2 path → its string map, authenticating with a {@link VaultK8sAuth}-style token
-// provider. On a 403 (token expired/revoked) it invalidates + retries once with a fresh login. This
-// is the `readVaultKv` the bootstrap-secret resolvers (DB creds, field key) consume in vault mode.
+// provider. On a 401/403 (token missing/invalid/expired/revoked) it invalidates + retries once with a
+// fresh login. This is the `readVaultKv` the bootstrap-secret resolvers (DB creds, field key) consume in
+// vault mode.
 
 /** The token-provider contract (satisfied by VaultK8sAuth). */
 export type TokenProvider = {
@@ -28,8 +29,10 @@ export function makeVaultKvReader(
 
   return async (path: string): Promise<Record<string, string>> => {
     let res = await deps.httpGetJson(url(path), await deps.auth.token());
-    if (res.status === 403) {
-      // Token expired/revoked — re-login once and retry.
+    if (res.status === 401 || res.status === 403) {
+      // Token missing/invalid (401) or expired/revoked / insufficient-as-cached (403) — re-login once and
+      // retry. 401 matters too: an expired token returns 401, and the runtime path (VaultHttpPort) already
+      // retries both — keep the boot reader consistent (review P2).
       deps.auth.invalidate();
       res = await deps.httpGetJson(url(path), await deps.auth.token());
     }

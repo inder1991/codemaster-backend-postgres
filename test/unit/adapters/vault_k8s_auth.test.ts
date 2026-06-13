@@ -58,6 +58,17 @@ describe("VaultK8sAuth", () => {
     expect(posts).toHaveLength(1);
   });
 
+  it("HONORS a real short lease — does NOT over-trust it past the true TTL (review P2)", async () => {
+    // A real lease of 30s must renew at ~27s (90%), NOT be floored up to 54s — else the cached token is
+    // already expired by Vault but still served, causing a 403 window. The floor applies only to lease<=0.
+    const { auth, posts, advance } = harness({ lease: 30 });
+    await auth.token();
+    advance(28); // past 90% of the REAL 30s lease (would still be cached if wrongly floored to 60)
+    const t2 = await auth.token();
+    expect(posts).toHaveLength(2);
+    expect(t2).toBe("vt-2");
+  });
+
   it("de-duplicates concurrent cold-start logins — one POST, not N (P2)", async () => {
     const { auth, posts } = harness();
     const [a, b] = await Promise.all([auth.token(), auth.token()]);

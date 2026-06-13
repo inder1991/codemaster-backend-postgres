@@ -4,12 +4,14 @@
 // takes effect at runtime, not just at GET. Mirrors github_config_resolver (4b). Absence degrades only
 // Confluence ingestion (no knowledge sync), never boot.
 
+import { FileKvReader } from "#backend/adapters/vault_file_kv.js";
 import { VaultHttpPort } from "#backend/adapters/vault_http.js";
 import { PostgresConfluenceSettingsRepo } from "#backend/integrations/confluence/confluence_settings_repo.js";
 import {
   type ConfluenceVaultReader,
   VAULT_KV_PATH,
 } from "#backend/integrations/confluence/token_provider.js";
+import type { VaultKvReadPort } from "#backend/ingest/webhook_secret_provider.js";
 import { getAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
 
 import { resolveLayered } from "#backend/config/layered_config.js";
@@ -74,6 +76,19 @@ function toSecretRecord(c: ConfluenceConfig): Record<string, string> {
  * is unconfigured) and a refresh throw as fail-open (keeps the cached token).
  */
 export function makeResolvingConfluenceReader(): ConfluenceVaultReader {
+  // Memoize the Vault KV reader so the VaultK8sAuth lease cache + single-flight SURVIVE across reads —
+  // refreshOnce calls this every ~30 min, and a fresh VaultHttpPort per read would force a fresh SA login
+  // each time (a self-DoS against Vault's login rate limiter). Built lazily on the first Vault-tier reach,
+  // and honors the ADR-0071 agent-file selector (parity with the webhook + auth-secret providers — review
+  // P2), so an agent-file deployment reads the rendered file instead of the HTTP API.
+  let vaultReader: VaultKvReadPort | undefined;
+  const vaultKvRead = (): Promise<Record<string, string>> => {
+    vaultReader ??=
+      process.env["CODEMASTER_VAULT_SECRET_SOURCE"] === "agent-file"
+        ? new FileKvReader()
+        : VaultHttpPort.fromEnv();
+    return vaultReader.kvRead({ path: VAULT_KV_PATH });
+  };
   return {
     kvRead: async (): Promise<Record<string, string>> => {
       const resolved = await resolveLayered<ConfluenceConfig>(
@@ -84,7 +99,7 @@ export function makeResolvingConfluenceReader(): ConfluenceVaultReader {
           { source: "env", load: () => Promise.resolve(confluenceConfigFromEnv((n) => process.env[n])) },
           {
             source: "vault",
-            load: async () => confluenceConfigFromVaultData(await VaultHttpPort.fromEnv().kvRead({ path: VAULT_KV_PATH })),
+            load: async () => confluenceConfigFromVaultData(await vaultKvRead()),
           },
         ],
         (source, err) => {

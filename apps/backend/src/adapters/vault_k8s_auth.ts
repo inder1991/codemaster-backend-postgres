@@ -83,7 +83,10 @@ export class VaultK8sAuth {
       throw new Error(`Vault kubernetes login for role "${this.#deps.role}" returned no client_token`);
     }
     const rawLease = typeof auth.lease_duration === "number" ? auth.lease_duration : 0;
-    const leaseSeconds = Math.max(rawLease, MIN_LEASE_SECONDS); // floor: never renewAtMs == now (P2)
+    // Floor ONLY a missing/zero lease (token_ttl=0 / omitted lease_duration) — that's the per-call re-login
+    // storm the floor guards. A real positive lease is honored as-is: flooring a short-but-real TTL up to 60s
+    // would make renewAtMs OVERSHOOT the true expiry, serving an already-dead token (a 403 window). (review P2)
+    const leaseSeconds = rawLease > 0 ? rawLease : MIN_LEASE_SECONDS;
     this.#cached = {
       token: auth.client_token,
       renewAtMs: this.#deps.now() + leaseSeconds * 1000 * RENEW_AT,
