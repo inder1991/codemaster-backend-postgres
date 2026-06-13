@@ -16,6 +16,58 @@ fail-loud boot (or one silent no-op) at a time, by reverse-engineering the code.
 that into: *one preflight + one runbook + strong defaults = a deploy that either works or tells you
 precisely why not.*
 
+## REVISED go-live provisioning model (owner-aligned 2026-06-13)
+
+The conversation refined the model. The operating principle is now a hard **two-tier** split:
+
+> **You provision exactly TWO things — the DB credentials and the field-encryption key — each from
+> EITHER an OpenShift Secret OR a Vault path (your choice). Everything else (LLM, GitHub, Confluence,
+> superadmin changes) is set later through the UI, stored in Postgres encrypted by that key, and
+> NEVER blocks the pod from coming up.**
+
+Settled decisions:
+1. **Boot-blocking tier = {DB creds, field-encryption key}** only (+ Vault reachability *iff* those come
+   from Vault). GitHub/LLM/Confluence are **non-blocking** — the pod boots + the UI is reachable
+   without them; absence degrades only *that feature*. (This INVERTS the first preflight cut, which
+   made GitHub required — those move to non-blocking.)
+2. **Source selector:** one env switch `CODEMASTER_SECRET_SOURCE = openshift | vault` (default
+   `openshift`), with optional per-secret overrides (`CODEMASTER_PG_SECRET_SOURCE`,
+   `CODEMASTER_FIELD_KEY_SOURCE`). The app reads ONLY the selected source; clear errors name it.
+   `openshift` = env from a Secret (full `CODEMASTER_PG_CORE_DSN`, or `PG_USER`+`PG_PASSWORD` + host/
+   port/db from the ConfigMap); `vault` = SA login → read the KV path.
+3. **Vault auth = OpenShift service account (Kubernetes auth):** read the pod SA JWT →
+   `auth/kubernetes/login {role, jwt}` → token → KV reads; renew on expiry. New
+   `CODEMASTER_VAULT_AUTH = kubernetes | token | agent-file` (keeps existing modes). The SA→role→
+   policy→path binding is Vault-admin setup (runbook).
+4. **Bootstrap secrets are READ-ONLY** — the app never copies the key/DB creds into Vault or Postgres
+   (key-next-to-ciphertext anti-pattern; DB creds are circular). One source of truth; re-provisioning
+   to a different source is an explicit operator action (copy + flip the switch).
+5. **UI config → Postgres, encrypted by the field-encryption KEY (not Vault Transit).** Switch
+   `core.llm_provider_settings` (+ any other Vault-Transit'd config) from Transit to the field codec,
+   so UI-config of secrets works WITH OR WITHOUT Vault. Precedence at use-time: DB (UI) > env
+   (ConfigMap/Secret) > Vault > disabled. Effective immediately, survives restarts/scaling.
+6. **Superadmin bootstrap:** on first boot, if no superadmin exists, seed `admin` / `admin` (argon2-
+   hashed), changeable via UI. Idempotent (never resets on upgrade). [OPEN: force-change-on-first-
+   login vs loud-warning-only — defaulting to a loud warning per "changeable afterwards".]
+7. **Fuse all 17 migrations → one `0001_baseline.sql`** (greenfield confirmed — no existing
+   deployment). Verify the fused schema == running all 17. `EXPECTED_MIGRATIONS = ["0001_baseline"]`.
+8. **Keyset = provisioned (Option A)**, never auto-generated (auto-gen + non-persist = data loss on
+   restart; a constant default = shared-key breach). It lives in the Secret/Vault you control; the app
+   reads it at every boot, holds it in memory only, never persists it.
+
+Most machinery EXISTS: users + `super_admin` role + `local_user_repo`; DB-stored config tables
+(`llm_provider_settings`/`platform_config`/`global_config`/`org_configs`/`repo_configs`); the field
+codec (`boot_field_keys`/`audit_field_codec`/`email_codec`); a Vault HTTP client. The work is
+RE-TIERING + adding source-adapters (two-source creds, K8s-auth) + the encryption switch + superadmin
+seed + migration fusion — not a rewrite. The deploy_preflight already built must be re-tiered (drop
+GitHub/LLM from blocking; keep DB + keyset).
+
+REVISED build sequence (each TDD): (1) source-resolver + `CODEMASTER_SECRET_SOURCE` (DB creds two-
+source) → (2) Vault K8s-auth client → (3) re-tier deploy_preflight to {DB, keyset} blocking; the rest
+to a non-blocking `/config-status` → (4) UI-config encryption switch (Transit → field codec) → (5)
+superadmin bootstrap → (6) fuse migrations → (7) chart wiring (Secret + Vault SA modes, the switch) +
+runbook update.
+
 ## Design principles
 
 1. **Minimize required inputs.** Every value that *can* have a safe default *has* one. The engineer
