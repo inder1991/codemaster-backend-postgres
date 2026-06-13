@@ -8,16 +8,22 @@ export type ConfigLayer<T> = {
   readonly source: string;
   /** Load the config from this layer, or null when this layer has nothing. */
   readonly load: () => Promise<T | null>;
+  /** When true, a thrown load() error is treated as "nothing here" (resolution falls through to the next
+   *  tier) instead of propagating — for tiers prone to TRANSIENT outages (e.g. the DB: a core-DB blip must
+   *  not break a feature whose creds live in env/Vault — review P1). Default false: a throw PROPAGATES
+   *  (fail-closed — e.g. a Vault path-not-found is a deployment misconfiguration that must fail loud, not
+   *  silently disable the feature). */
+  readonly tolerateErrors?: boolean;
 };
 
 /**
  * Resolve through the layers in order; return the first non-null value + its source, or null.
  *
- * A layer whose `load()` THROWS (e.g. a transient DB/Vault outage) is treated as "this layer has nothing"
- * and resolution falls through to the next — a higher-tier outage must NOT break a feature whose creds live
- * in a lower tier (review P1: a core-DB blip would otherwise disable GitHub creds/webhook + Confluence even
- * when env/Vault has them). The throw is surfaced via `onError` so it is never silent; if NO layer yields,
- * the result is null (the feature is disabled — fail-closed, not a boot/runtime crash).
+ * A layer marked `tolerateErrors` whose `load()` THROWS is treated as "this layer has nothing" and
+ * resolution falls through to the next — so a TRANSIENT outage of a tolerant tier (e.g. a core-DB blip)
+ * doesn't break a feature whose creds live in a lower tier (review P1). The throw is surfaced via `onError`
+ * (never silent). A throw from a NON-tolerant tier PROPAGATES (fail-closed — e.g. a Vault path-not-found is
+ * a deployment misconfiguration). If NO layer yields, the result is null (the feature is disabled).
  */
 export async function resolveLayered<T>(
   layers: ReadonlyArray<ConfigLayer<T>>,
@@ -28,7 +34,10 @@ export async function resolveLayered<T>(
     try {
       value = await layer.load();
     } catch (err) {
-      onError?.(layer.source, err);
+      if (layer.tolerateErrors !== true) {
+        throw err; // fail-closed tier — propagate (e.g. Vault path-not-found at deployment)
+      }
+      onError?.(layer.source, err); // transient-tolerant tier (e.g. DB blip) — surface + fall through
       continue;
     }
     if (value !== null) {

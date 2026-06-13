@@ -45,14 +45,14 @@ describe("resolveLayered", () => {
     expect(vaultCalls).toBe(0);
   });
 
-  // Review P1: a THROWING layer (transient DB/Vault outage) must NOT break fall-through — else a core-DB
-  // blip would disable a feature whose creds live in env/Vault. The throw is treated as "this layer has
-  // nothing" and surfaced via onError (so it's not silent).
-  it("falls through a THROWING layer to the next, reporting the error", async () => {
+  // Review P1: a `tolerateErrors` layer's throw (transient DB blip) must NOT break fall-through — it's
+  // treated as "this layer has nothing" + surfaced via onError. A NON-tolerant layer's throw PROPAGATES
+  // (fail-closed — e.g. a Vault path-not-found is a deployment misconfig that must fail loud).
+  it("falls through a THROWING tolerant layer to the next, reporting the error", async () => {
     const errors: Array<{ source: string; message: string }> = [];
     const got = await resolveLayered(
       [
-        { source: "db", load: () => Promise.reject(new Error("db connection refused")) },
+        { source: "db", load: () => Promise.reject(new Error("db connection refused")), tolerateErrors: true },
         { source: "env", load: () => Promise.resolve({ k: "from-env" }) },
       ],
       (source, err) => errors.push({ source, message: err instanceof Error ? err.message : String(err) }),
@@ -61,15 +61,24 @@ describe("resolveLayered", () => {
     expect(errors).toEqual([{ source: "db", message: "db connection refused" }]);
   });
 
-  it("returns null (disabled) when the only layer throws — fail-closed, not fail-crash", async () => {
+  it("returns null (disabled) when the only tolerant layer throws — fail-closed, not fail-crash", async () => {
     let reported = 0;
     const got = await resolveLayered(
-      [{ source: "db", load: () => Promise.reject(new Error("db down")) }],
+      [{ source: "db", load: () => Promise.reject(new Error("db down")), tolerateErrors: true }],
       () => {
         reported += 1;
       },
     );
     expect(got).toBeNull();
     expect(reported).toBe(1);
+  });
+
+  it("PROPAGATES a throw from a NON-tolerant layer (fail-closed deployment error)", async () => {
+    await expect(
+      resolveLayered([
+        { source: "db", load: () => Promise.resolve(null) },
+        { source: "vault", load: () => Promise.reject(new Error("vault path not found")) },
+      ]),
+    ).rejects.toThrow("vault path not found");
   });
 });

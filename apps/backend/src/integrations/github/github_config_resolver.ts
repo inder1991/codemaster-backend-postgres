@@ -21,12 +21,12 @@ type Layered<T> = {
 async function resolve<T>(s: Layered<T>): Promise<{ value: T; source: string } | null> {
   return resolveLayered<T>(
     [
-      { source: "db", load: s.fromDb },
+      // DB tier tolerates a TRANSIENT core-DB error (fall through to env/Vault, review P1); the Vault tier
+      // is NOT tolerant — a path-not-found there is a deployment misconfig that must fail loud (fail-closed).
+      { source: "db", load: s.fromDb, tolerateErrors: true },
       { source: "env", load: () => Promise.resolve(s.fromEnv()) },
       { source: "vault", load: s.fromVault },
     ],
-    // A tier outage (e.g. a transient core-DB error) falls through to the next tier (review P1) — surface
-    // it so a degraded resolution isn't silent.
     (source, err) => {
       // eslint-disable-next-line no-console
       console.warn(

@@ -78,14 +78,15 @@ export function makeResolvingConfluenceReader(): ConfluenceVaultReader {
     kvRead: async (): Promise<Record<string, string>> => {
       const resolved = await resolveLayered<ConfluenceConfig>(
         [
-          { source: "db", load: confluenceConfigFromDb },
+          // DB tier tolerates a TRANSIENT core-DB error (fall through, review P1); the Vault tier is NOT
+          // tolerant — a path-not-found is a deployment misconfig that must fail loud (fail-closed).
+          { source: "db", load: confluenceConfigFromDb, tolerateErrors: true },
           { source: "env", load: () => Promise.resolve(confluenceConfigFromEnv((n) => process.env[n])) },
           {
             source: "vault",
             load: async () => confluenceConfigFromVaultData(await VaultHttpPort.fromEnv().kvRead({ path: VAULT_KV_PATH })),
           },
         ],
-        // A tier outage (e.g. a transient core-DB error) falls through to the next tier (review P1).
         (source, err) => {
           // eslint-disable-next-line no-console
           console.warn(
