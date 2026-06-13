@@ -8,7 +8,13 @@ import { readFile } from "node:fs/promises";
 import { VaultK8sAuth } from "#backend/adapters/vault_k8s_auth.js";
 import { makeVaultKvReader } from "#backend/adapters/vault_kv_reader.js";
 
+import { transportAbortSignal } from "#platform/transport_timeout.js";
+
 const DEFAULT_SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token";
+// Boot-path Vault HTTP timeout (ms). Without it a stalled/black-holed Vault hangs `main()` resolving the
+// DB DSN BEFORE the server binds — a silent, non-restarting wedge instead of fail-loud (review P1). Mirrors
+// FetchVaultHttpClient's 5s default.
+const BOOT_VAULT_TIMEOUT_MS = 5_000;
 
 export type VaultReaderFactoryDeps = {
   readonly env: Record<string, string | undefined>;
@@ -24,12 +30,16 @@ async function fetchPostJson(url: string, body: unknown): Promise<{ status: numb
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
+    signal: transportAbortSignal(BOOT_VAULT_TIMEOUT_MS), // bounded — a stalled Vault must fail, not hang boot
   });
   return { status: r.status, body: await r.json().catch(() => ({})) };
 }
 
 async function fetchGetJson(url: string, token: string): Promise<{ status: number; body: unknown }> {
-  const r = await fetch(url, { headers: { "X-Vault-Token": token } });
+  const r = await fetch(url, {
+    headers: { "X-Vault-Token": token },
+    signal: transportAbortSignal(BOOT_VAULT_TIMEOUT_MS), // bounded — a stalled Vault must fail, not hang boot
+  });
   return { status: r.status, body: await r.json().catch(() => ({})) };
 }
 

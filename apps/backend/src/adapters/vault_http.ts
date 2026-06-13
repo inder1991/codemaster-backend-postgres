@@ -224,6 +224,11 @@ export class VaultHttpPort implements VaultPort {
     if (!addr) {
       throw new VaultConnectivityError("VAULT_ADDR env var unset; cannot construct VaultHttpPort");
     }
+    // The KV-v2 mount MUST match the DB-creds reader (vault_reader_factory reads the same env), else the
+    // field-key / webhook / auth-secret reads hit the DEFAULT 'secret' mount while the DSN reader uses the
+    // configured one — a split-brain that 404s the field key (crashloop) on a non-default mount (review P1).
+    const kvMount = process.env["CODEMASTER_VAULT_KV_MOUNT"];
+    const mountOpt = kvMount !== undefined && kvMount !== "" ? { kvMount } : {};
     // SA-auth (kubernetes, review P0-B): the app logs in with its projected service-account JWT — no
     // static token, no agent-rendered token file. The SHARED VaultK8sAuth (env-keyed role/auth-path/
     // SA-token path — same as the DB-creds reader) caches + lease-renews; its token() is the async
@@ -239,14 +244,15 @@ export class VaultHttpPort implements VaultPort {
         onAuthInvalid: () => {
           auth.invalidate();
         },
+        ...mountOpt,
       });
     }
     const tokenEnv = process.env["VAULT_TOKEN"];
     if (tokenEnv) {
-      return new VaultHttpPort({ addr, token: tokenEnv });
+      return new VaultHttpPort({ addr, token: tokenEnv, ...mountOpt });
     }
     const tokenPath = process.env["VAULT_AGENT_TOKEN_PATH"] ?? DEFAULT_TOKEN_PATH;
-    return new VaultHttpPort({ addr, tokenPath });
+    return new VaultHttpPort({ addr, tokenPath, ...mountOpt });
   }
 
   /**

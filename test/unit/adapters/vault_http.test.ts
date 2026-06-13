@@ -561,12 +561,38 @@ describe("VaultHttpPort.fromEnv", () => {
     addr: process.env["VAULT_ADDR"],
     token: process.env["VAULT_TOKEN"],
     agentPath: process.env["VAULT_AGENT_TOKEN_PATH"],
+    kvMount: process.env["CODEMASTER_VAULT_KV_MOUNT"],
+    auth: process.env["CODEMASTER_VAULT_AUTH"],
   };
 
   afterEach(() => {
     restoreEnv("VAULT_ADDR", saved.addr);
     restoreEnv("VAULT_TOKEN", saved.token);
     restoreEnv("VAULT_AGENT_TOKEN_PATH", saved.agentPath);
+    restoreEnv("CODEMASTER_VAULT_KV_MOUNT", saved.kvMount);
+    restoreEnv("CODEMASTER_VAULT_AUTH", saved.auth);
+  });
+
+  it("honors CODEMASTER_VAULT_KV_MOUNT (no split-brain: same mount as the DB-creds reader)", async () => {
+    // review P1: fromEnv must read the configured KV mount, else the field-key/webhook/auth reads hit the
+    // DEFAULT 'secret' mount while the DSN reader uses the configured one → field-key 404 → crashloop.
+    process.env["VAULT_ADDR"] = "https://vault.internal:8200";
+    process.env["VAULT_TOKEN"] = "tok";
+    process.env["CODEMASTER_VAULT_KV_MOUNT"] = "kv-prod";
+    delete process.env["CODEMASTER_VAULT_AUTH"];
+    let capturedUrl = "";
+    vi.stubGlobal("fetch", async (url: string): Promise<Response> => {
+      capturedUrl = url;
+      return new Response(JSON.stringify({ data: { data: { k: "v" } } }), { status: 200 });
+    });
+    try {
+      await VaultHttpPort.fromEnv().kvRead({ path: "codemaster/field-encryption/keys" });
+      expect(capturedUrl).toBe(
+        "https://vault.internal:8200/v1/kv-prod/data/codemaster/field-encryption/keys",
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("should throw VaultConnectivityError when VAULT_ADDR is unset", () => {
