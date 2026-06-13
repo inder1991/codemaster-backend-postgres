@@ -234,7 +234,7 @@ import {
 import { type DnsResolver } from "#backend/security/url_validator.js";
 import { type VaultPort } from "#backend/adapters/vault_port.js";
 import { PostgresLlmProviderSettingsRepo } from "#backend/integrations/llm/llm_provider_settings_repo.js";
-import { requireAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
+import { getAuditKeyRegistry, requireAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
 import { PostgresGitHubAppSettingsRepo } from "#backend/integrations/github/github_app_settings_repo.js";
 import { type GetPreflightValidator } from "#backend/integrations/llm/preflight_validator.js";
 import { PLATFORM_SCOPE_AUDIT_INSTALLATION_ID } from "#backend/infra/sentinels.js";
@@ -416,7 +416,31 @@ export async function registerAdminRoutes(
       );
       const { makeObserveDeps } = await import("#backend/deploy_preflight_io.js");
       const observed = await observeDeployState(DEPLOY_CONTRACT, makeObserveDeps({ db: opts.db }));
-      return getConfigStatus(DEPLOY_CONTRACT, observed);
+      const envFileItems = getConfigStatus(DEPLOY_CONTRACT, observed);
+      // DB tier (review P1): a UI-saved github/llm config overrides the env/file view → configured/db, and
+      // LLM (DB-only after 4a, not in the env/file advisory) is reported here. Registry absent → DB tier skipped.
+      const registry = getAuditKeyRegistry();
+      if (registry === null) {
+        return envFileItems;
+      }
+      const githubRow = await new PostgresGitHubAppSettingsRepo({ db: opts.db, registry }).read();
+      const items = envFileItems.map((it) =>
+        githubRow !== null && it.key.startsWith("github_app.")
+          ? { ...it, state: "configured" as const, source: "db" as const }
+          : it,
+      );
+      const llmRoles = await new PostgresLlmProviderSettingsRepo({
+        db: opts.db,
+        registry,
+        clock: opts.clock,
+      }).readRotationFingerprint();
+      items.push({
+        key: "llm.provider",
+        state: llmRoles.length > 0 ? "configured" : "pending",
+        source: llmRoles.length > 0 ? "db" : "none",
+        gates: "LLM provider for reviews (no reviews until configured)",
+      });
+      return items;
     });
 
   await app.register(async (scope) => {
@@ -476,13 +500,27 @@ export async function registerAdminRoutes(
             .code(422)
             .send({ detail: "app_id, private_key_pem, webhook_secret are required strings" });
         }
+        const principal = request.authPrincipal!;
+        const enabled = typeof body.enabled === "boolean" ? body.enabled : true;
         const repo = new PostgresGitHubAppSettingsRepo({ db: opts.db, registry: requireAuditKeyRegistry() });
         await repo.write({
           appId: body.app_id,
           privateKeyPem: body.private_key_pem,
           webhookSecret: body.webhook_secret,
-          enabled: typeof body.enabled === "boolean" ? body.enabled : true,
-          rotatedByUserId: request.authPrincipal!.userId,
+          enabled,
+          rotatedByUserId: principal.userId,
+        });
+        // Forensic record for the platform's most sensitive credential. NEVER log the secrets — only
+        // app_id + enabled go in `after` (the rotation audit, mirroring llm-provider-config).
+        await opts.audit?.({
+          actorUserId: principal.userId,
+          installationId: principal.installationId,
+          action: "github_app_settings.rotated",
+          targetKind: "github_app_settings",
+          targetId: "platform",
+          before: null,
+          after: { app_id: body.app_id, enabled },
+          now: opts.clock.now(),
         });
         return reply.code(200).send({ ok: true });
       },

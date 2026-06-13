@@ -253,13 +253,26 @@ export const DEPLOY_CONTRACT: DeployContract = {
       required: false,
       gates: "Confluence ingestion (knowledge corpus)",
     },
+    // Two keys at the one codemaster/api/auth path — the seeder groups by path into a single `vault kv
+    // put session_signing_key=… csrf_secret=…` (review P1: the prior single keyless entry seeded `value=`,
+    // which auth_secrets_provider can't read). openshift mode reads these from env instead (P0-A.2b).
     {
-      name: "api_auth",
+      name: "api_auth.session_signing_key",
       source: "file",
       fileName: "codemaster_api_auth",
       vaultPath: "codemaster/api/auth",
+      key: "session_signing_key",
       required: false,
-      gates: "session / auth-route secrets",
+      gates: "session signing key (auth routes)",
+    },
+    {
+      name: "api_auth.csrf_secret",
+      source: "file",
+      fileName: "codemaster_api_auth",
+      vaultPath: "codemaster/api/auth",
+      key: "csrf_secret",
+      required: false,
+      gates: "CSRF secret (auth routes)",
     },
   ],
   extensions: [
@@ -429,10 +442,11 @@ export function parseRenderedSecret(raw: string): Record<string, string> | null 
 /** A non-blocking feature-config item's state, for /config-status (never carries the secret value). */
 export type ConfigStatusItem = {
   readonly key: string;
-  /** configured = a value is present; pending = not yet set in any source. (Step 4 adds db source +
-   *  an active `validated`/`invalid` probe; until then only configured/pending are reported.) */
+  /** configured = a value is present; pending = not yet set in any source. */
   readonly state: "configured" | "pending";
-  readonly source: SecretSource | "none";
+  /** Where the value came from: "db" (UI-saved, overrides env/file), "env"/"file" (the observed tier),
+   *  or "none" (pending). */
+  readonly source: SecretSource | "db" | "none";
   readonly gates?: string;
 };
 

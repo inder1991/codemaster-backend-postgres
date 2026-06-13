@@ -84,6 +84,37 @@ describeDb("admin github-config (disposable)", () => {
     await app.close();
   });
 
+  it("PUT emits a github_app_settings.rotated audit event with NO secrets in the payload (P1)", async () => {
+    const audited: Array<{ action: string; after: unknown }> = [];
+    const app = buildApp({});
+    await registerAdminRoutes(app, {
+      db,
+      signingKey: SIGNING_KEY,
+      clock: new FakeClock({ now: NOW }),
+      audit: async (e) => {
+        audited.push({ action: e.action, after: e.after });
+      },
+    });
+    await app.ready();
+    try {
+      const res = await app.inject({
+        method: "PUT",
+        url: "/api/admin/github-config",
+        cookies: cookie("super_admin"),
+        payload: { app_id: "123456", private_key_pem: PEM, webhook_secret: "whsec-abc" },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(audited).toHaveLength(1);
+      expect(audited[0]?.action).toBe("github_app_settings.rotated");
+      const after = JSON.stringify(audited[0]?.after);
+      expect(after).not.toContain("whsec-abc");
+      expect(after).not.toContain("RSA PRIVATE KEY");
+      expect(after).toContain("123456"); // app_id IS recorded (non-secret)
+    } finally {
+      await app.close();
+    }
+  });
+
   it("PUT is 403 for non-super_admin and 422 on a bad body", async () => {
     const app = await makeApp();
     expect(
