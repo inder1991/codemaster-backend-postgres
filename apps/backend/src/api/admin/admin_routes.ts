@@ -654,6 +654,9 @@ export async function registerAdminRoutes(
     // surface now owns it). super_admin; tests the creds in the body WITHOUT persisting (mirrors the LLM
     // test-credentials UX). Reuses the SAME injected probe seam; 503 when the probe adapter is unwired
     // (parity with how platform-credentials behaves today). Never returns the token.
+    // IMPORTANT (internal Confluence): the probe adapter MUST NOT apply private-CIDR/SSRF blocking to the
+    // base_url — internally-hosted Confluence Data Center on a private network is a legitimate, super_admin-
+    // configured target. Blocking it would fail Test for valid internal hosts while ingestion succeeds.
     scope.post(
       "/api/admin/confluence-config/test",
       { preHandler: requireRole(["super_admin"]) },

@@ -132,6 +132,22 @@ describeDb("admin confluence-config (disposable)", () => {
     }
   });
 
+  it("accepts an INTERNAL/private-network base_url (http + private host) — self-hosted DC must work", async () => {
+    // codemaster must support internally-hosted Confluence Data Center: a private IP / http base_url is a
+    // legitimate operator-configured target. The PUT must NOT reject it (no https-only / private-CIDR block).
+    const app = await makeApp();
+    const res = await app.inject({
+      method: "PUT",
+      url: "/api/admin/confluence-config",
+      cookies: cookie("super_admin"),
+      payload: { base_url: "http://confluence.corp.internal:8090/wiki", token: "dc-pat-token" }, // Bearer PAT (no auth_email)
+    });
+    expect(res.statusCode).toBe(200);
+    const get = await app.inject({ method: "GET", url: "/api/admin/confluence-config", cookies: cookie("super_admin") });
+    expect(get.json()).toMatchObject({ configured: true, baseUrl: "http://confluence.corp.internal:8090/wiki", authEmail: null });
+    await app.close();
+  });
+
   it("POST /test: probe ok → {ok:true}; probe fail → {ok:false,message}; no probe wired → 503; bad body → 422", async () => {
     // probe wired + ok
     const appOk = await makeApp({ probeOk: true });
