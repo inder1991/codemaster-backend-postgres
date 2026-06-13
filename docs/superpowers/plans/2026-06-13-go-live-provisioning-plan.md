@@ -150,3 +150,107 @@ Backend exposes; frontend consumes (align contracts when building 3–5; fetch t
 
 1 → 2 (creds need the Vault reader) → 3 (re-tier uses resolved DSN) → 4 (independent, can parallel 3) →
 5 (needs keyset) → 6 (independent) → 7 (chart, last). Each step ships green before the next.
+
+---
+
+## Review refinements — addressed (2026-06-13 adversarial review)
+
+### R1. Field-encryption key lifecycle (root of trust for UI secrets)
+- **Format (EXISTING — `security/field_encryption_keys_loader.ts`):** JSON
+  `{ "current_version": "vN", "keys": { "v1": "<base64 of 32 random bytes>", "vN": "…" } }`.
+  AES-256-GCM (32-byte keys), versioned. `parseKeysetPayload` validates: `current_version` present +
+  string; `keys` an object; each value strict-base64 decoding to exactly 32 bytes.
+- **Generation:** `openssl rand -base64 32` per key; first keyset
+  `{"current_version":"v1","keys":{"v1":"<that>"}}`. Ship `npm run gen:field-key` to emit it.
+- **Entropy:** 32 bytes from a CSPRNG only — no passphrases / KDF-derived keys.
+- **Storage:** the Secret/Vault entry, read-only (decision 4). The app holds it in memory only.
+- **Backup (REQUIRED):** back up the Secret/Vault entry in your secret-backup process. **LOST KEY =
+  every UI-saved secret (LLM API key, user emails) is PERMANENTLY UNRECOVERABLE** — the DB holds only
+  ciphertext. The runbook must state this in bold.
+- **Restore test (DR):** go-live acceptance — restore DB + the SAME keyset → decrypts; restore +
+  wrong/missing keyset → fails clearly (see R8).
+- **Rotation ceremony:** add `vN+1` to `keys`, set `current_version=vN+1`, update the Secret/Vault
+  entry; the codec decrypts old data by its version tag, encrypts new with current. **Retain old
+  versions** as long as any ciphertext references them (no destructive rotation).
+
+### R2. `/config-status` contract
+- `GET /api/admin/config-status` — **super_admin auth required**; **never returns secret values**.
+- `{ items: [{ key, state, source, last_checked_at, message }] }`,
+  `state ∈ configured | validated | pending | invalid | unknown`, `source ∈ db | env | vault | none`.
+- **`configured`** = a value is present. **`validated`** = present AND an active probe confirmed it
+  works (GitHub auth ping / LLM ping). Default reports configured/pending; validated/invalid only when
+  a probe ran. The two are distinct — "set" ≠ "works".
+- Drives the frontend setup-checklist (R5).
+
+### R3. Migration-fusion gates (stronger than byte-diff)
+- Verification = **normalized schema diff + semantic checks**, NOT raw bytes (extension version/owner
+  differences create false diffs). Compare, on {fresh+fused} vs {fresh+all-17}: extensions (name
+  only), schemas, tables+columns+types, indexes, constraints, functions, grants (ownership-normalized
+  via `pg_dump --no-owner --no-privileges`), **seed rows** (row-level SELECT compare), migration
+  journal expectation. A throwaway verify script gates step 6.
+- **Keep the 17** in `migrations/_archive/` (or git tag `pre-fusion`) until go-live passes; remove after.
+
+### R4 + R5. Two charts; frontend is first-class
+- **Decision: TWO charts.** Backend = this repo (`deploy/helm/codemaster-backend`, Service
+  `codemaster-backend`). Frontend = `codemaster-frontend` (Next.js; its own `Dockerfile` +
+  `deploy/{kind,openshift}` + `contracts/openapi.json`; `.env.example` →
+  `BACKEND_API_BASE_URL=http://codemaster-backend.<ns>.svc`).
+- **Frontend tasks (first-class):**
+  - **OpenAPI sync:** backend publishes its OpenAPI; the frontend's `contracts/openapi.json` is
+    regenerated whenever the backend adds /config-status + superadmin + config endpoints (a contract
+    step, not an afterthought).
+  - **`BACKEND_API_BASE_URL`** → the backend Service DNS (same namespace: `codemaster-backend.<ns>.svc`).
+  - **RBAC visibility:** config UI is super_admin-only (backend enforces; frontend hides for others).
+  - **Setup-checklist UI** driven by `/config-status`.
+  - **Frontend deploy wiring:** its `deploy/openshift` overlay (image, BACKEND_API_BASE_URL, the Route
+    for browser access).
+- **Go-live verification (runbook):** install BOTH charts; verify **browser login through the frontend
+  Route** as admin/admin → reaches the backend — not just backend `/readyz`.
+
+### R6. Readiness vs liveness
+- **`/livez` (liveness):** process alive + event loop responsive; depends on NOTHING downstream — a DB
+  blip or pending config must NOT trigger liveness restarts (no flapping).
+- **`/readyz` (readiness):** DB reachable + key loaded + schema OK (the blocking tier) + runtime loops
+  alive — gates TRAFFIC. Pending non-blocking config (github/llm/confluence) does NOT affect `/readyz`
+  (the pod is ready to serve the UI + accept config). Audit `/healthz` to ensure it carries liveness
+  (no downstream-config checks).
+
+### R7. Vault-Transit inventory (precise — replaces "any other")
+- **Confirmed by grep:** the ONLY Vault-Transit-encrypted column is
+  `core.llm_provider_settings.api_key_ciphertext` (`llm_provider_settings_repo.ts`). `email_ciphertext`
+  is ALREADY the local field codec. **Step 4 switches exactly that one repo; there is no other.**
+- **Scope note:** GitHub app creds + Confluence token are currently FILE secrets (provisioned),
+  NOT DB-UI config. Making them UI-editable needs NEW DB-config surfaces (columns + field-codec) →
+  flagged as a decision: in-scope-for-UI-config, or provisioned-now + UI-config fast-follow. (LLM
+  already has the DB-config surface; it's the template for the others.)
+
+### R8. Disaster-recovery acceptance (go-live tests)
+- **DR-1:** restore a DB backup + provision the SAME keyset → app boots, decrypts saved config → works.
+- **DR-2:** restore DB + WRONG or MISSING keyset → app fails CLEARLY at first decrypt ("cannot decrypt
+  with current field-encryption keyset — wrong/missing key version"), never silently corrupts/serves garbage.
+
+### R9. Vault Kubernetes-auth setup (operator runbook detail)
+- **Namespace:** the app's OpenShift namespace. **SA:** `codemaster-backend` (the deployment's
+  serviceAccountName). **Auth path:** `auth/kubernetes` (`CODEMASTER_VAULT_K8S_AUTH_PATH`).
+- **Vault role (Vault-admin):** `vault write auth/kubernetes/role/codemaster
+  bound_service_account_names=codemaster-backend bound_service_account_namespaces=<ns>
+  policies=codemaster-read ttl=1h`.
+- **Policy `codemaster-read`:** read on `codemaster/postgres/*` + `codemaster/field-encryption/*`
+  (+ any vault-sourced feature config).
+- **Token renewal:** renew before lease expiry; re-login on 403/expiry.
+- **SA JWT rotation:** OpenShift projected SA tokens are short-lived + auto-rotate — the app RE-READS
+  the JWT file on each login (never caches the JWT), so rotation is transparent.
+
+### R10. Config precedence — two rules, do not conflate
+- **Bootstrap secrets (DB creds, field key): NO fallback.** Read EXACTLY `CODEMASTER_SECRET_SOURCE`
+  (openshift|vault); missing → fail loud naming that source. Deterministic, no surprises.
+- **UI-managed feature config (LLM/GitHub/Confluence): fallback chain** — DB (UI) > env
+  (ConfigMap/Secret) > Vault > disabled. Layered; UI wins.
+- The no-fallback rule applies ONLY to the two bootstrap secrets; feature config is intentionally layered.
+
+### Plan deltas from this review
+- New helper `npm run gen:field-key`; new DR acceptance tests (DR-1/DR-2); `/config-status` gets a
+  formal contract + admin auth + configured-vs-validated; step 6 verification upgraded to
+  normalized+semantic with an archived-migrations safety net; a frontend workstream (OpenAPI sync,
+  Route, BACKEND_API_BASE_URL, RBAC, checklist UI) + two-chart runbook; `/livez` vs `/readyz` split;
+  the Transit inventory pinned to one repo; the github/confluence-UI-config scope decision surfaced.
