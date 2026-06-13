@@ -1,14 +1,12 @@
-// Chunker selector — 1:1 port of the frozen Python ChunkerRegistry
-// (vendor/codemaster-py/codemaster/chunking/selector.py).
-//
-// Routes a path to the right chunker by FILE EXTENSION (narrow + explicit; no content sniffing):
+// Chunker selector — routes a path to the right chunker by FILE EXTENSION (narrow + explicit; no
+// content sniffing):
 //   * .py                                         → TreeSitterPythonChunker
 //   * .ts .tsx .js .jsx .mjs .cjs                 → TreeSitterTsJsChunker
 //   * everything else                             → HunkFallbackChunker
 //
 // Default-deny on extension typos (.py3 / .coffee → HunkFallback). The 3 chunkers are stateless
 // (the loader owns the process-wide parser cache); the registry holds pre-constructed singletons so
-// every chunk call reuses the warm parsers (selector.py rationale).
+// every chunk call reuses the warm parsers.
 
 import { HunkFallbackChunker } from "./hunk_fallback.js";
 import { type HunkRange } from "./treesitter_python.js";
@@ -17,8 +15,7 @@ import { TreeSitterTsJsChunker } from "./treesitter_tsjs.js";
 
 import type { DiffChunkV1 } from "#contracts/diff_chunking.v1.js";
 
-/** Structural port of chunker_port.py::ChunkerPort — the one async `chunk` method the three chunker
- *  classes (and the selector's return) share. All three TS chunkers already match this shape. */
+/** The one async `chunk` method the three chunker classes (and the selector's return) share. */
 export type ChunkerPort = {
   chunk(args: {
     path: string;
@@ -27,9 +24,9 @@ export type ChunkerPort = {
   }): Promise<Array<DiffChunkV1>>;
 };
 
-/** Port of selector.py::_PY_EXTENSIONS. */
+/** Python source file extensions. */
 const PY_EXTENSIONS: ReadonlySet<string> = new Set([".py"]);
-/** Port of selector.py::_TSJS_EXTENSIONS. */
+/** TypeScript / JavaScript file extensions. */
 const TSJS_EXTENSIONS: ReadonlySet<string> = new Set([
   ".ts",
   ".tsx",
@@ -40,10 +37,9 @@ const TSJS_EXTENSIONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Port of selector.py::_extract_extension — lowercase extension INCLUDING the leading dot, or "" for
- * extensionless files / dotfiles. Handles embedded dots (`a.b.py` → `.py`; returns the LAST extension
- * only). `last_dot <= 0` covers BOTH no-dot AND dotfiles (".gitignore" → "") — matching the frozen
- * Python `if last_dot <= 0: return ""`.
+ * Lowercase extension INCLUDING the leading dot, or "" for extensionless files / dotfiles. Handles
+ * embedded dots (`a.b.py` → `.py`; returns the LAST extension only). `last_dot <= 0` covers BOTH
+ * no-dot AND dotfiles (".gitignore" → "").
  */
 export function extractExtension(path: string): string {
   const lastSlash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
@@ -56,8 +52,8 @@ export function extractExtension(path: string): string {
 }
 
 /**
- * Port of selector.py::ChunkerRegistry — pre-constructed chunker singletons + the routing function.
- * One instance per worker pod; construct via {@link ChunkerRegistry.build} at boot.
+ * Pre-constructed chunker singletons + the routing function. One instance per worker pod; construct
+ * via {@link ChunkerRegistry.build} at boot.
  */
 export class ChunkerRegistry {
   readonly python: TreeSitterPythonChunker;
@@ -74,8 +70,7 @@ export class ChunkerRegistry {
     this.fallback = args.fallback;
   }
 
-  /** Port of `ChunkerRegistry.build` — construct the standard 3-chunker registry. Public for tests +
-   *  production bootstrap. */
+  /** Construct the standard 3-chunker registry. Public for tests + production bootstrap. */
   static build(): ChunkerRegistry {
     return new ChunkerRegistry({
       python: new TreeSitterPythonChunker(),
@@ -84,7 +79,7 @@ export class ChunkerRegistry {
     });
   }
 
-  /** Port of `select_for` — route by file extension. See the module header for the full mapping. */
+  /** Route by file extension. See the module header for the full mapping. */
   selectFor(path: string): ChunkerPort {
     const ext = extractExtension(path);
     if (PY_EXTENSIONS.has(ext)) {

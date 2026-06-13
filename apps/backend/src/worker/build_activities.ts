@@ -1,9 +1,7 @@
 /**
  * `buildActivities()` — the Temporal worker COMPOSITION ROOT for the review pipeline.
  *
- * 1:1 in intent with the frozen Python worker bootstrap's activity wiring
- * (vendor/codemaster-py/codemaster/worker/main.py ~2897-2967 for the LlmClientCache wiring, plus the
- * per-activity bound-method / closure registrations). This is the ONE place that:
+ * This is the ONE place that:
  *
  *   1. Constructs the REAL collaborators ONCE (the git cloner, the platform embedder, the retrieve /
  *      embed / aggregate activity instances, the role-keyed LlmClientCache with its ledger-wired client
@@ -241,11 +239,9 @@ import { WallClock } from "#platform/clock.js";
  * The Tier-1 static-analysis soft-barrier deadline (seconds). W2.6 (M4): the SHARED
  * `TIER1_SOFT_BARRIER_SECONDS` (static_analysis.activity.ts) — 45s, strictly below the 60s per-tool
  * safety guard, so the orchestrator's authoritative deadline actually preempts a hung tool.
- * DELIBERATE divergence from the frozen Python default
- * `review_budgets.yaml::tier1_static_analysis_seconds: 60`, whose equal barrier/guard values made
- * the soft barrier a no-op. The DB/yaml-backed budgets config loader
- * (`review_budgets.py::load_budgets`) is NOT ported to TS yet; this constant is the unconfigured
- * default until it lands. FOLLOW-UP-review-budgets-loader.
+ * DELIBERATE divergence from the prior default of 60s, whose equal barrier/guard values made the
+ * soft barrier a no-op. The DB/yaml-backed budgets config loader is NOT wired in TS yet; this
+ * constant is the unconfigured default until it lands. FOLLOW-UP-review-budgets-loader.
  */
 const TIER1_STATIC_ANALYSIS_SECONDS = TIER1_SOFT_BARRIER_SECONDS;
 
@@ -274,7 +270,7 @@ function requireCoreDsn(): string {
  * token-provider's JWT→installation-token mint AND (here) the cloner's `getToken` calls, a Vault adapter
  * built from env, and a {@link GitHubAppTokenProvider} bound to `getToken`. The cloner takes the bound
  * `getToken` (a `(installationId) => Promise<string>` — the `TokenProvider` shape) + the env installation
- * id. Mirrors the frozen Python worker constructing `GitSubprocessCloner(token_provider=…, installation_id=…)`.
+ * id.
  *
  * Construction is deferred to the first `cloneRepoIntoWorkspace` dispatch (async — it `fromEnv`-builds the
  * token provider) and memoized, so the build stays off `VAULT_ADDR` / GitHub round-trips at worker boot,
@@ -312,7 +308,7 @@ function makeClonerDepsResolver(): () => Promise<CloneRepoIntoWorkspaceDeps> {
 
 // ─── lazy GitHubIssueClient (the fetch_linked_issues github seam — deferred-Vault) ────────────────
 
-/** The `getIssue` slice the FetchLinkedIssuesActivity consumes (1:1 with its `GithubIssuePort`). */
+/** The `getIssue` slice the FetchLinkedIssuesActivity consumes. */
 type GithubIssuePortShape = {
   getIssue(args: {
     installationId: number;
@@ -362,9 +358,9 @@ function makeLazyIssueClient(): GithubIssuePortShape {
 
 // ─── lazy GitHubApiReviewClient (the fix-prompt advisory-comment seam — deferred-Vault) ───────────
 
-/** The issue-comment slice the FixPromptActivities consumes (1:1 with its FixPromptIssueCommentClient):
- *  `createIssueComment` (post) + `listIssueComments` (the W3.3 operational-marker recovery oracle).
- *  `installationId` is PER-CALL (per-review routing) — the seam is no longer bound to one installation. */
+/** The issue-comment slice the FixPromptActivities consumes: `createIssueComment` (post) +
+ *  `listIssueComments` (the W3.3 operational-marker recovery oracle). `installationId` is PER-CALL
+ *  (per-review routing) — the seam is no longer bound to one installation. */
 type FixPromptIssueCommentClientShape = {
   createIssueComment(args: {
     installationId: number;
@@ -472,17 +468,13 @@ function makeLazyRetentionGithubClient(): GitHubApiClient {
 
 /**
  * Build the REAL role-keyed {@link LlmClientCache} with the ledger-wired client factory (ADR-0068).
+ * The settings repo feeds BOTH the credentials provider (TTL-refreshing per-role creds) AND the
+ * cache's freshness probe; the custom `clientFactory` builds a real {@link LlmClient} over the shared
+ * per-process collaborators PLUS the real {@link LlmInvocationLedger} (the de-dormant ADR-0068 #5
+ * wiring). The default factory omits the ledger; THIS factory supplies it.
  *
- * 1:1 with the frozen Python worker `_client_factory` + `LlmClientCache(...)` wiring: the settings repo
- * (`PostgresLlmProviderSettingsRepo`, the real Vault-Transit decrypt) feeds BOTH the credentials provider
- * (TTL-refreshing per-role creds) AND the cache's freshness probe; the cache's custom `clientFactory`
- * builds a real {@link LlmClient} over the shared per-process collaborators (`sharedClientCollaborators`
- * — the Postgres cost-cap, blob store, telemetry writer, Langfuse exporter, clock) PLUS the real
- * {@link LlmInvocationLedger} (the de-dormant ADR-0068 #5 wiring). The default factory omits the ledger;
- * THIS factory supplies it, which is the whole point of doing the wiring in the composition root.
- *
- * The Vault adapter is built from env here — so this function is called LAZILY (first `bedrockReviewChunk`
- * dispatch), matching the deferred-Vault pattern; `buildActivities()` itself never calls it.
+ * The Vault adapter is built from env here — so this function is called LAZILY (first
+ * `bedrockReviewChunk` dispatch), matching the deferred-Vault pattern.
  */
 function buildLlmClientCache(dsn: string): LlmClientCache {
   const vault = VaultHttpPort.fromEnv();
@@ -494,7 +486,7 @@ function buildLlmClientCache(dsn: string): LlmClientCache {
   // invocations are idempotent (a post-call persistence failure + a Temporal retry replays the stored
   // provider response instead of paying for a second Bedrock completion). `sharedClientCollaborators(dsn)`
   // is the same process-wide memo the default factory uses (cost-cap, blob, telemetry, Langfuse, clock),
-  // so every role's client shares the spine singletons — exactly the Python `_client_factory` closure.
+  // so every role's client shares the spine singletons.
   const ledgerClientFactory: ClientFactory = ({ sdk }) => {
     const { costCap, blobStore, telemetry, langfuse, clock, costJournal } =
       sharedClientCollaborators(dsn);
@@ -615,21 +607,19 @@ function makeLazyTokenProvider(): TokenProvider {
 
 // ─── CODEOWNERS file port (the sync_code_owners_activity GitHub seam — deferred-Vault, 3-path lookup) ──
 //
-// 1:1 with the Python `_SpineCodeOwnersAdapter` (worker/main.py:2565-2589): wrap a lazy deferred-Vault
-// GitHubApiClient.getContents behind the activity's narrow {@link CodeOwnersFilePort}. Tries the three
-// CODEOWNERS lookup paths in order (`.github/CODEOWNERS`, `CODEOWNERS`, `docs/CODEOWNERS`) per GitHub's
+// Wrap a lazy deferred-Vault GitHubApiClient.getContents behind the activity's narrow
+// {@link CodeOwnersFilePort}. Tries the three CODEOWNERS lookup paths in order (`.github/CODEOWNERS`, `CODEOWNERS`, `docs/CODEOWNERS`) per GitHub's
 // documented resolution; returns the first one that exists (base64-ASCII bytes + blob SHA), or null when
 // none of the conventional paths host a CODEOWNERS file (the activity treats null as a no-op → returns 0).
 
-/** The three conventional CODEOWNERS paths, tried in order (1:1 with the Python `_CODEOWNERS_LOOKUP_PATHS`). */
+/** The three conventional CODEOWNERS paths, tried in order. */
 const CODEOWNERS_LOOKUP_PATHS = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"] as const;
 
 /**
  * A {@link CodeOwnersFilePort} that wraps the lazy deferred-Vault {@link GithubContentsPort} (the SAME
- * `getContents` seam the manifest fetch uses) with the 3-path CODEOWNERS lookup. 1:1 with the Python
- * `_SpineCodeOwnersAdapter.fetch_codeowners`. `getContents` additionally takes a telemetry-only
- * `installationUuid` (NOT consumed by `_request`); the port only carries the numeric id, so the stringified
- * numeric id is supplied for that unused parameter.
+ * `getContents` seam the manifest fetch uses) with the 3-path CODEOWNERS lookup. `getContents`
+ * additionally takes a telemetry-only `installationUuid` (NOT consumed by `_request`); the port only
+ * carries the numeric id, so the stringified numeric id is supplied for that unused parameter.
  */
 function makeCodeOwnersFilePort(): CodeOwnersFilePort {
   const contents = makeLazyManifestContentsClient();
@@ -666,7 +656,7 @@ function makeCodeOwnersFilePort(): CodeOwnersFilePort {
 // `list_active_confluence_spaces_activity` returns ZERO spaces (no `core.integrations` confluence_space
 // rows), so the sync workflow never reaches a per-space `fetch_space_pages` → the client is NEVER built →
 // the absent Vault token never trips boot. In prod (token present, spaces configured), the first sync tick
-// builds the real client through the same Vault-backed token-provider the Python worker uses.
+// builds the real client through the same Vault-backed token-provider.
 
 /**
  * Build the REAL {@link ConfluenceClient} from the Vault-backed {@link ConfluenceTokenProvider}. Mirrors
@@ -725,8 +715,8 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
   // the aggregate semantic-merge stage, the embed_query activity, and the retrieve-knowledge ANN port.
   const embedder = resolveEmbeddingsConsumer();
 
-  // Bound-method activity holders — the real embedder threads into all three (1:1 with the frozen Python
-  // bound-method-holder activity registrations). `.aggregateFindings` / `.embedQuery` / `.retrieveKnowledge`
+  // Bound-method activity holders — the real embedder threads into all three.
+  // `.aggregateFindings` / `.embedQuery` / `.retrieveKnowledge`
   // are arrow properties, so they stay bound when destructured into the map (Temporal registers the value).
   const aggregateActivity = new AggregateFindingsActivity({ embedder });
   const embedQueryActivity = new EmbedQueryActivity({ embeddings: embedder, modelName: "qwen3-embed-0.6b" });
@@ -739,19 +729,18 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
   // ADR-0062 pool). The orchestrator dispatches it BEFORE the chunk fan-out and fail-opens to "no
   // short-circuit" when it errors; arrow property → stays bound when destructured into the map.
   const probeKnowledgeCorpusActivity = ProbeKnowledgeCorpusActivity.fromDsn(dsn);
-  // dedup_findings — the Temporal-activity port of the frozen Python `dedup_linter_with_llm` (the
-  // semantic dedup stage embeds over the network, so it CANNOT run in the workflow sandbox; ADR-0065/0066).
+  // dedup_findings — semantic dedup stage (embeds over the network, CANNOT run in the workflow
+  // sandbox; ADR-0065/0066).
   // Shares the same real embedder as the aggregate stage. FOLLOW-UP-dedup-findings-orchestrator-wiring:
   // the Workflow phase dispatches this between fan-out (Step 5) and aggregate (Step 7), replacing the
-  // Python's inline `dedup_linter_with_llm` call. Registered here so the surface is dispatch-ready.
+  // former inline dedup step. Registered here so the surface is dispatch-ready.
   const dedupFindingsActivity = new DedupFindingsActivity({ embedder });
 
   // The lazy real cloner-deps (deferred-Vault pattern; constructed on first dispatch). The shared LLM cache
   // (llmCache) is built earlier (above the retrieve-knowledge activity, which now also consumes it for E).
   const resolveClonerDeps = makeClonerDepsResolver();
 
-  // generate_walkthrough bound-method holder — 1:1 with the frozen Python `WalkthroughActivities(cache=…)`.
-  // It SHARES the same lazy ledger-wired LlmClientCache the review-chunk activity uses (the cache is
+  // generate_walkthrough bound-method holder. SHARES the same lazy ledger-wired LlmClientCache the review-chunk activity uses (the cache is
   // role-keyed; the walkthrough resolves `forRole("primary")` then selects `modelForPurpose("walkthrough")`
   // — claude-opus, distinct from the review role's sonnet — inside the activity body, exactly like
   // bedrockReviewChunk). `.generateWalkthrough` is an arrow property so it stays bound when destructured.
@@ -762,8 +751,8 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
   // linked-issues holder additionally takes the lazy GitHubIssueClient (deferred-Vault). The
   // suggested-reviewers holder is flag-gated on `code_owners_v1` via `isEnabled`; the `core.flags` reader
   // is NOT ported to TS yet (it is an ingest-side helper out of this stage's scope), so `isEnabled` is
-  // wired DEFAULT-OFF — 1:1 with the Python `read_code_owners_v1_enabled` production default (off until an
-  // operator flips the rollout; the activity short-circuits to [] and the renderer drops the section).
+  // wired DEFAULT-OFF — production default is off until an operator flips the rollout; the activity
+  // short-circuits to [] and the renderer drops the section.
   // FOLLOW-UP-code-owners-v1-flag-reader: port the `core.flags` reader so the operator can flip the rollout.
   const clock = new WallClock();
   const fetchLinkedIssuesActivity = new FetchLinkedIssuesActivity({
@@ -793,16 +782,14 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
   });
 
   // ── static_analysis bound-method holder (REAL runner orchestration) ──
-  // 1:1 with the frozen Python `_wire_static_analysis_activity`: the three in-worker runners
-  // (Ruff/ESLint/Gitleaks — default binary names on $PATH; the worker-image provides the binaries) +
+  // The three in-worker runners (Ruff/ESLint/Gitleaks — default binary names on $PATH; the worker-image provides the binaries) +
   // the soft-barrier StaticAnalysisOrchestrator (Tier-1 deadline + the shared WallClock) + the Haiku
   // AnalysisCurator (which resolves `forRole("secondary")` off the SAME lazy ledger-wired LlmClientCache
   // the review-chunk/walkthrough/fix-prompt activities use). The K8s-Job runners (Semgrep/Trivy/Checkov/
   // Kube-linter) are DEFERRED owner-provided infra — only the in-worker runners are registered today
-  // (FOLLOW-UP-static-analysis-k8s-job-runners). The Tier-1 deadline is the frozen Python default
-  // (review_budgets.yaml `tier1_static_analysis_seconds: 60`); the config-loader port is a separate
-  // follow-up (FOLLOW-UP-review-budgets-loader). `.staticAnalysis` is an arrow property so it stays
-  // bound when destructured into the map.
+  // (FOLLOW-UP-static-analysis-k8s-job-runners). The Tier-1 deadline is the unconfigured default of
+  // 60s; the config-loader is a separate follow-up (FOLLOW-UP-review-budgets-loader). `.staticAnalysis`
+  // is an arrow property so it stays bound when destructured into the map.
   const staticAnalysisActivity = buildStaticAnalysisActivity({
     runners: {
       ruff: new RuffInWorkerRunner(),
@@ -879,7 +866,7 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
   // deferred-Vault token provider (the SAME GitHubAppTokenProvider mint the review cloner uses; called with
   // the per-PR NUMERIC installation id resolved at the activity boundary); `cloner`/`resolveRepo` fall to
   // their real production defaults. sync_code_owners_activity is wired with: the 3-path CODEOWNERS file port
-  // (lazy deferred-Vault getContents — 1:1 with the Python `_SpineCodeOwnersAdapter`); PostgresCodeOwnersRepo
+  // (lazy deferred-Vault getContents for the 3-path CODEOWNERS lookup); PostgresCodeOwnersRepo
   // over the shared ADR-0062 pool; and `isEnabled` DEFAULT-OFF (the `code_owners_v1` flag reader is unported
   // — FOLLOW-UP-code-owners-v1-flag-reader, same default-off precedent as fetch_suggested_reviewers). The
   // refresh_semantic_docs holder shares the SAME real embedder + model name ("qwen3-embed-0.6b") the
@@ -993,8 +980,8 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     // Registered under their snake_case TEMPORAL NAMES (NOT camelCase) because the reconcile/repair
     // workflows (reconcile.workflow.ts) proxy them by those exact names — a camelCase key would dispatch
     // `ActivityNotRegistered`. Each is a self-wiring 1-arg activity (resolves CODEMASTER_PG_CORE_DSN + its
-    // own pool / GitHub client inside the body), so it's registered bare. The bracketed-string keys mirror
-    // the Python `@activity.defn(name="...")` registration names.
+    // own pool / GitHub client inside the body), so it's registered bare. The bracketed-string keys are
+    // the registration names.
     ["reconcile_installation_activity"]: reconcileInstallation,
     ["reconcile_repositories_activity"]: reconcileRepositories,
     ["hydrate_installation_repositories_activity"]: hydrateInstallationRepositories,

@@ -1,8 +1,6 @@
 /**
- * `ConfluenceSyncActivities` — FAITHFUL 1:1 TypeScript port of the frozen Python
- * `vendor/codemaster-py/codemaster/activities/confluence_sync.py` (Sub-spec A T11).
- *
- * Bound-method holder for the 6 Confluence sync activities the ConfluenceIngestWorkflow composes:
+ * `ConfluenceSyncActivities` (Sub-spec A T11) — bound-method holder for the 6 Confluence sync
+ * activities the ConfluenceIngestWorkflow composes:
  *   1. fetch_space_pages_activity   — cursor-paginate a space → all PageRefs.
  *   2. fetch_page_body_activity     — fetch one page body + metadata.
  *   3. sanitize_page_activity       — sanitize HTML + macros + detect injection patterns (PURE — no I/O).
@@ -17,32 +15,25 @@
  *
  * ## Injected seams (NARROW ports, not the concrete classes)
  *
- * The Python injected the concrete `ConfluenceClient`, the embeddings port, the repo module functions,
- * and an `AsyncSession` factory. The TS port injects NARROW structural ports instead — the exact slice
- * each method needs — so the holder is unit-testable with stubs (no Temporal, no DB) and Stage 8 wires
- * the real {@link ConfluenceClient} + {@link PostgresConfluenceChunksRepo} +
- * {@link PostgresConfluencePageApprovalsRepo} by structural match.
+ * Injects NARROW structural ports — the exact slice each method needs — so the holder is
+ * unit-testable with stubs (no Temporal, no DB) and Stage 8 wires the real {@link ConfluenceClient}
+ * + {@link PostgresConfluenceChunksRepo} + {@link PostgresConfluencePageApprovalsRepo} by structural
+ * match.
  *
- * ## FAITHFUL DIVERGENCES (surfaced for the verifier)
+ * ## Divergences
  *
- *  - **Idempotency lookup / writer / approvals are PORTS, not a session factory.** The Python opened an
- *    `AsyncSession` per activity and called the repo MODULE functions
- *    (`find_existing_chunk_embedding`, `upsert_chunks`, `get_active_approval`) with that session. The TS
- *    repos are CLASS instances bound to a process-shared Kysely (ADR-0062), so this holder takes the
- *    repos (as narrow ports) directly. Same behaviour; the transaction/commit lives INSIDE
- *    `PostgresConfluenceChunksRepo.upsertChunks` (1:1 with the Python caller-owned `session.commit()`).
+ *  - **Idempotency lookup / writer / approvals are PORTS, not a session factory.** The TS repos are
+ *    CLASS instances bound to a process-shared Kysely (ADR-0062); this holder takes them as narrow
+ *    ports directly. The transaction/commit lives INSIDE `PostgresConfluenceChunksRepo.upsertChunks`.
  *
- *  - **Hard-limit count/sum are PURE in the TS port.** The Python `count_default_chunks_in_space` /
- *    `sum_default_corpus_tokens` ran SQL against the session; the ported `hard_limits.ts` are PURE
- *    predicates over chunk-row projections (see that module's header). So this holder owns ONE narrow
- *    reader ({@link ExistingChunkRowsReader}) that fetches the candidate rows (active default-tagged
- *    chunks, the only rows the predicates inspect) and feeds them to {@link countDefaultChunksInSpace} /
- *    {@link sumDefaultCorpusTokens} — the same WHERE clause the Python SQL applied, now split across a
- *    fetch + a pure filter. The reader query carries the `// tenant:exempt` marker for parity (the
+ *  - **Hard-limit count/sum are PURE.** `hard_limits.ts` are PURE predicates over chunk-row
+ *    projections (see that module's header). This holder owns ONE narrow reader
+ *    ({@link ExistingChunkRowsReader}) that fetches the candidate rows (active default-tagged chunks)
+ *    and feeds them to {@link countDefaultChunksInSpace} / {@link sumDefaultCorpusTokens} — split
+ *    across a fetch + a pure filter. The reader query carries the `// tenant:exempt` marker (the
  *    confluence tables are platform-wide post-migration-0063 → NOT tenant-scoped).
  *
- *  - **`get_default_corpus_limits()` is synchronous** in the TS port (the Python was `async` because it
- *    read platform_config; the ported `hard_limits.ts` inlines the spec-pinned fallbacks per ADR-0075).
+ *  - **`get_default_corpus_limits()` is synchronous** (inlines spec-pinned fallbacks per ADR-0075).
  *
  *  - **EmbedderCache dual-write is NOW wired (SCOPE-A).** When an `embedderCache` collaborator is injected,
  *    `upsertChunks` resolves the active generation + model from it (awaiting one lazy-TTL `refresh()` so a
@@ -54,7 +45,7 @@
  *    reads until an operator flips `retrieval_mode` to 'generation_only'. The cache is the SAME
  *    DSN-memoized singleton the confluence retrieval adapter shares.
  *
- *  - **No `activity.heartbeat` / `activity.info().heartbeat_details`.** The Python `fetch_space_pages`
+ *  - **No `activity.heartbeat` / `activity.info().heartbeat_details`.** The prior `fetch_space_pages`
  *    emitted a heartbeat per cursor round-trip (F-41) and resumed from heartbeat details on retry. The
  *    Temporal-context-bound heartbeat seam is shared-wiring (Stage 8); this port enumerates the full
  *    space in one pass and is replay-safe (no clock/random). Tracked FOLLOW-UP-confluence-fetch-heartbeat.
@@ -103,7 +94,7 @@ import {
 } from "#contracts/confluence_sync.v1.js";
 import { DefaultApprovalV1 } from "#contracts/page_approval.v1.js";
 
-// ─── Constants (1:1 with the frozen Python module constants) ─────────────────────────────────────
+// ─── Constants ───────────────────────────────────────────────────────────────────────────────────
 
 /** Maximum texts per embed call (EmbedRequest.texts max_length=128 → MAX_TEXTS). */
 const EMBED_BATCH_SIZE = 128;
@@ -156,9 +147,8 @@ export type PageApprovalsReader = {
 
 /**
  * Reader that fetches the candidate rows the PURE hard-limit predicates inspect: the active
- * default-tagged chunks (per-space count + platform-wide token sum). 1:1 with the WHERE clause of the
- * Python `count_default_chunks_in_space` / `sum_default_corpus_tokens` SQL, split into a fetch + the
- * pure filter ({@link countDefaultChunksInSpace} / {@link sumDefaultCorpusTokens}).
+ * default-tagged chunks (per-space count + platform-wide token sum), split into a fetch + the pure
+ * filter ({@link countDefaultChunksInSpace} / {@link sumDefaultCorpusTokens}).
  */
 export type ExistingChunkRowsReader = {
   /**
@@ -376,8 +366,7 @@ export class ConfluenceSyncActivities {
    * Embed a batch of needs-embed items. Falls back to per-text truncating embed on
    * {@link EmbeddingsValidationError} so a single chunk that exceeds the embedder's context window is
    * SKIPPED rather than aborting the whole corpus sync. Returns `(item, vector)` for the texts that
-   * embedded; skipped texts are omitted. 1:1 with the Python `_embed_batch_resilient` — PLUS the RM9
-   * observability the Python also lacked: every skip increments
+   * embedded; skipped texts are omitted. RM9 observability: every skip increments
    * `codemaster_confluence_chunk_embed_skipped_total` and WARN-logs `page_id` + `chunk_index`.
    *
    * DECISION (RM9, explicit): a page that loses chunks still upserts the SURVIVORS — availability
@@ -393,7 +382,7 @@ export class ConfluenceSyncActivities {
     try {
       const req: EmbedRequest = { texts, model_name: this.modelName, purpose: EMBED_PURPOSE };
       const result = await this.embeddings.embed(req);
-      // Mirror the Python `zip(batch, result.vectors, strict=True)`: the embedder MUST return exactly one
+      // The embedder MUST return exactly one
       // vector per text. No contract validates `vectors.length === texts.length`, so this is the SOLE guard
       // against a drifting embedder silently mis-mapping vectors to chunks (over-count) or producing a vague
       // `[...undefined]` TypeError (under-count).
@@ -435,7 +424,7 @@ export class ConfluenceSyncActivities {
    * Embed a single text, halving it on {@link EmbeddingsValidationError} until it fits the embedder's
    * context window (or giving up below 256 chars → null). The retrieval embedding of a truncated prefix
    * still represents the chunk's topic; the FULL body is stored + shown to the LLM, so grounding is
-   * unaffected. 1:1 with the Python `_embed_one_truncating`.
+   * unaffected.
    */
   private async embedOneTruncating(text: string): Promise<Array<number> | null> {
     let candidate = text;
@@ -466,7 +455,6 @@ export class ConfluenceSyncActivities {
    * `upsert_chunks_activity` — upsert chunks with hard-limit governance + page-approvals JOIN +
    * quarantine recompute.
    *
-   * Audit fixes preserved 1:1 with the Python:
    *   P0-1/P0-2: resolve the active page approval; reject default-tagged chunks without one.
    *   Hard limits: atomic refusal of default-tagged additions when the per-space chunk cap or the
    *     platform-wide token cap would be exceeded.
@@ -529,9 +517,7 @@ export class ConfluenceSyncActivities {
         };
       }
       // PROJECT to the 5-field DefaultApprovalV1 the column stores — NOT the full ConfluencePageApprovalV1
-      // the repo returns. 1:1 with the frozen Python (confluence_sync.py:504-510), which builds a fresh
-      // DefaultApprovalV1(approver_email, approved_at_utc, approval_artifact_url, scope_justification,
-      // default_scope). The narrow PageApprovalsReader port is typed DefaultApprovalV1, but TS structural
+      // the repo returns. The narrow PageApprovalsReader port is typed DefaultApprovalV1, but TS structural
       // subtyping lets the wired repo's 12-field row satisfy it at runtime — so we re-project explicitly to
       // keep core.confluence_chunks.default_approval JSONB at exactly the 6 keys (.strict()/extra=forbid)
       // and never leak approval_id/space_key/page_id/revoked_at/revoked_by/created_at/updated_at to disk.
@@ -614,12 +600,10 @@ export class ConfluenceSyncActivities {
 
 /**
  * Pool-backed {@link ExistingChunkRowsReader}: fetches the active, default-tagged chunk rows the PURE
- * hard-limit predicates inspect. The SQL applies the same WHERE clause the Python
- * `count_default_chunks_in_space` / `sum_default_corpus_tokens` queries applied
- * (`'default' = ANY(labels) AND deleted_at IS NULL`), projecting only the columns the predicates need
- * (space_key, labels, deleted_at, token_count). The pure helpers re-apply the predicate defensively, so
- * narrowing here is purely an efficiency bound (no need to stream the whole table). `deleted_at` is
- * always NULL in the projected rows (the WHERE filters it), so it is bound to `null` in the row shape.
+ * hard-limit predicates inspect (`'default' = ANY(labels) AND deleted_at IS NULL`), projecting only the
+ * columns the predicates need (space_key, labels, deleted_at, token_count). The pure helpers re-apply
+ * the predicate defensively, so narrowing here is purely an efficiency bound. `deleted_at` is always
+ * NULL in the projected rows (the WHERE filters it), so it is bound to `null` in the row shape.
  *
  * Resolves the shared ADR-0062 pool from the injected `dsn` (default `CODEMASTER_PG_CORE_DSN`). Stage 8
  * wires one instance into the {@link ConfluenceSyncActivities} constructor.

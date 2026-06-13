@@ -1,14 +1,11 @@
 /**
- * Cost-cap enforcer shared surface — 1:1 TypeScript port of `codemaster/cost/enforcer.py`:
- * the error types, the `CostCapEnforcer` interface, the `CostCapDecision`, the default caps, the
- * `InMemoryCostCapEnforcer` (unit-test double), and the `todayUtc` clock→date helper.
+ * Cost-cap enforcer shared surface — error types, `CostCapEnforcer` interface, `CostCapDecision`,
+ * default caps, `InMemoryCostCapEnforcer` (unit-test double), and the `todayUtc` clock→date helper.
  *
- * The REAL production enforcer — `PostgresCostCapEnforcer` (the atomic, optimistic-reservation
- * enforcer over `telemetry.cost_daily`; since W2.1 a LOCK-FREE conditional-UPDATE gate rather than
- * the Python `codemaster/cost/postgres_enforcer.py` `SELECT ... FOR UPDATE` — same decisions, no
- * held hot-row lock) — lives in the sibling `./postgres_enforcer.ts`, matching the Python file
- * split. It implements the `CostCapEnforcer` interface exported here; the production
- * `LlmClientCache` injects it. ALL cost arithmetic is INTEGER cents — no float, no division.
+ * The REAL production enforcer (`PostgresCostCapEnforcer` — a LOCK-FREE conditional-UPDATE gate over
+ * `telemetry.cost_daily`) lives in `./postgres_enforcer.ts`. It implements the `CostCapEnforcer`
+ * interface exported here; the production `LlmClientCache` injects it. ALL cost arithmetic is
+ * INTEGER cents — no float, no division.
  *
  * Workers call `enforcer.checkOrRaise({ installationId, estimatedCents, today })` before every
  * Bedrock call; `recordCallCost()` applies the post-call accounting afterward.
@@ -18,13 +15,13 @@ import type { Clock } from "#platform/clock.js";
 
 import { CostCapDecisionV1 } from "#contracts/cost_cap_decision.v1.js";
 
-// ─── Errors (1:1 with enforcer.py) ──────────────────────────────────────────
+// ─── Errors ──────────────────────────────────────────────────────────────────
 
 /**
  * Raised when a cap would be exceeded.
  *
  * The workflow catches this and surfaces as a `cost_cap_exceeded` finding in the walkthrough
- * degradation note. Audit-logged. Mirrors `BedrockBudgetExceededError(*, reason, scope, scope_id)`.
+ * degradation note. Audit-logged.
  */
 export class BedrockBudgetExceededError extends Error {
   public readonly reason: string;
@@ -82,14 +79,14 @@ export type CostCapEnforcer = {
   }): Promise<void>;
 };
 
-// ─── Shared constants (postgres_enforcer.py) ────────────────────────────────
+// ─── Shared constants ────────────────────────────────────────────────────────
 
 /** $5,000/day — `DEFAULT_GLOBAL_CAP_CENTS`. */
 export const DEFAULT_GLOBAL_CAP_CENTS = 500_000;
 /** $1,000/day — `DEFAULT_PER_ORG_CAP_CENTS`. */
 export const DEFAULT_PER_ORG_CAP_CENTS = 100_000;
 
-// ─── In-memory enforcer (1:1 with enforcer.py::InMemoryCostCapEnforcer) ─────
+// ─── In-memory enforcer ───────────────────────────────────────────────────────
 
 /**
  * In-memory enforcer for unit tests and local dev.
@@ -224,8 +221,8 @@ function orgKey(today: string, installationId: string): string {
 /**
  * Derive the UTC date string (`YYYY-MM-DD`) that callers pass as `today`.
  *
- * Mirrors the Python caller idiom `self._clock.now().date()` — the UTC calendar date of the clock's
- * `now()`. `Clock.now()` returns an absolute UTC instant, so the ISO date prefix is the UTC date.
+ * The UTC calendar date of the clock's `now()`. `Clock.now()` returns an absolute UTC instant, so the
+ * ISO date prefix is the UTC date.
  */
 export function todayUtc(clock: Clock): string {
   return clock.now().toISOString().slice(0, 10);

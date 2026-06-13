@@ -258,8 +258,8 @@ export class PostgresCostJournal implements CostJournalShadowPort {
         const globalTotal = await this.#sumDay(trx, { today });
         const orgTotal = isPlatformScope ? 0 : await this.#sumDay(trx, { today, installationId });
 
-        // Budget checks — reason strings verbatim from the aggregate enforcer so the parity suite
-        // (and any operator reading logs) sees IDENTICAL refusals from either implementation.
+        // Budget checks — reason strings verbatim from the aggregate enforcer so operators see
+        // IDENTICAL refusals from either implementation.
         if (globalTotal + estimatedCents > this.globalCapCents) {
           throw new BedrockBudgetExceededError({
             reason:

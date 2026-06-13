@@ -1,13 +1,9 @@
 /**
- * `releaseWorkspace` activity — REAL de-stubbed port of the frozen Python
- * `@activity.defn release_workspace_activity`
- * (vendor/codemaster-py/codemaster/activities/_workspace_release.py).
+ * `releaseWorkspace` activity — idempotent + globally-callable cleanup. Legal entry states:
+ * `ALLOCATED`, `RELEASE_REQUESTED`, `FAILED_CLEANUP`, `ORPHANED`. Called by the workflow body
+ * (happy path), the janitor (orphan reap + FAILED_CLEANUP retry), and operator tools.
  *
- * Idempotent + globally-callable cleanup. Legal entry states: `ALLOCATED`, `RELEASE_REQUESTED`,
- * `FAILED_CLEANUP`, `ORPHANED`. Called by the workflow body (happy path), the janitor (orphan reap +
- * FAILED_CLEANUP retry), and operator tools.
- *
- * ## Steps (1:1 with the Python body)
+ * ## Steps
  *
  *   1. `getById(workspace_id)`. Missing → idempotent no-op (return).
  *   2. `RELEASED` → idempotent no-op (terminal; return).
@@ -33,8 +29,7 @@
  * between `rm` and the DB flip). So validation tolerates a missing leaf — unlike the allocate-time
  * resolve, which requires the dir to exist. But it STILL detects a hostile-symlink / path-traversal
  * escape by resolving the deepest-existing ancestor (following symlinks) and lexically collapsing the
- * rest, then asserting containment under the resolved root (1:1 with the Python `_validate_cleanup_path`
- * using `Path.resolve(strict=False)` + `relative_to`).
+ * rest, then asserting containment under the resolved root.
  *
  * ## Pod identity / root / pool — same env + ADR-0062 seams as the allocate activity.
  */
@@ -56,7 +51,7 @@ import { type Kysely, sql, type Transaction } from "kysely";
 /** Default workspace root when `CODEMASTER_WORKSPACE_ROOT` is unset (same value as the allocate activity). */
 const DEFAULT_WORKSPACE_ROOT = "/var/lib/codemaster/workspaces";
 
-/** Max length of the `last_cleanup_error` column write (1:1 with the Python `reason[:1024]` bound). */
+/** Max length of the `last_cleanup_error` column write (`reason[:1024]` bound). */
 const MAX_CLEANUP_ERROR_LEN = 1024;
 
 /**
@@ -95,8 +90,8 @@ function resolveDb(deps: ReleaseWorkspaceDeps): Kysely<unknown> {
 
 /**
  * `realpath` the deepest EXISTING ancestor of `candidate` (following symlinks), then lexically rejoin
- * the trailing components that do not yet (or no longer) exist. The Node analogue of the Python
- * `Path.resolve(strict=False)`: resolve as much of the path as exists, collapse the rest lexically.
+ * the trailing components that do not yet (or no longer) exist. Resolves as much of the path as exists,
+ * collapses the rest lexically.
  *
  * This is the release-time path resolver: it tolerates a missing leaf (the dir may already be gone)
  * while still following symlinks on the existing prefix so a hostile symlink swap on an ancestor
@@ -122,8 +117,8 @@ async function resolveNonStrict(candidate: string): Promise<string> {
 }
 
 /**
- * Validate `candidate` is contained under `workspaceRoot`, TOLERATING a missing leaf. 1:1 with the
- * Python `_validate_cleanup_path`. Returns the resolved (or lexically-collapsed) path on success.
+ * Validate `candidate` is contained under `workspaceRoot`, TOLERATING a missing leaf. Returns the
+ * resolved (or lexically-collapsed) path on success.
  *
  * @throws {WorkspaceSecurityViolation} `candidate` escapes the resolved root (hostile symlink /
  *         path traversal).
@@ -151,8 +146,8 @@ async function validateCleanupPath(workspaceRoot: string, candidate: string): Pr
 }
 
 /**
- * Open a one-shot transaction and run {@link transitionLease}. 1:1 with the Python `_transition`. Each
- * transition gets its own txn so the `rm -rf` I/O between transitions never holds a row lock.
+ * Open a one-shot transaction and run {@link transitionLease}. Each transition gets its own txn so
+ * the `rm -rf` I/O between transitions never holds a row lock.
  */
 async function runTransition(
   db: Kysely<unknown>,
@@ -178,12 +173,11 @@ async function runTransition(
 }
 
 /**
- * Transition to FAILED_CLEANUP + bump the janitor backoff metadata, in ONE transaction. 1:1 with the
- * Python `_transition_to_failed_cleanup`: {@link transitionLease} stamps the state + `cleanup_failed_at`
- * (the biconditional CHECK), and the follow-up UPDATE bumps `cleanup_attempts`, stamps
- * `last_cleanup_attempt_at`, and writes the bounded `last_cleanup_error` so the next reap pass sees
- * the right backoff index. Both updates share one COMMIT so the row never appears with a stamped
- * state but a stale attempt counter.
+ * Transition to FAILED_CLEANUP + bump the janitor backoff metadata, in ONE transaction.
+ * {@link transitionLease} stamps the state + `cleanup_failed_at` (the biconditional CHECK), and the
+ * follow-up UPDATE bumps `cleanup_attempts`, stamps `last_cleanup_attempt_at`, and writes the bounded
+ * `last_cleanup_error` so the next reap pass sees the right backoff index. Both updates share one
+ * COMMIT so the row never appears with a stamped state but a stale attempt counter.
  */
 async function transitionToFailedCleanup(
   db: Kysely<unknown>,
@@ -211,8 +205,7 @@ async function transitionToFailedCleanup(
 }
 
 /**
- * Release a workspace. 1:1 with the frozen Python `release_workspace_activity` (see the module
- * docstring for the full contract). Returns `void`.
+ * Release a workspace. Returns `void`.
  *
  * @throws {WorkspaceSecurityViolation} path validation rejected the cleanup path. The lease is left in
  *         FAILED_CLEANUP; the workflow body MUST re-raise this (spec §6.2).

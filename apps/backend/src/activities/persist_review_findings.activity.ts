@@ -1,17 +1,12 @@
 /**
- * `persistReviewFindings` activity — the ONE activity the Phase-2.0 Temporal-TS walking skeleton
- * registers. 1:1 in intent with the frozen Python `@activity.defn persist_review_findings_activity`
- * (`vendor/codemaster-py/codemaster/review/persist_review_findings.py`): take the single typed input
- * envelope, construct the Postgres repo, persist the aggregated findings, return the ordered finding ids.
- *
- * ## Runtime context (vs. the workflow body)
+ * `persistReviewFindings` activity — takes the single typed input envelope, constructs the Postgres repo,
+ * persists the aggregated findings, returns the ordered finding ids.
  *
  * Activities run in the NORMAL Node runtime — NOT the workflow V8-isolate sandbox. `node:crypto` is fully
  * available here (the repo's `deriveReviewFindingId` uses it transitively for its uuid5), and so is real
  * I/O (the `pg.Pool` the repo opens through the ADR-0062 shared seam). The ADR-0065 crypto boundary
  * constrains the WORKFLOW body + the payload converter, never the activity layer — minting / hashing /
- * DB writes all live here, exactly as the frozen-Python per-chunk closures isolate minting to activity
- * context.
+ * DB writes all live here.
  *
  * ## Inputs (read off the actual contract shape — `persist_review_findings.v1.ts`)
  *
@@ -27,7 +22,7 @@
  * The repo records `created_at` from an injected {@link Clock}. By default we hand it a {@link WallClock}.
  * If `CODEMASTER_FAKE_CLOCK_ISO` is set to a parseable ISO-8601 instant, we instead hand it a
  * {@link FakeClock} pinned at that instant — so a later mini-dual-run can make the persisted `created_at`
- * column byte-deterministic across the Python and TS runners. Reading an env var and constructing a
+ * column byte-deterministic across runners. Reading an env var and constructing a
  * `new Date(iso)` (a KNOWN instant, not a wall-clock read) is outside the clock/random gate's scope.
  *
  * ## DSN
@@ -48,8 +43,7 @@ import type { PersistReviewFindingsInputV1 } from "#contracts/persist_review_fin
  * Resolve the {@link Clock} seam: a {@link FakeClock} pinned at `CODEMASTER_FAKE_CLOCK_ISO` when that env
  * var is a parseable ISO instant (deterministic `created_at` for the 2.5 dual-run), else a
  * {@link WallClock}. An unparseable value throws loudly rather than silently falling back — a typo in the
- * pin must not degrade to wall-clock non-determinism under the operator's nose. Static `process.env.X`
- * access (not dynamic indexing) so no object-injection sink is introduced.
+ * pin must not degrade to wall-clock non-determinism under the operator's nose.
  */
 function resolveClock(): Clock {
   const iso = process.env.CODEMASTER_FAKE_CLOCK_ISO;
@@ -66,7 +60,7 @@ function resolveClock(): Clock {
 }
 
 /**
- * The skeleton activity: persist the aggregated findings, return their ordered ids.
+ * Persist the aggregated findings, return their ordered ids.
  *
  * Constructs {@link PostgresReviewFindingsRepo} over the ADR-0062 shared pool for the
  * `CODEMASTER_PG_CORE_DSN` DSN + the resolved {@link Clock}, then delegates to `persistAggregated`. The

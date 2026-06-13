@@ -1,28 +1,23 @@
-// Token-budget enforcement — 1:1 port of the frozen Python post-pass
-// (vendor/codemaster-py/codemaster/chunking/token_budget.py).
+// Token-budget enforcement — post-pass over a chunker's output that splits any chunk whose
+// `token_estimate` exceeds MAX_CHUNK_TOKENS at the line midpoint (approximate halving) until every
+// output chunk fits the budget. Splits are DETERMINISTIC: same input → identical output across runs;
+// output preserves the original chunk ordering; sub-chunks carry the same `chunk_kind` + `language`
+// as the source, and their `chunk_id` is re-minted via the shared `computeChunkId`.
 //
-// Post-pass over a chunker's output that splits any chunk whose `token_estimate` exceeds
-// MAX_CHUNK_TOKENS at the line midpoint (approximate halving) until every output chunk fits the
-// budget. Splits are DETERMINISTIC: same input → identical output across runs; output preserves the
-// original chunk ordering; sub-chunks of a split source carry the same `chunk_kind` + `language` as
-// the source, and their `chunk_id` is re-minted from the new (path, start, end, body) via the shared
-// `computeChunkId` so chunk_id parity is preserved.
-//
-// LINE-BASED (ADR-0067 cond 5): the split slices the body BY LINES using the same Python
-// `str.splitlines(keepends=True)` semantics the chunkers use — NO byte offsets. The midpoint is
-// computed from the chunk's `end_line - start_line + 1` line span (NOT the rendered line array), so
-// the (left_end, right_start) line numbers match the frozen Python byte-for-byte.
+// LINE-BASED (ADR-0067 cond 5): the split slices the body BY LINES using splitlines-keepends
+// semantics — NO byte offsets. The midpoint is computed from the chunk's `end_line - start_line + 1`
+// line span (NOT the rendered line array).
 
 import { computeChunkId, DiffChunkV1 } from "#contracts/diff_chunking.v1.js";
 
-/** Port of token_budget.py::MAX_CHUNK_TOKENS. */
+/** Maximum token_estimate per chunk. */
 export const MAX_CHUNK_TOKENS = 6_000;
 
-// ── Python str.splitlines(keepends=True) ──────────────────────────────────────────────────────────
-// Parity-critical: `_split_once` slices the body BY LINES, so the line array MUST be split exactly as
-// the frozen Python `str.splitlines(keepends=True)`. Identical to the copy in treesitter_python.ts /
-// treesitter_tsjs.ts (kept local so this post-pass module owns its own slicing; the production corpus
-// is LF-only, but porting the full Unicode boundary set keeps arbitrary input byte-identical).
+// ── splitlines, keepends ──────────────────────────────────────────────────────────────────────────
+// Parity-critical: `_split_once` slices the body BY LINES, so the line array MUST split on the full
+// Unicode line-boundary set (\r\n as one boundary). Kept local so this post-pass module owns its own
+// slicing; the production corpus is LF-only, but the full boundary set keeps arbitrary input
+// byte-identical.
 const LINE_BOUNDARY_CODEPOINTS: ReadonlySet<number> = new Set([
   0x0a, // \n  line feed
   0x0d, // \r  carriage return
@@ -36,11 +31,11 @@ const LINE_BOUNDARY_CODEPOINTS: ReadonlySet<number> = new Set([
   0x2029, // paragraph separator
 ]);
 
-/** Port of Python `str.splitlines(keepends=True)`: split into lines INCLUDING their terminators, with
- *  \r\n treated as a single terminator. A trailing terminator does NOT yield an empty final element. */
+/** Split into lines INCLUDING their terminators, with \r\n treated as a single terminator.
+ *  A trailing terminator does NOT yield an empty final element. */
 function splitlinesKeepends(text: string): Array<string> {
   const out: Array<string> = [];
-  const chars = [...text]; // code-point iteration (matches Python str semantics)
+  const chars = [...text]; // iterate by code point, not UTF-16 code unit
   let lineStart = 0;
   let i = 0;
   while (i < chars.length) {
@@ -65,24 +60,21 @@ function splitlinesKeepends(text: string): Array<string> {
   return out;
 }
 
-/** Port of token_budget.py::_ASCII_MAX — chars with codepoint > this are non-ASCII (R-18). */
+/** Chars with codepoint > this are non-ASCII (R-18). */
 const ASCII_MAX = 127;
-/** Port of token_budget.py::_NON_ASCII_FACTOR_THRESHOLD — non-ASCII share above which the 2.5x
- *  tokenizer safety factor applies (R-18). */
+/** Non-ASCII share above which the 2.5x tokenizer safety factor applies (R-18). */
 const NON_ASCII_FACTOR_THRESHOLD = 0.1;
-/** Port of the R-18 safety factor multiplier. */
+/** The R-18 safety factor multiplier. */
 const NON_ASCII_FACTOR = 2.5;
 
 /**
- * Port of token_budget.py::estimate_tokens — 4-chars-per-token proxy with the R-18 non-ASCII safety
- * factor. Parity-critical arithmetic:
- *   - empty body → 1 (the Python `if not body: return 1`).
- *   - `non_ascii_share = (# codepoints with ord(c) > 127) / len(body)` over CODE POINTS (Python str
- *     length, NOT UTF-16 units) — `[...body]` iterates codepoints.
+ * 4-chars-per-token proxy with the R-18 non-ASCII safety factor. Parity-critical arithmetic:
+ *   - empty body → 1.
+ *   - `non_ascii_share = (# codepoints with ord(c) > 127) / len(body)` over CODE POINTS.
  *   - `factor = 2.5 if share > 0.1 else 1.0` (STRICT `>` — exactly 0.1 keeps factor 1.0).
- *   - `max(1, int(len/4 * factor))` — FLOAT division then FLOAT multiply then TRUNCATE toward zero
- *     (`int()` in Python ≡ `Math.trunc` on a non-negative). NOTE: this is NOT integer division;
- *     `int(25 * 2.5) = int(62.5) = 62`, so the order of operations matters for parity.
+ *   - `max(1, int(len/4 * factor))` — FLOAT division then FLOAT multiply then TRUNCATE toward zero.
+ *     NOTE: this is NOT integer division; `int(25 * 2.5) = int(62.5) = 62`, so operation order
+ *     matters for parity.
  */
 export function estimateTokens(body: string): number {
   if (body === "") {
@@ -101,11 +93,9 @@ export function estimateTokens(body: string): number {
 }
 
 /**
- * Port of token_budget.py::_split_once — halve a chunk at the line midpoint.
- *
- * Returns `[chunk, chunk]` (the SAME object twice) as the can't-split sentinel when the chunk spans
- * fewer than 2 lines OR its rendered body has fewer than 2 lines — matching the Python `return chunk,
- * chunk`. Otherwise returns the two re-minted halves.
+ * Halve a chunk at the line midpoint. Returns `[chunk, chunk]` (the SAME object twice) as the
+ * can't-split sentinel when the chunk spans fewer than 2 lines OR its rendered body has fewer than
+ * 2 lines. Otherwise returns the two re-minted halves.
  *
  *   mid         = n_lines // 2                  (floor; Math.trunc on a non-negative)
  *   left_end    = start_line + mid - 1
@@ -161,13 +151,12 @@ function splitOnce(chunk: DiffChunkV1): readonly [DiffChunkV1, DiffChunkV1] {
 }
 
 /**
- * Port of token_budget.py::enforce_token_budget — split oversized chunks at the line midpoint until
- * every chunk fits the budget. Returns a NEW array with the same ordering; chunks already within the
- * budget pass through unchanged (object identity preserved). Sub-chunks are processed in original
- * order (left before right) via a worklist that mirrors the Python `pending.insert(0, ...)` LIFO
+ * Split oversized chunks at the line midpoint until every chunk fits the budget. Returns a NEW array
+ * with the same ordering; chunks already within the budget pass through unchanged (object identity
+ * preserved). Sub-chunks are processed in original order (left before right) via a worklist with
  * front-insertion.
  *
- * @throws RangeError when `maxTokens <= 0` (mirrors the Python `ValueError`).
+ * @throws RangeError when `maxTokens <= 0`.
  */
 export function enforceTokenBudget(
   chunks: ReadonlyArray<DiffChunkV1>,

@@ -1,8 +1,6 @@
 /**
- * `MarkStaleChunksActivity` — FAITHFUL 1:1 TypeScript port of the frozen Python
- * `vendor/codemaster-py/codemaster/activities/mark_stale_chunks.py` (Sub-spec A T13).
- *
- * Flips `page_status` active → stale when chunks age past a threshold (spec §3.6 staleness lifecycle):
+ * `MarkStaleChunksActivity` — flips `page_status` active → stale when chunks age past a threshold
+ * (spec §3.6 staleness lifecycle):
  *   - active: fresh; retrieval includes.
  *   - stale:  aged out; downstream retrieval can deprioritize.
  *   - 180-day default for most chunks.
@@ -18,9 +16,9 @@
  *
  * ## FAITHFUL DIVERGENCE (ADR-0075)
  *
- * The Python read the thresholds from `core.platform_config` (operator-tunable) with spec-pinned
- * fallbacks 180/90. `platform_config_cache` is NOT ported (the same deferral as `hard_limits.ts` +
- * `retrieve_knowledge`), so the TS port INLINES the spec-pinned fallbacks directly. Tracked under
+ * The thresholds are operator-tunable from `core.platform_config` with spec-pinned fallbacks 180/90.
+ * `platform_config_cache` is NOT yet wired (the same deferral as `hard_limits.ts` +
+ * `retrieve_knowledge`), so this INLINES the spec-pinned fallbacks directly. Tracked under
  * FOLLOW-UP-platform-config-cache.
  *
  * ## Runtime context / DSN / clock authority
@@ -28,15 +26,13 @@
  * Runs in the NORMAL Node runtime (DB access sanctioned). Resolves the shared ADR-0062 pool from the
  * injected `dsn` (default `CODEMASTER_PG_CORE_DSN`). The eligibility predicate
  * `last_modified_at < now() - make_interval(...)` AND the `stale_at = now()` stamp both use the DB
- * `now()` (server transaction time) — 1:1 with the frozen Python SQL (no injected clock; the Python
- * activity stamped via the DB `now()`, not the infra clock). Both passes run in ONE transaction so a
- * throw rolls both back.
+ * `now()` (server transaction time) — no injected clock. Both passes run in ONE transaction so a throw
+ * rolls both back.
  *
  * ## Tenancy (cross-tenant by design)
  *
  * `core.confluence_chunks` is PLATFORM-WIDE (no `installation_id` post-migration-0063) → NOT in
- * TENANT_SCOPED_TABLES; the gate does not fire. The `// tenant:exempt` marker mirrors the frozen Python
- * source for documentation parity.
+ * TENANT_SCOPED_TABLES; the gate does not fire.
  */
 
 import { type PoolClient } from "pg";
@@ -49,7 +45,7 @@ import {
   type MarkStaleChunksOutputV1,
 } from "#contracts/confluence_sync_stale.v1.js";
 
-// Spec-pinned fallbacks (ADR-0075 FOLLOW-UP-platform-config-cache). 1:1 with the Python `_FALLBACK_*`.
+// Spec-pinned fallbacks (ADR-0075 FOLLOW-UP-platform-config-cache).
 const FALLBACK_DAYS_DEFAULT = 180;
 const FALLBACK_DAYS_SECURITY_POLICY = 90;
 

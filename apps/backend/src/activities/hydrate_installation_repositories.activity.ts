@@ -1,12 +1,10 @@
 /**
  * `hydrateInstallationRepositories` activity — registered Temporal activity name
- * `hydrate_installation_repositories_activity`.
+ * `hydrate_installation_repositories_activity` (F-4 / bootstrap-state-coverage plan v5).
  *
- * FAITHFUL 1:1 port of the frozen Python `@activity.defn("hydrate_installation_repositories_activity")`
- * (vendor/codemaster-py/codemaster/activities/hydrate_installation_repositories.py) — the repair
- * workflow's worker-side body (F-4 / bootstrap-state-coverage plan v5). Fetches canonical
- * `core.repositories` state from the GitHub API (`GET /installation/repositories`) and upserts each row
- * via the shared {@link upsertRepository} helper with `enabledOnInsert = true` (auto-enable).
+ * Fetches canonical `core.repositories` state from the GitHub API (`GET /installation/repositories`)
+ * and upserts each row via the shared {@link upsertRepository} helper with `enabledOnInsert = true`
+ * (auto-enable).
  *
  * ## Terminal-failure classification (v5 5.3 poison-installation fix)
  *
@@ -105,7 +103,7 @@ export type HydrateDeps = {
 const LOG_PREFIX = "codemaster.activities.hydrate_installation_repositories";
 
 /**
- * Pure hydrate body (seams injected) — 1:1 with hydrate_installation_repositories.py:99-191.
+ * Pure hydrate body (seams injected).
  */
 export async function doHydrateInstallationRepositories(
   payload: RepairInstallationRepositoriesPayloadV1,
@@ -150,7 +148,7 @@ export async function doHydrateInstallationRepositories(
     throw err;
   }
 
-  // Success path — single transaction (1:1 with `async with factory() as session, session.begin()`).
+  // Success path — single transaction.
   await db.transaction(async (tx) => {
     const iid = await resolveInternalInstallationId(tx, githubIid);
     if (iid !== null) {
@@ -199,8 +197,7 @@ export async function doHydrateInstallationRepositories(
 }
 
 /**
- * PR2 I-1 fix — two-transaction terminal-failure persistence. 1:1 with `_persist_terminal_failure`
- * (hydrate_installation_repositories.py:194-264).
+ * PR2 I-1 fix — two-transaction terminal-failure persistence.
  *
  *  1. `markBlocked` commits in its OWN transaction (load-bearing for the poison-installation guarantee).
  *  2. The (deferred) audit emit runs in a SECOND transaction whose failure is logged WARN and SWALLOWED.
@@ -279,9 +276,7 @@ export function repairStatePortFromModule(): RepairStatePort {
 /**
  * The registered `hydrate_installation_repositories_activity` Temporal activity. Resolves the DSN +
  * constructs the production GitHub client + repair-state adapter, then delegates to the pure body.
- *
- * The activity input is the bare JSON dict = serialized `RepairInstallationRepositoriesPayloadV1`; we
- * re-validate at the boundary (1:1 with the Python `model_validate`).
+ * Re-validates input at the boundary.
  */
 export async function hydrateInstallationRepositories(
   payloadDict: unknown,
@@ -298,10 +293,9 @@ export async function hydrateInstallationRepositories(
   const clock = new WallClock();
   const db = tenantKysely<unknown>(dsn);
 
-  // Production GitHub client wiring (mirrors enrich_pr_files.activity.ts / post_review_results) — the
-  // import chain (VaultHttpPort, GitHubAppTokenProvider, FetchGitHubHttpClient) is constructed lazily
-  // here, INSIDE the activity, so the workflow-sandbox registration never drags it in. Deferred to a
-  // dynamic import so this module's static import graph stays light and matches the seam-injected body.
+  // Production GitHub client wiring (same pattern as enrich_pr_files.activity.ts / post_review_results)
+  // — constructed lazily inside the activity so the workflow-sandbox registration never drags it in.
+  // Dynamic import keeps the static import graph light and matches the seam-injected body.
   const { FetchGitHubHttpClient } = await import("#backend/integrations/github/api_client.js");
   const { GitHubAppTokenProvider } = await import("#backend/integrations/github/token_provider.js");
   const { VaultHttpPort } = await import("#backend/adapters/vault_http.js");

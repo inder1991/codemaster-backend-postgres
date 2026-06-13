@@ -1,13 +1,9 @@
 /**
- * `applyArbitration` activity — 1:1 in intent with the frozen Python
- * `@activity.defn apply_arbitration_activity`
- * (`vendor/codemaster-py/codemaster/review/arbitration_apply_activity.py::ArbitrationApplyActivity.apply_arbitration_activity`).
- *
- * Runs the PURE {@link arbitrate} core over the in-memory inputs, then fans the resulting
- * {@link ArbitrationResultV1} out into durable persistence via {@link applyArbitration} (Tier-1 INSERTs,
- * Tier-2 UPDATEs, rejection rows). Returns the result so the workflow-body walkthrough-footer renderer can
- * fold suppressed-finding counts + tool-degradation notes (the footer wiring is a Workflow-phase concern,
- * out of scope here).
+ * `applyArbitration` activity — runs the PURE {@link arbitrate} core over the in-memory inputs, then
+ * fans the resulting {@link ArbitrationResultV1} out into durable persistence via {@link applyArbitration}
+ * (Tier-1 INSERTs, Tier-2 UPDATEs, rejection rows). Returns the result so the workflow-body
+ * walkthrough-footer renderer can fold suppressed-finding counts + tool-degradation notes (the footer
+ * wiring is a Workflow-phase concern, out of scope here).
  *
  * ## Runtime context (vs. the workflow body)
  *
@@ -20,11 +16,9 @@
  * The single positional input is an {@link ApplyArbitrationInputV1}. Notable wire shapes:
  *   - `tier2_findings` — the LIST-OF-PAIRS `[uuid, ReviewFindingV1][]` (JSON-safe; NOT a UUID-keyed dict).
  *   - `tier2_review_finding_id_by_arbitration_id` — `Record<string, string>` (STRING keys → uuid values):
- *     the JSON-safe shape the frozen Python adopted (`dict[str, uuid.UUID]`) after smoke #10 crashed on a
- *     `dict[UUID, UUID]` at the Temporal payload boundary. The keys are already strings; this activity
- *     passes the map straight into `applyArbitration` (no `uuid.UUID(k)` reconstruction is needed in TS —
- *     the map key + value are both wire strings, used directly as the `arbitration_id → review_finding_id`
- *     lookup).
+ *     the JSON-safe shape adopted after `dict[UUID, UUID]` crashed at the Temporal payload boundary. The
+ *     keys are already strings; this activity passes the map straight into `applyArbitration` — the map
+ *     key + value are both wire strings used directly as the `arbitration_id → review_finding_id` lookup.
  *   - `now` — the ISO instant the workflow sourced from `workflow.now()`; written onto SUPPRESSED_BY_LLM
  *     decisions' `suppressed_at`.
  *
@@ -62,7 +56,7 @@ import type { ArbitrationResultV1 } from "#contracts/arbitration_result.v1.js";
  * Resolve the {@link Clock} seam: a {@link FakeClock} pinned at `CODEMASTER_FAKE_CLOCK_ISO` when that env var
  * is a parseable ISO instant (deterministic `created_at` for a dual-run), else a {@link WallClock}. An
  * unparseable value throws loudly rather than silently degrading to wall-clock non-determinism. Static
- * `process.env.X` access (no dynamic indexing). Mirrors persist_review_findings.activity.ts.
+ * `process.env.X` access (no dynamic indexing).
  */
 function resolveClock(): Clock {
   const iso = process.env.CODEMASTER_FAKE_CLOCK_ISO;
@@ -84,8 +78,7 @@ function resolveClock(): Clock {
  *
  * Composition: `arbitrate(...)` is pure (the injected policy + the caller-supplied `now`); the returned
  * result is handed to `applyArbitration(...)` which fans out into the repos. The bundled suppression policy
- * is loaded per-call (the load is a cheap parse of an in-module literal; no I/O), mirroring the Python's
- * injected `SuppressionPolicy`.
+ * is loaded per-call (the load is a cheap parse of an in-module literal; no I/O).
  */
 export async function applyArbitrationActivity(
   input: ApplyArbitrationInputV1,

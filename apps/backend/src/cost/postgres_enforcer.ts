@@ -1,13 +1,9 @@
 /**
- * Production cost-cap enforcer — 1:1 TypeScript/Kysely port of the frozen Python spine enforcer
- * `vendor/codemaster-py/codemaster/cost/postgres_enforcer.py::PostgresCostCapEnforcer`
- * (Sprint 14 / S14.D, closes audit B1.1 + B2.6; Sprint 15 / S15.H cap-resolution).
- *
- * This is the REAL, atomic, optimistic-reservation enforcer the frozen worker wires ALWAYS-ON in
- * production — NOT a stub, mock, or no-op. (The {@link InMemoryCostCapEnforcer} in
- * `#backend/cost/enforcer.js` is the unit-test double; the `AllowAllCostCap` default inside
- * `LlmClient` is the cassette-test default that the production `LlmClientCache` REPLACES with an
- * instance of THIS class.)
+ * Production cost-cap enforcer — the REAL, atomic, optimistic-reservation enforcer wired ALWAYS-ON
+ * in production (Sprint 14 / S14.D, closes audit B1.1 + B2.6; Sprint 15 / S15.H cap-resolution).
+ * NOT a stub, mock, or no-op. (The {@link InMemoryCostCapEnforcer} in `#backend/cost/enforcer.js` is
+ * the unit-test double; the `AllowAllCostCap` default inside `LlmClient` is the cassette-test default
+ * that the production `LlmClientCache` REPLACES with an instance of THIS class.)
  *
  * ## What it does (W2.1 — lock-free conditional-UPDATE gate; closes XC4)
  *
@@ -46,8 +42,8 @@
  * Each call runs inside `db.transaction().execute(trx => …)` over the SHARED single-pool Kysely seam
  * ({@link tenantKysely} / {@link getPool}). Kysely pins ONE checked-out connection for the whole
  * transaction callback, so `SET LOCAL lock_timeout`, the idempotent INSERTs, and the conditional
- * reserve-gate `UPDATE`s all run on the same connection — exactly the single-connection contract
- * the Python `async with session.begin()` provides. The `pg.Pool` is NEVER created per call.
+ * reserve-gate `UPDATE`s all run on the same connection — the single-connection transaction
+ * contract. The `pg.Pool` is NEVER created per call.
  *
  * ## Tenancy (telemetry.cost_daily is scope-discriminated, NOT per-installation)
  *
@@ -59,16 +55,14 @@
  * `cost_cap_overrides` keys on `installation_id` as a PK (the row IS the scope), and `cost_cap_settings`
  * is platform-global. Each raw `sql` below carries the `// tenant:exempt reason=… follow_up=…` marker
  * verbatim from the part-1 settings-repo platform-config idiom so a human reviews any future query and
- * the scope-discriminated rationale travels with the code. (Mirrors the frozen Python, which carries
- * no `installation_id` filter on these tables.)
+ * the scope-discriminated rationale travels with the code.
  *
  * ## Clock seam
  *
  * The injected {@link Clock} authors `updated_at` on every write and the `now()` comparison in the
- * `cost_cap_overrides` expiry predicate — mirroring the Python `self._clock.now()`. No raw `Date` /
+ * `cost_cap_overrides` expiry predicate. No raw `Date` /
  * `Math.random` is used (the `check_clock_random` gate is satisfied).
  *
- * @see vendor/codemaster-py/codemaster/cost/postgres_enforcer.py — the frozen source of truth.
  */
 
 import { type Kysely, sql } from "kysely";
@@ -87,7 +81,7 @@ import {
   DEFAULT_PER_ORG_CAP_CENTS,
 } from "#backend/cost/enforcer.js";
 
-// ─── Constants (1:1 with the frozen postgres_enforcer.py module constants) ──────────────────────────
+// ─── Constants ──────────────────────────────────────────────────────────────────────────────────────
 
 /**
  * The zero-UUID sentinel the global-scope row carries (migration 0024 default + the
@@ -101,8 +95,7 @@ const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
 /**
  * `SET LOCAL lock_timeout` — Postgres returns SQLSTATE 55P03 when the row lock cannot be acquired
  * within this window. We translate that to {@link CostCapLockTimeoutError} so the Bedrock client can
- * apply the retry-once-then-fail-closed policy from the S14.D failure-mode spec. Verbatim from the
- * Python `_PG_LOCK_TIMEOUT_SQLSTATE` / `_LOCK_TIMEOUT_SECONDS`.
+ * apply the retry-once-then-fail-closed policy from the S14.D failure-mode spec.
  */
 const PG_LOCK_TIMEOUT_SQLSTATE = "55P03";
 const LOCK_TIMEOUT = "2s";
@@ -145,8 +138,8 @@ function pgSqlstate(err: unknown): string | undefined {
 /**
  * Map a thrown error to {@link CostCapLockTimeoutError} when it is the Postgres lock-timeout (55P03),
  * else re-throw it unchanged. `BedrockBudgetExceededError` (a refusal, not a DB error) carries no
- * `.code`, so it falls through to the re-throw and surfaces to the caller verbatim — exactly the
- * Python `except DBAPIError` branch, which only intercepts driver errors. Every mapped timeout
+ * `.code`, so it falls through to the re-throw and surfaces to the caller verbatim — this mapping
+ * only intercepts DB driver errors. Every mapped timeout
  * increments {@link LOCK_TIMEOUT_COUNTER} (op-labelled, fail-safe) — the W2.1 alert seam.
  */
 function mapLockTimeout(err: unknown, op: "reserve" | "settle", context: string): never {
@@ -206,8 +199,8 @@ export class PostgresCostCapEnforcer implements CostCapEnforcer {
     this.globalCapCents = args.globalCapCents ?? DEFAULT_GLOBAL_CAP_CENTS;
     this.perOrgCapCents = args.perOrgCapCents ?? DEFAULT_PER_ORG_CAP_CENTS;
     // Production default: read live caps from core.cost_cap_overrides + core.cost_cap_settings
-    // (S15.H). The Python constructor defaults this False; the PRODUCTION wiring passes True. We keep
-    // the same default-False so call sites are explicit about the production posture (mirrors Python).
+    // (S15.H). This defaults False; the PRODUCTION wiring passes True. We keep
+    // the default-False so call sites are explicit about the production posture.
     this.readCapsFromDb = args.readCapsFromDb ?? false;
   }
 

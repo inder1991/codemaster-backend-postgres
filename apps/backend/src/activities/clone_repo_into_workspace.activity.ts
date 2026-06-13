@@ -1,26 +1,19 @@
 /**
- * `cloneRepoIntoWorkspace` activity — 1:1 port (part 2 of 2) of the frozen Python
- * `@activity.defn clone_repo_into_workspace`
- * (vendor/codemaster-py/codemaster/activities/_workspace_clone.py, lines 133-262).
- *
- * Workspace-aware clone step of the core loop: clones git directly into the
+ * `cloneRepoIntoWorkspace` activity — workspace-aware clone step of the core loop: clones git directly into the
  * {@link CloneRepoIntoWorkspaceInput}'s `handle.derived_path`, enforces the 200 MiB
  * workspace-size cap, and returns a {@link ClonedRepoV1} envelope. The GitCloner seam +
  * `CloneFailedError` / `WorkspaceTooLargeError` taxonomy + `byteSizeOfDir` walk are the part-1
  * imports under `#backend/integrations/git/`.
  *
- * ## Lease state-assertion + heartbeat seam (REAL — de-stubbed, 1:1 with the Python)
+ * ## Lease state-assertion + heartbeat seam (REAL — de-stubbed)
  *
- * The Python activity steps 1+2 open a DB transaction to (a) assert the lease row is still
- * `ALLOCATED` via a no-op `transition_lease(from=ALLOCATED, to=ALLOCATED)` (raising `StateDrift`
- * if the row moved) and (b) `LeaseRepo.touch_heartbeat(...)` to bump the janitor's orphan timer.
- * It also calls `activity.heartbeat({...})` four times to surface in-flight progress within the
- * Temporal heartbeat window.
+ * Steps 1+2 open a DB transaction to (a) assert the lease row is still `ALLOCATED` via a no-op
+ * `transition_lease(from=ALLOCATED, to=ALLOCATED)` (raising `StateDrift` if the row moved) and
+ * (b) `LeaseRepo.touch_heartbeat(...)` to bump the janitor's orphan timer. It also calls
+ * `activity.heartbeat({...})` four times to surface in-flight progress within the heartbeat window.
  *
- * Per the established TS activity pattern (explicit collaborator arg, NOT Python module-level
- * `configure()` globals), both halves are modeled as INJECTED collaborators — but their PRODUCTION
- * DEFAULTS are now the REAL impls (parts 1+2 of the workspace-lease subsystem have landed), matching
- * the LLM-client de-stub pattern: NO no-op survives on the shipped path.
+ * Both halves are modeled as INJECTED collaborators — PRODUCTION DEFAULTS are the REAL impls
+ * (parts 1+2 of the workspace-lease subsystem have landed): NO no-op survives on the shipped path.
  *
  *   - `assertLeaseAllocated`: the production default ({@link defaultAssertLeaseAllocated}) opens ONE
  *     transaction on the shared ADR-0062 pool (resolved from `CODEMASTER_PG_CORE_DSN`) and runs the
@@ -28,13 +21,13 @@
  *     asserting the outcome is `ALREADY_APPLIED` (an `APPLIED` outcome is structurally impossible for
  *     a same-state transition and surfaces as a `RuntimeError`; a `StateDrift` propagates when the
  *     row moved off `ALLOCATED`). It then bumps `LeaseRepo.touchHeartbeat(workspace_id)` in the SAME
- *     transaction (1:1 with the Python `async with session.begin(): …`).
+ *     transaction.
  *   - `heartbeat`: the production default ({@link defaultHeartbeat}) forwards the phase payload to
  *     the job-lease heartbeat (the Postgres runtime's liveness signal; the per-phase payload
  *     activity context). Tests inject a no-op double (there is no Temporal context under unit/integration).
  *
  * The observable output ({@link ClonedRepoV1}) does NOT depend on either collaborator. The four
- * heartbeat call sites sit at the same four phase boundaries as the Python so the granularity matches.
+ * The four heartbeat call sites sit at the same four phase boundaries so the granularity matches.
  *
  * ## Error-wrapping rule (parity-significant)
  *
@@ -65,7 +58,6 @@ import type { CloneRepoIntoWorkspaceInput } from "#contracts/clone_repo_into_wor
 /**
  * Minimum-acceptable length for a head SHA — git's standard short-SHA width. Anything shorter is
  * treated as a missing/typoed SHA and raises {@link CloneFailedError} BEFORE the cloner is invoked.
- * Mirrors the frozen Python `_MIN_HEAD_SHA_LEN = 7`.
  */
 export const MIN_HEAD_SHA_LEN = 7;
 
@@ -92,7 +84,7 @@ export type CloneRepoIntoWorkspaceDeps = {
 };
 
 /**
- * REAL production default for `assertLeaseAllocated` (1:1 with the Python steps 1+2, one transaction).
+ * REAL production default for `assertLeaseAllocated` (one transaction).
  *
  * Resolves the shared ADR-0062 Kysely from `CODEMASTER_PG_CORE_DSN` (the same DSN/pool seam the
  * allocate + release activities use), opens ONE transaction, and within it:
@@ -100,13 +92,13 @@ export type CloneRepoIntoWorkspaceDeps = {
  *      asserting the outcome is `ALREADY_APPLIED`. `APPLIED` is structurally impossible for a same-state
  *      transition (the primitive returns `ALREADY_APPLIED` whenever `current === toState`, before the
  *      UPDATE) — a defensive `RuntimeError` surfaces `LeaseTransitionOutcome`-table drift rather than
- *      masking it (1:1 with the Python defensive raise). A `StateDrift` propagates when the row is
- *      missing OR no longer `ALLOCATED` (e.g. a concurrent cancellation flipped it to RELEASE_REQUESTED).
+ *      masking it. A `StateDrift` propagates when the row is missing OR no longer `ALLOCATED`
+ *      (e.g. a concurrent cancellation flipped it to RELEASE_REQUESTED).
  *   2. bumps `LeaseRepo.touchHeartbeat(workspace_id)` so the janitor's orphan timer is reset — in the
  *      SAME transaction, so the assertion + heartbeat commit atomically.
  *
- * The clone activity passes NO `expectedInstallationId` (the BF-9 Phase-B grace period — 1:1 with the
- * Python, which also passes none here; `transitionLease` logs the structured WARN + proceeds).
+ * The clone activity passes NO `expectedInstallationId` (BF-9 Phase-B grace period — `transitionLease`
+ * logs the structured WARN + proceeds).
  *
  * @throws {Error}       `CODEMASTER_PG_CORE_DSN` unset, OR the transition returned a non-`ALREADY_APPLIED`
  *                       outcome (table drift).
@@ -145,11 +137,10 @@ export async function defaultAssertLeaseAllocated(
 }
 
 /**
- * Production default for `heartbeat` — a NO-OP in the Postgres runtime. The Python relied on the
- * Temporal activity heartbeat to keep the lease-janitor's orphan timer fresh; with Temporal removed,
+ * Production default for `heartbeat` — a NO-OP in the Postgres runtime. With Temporal removed,
  * the review job's lease heartbeat (runOneJob's heartbeat loop) is the runtime's sole liveness
  * signal and the per-phase payload has no consumer. Kept as an injectable seam (tests/clients may
- * override `heartbeat`) so the call sites in the clone body stay structurally 1:1 with the Python.
+ * override `heartbeat`) so the call sites in the clone body stay structurally aligned.
  */
 export function defaultHeartbeat(): void {
   /* no-op: the job-lease heartbeat owns liveness in the Postgres runtime. (A 0-arg fn is assignable
@@ -157,7 +148,7 @@ export function defaultHeartbeat(): void {
 }
 
 /**
- * Clone into an EXISTING workspace. 1:1 with the frozen Python activity body.
+ * Clone into an EXISTING workspace.
  *
  * Steps:
  *   1. + 2. Assert lease state `ALLOCATED` + bump heartbeat ({@link defaultAssertLeaseAllocated}).
@@ -178,8 +169,7 @@ export async function cloneRepoIntoWorkspace(
   const workspacePath = req.handle.derived_path;
 
   // 1. + 2. State assertion + heartbeat bump (REAL). The default opens one txn on the shared pool,
-  // asserts the lease is still ALLOCATED (throws StateDrift if it moved), and bumps the lease
-  // heartbeat. Mirrors the Python transaction + `activity.heartbeat({phase: "state_assertion_done"})`.
+  // asserts the lease is still ALLOCATED (throws StateDrift if it moved), and bumps the lease heartbeat.
   await assertLeaseAllocated(workspaceId);
   heartbeat({ phase: "state_assertion_done" });
 
@@ -203,8 +193,7 @@ export async function cloneRepoIntoWorkspace(
     });
   }
 
-  // Heartbeat BEFORE the clone shell-out so a stalled subprocess is detectable within the heartbeat
-  // window. Mirrors the Python `activity.heartbeat({phase: "clone_started"})`.
+  // Heartbeat BEFORE the clone shell-out so a stalled subprocess is detectable within the heartbeat window.
   heartbeat({ phase: "clone_started" });
   try {
     await cloner.clone({
@@ -241,7 +230,7 @@ export async function cloneRepoIntoWorkspace(
   heartbeat({ phase: "size_checked", byte_size: byteSize });
 
   // Construct via the Zod contract so schema_version (=2) + head_sha/byte_size constraints are
-  // applied exactly as the Python Pydantic construction would. `repo_path` is `<workspace>/repo`.
+  // validated. `repo_path` is `<workspace>/repo`.
   return ClonedRepoV1.parse({
     workspace_path: workspacePath,
     repo_path: `${workspacePath}/${REPO_SUBDIR_NAME}`,
@@ -253,8 +242,7 @@ export async function cloneRepoIntoWorkspace(
 /**
  * Test/verifier {@link GitCloner} stub. Writes a known marker file into `<workspace>/repo` so the
  * activity's byte-size walk observes a real, deterministic on-disk footprint. The marker body length
- * is the controllable byte budget the oversized-tree test drives. Mirrors the role of the Python
- * test cloner stub: it makes the post-clone workspace observable without a real git round-trip.
+ * is the controllable byte budget the oversized-tree test drives.
  */
 export class StubCloner implements GitCloner {
   private readonly markerBody: string;

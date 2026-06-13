@@ -1,8 +1,6 @@
-// Composition root for the OutboxDispatcherWorkflow's activities — the dispatcher's analogue of
-// build_activities.ts (1:1 with the Python `outbox.configure(session_factory=..., clock=...,
-// max_attempts=...)` call at worker boot). Constructs the repo + clock + the dispatcher's own cached
-// Kysely (ADR-0062 single cached engine via tenantKysely) and returns the 4 arrow-property activities,
-// keyed by the names the workflow's proxyActivities() expects.
+// Composition root for the OutboxDispatcherWorkflow's activities. Constructs the repo + clock + the
+// dispatcher's own cached Kysely (ADR-0062 single cached engine via tenantKysely) and returns the 4
+// arrow-property activities, keyed by the names the workflow's proxyActivities() expects.
 
 import { OutboxDispatchActivities } from "#backend/activities/outbox_dispatch.activity.js";
 import { PostgresOutboxRepo } from "#backend/domain/repos/outbox_repo.js";
@@ -10,7 +8,7 @@ import { PostgresOutboxRepo } from "#backend/domain/repos/outbox_repo.js";
 import { tenantKysely } from "#platform/db/database.js";
 import { WallClock } from "#platform/clock.js";
 
-/** The dead-letter threshold (Python configure() default max_attempts=5); env-overridable for ops tuning. */
+/** The dead-letter threshold (default max_attempts=5); env-overridable for ops tuning. */
 const OUTBOX_MAX_ATTEMPTS = Number(process.env["CODEMASTER_OUTBOX_MAX_ATTEMPTS"] ?? "5");
 
 /** Read the canonical core-store DSN, fail-loud when unset (mirrors build_activities.ts::requireCoreDsn). */

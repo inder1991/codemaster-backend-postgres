@@ -1,20 +1,16 @@
 /**
- * `generateFixPrompt` activity — 1:1 in intent with the frozen Python
- * `@activity.defn generate_fix_prompt_activity`
- * (`vendor/codemaster-py/codemaster/review/fix_prompt_theme_activity.py::FixPromptActivities.generate_fix_prompt_activity`).
- *
- * Builds a copy-pasteable Claude-Code fix prompt from the aggregated findings — a DETERMINISTIC primary
+ * `generateFixPrompt` activity — builds a copy-pasteable Claude-Code fix prompt from the aggregated
+ * findings — a DETERMINISTIC primary
  * section (`buildFixPromptDeterministic`) PLUS an ADDITIVE best-effort LLM theme-synthesis (the
  * `## Cross-cutting patterns` section); on any LLM failure the deterministic section still ships. Persists
  * the prompt via the ported `FixPromptRepo` and posts it as an advisory PR conversation-tab comment.
  *
- * ## Bound-method holder (mirrors WalkthroughActivities)
+ * ## Bound-method holder
  *
- * The frozen Python is a class `FixPromptActivities(cache, repo, gh_client, clock)` with an `@activity.defn`
- * method. This port mirrors that: a {@link FixPromptActivities} class holding the injected collaborators,
- * exposing `generateFixPrompt` as an arrow property so it stays bound when the worker bootstrap destructures
- * it into the activities map (Temporal registers the function value directly, losing `this`). The Workflow
- * phase wires the construction in `build_activities.ts` (NOT this file — HARD RULE).
+ * A {@link FixPromptActivities} class holds the injected collaborators, exposing `generateFixPrompt` as
+ * an arrow property so it stays bound when the worker bootstrap destructures it into the activities map
+ * (Temporal registers the function value directly, losing `this`). The Workflow phase wires the
+ * construction in `build_activities.ts` (NOT this file — HARD RULE).
  *
  * ## Single typed input — CLAUDE.md invariant 11 / ADR-0047
  *
@@ -28,7 +24,7 @@
  * `pg.Pool` the repo opens (ADR-0062 shared seam), the GitHub HTTP client, and the wall clock all live
  * here, exactly like `generateWalkthrough`.
  *
- * ## Fail-open posture (1:1 with the Python)
+ * ## Fail-open posture
  *
  *   - Empty findings → short-circuit, return `{ generated: false, generation_mode: "", comment_posted: false }`.
  *   - The LLM theme-synthesis is best-effort INSIDE `buildFixPrompt` (degrades to the deterministic base).
@@ -54,7 +50,7 @@ import type { GenerateFixPromptInputV1 } from "#contracts/generate_fix_prompt.v1
 /**
  * The GitHub issue-comment surface the activity needs — the slice of `GhReviewClient` it uses
  * (`createIssueComment` + `listIssueComments`). Kept loosely-typed (structural subset) so the activity
- * depends only on the two methods, mirroring how the Python keeps `gh_client` loosely typed to avoid
+ * depends only on the two methods, keeping `gh_client` loosely typed to avoid
  * import weight. `listIssueComments` is the W3.3 operational-marker recovery oracle (F2): it lets a re-run
  * recover the id of a comment that was posted right before a crash (post succeeded, record crashed).
  */
@@ -104,8 +100,7 @@ export type GenerateFixPromptOpts = {
 const DEFAULT_CLAIM_TTL_SECONDS = 120;
 
 /**
- * Bound-method holder for the generate_fix_prompt activity — 1:1 with the frozen Python
- * `FixPromptActivities(cache=…, repo=…, gh_client=…, clock=…)`. The worker bootstrap constructs it with
+ * Bound-method holder for the generate_fix_prompt activity. The worker bootstrap constructs it with
  * the shared ledger-wired {@link LlmClientCacheLike} (the fix_prompt purpose resolves to sonnet via the
  * central seed), the ported {@link FixPromptRepo}, the installation-bound issue-comment client, and the
  * shared clock; it registers the `generateFixPrompt` bound arrow property.
@@ -129,8 +124,7 @@ export class FixPromptActivities {
   }
 
   /**
-   * The activity. 1:1 in intent with the Python `generate_fix_prompt_activity`, hardened for the
-   * de-Temporal runner (W3.3 / F2 / F3 / F5). Arrow property so it stays bound when destructured into the
+   * The activity (W3.3 / F2 / F3 / F5). Arrow property so it stays bound when destructured into the
    * worker activities map.
    *
    * ## Recoverable post claim + operational marker recovery (W3.3)
@@ -171,7 +165,7 @@ export class FixPromptActivities {
       aggregated: payload.aggregated,
       prNumber: payload.pr_number,
       // TS hardening divergence (ADR-0068) — thread the REAL installation_id to the LLM client (cost-cap /
-      // blob / telemetry). The Python platform-scopes the fix_prompt call (omits it).
+      // blob / telemetry). The fix_prompt call was previously platform-scoped (installation_id omitted).
       installationId: payload.installation_id,
       cache: this.cache,
       clock: this.clock,

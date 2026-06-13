@@ -1,7 +1,5 @@
 /**
- * `parseManifestDependencies` activity — 1:1 port of the frozen Python
- * `codemaster/activities/parse_manifest_dependencies.py`
- * (Commit 6 of FOLLOW-UP-manifest-dependency-parsing).
+ * `parseManifestDependencies` activity (FOLLOW-UP-manifest-dependency-parsing commit 6).
  *
  * Architectural condition #7: a SEPARATE activity from the fetch. Reads a
  * {@link ParseManifestDependenciesInputV1} (a tuple of {@link ManifestSnapshot}); returns the same tuple
@@ -13,31 +11,28 @@
  *     emission order) → TRUNCATED state.
  *   - {@link MAX_MANIFEST_PARSE_MS} = 250 — wall-clock budget per manifest → over-budget surfaces PARTIAL.
  *
- * ## State logic (1:1 with the Python `_parse_one`)
+ * ## State logic
  *   - UNSUPPORTED_FORMAT — basename matched the matcher but no parser exists (`_dispatch` → null).
  *   - FAILED — non-empty body but the parser emitted zero records (malformed / unparseable body).
  *   - TRUNCATED — emitted > the dependency cap (takes priority over PARTIAL — louder signal).
  *   - PARTIAL — the parser surfaced rejections OR the parse ran over the time budget.
  *   - PARSED — clean parse (records, no rejections, within both caps; OR an empty/absent body).
  *
- * ## Telemetry divergence from the Python (noted in the parity report)
- * The Python emits OTel counters/histograms via `codemaster.observability.manifest_parser_metrics`.
- * There is NO equivalent TS metrics module yet, so this port DROPS the metric emission and keeps ONLY the
- * structured rejection log — emitted as `console.warn(JSON.stringify(...))` (the curator's logging idiom),
- * 1:1 with the Python `_LOG.warning("manifest_parser_entry_rejected", extra={...})` payload. The
- * record_attempt / record_outcome / record_duration_ms / record_entries_emitted counters are omitted; they
- * are pure observability with no behavioral effect on the returned snapshots.
+ * ## Telemetry
+ * There is NO OTel metrics module yet; this activity DROPS the metric emission and keeps ONLY the
+ * structured rejection log — emitted as `console.warn(JSON.stringify(...))`. The record_attempt /
+ * record_outcome / record_duration_ms / record_entries_emitted counters are omitted; they are pure
+ * observability with no behavioral effect on the returned snapshots.
  *
  * ## Clock seam (CLAUDE.md clock-and-random protocol)
- * The Python measures `duration_ms` via `time.monotonic()`. The banned-primitive gate forbids
+ * The banned-primitive gate forbids
  * `performance.now()` / `Date.now()` outside `libs/platform/src/clock.ts`, so the per-manifest duration is
  * read from an INJECTED {@link Clock}.`monotonic()` (seconds → multiplied by 1000 for ms). Production wires
  * a {@link WallClock}; tests wire a `FakeClock` and `advance(...)` it to drive the time-budget branch.
  *
  * Per-manifest failure isolation: a malformed body for one manifest never aborts the others.
  *
- * See plan: `docs/superpowers/plans/2026-05-27-confluence-pr-context-manifests-v1.md` and the frozen
- * Python source above.
+ * See plan: `docs/superpowers/plans/2026-05-27-confluence-pr-context-manifests-v1.md`.
  */
 
 import {
@@ -74,24 +69,23 @@ import {
 
 // ─── Resource caps (architectural condition #4) ────────────────────────────────────────────────────────
 
-/** Truncate the per-manifest record set to the first N (1:1 with the Python `MAX_DEPENDENCIES_PER_MANIFEST`). */
+/** Truncate the per-manifest record set to the first N. */
 export const MAX_DEPENDENCIES_PER_MANIFEST = 5000;
-/** Per-manifest wall-clock budget in ms (1:1 with the Python `MAX_MANIFEST_PARSE_MS`). */
+/** Per-manifest wall-clock budget in ms. */
 export const MAX_MANIFEST_PARSE_MS = 250;
 
 // ─── Dispatcher table — path basename → parser callable ─────────────────────────────────────────────────
 
 /**
- * A bound parser callable: `(body, source) → ParseOutcome`. The dispatch table normalizes the 5 ported
- * ecosystem parsers' differing argument shapes (object-arg vs. `GoParseInput` vs. the `isDev` flag) behind
- * this uniform signature, 1:1 with the Python `_PARSER_TABLE` lambdas.
+ * A bound parser callable: `(body, source) → ParseOutcome`. The dispatch table normalizes the
+ * ecosystem parsers' differing argument shapes behind this uniform signature.
  */
 type ParserCallable = (body: string, source: string) => ParseOutcome;
 
 /**
  * Dispatch table — basename → parser callable. Keys are the 13 v1-supported patterns; lookup misses fall
- * through to `undefined` (→ UNSUPPORTED_FORMAT). Matches the ManifestMatcher Tier 1+2 basenames. Insertion
- * order is immaterial (basename lookup, not iteration). 1:1 with the Python `_PARSER_TABLE`.
+ * through to `undefined` (→ UNSUPPORTED_FORMAT). Matches the ManifestMatcher Tier 1+2 basenames.
+ * Insertion order is immaterial (basename lookup, not iteration).
  */
 const PARSER_TABLE: ReadonlyMap<string, ParserCallable> = new Map<string, ParserCallable>([
   // Python
@@ -126,8 +120,7 @@ const PARSER_TABLE: ReadonlyMap<string, ParserCallable> = new Map<string, Parser
 ]);
 
 /**
- * Extract a path's basename (the segment after the last `/`). 1:1 with the Python
- * `path.rsplit("/", 1)[-1] if "/" in path else path`.
+ * Extract a path's basename (the segment after the last `/`).
  */
 function basenameOf(path: string): string {
   const idx = path.lastIndexOf("/");
@@ -136,7 +129,7 @@ function basenameOf(path: string): string {
 
 /**
  * Route to the right parser based on the manifest's basename. Returns `null` when the basename matches a
- * path the matcher knows but no parser exists (→ UNSUPPORTED_FORMAT). 1:1 with the Python `_dispatch`.
+ * path the matcher knows but no parser exists (→ UNSUPPORTED_FORMAT).
  */
 export function dispatch(manifest: ManifestSnapshot): ParseOutcome | null {
   const parser = PARSER_TABLE.get(basenameOf(manifest.path));
@@ -146,13 +139,12 @@ export function dispatch(manifest: ManifestSnapshot): ParseOutcome | null {
   return parser(manifest.raw_body, manifest.path);
 }
 
-// ─── Per-manifest parse (1:1 with the Python `_parse_one`) ──────────────────────────────────────────────
+// ─── Per-manifest parse ──────────────────────────────────────────────────────────────────────────────────
 
 /**
  * Options for {@link parseOne}. `clock` supplies the monotonic duration reader (default {@link WallClock});
  * `maxDependencies` supplies the truncation cap (default {@link MAX_DEPENDENCIES_PER_MANIFEST}). The
- * `maxDependencies` seam is the TS analogue of the Python test's `monkeypatch.setattr(...)` on the module
- * constant — production callers never pass it.
+ * `maxDependencies` seam is a test seam on the module constant — production callers never pass it.
  */
 export type ParseOneOptions = {
   readonly clock?: Clock;
@@ -161,24 +153,23 @@ export type ParseOneOptions = {
 
 /**
  * Apply the dispatcher to one manifest + handle resource caps. Returns a NEW snapshot with the parsed
- * fields populated. 1:1 with the Python `_parse_one`. Pure-ish: the only side effect is the structured
- * rejection log (`console.warn`).
+ * fields populated. Pure-ish: the only side effect is the structured rejection log (`console.warn`).
  */
 export function parseOne(manifest: ManifestSnapshot, options: ParseOneOptions = {}): ManifestSnapshot {
   const clock = options.clock ?? new WallClock();
   const maxDependencies = options.maxDependencies ?? MAX_DEPENDENCIES_PER_MANIFEST;
 
-  // `time.monotonic()` is seconds; the Python multiplies the delta by 1000 to get ms.
+  // `monotonic()` is seconds; the delta is multiplied by 1000 to get ms.
   const start = clock.monotonic();
   let outcome: ParseOutcome | null;
   try {
     outcome = dispatch(manifest);
   } catch (err) {
-    // Per-manifest failure isolation (EXCEEDS Python — Python's `_parse_one` lets the throw propagate and
-    // aborts the whole `tuple(...)` batch). A parser may throw mid-iteration on a malformed body — e.g. a
-    // non-string dependency spec → TypeError (faithful to Python's AttributeError). Mark THIS manifest
-    // FAILED, log the parser exception, and let the caller continue with the rest; one bad manifest must
-    // never abort the parse stage, which is what this activity's fail-open enrichment contract promises.
+    // Per-manifest failure isolation: a single throw must NOT abort the whole batch. A parser may throw
+    // mid-iteration on a malformed body — e.g. a non-string dependency spec → TypeError. Mark THIS
+    // manifest FAILED, log the parser exception, and let the caller continue with the rest; one bad
+    // manifest must never abort the parse stage, which is what this activity's fail-open enrichment
+    // contract promises.
     logParserException(manifest, err);
     return ManifestSnapshot.parse({
       ...manifest,
@@ -236,12 +227,11 @@ export function parseOne(manifest: ManifestSnapshot, options: ParseOneOptions = 
 }
 
 /**
- * Emit one structured `console.warn` per rejected entry — 1:1 with the Python
- * `_LOG.warning("manifest_parser_entry_rejected", extra={...})`. `raw_name` is truncated to 64 chars
- * (`rej.raw_name[:64]`) to bound the log payload. NO metric emission (see the module docstring).
+ * Emit one structured `console.warn` per rejected entry. `raw_name` is truncated to 64 chars to
+ * bound the log payload. NO metric emission (see the module docstring).
  */
 function logRejections(manifest: ManifestSnapshot, outcome: ParseOutcome): void {
-  // `detected_ecosystem or "other"` — null/empty falls back to "other" (1:1 with the Python `ecosystem`).
+  // `detected_ecosystem or "other"` — null/empty falls back to "other".
   const ecosystem = manifest.detected_ecosystem ?? "other";
   for (const rej of outcome.rejections) {
     console.warn(
@@ -278,9 +268,8 @@ function logParserException(manifest: ManifestSnapshot, err: unknown): void {
 // ─── Activity class ─────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Bound-method holder for `parseManifestDependencies` (1:1 with the Python
- * `ParseManifestDependenciesActivity`). The {@link Clock} is INJECTED at construction (defaulting to a
- * {@link WallClock}) so the activity stays deterministic under test.
+ * Bound-method holder for `parseManifestDependencies`. The {@link Clock} is INJECTED at construction
+ * (defaulting to a {@link WallClock}) so the activity stays deterministic under test.
  */
 export class ParseManifestDependenciesActivity {
   readonly #clock: Clock;
@@ -292,8 +281,7 @@ export class ParseManifestDependenciesActivity {
   /**
    * Parse every input manifest; return a NEW tuple with the parsed fields populated. Per-manifest failure
    * isolation: a malformed body for one manifest never aborts the others. UNSUPPORTED_FORMAT for patterns
-   * the matcher knows but we don't yet parse. Validates I/O via the Zod contract so the dispatch boundary
-   * behaves exactly like the Python Pydantic model. 1:1 with the Python `parse_manifest_dependencies`.
+   * the matcher knows but we don't yet parse. Validates I/O via the Zod contract at the dispatch boundary.
    */
   public async parseManifestDependencies(
     rawInput: ParseManifestDependenciesInputV1,

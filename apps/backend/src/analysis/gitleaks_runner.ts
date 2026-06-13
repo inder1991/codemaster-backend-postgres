@@ -1,14 +1,11 @@
 /**
- * GitleaksInWorkerRunner — 1:1 port of `vendor/codemaster-py/codemaster/analysis/gitleaks_runner.py`
- * (Sprint 9 / S9.1.5).
- *
- * Runs Gitleaks via the in-worker subprocess sandbox and parses its JSON-array output into
- * {@link AnalysisFindingV1}s.
+ * GitleaksInWorkerRunner — runs Gitleaks via the in-worker subprocess sandbox and parses its
+ * JSON-array output into {@link AnalysisFindingV1}s.
  *
  * ALWAYS-PROMOTE rule: every gitleaks finding lands at `severity_raw="blocker"` regardless of the
- * tool's own classification. The curator (S9.2.2) bypasses gitleaks findings — they translate 1:1 to
- * a blocker/security ReviewFindingV1 with no LLM intervention. A leaked credential is high-cost to
- * miss and low-cost to flag spuriously.
+ * tool's own classification. The curator (S9.2.2) bypasses gitleaks findings — they translate
+ * directly to a blocker/security ReviewFindingV1 with no LLM intervention. A leaked credential is
+ * high-cost to miss and low-cost to flag spuriously.
  *
  * SECRET REDACTION: the raw `Secret` value is NEVER stored in the finding — only the rule_id + line
  * range + a redacted message (first/last 4 chars, middle masked) reach the envelope. (The redact
@@ -22,18 +19,16 @@
  * Conventions match the other runners: empty file list → []; exit 0/1 → success; exit ≥ 2 →
  * {@link RunnerToolError}; malformed JSON / null body / non-array → log WARN + return [].
  *
- * ## Changed-file scoping (W2.6 / M3 — DELIBERATE divergence from the frozen Python)
+ * ## Changed-file scoping (W2.6 / M3 — DELIBERATE divergence)
  *
- * The Python runner scans the WHOLE checked-out tree (`--source=<workspace>`) and discards
- * out-of-PR findings post-hoc — a full-tree secret scan per PR regardless of PR size: a cost /
- * timeout / OOM amplifier on large monorepos, exactly where losing the secret scan matters most.
- * This port scopes the scan to the routed file set: the routed files are HARDLINKED (copy
- * fallback) into a per-run staging dir inside the workspace ({@link GITLEAKS_SCAN_STAGING_DIRNAME},
- * relative structure preserved) and `--source` points at THAT dir, so scan cost scales with PR
- * size, not repo size. Findings map back through the staging root, so reported paths stay
- * workspace-relative. Fail-OPEN at every step: an unstageable file (deleted in the PR, traversal
- * escape) is skipped with a WARN; a staging-root failure falls back to the legacy whole-tree scan;
- * the staging dir is removed in `finally`.
+ * The original approach scans the WHOLE checked-out tree and discards out-of-PR findings post-hoc —
+ * a cost / timeout / OOM amplifier on large monorepos. This implementation scopes the scan to the
+ * routed file set: the routed files are HARDLINKED (copy fallback) into a per-run staging dir inside
+ * the workspace ({@link GITLEAKS_SCAN_STAGING_DIRNAME}, relative structure preserved) and `--source`
+ * points at THAT dir, so scan cost scales with PR size, not repo size. Findings map back through the
+ * staging root, so reported paths stay workspace-relative. Fail-OPEN at every step: an unstageable
+ * file (deleted in the PR, traversal escape) is skipped with a WARN; a staging-root failure falls
+ * back to the whole-tree scan; the staging dir is removed in `finally`.
  */
 
 import { promises as fs } from "node:fs";
@@ -47,7 +42,7 @@ import { uuid4 } from "./uuid4.js";
 import { AnalysisFindingV1 } from "#contracts/analysis_findings.v1.js";
 import { type Clock } from "#platform/clock.js";
 
-/** Per the always-promote rule — every gitleaks finding gets blocker so the curator translates 1:1. */
+/** Per the always-promote rule — every gitleaks finding gets blocker so the curator promotes it directly. */
 const GITLEAKS_SEVERITY = "blocker";
 
 /** The per-run staging dir (inside the workspace — same filesystem, so staging is hardlink-cheap)
@@ -56,13 +51,12 @@ export const GITLEAKS_SCAN_STAGING_DIRNAME = ".codemaster-gitleaks-scan";
 
 /**
  * Show first/last 4 chars; mask the middle. Mirrors the PatternSecretDetector redaction style so
- * reviewers can recognize WHICH credential leaked without seeing the full value. 1:1 with the Python
- * `_redact_secret` (uses the U+2026 HORIZONTAL ELLIPSIS, "…", exactly as the Python `"…"` literal).
+ * reviewers can recognize WHICH credential leaked without seeing the full value. Uses the U+2026
+ * HORIZONTAL ELLIPSIS, "…".
  */
 export function redactSecret(secret: string): string {
-  // Python `len(secret) <= 8` counts CODE POINTS; `[...secret]` does the same in JS (`String.length`
-  // counts UTF-16 units, which would diverge on astral-plane chars). Secrets are ASCII in practice,
-  // but we match Python's code-point semantics exactly.
+  // `[...secret]` counts CODE POINTS. Secrets are ASCII in practice, but code-point counting is
+  // correct for arbitrary input.
   const cps = [...secret];
   if (cps.length <= 8) return "…".repeat(cps.length);
   return `${cps.slice(0, 4).join("")}…${cps.slice(-4).join("")}`;
@@ -247,8 +241,8 @@ export function parseGitleaksOutput(
     const filePath = String(e["File"] ?? "");
     const relative = relativeToWorkspace(filePath, workspace);
 
-    // Mirror the frozen Python try-block: int(StartLine, 1) → start_line, then int(EndLine,
-    // start_line) → end_line; ANY non-coercible value collapses to (1, 1).
+    // Coerce line numbers: int(StartLine, 1) → start_line, int(EndLine, start_line) → end_line;
+    // ANY non-coercible value collapses to (1, 1).
     let startLine: number;
     let endLine: number;
     const startRaw = toInt(e["StartLine"], 1);
@@ -299,7 +293,7 @@ export function parseGitleaksOutput(
   return findings;
 }
 
-/** Mirror Python `int(x)` with a default; null on a non-coercible value (Python's `except` → (1,1)). */
+/** Coerce `x` to int with a default; null on a non-coercible value (→ (1,1) fallback). */
 function toInt(v: unknown, fallback: number): number | null {
   if (v === undefined || v === null) return fallback;
   if (typeof v === "number") return Number.isFinite(v) ? Math.trunc(v) : null;

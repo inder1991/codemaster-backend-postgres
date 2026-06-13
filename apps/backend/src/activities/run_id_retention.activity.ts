@@ -1,10 +1,6 @@
 /**
- * run_id retention janitor activities — REAL de-stubbed ports of the frozen Python
- * `@activity.defn run_id_close_stale_prs` / `run_id_retire_old_runs` / `run_id_delete_old_events`
- * (vendor/codemaster-py/codemaster/activities/run_id_retention.py). Phase 5 of the run_id
- * execution-causality refactor.
- *
- * Three sweeps the {@link runIdRetentionWorkflow} composes sequentially (close → retire → delete):
+ * run_id retention janitor activities. Three sweeps the {@link runIdRetentionWorkflow} composes
+ * sequentially (close → retire → delete):
  *
  *  1. {@link runIdCloseStalePrsActivity} (registered `run_id_close_stale_prs`)
  *     Sweeps `core.review_runs` rows where `is_ephemeral = true` AND `retired_at IS NULL` AND
@@ -31,38 +27,32 @@
  *
  * Neither DB sweep does an archive-before-DELETE. Sweep 2 is a SOFT delete (`UPDATE … SET retired_at`
  * — the row stays, just flagged), so there is nothing to archive. Sweep 3 is a hard DELETE of
- * correlation transients (workflow_events) with NO archive table — 1:1 with the frozen Python, which
- * deletes them outright (they are not recoverable business state; the compact lifecycle truth lives on
- * `core.review_runs`). This is faithful to the Python; it is NOT the archive-before-DELETE migration
- * pattern (that governs migrations, not this runtime janitor).
+ * correlation transients (workflow_events) with NO archive table — they are not recoverable business
+ * state; the compact lifecycle truth lives on `core.review_runs`. This is NOT the archive-before-DELETE
+ * migration pattern (that governs migrations, not this runtime janitor).
  *
- * ## TTL source (divergence from the Python — workflow-arg injection, not env/platform_config)
+ * ## TTL source
  *
- * The frozen Python workflow body passes `ttl_days` to each activity as a positional arg pinned at
- * Schedule registration (`args=[7, 30, 90]`). Faithful 1:1: the TS activities take `ttlDays` as an
- * injected dep ({@link RetentionSweepDeps.ttlDays}) and the {@link runIdRetentionWorkflow} supplies it
- * via the typed proxy args. Production resolves the same `[7, 30, 90]` defaults the Python pins (see
- * {@link DEFAULT_PR_TTL_DAYS} etc.); an injected `ttlDays` (tests) takes precedence.
+ * Activities take `ttlDays` as an injected dep ({@link RetentionSweepDeps.ttlDays}) supplied by
+ * {@link runIdRetentionWorkflow} via the typed proxy args. Production resolves the same `[7, 30, 90]`
+ * defaults (see {@link DEFAULT_PR_TTL_DAYS} etc.); an injected `ttlDays` (tests) takes precedence.
  *
- * ## Cross-tenant by design (Python `_CANDIDATE_SQL` / retire / delete carry NO installation_id filter)
+ * ## Cross-tenant by design (the candidate / retire / delete sweeps carry NO installation_id filter)
  *
- * All three sweeps are cross-tenant liveness/retention scans (the Python guards them by running inside
- * the privileged retention workflow). The raw-SQL tenancy gate accepts the inline
+ * All three sweeps are cross-tenant liveness/retention scans, guarded by running inside
+ * the privileged retention workflow. The raw-SQL tenancy gate accepts the inline
  * `// tenant:exempt reason=… follow_up=…` marker on each touching query.
  *
  * ## Clock authority
  *
  * The cutoff (`clock.now() - ttl`) and every audit `created_at` come from the INJECTED {@link Clock}
- * (default {@link WallClock}) — 1:1 with the Python `clock.now()`. (The Python uses the injected clock
- * for the cutoff too, NOT the DB `now()` — preserved verbatim.)
+ * (default {@link WallClock}).
  *
- * ## OTel counters (ported inline per the metrics-seam convention)
+ * ## OTel counters
  *
- * Counters are emitted via the {@link PendingEmits} post-commit collector where the Python uses
- * `emit_after_commit` (BF-15 drop-on-rollback), and inline (immediate) where the Python emits inline
- * (the events-deleted counter). Counter NAMES are copied verbatim from the Python so the deferred
- * name-parity gate + existing dashboards map unchanged. Per-installation labels are preserved only
- * where the Python uses them (the per-close audit counter).
+ * Counters are emitted via the {@link PendingEmits} post-commit collector (BF-15 drop-on-rollback) or
+ * inline for the events-deleted counter. Per-installation labels are preserved on the per-close audit
+ * counter only.
  *
  * ## Runtime context / shared-wiring boundary
  *
@@ -98,23 +88,23 @@ import {
   StalePrCloserResultV1,
 } from "#contracts/retention.v1.js";
 
-// ─── Production TTL defaults (1:1 with the Python schedule args [7, 30, 90]) ─────────────────────────
+// ─── Production TTL defaults ──────────────────────────────────────────────────────────────────────
 
-/** Default PR-closer TTL — ephemeral smoke PRs older than 7 days get closed (Python `args=[7, …]`). */
+/** Default PR-closer TTL — ephemeral smoke PRs older than 7 days get closed. */
 export const DEFAULT_PR_TTL_DAYS = 7;
-/** Default run-retire TTL — terminal runs older than 30 days get soft-deleted (Python `args=[…, 30, …]`). */
+/** Default run-retire TTL — terminal runs older than 30 days get soft-deleted. */
 export const DEFAULT_RUN_TTL_DAYS = 30;
-/** Default event-delete TTL — workflow_events older than 90 days get hard-deleted (Python `args=[…, 90]`). */
+/** Default event-delete TTL — workflow_events older than 90 days get hard-deleted. */
 export const DEFAULT_EVENT_TTL_DAYS = 90;
 
-/** Batch sizing for the retire sweep — 1:1 with the Python defaults (batch_size=1000, max_batches=50). */
+/** Batch sizing for the retire sweep (batch_size=1000, max_batches=50). */
 const RETIRE_BATCH_SIZE = 1000;
 const RETIRE_MAX_BATCHES = 50;
-/** Batch sizing for the events sweep — 1:1 with the Python defaults (batch_size=5000, max_batches=200). */
+/** Batch sizing for the events sweep (batch_size=5000, max_batches=200). */
 const EVENTS_BATCH_SIZE = 5000;
 const EVENTS_MAX_BATCHES = 200;
 
-// ─── OTel meter + counters (names copied verbatim from the Python) ───────────────────────────────────
+// ─── OTel meter + counters (stable, byte-pinned names) ───────────────────────────────────
 
 const METER = getMeter("codemaster.retention");
 
@@ -149,7 +139,7 @@ const EVENTS_DELETED: Counter = METER.createCounter("codemaster_retention_events
 export type RetentionSweepDeps = {
   /** DSN for the shared pool; default `CODEMASTER_PG_CORE_DSN`. */
   dsn?: string;
-  /** Time seam for the cutoff + audit `created_at`; default {@link WallClock} (1:1 with the Python). */
+  /** Time seam for the cutoff + audit `created_at`; default {@link WallClock}. */
   clock?: Clock;
   /** Retention TTL in days; default is the per-sweep production default (PR=7, run=30, event=90). */
   ttlDays?: number;
@@ -184,7 +174,7 @@ function resolveTtlDays(deps: RetentionSweepDeps, fallback: number): number {
   return ttl;
 }
 
-/** Compute the cutoff instant: `clock.now() - ttlDays`. 1:1 with the Python `clock.now() - timedelta(days=…)`. */
+/** Compute the cutoff instant: `clock.now() - ttlDays`. */
 function cutoffFor(clock: Clock, ttlDays: number): Date {
   return new Date(clock.now().getTime() - ttlDays * 24 * 60 * 60 * 1000);
 }
@@ -206,9 +196,9 @@ type CandidateRow = {
 };
 
 /**
- * R1-corrected candidate query — 1:1 with the Python `_CANDIDATE_SQL`. Pre-filters by `is_ephemeral`
- * (the durable authority), joins through pull_request_reviews → repositories → installations so each
- * candidate carries full_name, the bigint github_installation_id, and the internal installation_id UUID.
+ * R1-corrected candidate query — pre-filters by `is_ephemeral` (the durable authority), joins through
+ * pull_request_reviews → repositories → installations so each candidate carries full_name, the bigint
+ * github_installation_id, and the internal installation_id UUID.
  */
 const CANDIDATE_SQL =
   "SELECT " +
@@ -231,7 +221,7 @@ const CANDIDATE_SQL =
   "  AND i.suspended_at IS NULL " +
   "ORDER BY wr.started_at";
 
-/** The GitHub client exceptions the per-row fail-open path catches (1:1 with `_GITHUB_CLIENT_EXCS`). */
+/** The GitHub client exceptions the per-row fail-open path catches. */
 const GITHUB_CLIENT_ERROR_CTORS = [
   GitHubForbiddenError,
   GitHubNotFoundError,
@@ -244,7 +234,7 @@ function isGitHubClientError(e: unknown): boolean {
   return GITHUB_CLIENT_ERROR_CTORS.some((Ctor) => e instanceof Ctor);
 }
 
-/** Map a GitHub client error to the OTel `reason` label bucket — 1:1 with `_classify_github_error`. */
+/** Map a GitHub client error to the OTel `reason` label bucket. */
 function classifyGitHubError(e: unknown): string {
   if (e instanceof GitHubForbiddenError) return "forbidden";
   if (e instanceof GitHubNotFoundError) return "not_found";
@@ -252,16 +242,15 @@ function classifyGitHubError(e: unknown): string {
   return "other_error";
 }
 
-/** URL-encode the head filter, leaving `:` and `/` literal — matches the Python `quote(..., safe=":/")`. */
+/** URL-encode the head filter, leaving `:` and `/` literal. */
 function quoteHeadFilter(value: string): string {
   return encodeURIComponent(value).replace(/%3A/gi, ":").replace(/%2F/gi, "/");
 }
 
 /**
- * Return open PRs on `branchName` of `fullName`. 1:1 with `_list_open_pulls_for_branch`: the
- * `GET …/pulls?head={owner}:{branch}&state=open` returns ≤ 1 open PR (a branch heads at most one open
- * PR), so no pagination. The TS GitHub client returns a `body_text` string (not a `.json()` method), so
- * we JSON.parse it; a non-array body yields `[]`.
+ * Return open PRs on `branchName` of `fullName`. The `GET …/pulls?head={owner}:{branch}&state=open`
+ * returns ≤ 1 open PR (a branch heads at most one open PR), so no pagination. The GitHub client returns
+ * a `body_text` string, so we JSON.parse it; a non-array body yields `[]`.
  */
 async function listOpenPullsForBranch(args: {
   githubClient: GitHubApiClient;
@@ -280,7 +269,7 @@ async function listOpenPullsForBranch(args: {
   return Array.isArray(parsed) ? (parsed as Array<Record<string, unknown>>) : [];
 }
 
-/** PATCH `…/pulls/{n}` with `state=closed`. 1:1 with `_close_pull`. */
+/** PATCH `…/pulls/{n}` with `state=closed`. */
 async function closePull(args: {
   githubClient: GitHubApiClient;
   installationId: number;
@@ -294,9 +283,9 @@ async function closePull(args: {
 }
 
 /**
- * Emit one `audit.audit_events` row recording a close. Fresh transaction per emit (1:1 with
- * `_emit_close_audit`): so a single failed audit can't taint the rest of the sweep, and the counter
- * increment is queued behind the commit (BF-15 drop-on-rollback).
+ * Emit one `audit.audit_events` row recording a close. Fresh transaction per emit so a single failed
+ * audit can't taint the rest of the sweep, and the counter increment is queued behind the commit
+ * (BF-15 drop-on-rollback).
  */
 async function emitCloseAudit(args: {
   poolDsn: string;
@@ -329,7 +318,7 @@ async function emitCloseAudit(args: {
   pending.drain();
 }
 
-/** Process one candidate row. Returns `[closedDelta, skippedDelta]`. 1:1 with `_close_one_row`. */
+/** Process one candidate row. Returns `[closedDelta, skippedDelta]`. */
 async function closeOneRow(args: {
   row: CandidateRow;
   githubClient: GitHubApiClient;
@@ -359,7 +348,7 @@ async function closeOneRow(args: {
   }
 
   if (pulls.length === 0) {
-    // No open PR — already closed, or never had one. Skipped (no work), not an error. 1:1 with Python.
+    // No open PR — already closed, or never had one. Skipped (no work), not an error.
     PRS_SKIPPED.add(1, { reason: "not_found" });
     return [0, 1];
   }
@@ -388,7 +377,7 @@ async function closeOneRow(args: {
       if (e instanceof GitHubNotFoundError) {
         // BF-28: someone closed it between the list and the close. Desired end-state holds but we did
         // not perform the action — count as skipped to keep `_prs_closed` truthful + avoid a
-        // false-attribution audit row. 1:1 with the Python `continue` after the 404 warning.
+        // false-attribution audit row.
         console.info(
           `retention: close pre-empted (404) full_name=${row.full_name} pr=${pullNumber}`,
         );
@@ -422,7 +411,6 @@ async function closeOneRow(args: {
 /**
  * `runIdCloseStalePrsActivity` (registered `run_id_close_stale_prs`). Finds ephemeral review_runs older
  * than ttl and closes their open GitHub PRs. Returns `StalePrCloserResultV1{scanned, closed, skipped}`.
- * 1:1 with the Python `_close_stale_prs_impl`.
  */
 export async function runIdCloseStalePrsActivity(
   deps: ClosePrsDeps,
@@ -472,10 +460,10 @@ type RetireCandidateRow = {
 };
 
 /**
- * Run one raw `$N`-parameterized statement on a Kysely transaction and return its rows. The Python
- * retire sweep uses raw `text(...)` SQL (NOT the ORM query builder); this keeps the TS port byte-faithful
- * to that SQL while still threading the SAME Kysely tx that {@link emitWorkflowEvent} requires. Mirrors
- * the `sql\`\`.execute(tx)` idiom in `_workflow_events_repository`.
+ * Run one raw `$N`-parameterized statement on a Kysely transaction and return its rows. The retire
+ * sweep uses raw SQL (NOT the ORM query builder) while still threading the SAME Kysely tx that
+ * {@link emitWorkflowEvent} requires, following the `sql\`\`.execute(tx)` idiom in
+ * `_workflow_events_repository`.
  */
 async function txQuery<R>(
   tx: Transaction<unknown>,
@@ -506,7 +494,7 @@ function auditClientFor(tx: Transaction<unknown>): {
   };
 }
 
-/** SELECT for one retire batch — 1:1 with the Python candidate SQL (LEFT JOINs preserve orphans). */
+/** SELECT for one retire batch (LEFT JOINs preserve orphans). */
 const RETIRE_CANDIDATE_SQL =
   "SELECT wr.run_id, wr.review_id, wr.started_at, r.installation_id " +
   "FROM core.review_runs wr " +
@@ -519,7 +507,7 @@ const RETIRE_CANDIDATE_SQL =
   "LIMIT $2 " +
   "FOR UPDATE OF wr SKIP LOCKED";
 
-/** UPDATE … RETURNING for one retire batch — 1:1 with the Python (idempotent under Temporal retry). */
+/** UPDATE … RETURNING for one retire batch (idempotent under Temporal retry). */
 const RETIRE_UPDATE_SQL =
   "UPDATE core.review_runs " +
   "SET retired_at = $1, retention_reason = 'ttl_expired' " +
@@ -530,7 +518,7 @@ const RETIRE_UPDATE_SQL =
 
 /**
  * `runIdRetireOldRunsActivity` (registered `run_id_retire_old_runs`). Batched soft-delete of terminal
- * `review_runs` older than ttl. 1:1 with the Python `_retire_old_runs_impl` R1 invariants:
+ * `review_runs` older than ttl. R1 invariants:
  *   - `UPDATE … RETURNING` is the source of truth for "what was retired" (NOT the prior SELECT).
  *   - `FOR UPDATE OF wr SKIP LOCKED` lets overlapping janitor runs take disjoint slices.
  *   - Each batch is its own transaction (a mid-sweep failure doesn't roll back prior batches).
@@ -538,9 +526,8 @@ const RETIRE_UPDATE_SQL =
  *   - Sets BOTH `retired_at` and `retention_reason='ttl_expired'`.
  *   - Terminal filter is `COMPLETED`/`FAILED` only (CANCELLED/PARTIAL are durable diagnostic metadata).
  *
- * Returns `RunsRetentionResultV1{scanned, retired}` where both equal `total_retired` (the Python returns
- * scanned=retired=total_retired; orphans are included in total_retired, surfaced separately only via the
- * orphan OTel counter).
+ * Returns `RunsRetentionResultV1{scanned, retired}` where both equal `total_retired`; orphans are
+ * included in total_retired, surfaced separately only via the orphan OTel counter.
  */
 export async function runIdRetireOldRunsActivity(
   deps: RetentionSweepDeps,
@@ -563,8 +550,8 @@ export async function runIdRetireOldRunsActivity(
 
     await kysely.transaction().execute(async (tx) => {
       // The Kysely transaction owns the connection; the SELECT … FOR UPDATE, the UPDATE … RETURNING,
-      // every audit/workflow_event emit commit atomically per batch. Raw SQL is byte-faithful with the
-      // Python `text(...)` candidate + UPDATE statements.
+      // every audit/workflow_event emit commit atomically per batch. The candidate SELECT and UPDATE run
+      // as raw SQL.
       // tenant:exempt reason=cross-tenant-run-retention-sweep follow_up=PERMANENT-EXEMPTION-run-id-retention
       const candidates = await txQuery<RetireCandidateRow>(tx, RETIRE_CANDIDATE_SQL, [
         cutoff,
@@ -650,7 +637,7 @@ export async function runIdRetireOldRunsActivity(
   }
 
   // total_retired already covers ALL rows the UPDATE … RETURNING confirmed-transitioned, orphans
-  // included. The Python returns scanned=retired=total_retired.
+  // included; scanned=retired=total_retired.
   return RunsRetentionResultV1.parse({ scanned: totalRetired, retired: totalRetired });
 }
 
@@ -660,15 +647,14 @@ export async function runIdRetireOldRunsActivity(
 
 /**
  * `runIdDeleteOldEventsActivity` (registered `run_id_delete_old_events`). Hard-deletes
- * `audit.workflow_events` rows older than ttl in bounded batches. 1:1 with `_delete_old_events_impl`:
+ * `audit.workflow_events` rows older than ttl in bounded batches:
  *   - No per-row audit emit (workflow_events are correlation transients, not tenant-scoped actions).
  *   - Each batch is its own transaction; `FOR UPDATE SKIP LOCKED` on the inner SELECT lets overlapping
  *     janitor runs coexist.
  *   - Composite-key `WHERE (event_id, received_at) IN (…)` DELETE — required by the partitioned-parent
  *     shape (PK = (event_id, received_at)) so the planner can prune partitions on received_at.
- *   - The OTel `events_deleted` counter is emitted INLINE per batch (1:1 — the Python `_events_deleted`
- *     emit is inline, NOT post-commit; a retry after partial completion may slightly overcount, which
- *     is acceptable for telemetry).
+ *   - The OTel `events_deleted` counter is emitted INLINE per batch (NOT post-commit; a retry after
+ *     partial completion may slightly overcount, which is acceptable for telemetry).
  *
  * Returns `EventsRetentionResultV1{scanned, deleted, batches}` with scanned===deleted (the DELETE fuses
  * candidate-selection with mutation).
@@ -710,7 +696,7 @@ export async function runIdDeleteOldEventsActivity(
     if (rowCount === 0) break;
     totalDeleted += rowCount;
     batchesDone += 1;
-    // Inline counter (1:1 with the Python `_events_deleted.add(row_count)` — NOT post-commit).
+    // Inline counter (NOT post-commit).
     EVENTS_DELETED.add(rowCount);
   }
 
@@ -743,8 +729,7 @@ export async function runIdDeleteOldEventsActivity(
 /**
  * Construction options for {@link RunIdRetentionActivities}. The integrator injects the production
  * GitHub client (the Vault-token-backed {@link GitHubApiClient}) the PR-closer needs; `dsn` / `clock`
- * default to the env pool + {@link WallClock}. 1:1 in spirit with the Python `configure(*, github_client,
- * clock, session_factory)` DI hook.
+ * default to the env pool + {@link WallClock}.
  */
 export type RunIdRetentionActivitiesOptions = {
   /** The Vault-token-backed GitHub client the PR-closer uses. REQUIRED to run the PR-closer in prod. */
@@ -765,10 +750,9 @@ export type RunIdRetentionActivitiesOptions = {
  *   activities["run_id_retire_old_runs"]   = ret.runIdRetireOldRuns.bind(ret);
  *   activities["run_id_delete_old_events"] = ret.runIdDeleteOldEvents.bind(ret);
  *
- * Each method takes the workflow-supplied `ttlDays: number` (1:1 with the Python `@activity.defn`
- * boundary `(ttl_days: int)`) and delegates to the testable free-function impl with the injected deps.
- * The PR-closer throws a clear error if no `githubClient` was injected (fail-closed) — the activity
- * cannot list/close PRs without it.
+ * Each method takes the workflow-supplied `ttlDays: number` and delegates to the testable free-function
+ * impl with the injected deps. The PR-closer throws a clear error if no `githubClient` was injected
+ * (fail-closed) — the activity cannot list/close PRs without it.
  */
 export class RunIdRetentionActivities {
   private readonly githubClient: GitHubApiClient | undefined;

@@ -1,23 +1,15 @@
 /**
- * `RefreshSemanticDocsActivity` — registered Temporal activity name `refresh_semantic_docs_activity`.
- *
- * FAITHFUL 1:1 port of the frozen Python
- * `vendor/codemaster-py/codemaster/activities/refresh_semantic_docs.py::RefreshSemanticDocsActivity.refresh_semantic_docs`
+ * `RefreshSemanticDocsActivity` — registered Temporal activity name `refresh_semantic_docs_activity`
  * (Sprint 26 / B-3, with the R-7/R-17/R-36/R-38/R-49 multi-lens audit fixes 2026-05-22).
  *
- * Bound-method holder composing the ported pure-function helpers (`discoverKnowledgeDocs`,
- * `chunkMarkdown`, `embedDocChunks`) under one activity boundary so the workflow body stays thin (one
- * activity call + retry policy).
+ * Bound-method holder composing `discoverKnowledgeDocs`, `chunkMarkdown`, `embedDocChunks` under one
+ * activity boundary so the workflow body stays thin (one activity call + retry policy).
  *
- * ## Path Y (clone-first) — workspace-path input, NOT a GitHub contents port
+ * ## Path Y (clone-first) — workspace-path input
  *
- * The frozen Python receives an ALREADY-CLONED `workspace_path`: the workflow body invokes the
- * `clone_repository_activity` FIRST (the existing primitive shared with the review pipeline), then passes
- * the workspace path here. This activity reads the repo's knowledge docs from the LOCAL FILESYSTEM (via
- * `discoverKnowledgeDocs` + `node:fs`), NOT via a GitHub API port. This is the faithful Python shape and
- * matches the established `compute_policy_rules` activity (which also walks `input.workspace_path` via
- * `node:fs` in the Node runtime). See the agent-report divergence note vs the task brief's "injected
- * GitHub contents port" wording — the frozen Python does NOT use one here.
+ * The workflow body invokes `clone_repository_activity` FIRST, then passes the workspace path here.
+ * This activity reads the repo's knowledge docs from the LOCAL FILESYSTEM (via `discoverKnowledgeDocs`
+ * + `node:fs`), matching the established `compute_policy_rules` activity.
  *
  * ## R-5 ORPHAN-SWEEP EMPTY-CHUNKS GUARD
  *
@@ -28,28 +20,24 @@
  *
  * ## Failure modes (per the program plan §B-3)
  *   - Embed service unreachable / rate-limited → returns `retrieval_degraded=True` with the matching
- *     `degradation_reason`; the prior index is unchanged. The workflow body decides whether to surface
- *     or retry via Temporal default policy.
- *   - Workspace read failure on a doc → log-equivalent (skip) + continue (consistent with the existing
- *     refresh degradation contract).
+ *     `degradation_reason`; the prior index is unchanged.
+ *   - Workspace read failure on a doc → skip + continue.
  *
  * ## Typed-input envelope (CLAUDE.md invariant 11 / ADR-0047)
  *
- * The single positional input is {@link RefreshSemanticDocsInputV1}. The frozen Python activity takes a
- * second `workspace_path` positional + a third `custom_knowledge_paths` tuple; this port carries them in
- * one typed args object (`{ input, workspacePath, customKnowledgePaths }`) so the holder method stays a
- * single-arg surface for the worker registration the INTEGRATOR wires.
+ * The single positional input is {@link RefreshSemanticDocsInputV1}. Additional fields
+ * (`workspacePath`, `customKnowledgePaths`) are carried in the typed args object so the holder method
+ * stays a single-arg surface for the worker registration the INTEGRATOR wires.
  *
  * ## Runtime context
  *
  * Runs in the NORMAL Node runtime (NOT the workflow V8-isolate sandbox), so real `node:fs` reads + DB +
  * embed-service I/O are fine.
  *
- * ## Metrics divergence (surfaced for the verifier)
+ * ## Metrics divergence
  *
- * The Python calls `record_refresh_duration(...)` (OTel histogram). That `semantic_docs_metrics` module
- * is NOT yet ported on the TS side, so the metric EMIT is omitted; the `duration_ms` CONTRACT field is
- * still computed via the injected {@link Clock} (`monotonic()` deltas), so the wire result is byte-faithful.
+ * The `semantic_docs_metrics` OTel histogram is NOT yet ported, so the metric EMIT is omitted; the
+ * `duration_ms` CONTRACT field is still computed via the injected {@link Clock} (`monotonic()` deltas).
  */
 
 import { createHash } from "node:crypto";
@@ -75,7 +63,7 @@ import {
 
 import { type Clock, WallClock } from "#platform/clock.js";
 
-/** Typed single-arg envelope for the activity (closes the Python 3-positional dispatch). */
+/** Typed single-arg envelope for the activity. */
 export type RefreshSemanticDocsArgs = {
   readonly input: RefreshSemanticDocsInputV1;
   readonly workspacePath: string;
@@ -86,7 +74,7 @@ export type RefreshSemanticDocsArgs = {
   readonly customKnowledgePaths?: ReadonlyArray<string>;
 };
 
-/** Options for the {@link RefreshSemanticDocsActivity} constructor (1:1 with the Python `__init__`). */
+/** Options for the {@link RefreshSemanticDocsActivity} constructor. */
 export type RefreshSemanticDocsActivityOptions = {
   embeddings: EmbeddingsPort;
   chunkRepo: KnowledgeChunkRepoPort;
@@ -94,7 +82,7 @@ export type RefreshSemanticDocsActivityOptions = {
   clock?: Clock;
 };
 
-/** Bound-method holder for `refresh_semantic_docs_activity` (1:1 with the Python `RefreshSemanticDocsActivity`). */
+/** Bound-method holder for `refresh_semantic_docs_activity`. */
 export class RefreshSemanticDocsActivity {
   readonly #embeddings: EmbeddingsPort;
   readonly #chunkRepo: KnowledgeChunkRepoPort;
@@ -105,13 +93,13 @@ export class RefreshSemanticDocsActivity {
     this.#embeddings = opts.embeddings;
     this.#chunkRepo = opts.chunkRepo;
     this.#modelName = opts.modelName;
-    // 1:1 with the Python R-7 Clock injection (replaces the inline `time.monotonic_ns()` calls).
+    // R-7 Clock injection (replaces the former inline monotonic-clock calls).
     this.#clock = opts.clock ?? new WallClock();
   }
 
   /**
-   * Build the embed-service-degraded result (1:1 with the Python `_degraded_result` DRY helper). The two
-   * embed-failure branches were byte-identical except for `degradationReason`.
+   * Build the embed-service-degraded result (DRY helper). The two embed-failure branches differ only in
+   * `degradationReason`.
    */
   #degradedResult(args: {
     start: number;
@@ -131,8 +119,7 @@ export class RefreshSemanticDocsActivity {
   }
 
   /**
-   * Discover knowledge docs in `workspacePath`, chunk + embed them into `core.knowledge_chunks`. 1:1 with
-   * the frozen Python `refresh_semantic_docs`.
+   * Discover knowledge docs in `workspacePath`, chunk + embed them into `core.knowledge_chunks`.
    */
   public async refreshSemanticDocs(
     args: RefreshSemanticDocsArgs,
@@ -146,8 +133,7 @@ export class RefreshSemanticDocsActivity {
     const docsDiscovered = discovered.docs.length;
 
     // Step 2: chunk every discovered doc. R-17 — each file read is async (`node:fs/promises.readFile`)
-    // so the event loop yields between files and peer activities make progress (the Python wraps each
-    // synchronous `read_text` in `asyncio.to_thread`).
+    // so the event loop yields between files and peer activities make progress.
     const allChunks: Array<MarkdownChunkV1> = [];
     const chunkHashes = new Map<string, string>();
     for (const doc of discovered.docs) {
@@ -156,8 +142,7 @@ export class RefreshSemanticDocsActivity {
       try {
         body = await readFile(filePath, { encoding: "utf-8" });
       } catch {
-        // Doc unreadable (OSError / UnicodeDecodeError) — skip + continue (1:1 with the Python
-        // `except (OSError, UnicodeDecodeError)` skip branch).
+        // Doc unreadable — skip + continue.
         continue;
       }
       const chunks = chunkMarkdown({ relative_path: doc.relative_path, body });
@@ -167,8 +152,8 @@ export class RefreshSemanticDocsActivity {
       }
     }
 
-    // Step 3: embed + upsert. Returns degradation signal on embed-service failure (mirrors the Python
-    // R-38 DRY'd except branches). The R-5 empty-chunks orphan-sweep guard lives INSIDE embedDocChunks.
+    // Step 3: embed + upsert. Returns degradation signal on embed-service failure (R-38). The R-5
+    // empty-chunks orphan-sweep guard lives INSIDE embedDocChunks.
     let embedResult;
     try {
       embedResult = await embedDocChunks({
@@ -210,17 +195,15 @@ export class RefreshSemanticDocsActivity {
     });
   }
 
-  /** Exposed for parity with the Python constructor's clock dependency (kept reachable). */
+  /** Exposed for the clock dependency (kept reachable). */
   public clock(): Clock {
     return this.#clock;
   }
 }
 
 /**
- * sha256 hex digest of `text` (1:1 with the Python `_hash_text` =
- * `hashlib.sha256(text.encode("utf-8")).hexdigest()`). Deterministic hashing via `node:crypto` — NOT a
- * randomness seam; the clock/random gate permits `node:crypto` hashing in an activity (same as
- * `discover_repo_docs.ts`).
+ * sha256 hex digest of `text`. Deterministic hashing via `node:crypto` — NOT a randomness seam; the
+ * clock/random gate permits `node:crypto` hashing in an activity.
  */
 function hashText(text: string): string {
   return createHash("sha256").update(Buffer.from(text, "utf-8")).digest("hex");

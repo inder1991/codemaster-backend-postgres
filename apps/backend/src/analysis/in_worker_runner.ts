@@ -1,33 +1,21 @@
 /**
- * InWorkerRunner — 1:1 port of `vendor/codemaster-py/codemaster/analysis/in_worker_runner.py`
- * (Sprint 9 / S9.1.2a+b+c).
+ * InWorkerRunner — base class for subprocess-driven static-analysis runners that live inside the
+ * worker pod (ESLint, Ruff, Gitleaks). Runs a CLI tool with `cwd=workspace`, captures stdout /
+ * stderr / exit-code / wall-ms, and enforces a wall-clock timeout with a SIGTERM-then-SIGKILL grace
+ * that reaps the WHOLE process group (so a misbehaving tool that forks descendants can't outlive the
+ * budget).
  *
- * Base class for subprocess-driven static-analysis runners that live inside the worker pod (ESLint,
- * Ruff, Gitleaks). Runs a CLI tool with `cwd=workspace`, captures stdout / stderr / exit-code /
- * wall-ms, and enforces a wall-clock timeout with a SIGTERM-then-SIGKILL grace that reaps the WHOLE
- * process group (so a misbehaving tool that forks descendants can't outlive the budget).
+ * Process-group reaping in Node: `spawn` with `detached: true` calls `setsid()` → the child leads a
+ * new process group (PGID == PID). `process.kill(-pid, signal)` — a NEGATIVE pid — signals the entire
+ * process group, reaping any grandchildren. The pod/OS-level sandboxing (seccomp + prlimit +
+ * capability-drop) is owner-provided worker-image infra and is intentionally NOT reproduced here. The
+ * behavioral contract — timeout, kill-the-group, fail-open-on-missing-binary — IS reproduced.
  *
- * Process-group reaping in Node
- * -----------------------------
- * Python uses `os.setsid()` in a `preexec_fn` + `os.killpg(pid, sig)`. Node's `spawn` exposes
- * `detached: true`, which calls `setsid()` for us → the child becomes the leader of a new process
- * group whose PGID equals its PID. There is no `os.killpg` in Node; the POSIX idiom is
- * `process.kill(-pid, signal)` — a NEGATIVE pid signals the entire process group. That reaps any
- * grandchildren the tool spawned, matching the Python `killpg` semantics exactly.
- *
- * The Python seccomp + prlimit + capability-drop `preexec_fn` hardening (S9.1.2b) is pod/OS-level
- * sandboxing that has no Node analogue and is owner-provided worker-image infra (NetworkPolicy +
- * the OpenShift securityContext); it is intentionally NOT reproduced here. The behavioral contract
- * the orchestrator depends on — timeout, kill-the-group, fail-open-on-missing-binary — IS reproduced.
- *
- * Determinism / seams
- * -------------------
- *   - {@link SpawnFn}: the subprocess factory (default `node:child_process.spawn`). Tests inject a
- *     recorder, mirroring the Python tests monkeypatching `asyncio.create_subprocess_exec`.
+ * Seams:
+ *   - {@link SpawnFn}: the subprocess factory (default `node:child_process.spawn`). Tests inject a recorder.
  *   - Timeout + grace timers are armed via the transport-timeout seam
  *     (`#platform/transport_timeout.ts::transportAbortSignal`) — NOT raw `setTimeout` /
- *     `AbortSignal.timeout`, which the `check_clock_random` gate bans outside the seam. Identical to
- *     `apps/backend/src/integrations/git/cloner.ts`.
+ *     `AbortSignal.timeout`, which the `check_clock_random` gate bans outside the seam.
  *
  * Runtime context: activities run in the NORMAL Node runtime, NOT the workflow V8-isolate sandbox —
  * `child_process` is permitted here (it would be forbidden in the workflow body).
@@ -56,13 +44,13 @@ export const DEFAULT_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 const DEFAULT_SIGTERM_GRACE_SECONDS = 5;
 
 /**
- * The subprocess factory seam. Mirrors `node:child_process.spawn`'s shape so the default impl is
+ * The subprocess factory seam. Matches `node:child_process.spawn`'s shape so the default impl is
  * `spawn` itself; tests inject a recorder. The returned object needs only the surface this base
  * touches: `pid`, the `stdout`/`stderr` streams, the `error` + `close` events, and `kill`.
  */
 export type SpawnFn = (command: string, args: ReadonlyArray<string>, options: SpawnOptions) => ChildProcess;
 
-/** Captured outcome of one subprocess invocation. 1:1 with the Python `SubprocessResultV1`. */
+/** Captured outcome of one subprocess invocation. */
 export type SubprocessResultV1 = {
   readonly exit_code: number;
   readonly stdout: Uint8Array;
@@ -73,8 +61,7 @@ export type SubprocessResultV1 = {
 /**
  * Raised when the subprocess binary is missing on `$PATH` (ENOENT) or otherwise unspawnable — any
  * launch failure that is NOT the binary's own exit behaviour. The orchestrator translates this to a
- * `failed_startup` {@link import("#contracts/tool_status.v1.js").ToolStatusV1}. 1:1 with the Python
- * `SubprocessLaunchError`.
+ * `failed_startup` {@link import("#contracts/tool_status.v1.js").ToolStatusV1}.
  */
 export class SubprocessLaunchError extends Error {
   public readonly command: ReadonlyArray<string>;
@@ -91,8 +78,7 @@ export class SubprocessLaunchError extends Error {
 /**
  * Raised when the subprocess exceeds the timeout. By the time this fires the runner has SIGKILLed
  * the entire process group, so no orphaned children remain. Carries the elapsed wall-ms. The
- * orchestrator translates this to a `failed_runtime` (or `timed_out`) status. 1:1 with the Python
- * `SubprocessTimeoutError`.
+ * orchestrator translates this to a `failed_runtime` (or `timed_out`) status.
  */
 export class SubprocessTimeoutError extends Error {
   public readonly command: ReadonlyArray<string>;
@@ -126,7 +112,7 @@ export class SubprocessOomError extends Error {
   }
 }
 
-/** `repr`-style quoting so the error message mirrors Python's `{command!r}` (tuple of strings). */
+/** `repr`-style quoting for the error message (tuple of strings). */
 function formatCommand(command: ReadonlyArray<string>): string {
   return `(${command.map((c) => `'${c}'`).join(", ")})`;
 }
@@ -313,7 +299,7 @@ export class InWorkerRunner {
   /**
    * SIGTERM the child's process group, wait up to the grace window, then SIGKILL anything still
    * alive. Relies on `detached: true` having given the child its own process group (PGID == PID), so
-   * `process.kill(-pid, sig)` signals the whole group — the Node analogue of Python's `os.killpg`.
+   * `process.kill(-pid, sig)` signals the whole process group.
    */
   private async killProcessGroup(
     proc: ChildProcess,
@@ -322,7 +308,7 @@ export class InWorkerRunner {
     const pid = proc.pid;
     if (pid === undefined) return; // never spawned cleanly; nothing to reap.
 
-    // SIGTERM the group. Swallow ESRCH (already dead) — mirrors Python's `except ProcessLookupError`.
+    // SIGTERM the group. Swallow ESRCH (the group is already dead).
     if (!signalGroup(pid, "SIGTERM")) return;
 
     const exitedAfterTerm = await Promise.race([
@@ -343,7 +329,7 @@ export class InWorkerRunner {
 
 /**
  * Signal an entire process group (`-pid`). Returns false (and swallows) when the group is already
- * gone (ESRCH) — the Node analogue of Python's `except ProcessLookupError: return`.
+ * gone (ESRCH).
  */
 function signalGroup(pid: number, signal: NodeJS.Signals): boolean {
   try {
@@ -356,7 +342,7 @@ function signalGroup(pid: number, signal: NodeJS.Signals): boolean {
   }
 }
 
-/** Extract a stable reason string from an unknown thrown value (mirrors Python `str(e)`). */
+/** Extract a stable reason string from an unknown thrown value. */
 function errorReason(e: unknown): string {
   if (e instanceof Error) return e.message;
   return String(e);

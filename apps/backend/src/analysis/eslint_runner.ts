@@ -1,9 +1,6 @@
 /**
- * EslintInWorkerRunner — 1:1 port of `vendor/codemaster-py/codemaster/analysis/eslint_runner.py`
- * (Sprint 9 / S9.1.3).
- *
- * Runs ESLint via the in-worker subprocess sandbox and parses its `--format=json` output into
- * {@link AnalysisFindingV1}s.
+ * EslintInWorkerRunner — runs ESLint via the in-worker subprocess sandbox and parses its
+ * `--format=json` output into {@link AnalysisFindingV1}s.
  *
  * Conventions:
  *   - Empty file list → no subprocess; return [].
@@ -15,9 +12,8 @@
  * ESLint severity → severity_raw: 1 → "warning", 2 → "error"; anything else passes through as the
  * string form of the integer.
  *
- * This module also OWNS {@link RunnerToolError} — in the frozen Python it is defined here and
- * imported by `ruff_runner.py` / `gitleaks_runner.py`; the TS port preserves that ownership so the
- * import graph matches.
+ * This module also OWNS {@link RunnerToolError} — imported by `ruff_runner.ts` / `gitleaks_runner.ts`
+ * to keep the import graph consistent.
  */
 
 import { InWorkerRunner, type SpawnFn, type SubprocessResultV1 } from "./in_worker_runner.js";
@@ -28,7 +24,7 @@ import { uuid4 } from "./uuid4.js";
 import { AnalysisFindingV1 } from "#contracts/analysis_findings.v1.js";
 import { type Clock } from "#platform/clock.js";
 
-/** ESLint integer severity → severity_raw string (1:1 with the Python `_ESLINT_SEVERITY_MAP`). */
+/** ESLint integer severity → severity_raw string. */
 const ESLINT_SEVERITY_MAP: ReadonlyMap<number, string> = new Map([
   [1, "warning"],
   [2, "error"],
@@ -36,7 +32,7 @@ const ESLINT_SEVERITY_MAP: ReadonlyMap<number, string> = new Map([
 
 /**
  * Raised when an analysis tool exits with a true failure code (≥ 2 for ESLint / Ruff / Gitleaks).
- * Carries stderr for diagnostics. 1:1 with the Python `RunnerToolError`.
+ * Carries stderr for diagnostics.
  */
 export class RunnerToolError extends Error {
   public readonly tool: string;
@@ -179,9 +175,8 @@ export function parseEslintOutput(
   return findings;
 }
 
-/** Mirror Python `int(x, default)` for the ESLint integer fields, which Python coerces eagerly via
- *  `int(msg.get("line", 1))`. A non-numeric value would raise in Python (the producer always emits
- *  ints); we fall back to the default for robustness without diverging on the real-tool path. */
+/** Coerce ESLint integer fields to int with a default. A non-numeric value falls back to the default
+ *  for robustness (the producer always emits ints). */
 function toIntOr(v: unknown, fallback: number): number {
   if (typeof v === "number" && Number.isFinite(v)) return Math.trunc(v);
   if (typeof v === "string") {

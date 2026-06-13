@@ -1,6 +1,5 @@
-// embedDocChunks — 1:1 port of the frozen Python
-// vendor/codemaster-py/codemaster/activities/embed_doc_chunks.py (Sprint 10 / S10.2.3, extended
-// Sprint 26 / B-1 + the R-5/R-12/R-13 multi-lens audit fixes 2026-05-22).
+// embedDocChunks (Sprint 10 / S10.2.3, extended Sprint 26 / B-1 + R-5/R-12/R-13 multi-lens audit
+// fixes 2026-05-22).
 //
 // Persist in-repo doc chunk embeddings to `core.knowledge_chunks`. Idempotent on `content_sha256` per
 // `(installation_id, repo_id, relative_path, chunk_index)` — chunks whose stored hash matches the
@@ -32,26 +31,25 @@ import { EmbedDocChunksResultV1 } from "#contracts/repo_docs.v1.js";
 
 import { uuid5 } from "#platform/randomness.js";
 
-// Embed service batch size. Aligned with EmbedRequest.texts max=128 (Python `_BATCH_SIZE = 128`).
+// Embed service batch size. Aligned with EmbedRequest.texts max=128.
 const BATCH_SIZE = 128;
 const EMBED_PURPOSE = "in_repo_doc";
 
 /**
- * Stable surrogate id for a chunk slot (1:1 with the Python `_chunk_id_for`). Computed deterministically
- * from the natural key so re-embedding the same key keeps the same id — review comments cite this as the
- * locator and the citation must remain stable across re-indexes.
+ * Stable surrogate id for a chunk slot. Computed deterministically from the natural key so
+ * re-embedding the same key keeps the same id — review comments cite this as the locator and the
+ * citation must remain stable across re-indexes.
  *
- * Python: `uuid.uuid5(repo_id, f"{relative_path}#{chunk_index}")` — note the NAMESPACE is `repo_id`
- * ITSELF (a UUID), not a fixed RFC-4122 namespace. The TS `uuid5(namespaceHex, name)` takes the namespace
- * as a hex string; `repoId` is already a UUID string, so it is passed straight through (byte-for-byte
- * parity with the Python derivation).
+ * Derived as `uuid5(repo_id, f"{relative_path}#{chunk_index}")` — the NAMESPACE is `repo_id` ITSELF
+ * (a UUID), not a fixed RFC-4122 namespace. The TS `uuid5(namespaceHex, name)` takes the namespace
+ * as a hex string; `repoId` is already a UUID string so it is passed straight through.
  */
 function chunkIdFor(args: { repoId: string; relativePath: string; chunkIndex: number }): string {
   return uuid5(args.repoId, `${args.relativePath}#${args.chunkIndex}`);
 }
 
 /**
- * Index `chunks` into `chunkRepo` using `embeddings`. 1:1 with the frozen Python `embed_doc_chunks`.
+ * Index `chunks` into `chunkRepo` using `embeddings`.
  *
  * Three passes:
  *   1. Partition into "needs embedding" vs "skip" via a bulk hash-lookup (R-12).
@@ -85,7 +83,7 @@ export async function embedDocChunks(args: {
     const newHash = chunkHashes.get(keyStr);
     if (newHash === undefined) {
       // Chunker emitted a chunk for which we have no file hash — programmer error upstream. Be defensive:
-      // embed so we don't silently drop content (1:1 with the Python `if new_hash is None` branch).
+      // embed so we don't silently drop content.
       toEmbed.push(c);
       continue;
     }
@@ -117,14 +115,13 @@ export async function embedDocChunks(args: {
       const vec = result.vectors[i];
       if (vec === undefined || vec.length !== EMBEDDING_DIM) {
         // Defensive — embed-service contract violation. Log + skip; don't corrupt the index with a
-        // zero-padded / wrong-shape vector (1:1 with the Python dim-mismatch skip).
+        // zero-padded / wrong-shape vector.
         return;
       }
       const newHash = chunkHashes.get(chunkKeyToStr(c.relative_path, c.chunk_index));
       if (newHash === undefined) {
-        // Cannot happen for a survivor that came from the hashed set, but the Python indexes
-        // chunk_hashes[(path, idx)] unconditionally here; mirror the "must have a hash to persist" intent
-        // by skipping rather than writing a NULL content_sha256.
+        // Cannot happen for a survivor that came from the hashed set, but skip rather than write a
+        // NULL content_sha256.
         return;
       }
       upsertRows.push({
@@ -152,7 +149,7 @@ export async function embedDocChunks(args: {
   // Refuse the orphan-sweep when `chunks` is empty. The intentional "customer removed all docs, sweep
   // stale rows" case is rare and best handled by a separate scheduled cleanup or admin operator command.
   // The default-safe behaviour here is to keep the prior index intact until a refresh with non-empty
-  // `chunks` actually runs (1:1 with the frozen Python Pass-3 guard).
+  // `chunks` actually runs.
   let deletedOrphans: number;
   if (chunks.length === 0) {
     // chunks=() — skip orphan-sweep to avoid wiping the entire index; prior rows retained.

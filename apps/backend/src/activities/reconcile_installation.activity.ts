@@ -1,41 +1,38 @@
 /**
  * `reconcileInstallation` activity — registered Temporal activity name `reconcile_installation_activity`.
  *
- * FAITHFUL 1:1 port of the frozen Python `@activity.defn("reconcile_installation_activity")`
- * (vendor/codemaster-py/codemaster/activities/reconcile_installation.py). Idempotent upsert into
- * `core.installations` + companion `core.users` / `core.ad_users` rows from a GitHub `installation`
- * event. Replaying the same event yields the same end state (INSERT … ON CONFLICT (github_installation_id)
- * DO UPDATE handles re-installs — a previously deleted/suspended row's `suspended_at` flips back to NULL).
+ * Idempotent upsert into `core.installations` + companion `core.users` / `core.ad_users` rows from a
+ * GitHub `installation` event. Replaying the same event yields the same end state (INSERT … ON CONFLICT
+ * (github_installation_id) DO UPDATE handles re-installs — a previously deleted/suspended row's
+ * `suspended_at` flips back to NULL).
  *
  * ## Runtime context
  *
  * Activities run in the NORMAL Node runtime (NOT the workflow V8-isolate sandbox), so real I/O is fine.
  * The activity input is the bare JSON dict = the serialized `GitHubInstallationPayloadV1`; the workflow
- * does NOT validate — this activity re-validates via the Zod contract at the boundary (1:1 with the
- * Python `GitHubInstallationPayloadV1.model_validate`).
+ * does NOT validate — this activity re-validates via the Zod contract at the boundary.
  *
  * ## DSN + transaction
  *
  * Reads `CODEMASTER_PG_CORE_DSN`, routes through the ADR-0062 process-shared single pool
- * ({@link tenantKysely}), and runs ALL mutations in ONE transaction (1:1 with the Python
- * `async with factory() as session: async with session.begin():`). The reconcile queries are raw
+ * ({@link tenantKysely}), and runs ALL mutations in ONE transaction. The reconcile queries are raw
  * `sql`...`` keyed on the GitHub surrogate, so they bypass the TenancyPlugin AST walk by construction.
  *
  * ## Deferred work (see // FOLLOW-UP markers)
  *
  *  - audit.audit_events emit (`installation.{action}` via emit_audit_event / bind_audit_context). The TS
  *    `audit/emit.ts` is built against an AuditQueryClient pg-client seam, not the Kysely tx this activity
- *    uses — the audit emit is DEFERRED in this port (already deferred in the TS port broadly). The audit
- *    `before` / `after` dicts ARE assembled (by the upsert helpers) so the wiring is a drop-in later.
+ *    uses — the audit emit is DEFERRED in this port. The audit `before` / `after` dicts ARE assembled (by
+ *    the upsert helpers) so the wiring is a drop-in later.
  *
- * ## Proactive repair kickoff (RH13 / W3.6 — the previously-deferred integrator step, now WIRED)
+ * ## Proactive repair kickoff (RH13 / W3.6)
  *
- * The Python enqueues RepairInstallationRepositoriesWorkflow via the shared dispatcher
- * (cooldown/blocked gate → outbox row → markAttempted, all in THIS transaction) at the end of the
- * activity, UNCONDITIONALLY (not gated on action), with trigger_source="installation_created" —
- * the belt-and-braces hydrate that backfills a fresh install's repos through the canonical
- * `GET /installation/repositories` even when the installation_repositories webhook is delayed,
- * batched oddly, or dropped outright (GitHub does not guarantee delivery — RH12).
+ * Enqueues RepairInstallationRepositoriesWorkflow via the shared dispatcher (cooldown/blocked gate →
+ * outbox row → markAttempted, all in THIS transaction) at the end of the activity, UNCONDITIONALLY (not
+ * gated on action), with trigger_source="installation_created" — the belt-and-braces hydrate that
+ * backfills a fresh install's repos through the canonical `GET /installation/repositories` even when the
+ * installation_repositories webhook is delayed, batched oddly, or dropped outright (GitHub does not
+ * guarantee delivery — RH12).
  */
 
 import { tenantKysely } from "#platform/db/database.js";
@@ -53,8 +50,6 @@ import {
 
 /**
  * The registered `reconcile_installation_activity` Temporal activity.
- *
- * 1:1 with reconcile_installation.py:190-263.
  */
 export async function reconcileInstallation(
   payloadDict: unknown,
@@ -68,9 +63,8 @@ export async function reconcileInstallation(
     );
   }
 
-  // The Python contract types `installation.account` as Optional, but the activity reads it
-  // unconditionally (the installation-event producer path always supplies it; the PR-backfill path
-  // synthesizes it). Faithful 1:1: read `.account` and fail loud if a payload reaches us without one.
+  // The installation-event producer path always supplies `.account`; the PR-backfill path synthesizes
+  // it. Read `.account` and fail loud if a payload reaches us without one.
   const account = payload.installation.account;
   if (account === undefined || account === null) {
     throw new Error(
@@ -109,7 +103,7 @@ export async function reconcileInstallation(
     // Deferred alongside the rest of the TS audit-emit port (audit/emit.ts uses an AuditQueryClient
     // pg-client seam, not this Kysely tx). The before/after dicts are already assembled in inst.
 
-    // RH13 (W3.6): the proactive repair kickoff — UNCONDITIONAL (Python does not gate on action),
+    // RH13 (W3.6): the proactive repair kickoff — UNCONDITIONAL (not gated on the action), running
     // in THIS same transaction so the outbox row + markAttempted commit atomically with the
     // installation/user upsert. The dispatcher owns the cooldown/blocked suppression + metrics; a
     // suppressed enqueue is a normal false return (the skip counter already fired inside).

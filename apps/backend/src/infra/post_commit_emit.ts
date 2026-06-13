@@ -1,6 +1,5 @@
 /**
  * Post-commit emit helper — fires OTel side-effects only after a successful transaction commit.
- * 1:1 behavioral port of the frozen Python `codemaster/infra/post_commit_emit.py`.
  *
  * Counter / histogram / up-down-counter mutations are non-rollback-safe: once `counter.add(1)` has
  * run, no DB rollback can undo it. Every spine primitive that emits OTel inside an open transaction
@@ -8,10 +7,8 @@
  *
  * ## Why a collector, not an event listener
  *
- * The Python source registers a SQLAlchemy `after_commit` / `after_rollback` listener pair on the
- * session: the queued callables fire only if the transaction COMMITS, and are dropped on rollback.
- * Kysely has NO event system, and `db.transaction().execute(fn)` already resolves AFTER the commit
- * has landed (and rejects — without ever resolving — on rollback). So the TS equivalent is a tiny
+ * Kysely has no event system, and `db.transaction().execute(fn)` already resolves AFTER the commit
+ * has landed (and rejects — without ever resolving — on rollback). The equivalent is a tiny
  * "pending emits" collector:
  *
  *   1. The caller creates a {@link PendingEmits} BEFORE opening the transaction.
@@ -20,21 +17,17 @@
  *   3. AFTER `db.transaction().execute(...)` RESOLVES successfully, the caller calls
  *      {@link PendingEmits.drain} exactly once to fire every queued callable.
  *   4. If the transaction THROWS / rolls back, the caller never reaches `drain()` — the queued
- *      callables are simply dropped (GC'd with the collector). This reproduces the Python
- *      `after_rollback` "drop unfired" semantics: no commit ⇒ no emit.
+ *      callables are simply dropped (GC'd with the collector): no commit ⇒ no emit.
  *
- * The collector is single-transaction-scoped by construction (one collector per transaction attempt),
- * so the per-transaction queue isolation the Python helper achieves by popping `info[_PENDING_KEY]`
- * is here just "make a fresh collector per transaction." A drained or never-drained collector should
+ * The collector is single-transaction-scoped by construction (one collector per transaction attempt —
+ * just make a fresh collector per transaction). A drained or never-drained collector should
  * not be reused.
  *
  * ## The "must not raise" contract
  *
  * A queued emit callable MUST NOT raise — but if a buggy one does, {@link PendingEmits.drain}
- * swallows + logs it (via `console.error`, the no-dep logging analogue) and continues draining the
- * rest, so one broken instrument cannot suppress the others or surface a spurious failure to a
- * caller that has already committed. This mirrors the Python `try/except Exception: _LOG.exception`
- * around each `emit_fn()`.
+ * swallows + logs it (`console.error`) and continues draining the rest, so one broken instrument
+ * cannot suppress the others or surface a spurious failure to a caller that has already committed.
  */
 
 /** A no-arg callable that performs a single OTel emit (e.g. `() => counter.add(1, { site })`). */
@@ -81,8 +74,7 @@ export class PendingEmits {
         emit();
       } catch (err) {
         // The emit contract is "must not raise"; a buggy emit cannot break the chain or fail a
-        // caller that already committed. No dep is added — console.error is the logging analogue of
-        // the Python `_LOG.exception("post-commit emit failed")`.
+        // caller that already committed.
         console.error("post-commit emit failed", err);
       }
     }
@@ -96,8 +88,8 @@ export class PendingEmits {
 
 /**
  * Queue `fn` on `pending` to be fired once the caller's transaction commits and the caller drains.
- * The TS analogue of the Python `emit_after_commit(session, fn)`: it does NOT fire `fn` here — it
- * only enqueues it. The caller fires the whole queue via {@link PendingEmits.drain} after the
+ * Does NOT fire `fn` here — only enqueues it. The caller fires the whole queue via
+ * {@link PendingEmits.drain} after the
  * transaction resolves; on rollback the caller never drains and `fn` is dropped.
  *
  * @param pending The transaction-scoped collector the caller created before opening the transaction.

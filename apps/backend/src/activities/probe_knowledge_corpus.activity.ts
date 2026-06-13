@@ -1,7 +1,7 @@
 // ProbeKnowledgeCorpusActivity — W2.4 (XH13) retrieval short-circuit probe.
 //
-// NEW activity introduced DURING the hardening waves (no frozen-Python counterpart — the Python ran
-// the full per-chunk hybrid retrieval unconditionally; XH13). ONE cheap EXISTS pair per review,
+// NEW activity introduced DURING the hardening waves (XH13): the prior design ran the full per-chunk
+// hybrid retrieval unconditionally. ONE cheap EXISTS pair per review,
 // dispatched by the orchestrator BEFORE the chunk fan-out and memoized on the review state, so a
 // 30–50-chunk PR against a knowledge-less repo no longer pays N embed RPCs + N hybrid retrievals
 // (3+ DB queries each) for provably-empty results.

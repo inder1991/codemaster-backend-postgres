@@ -1,9 +1,6 @@
 /**
- * `post_review_results` activity — 1:1 TypeScript port of the frozen Python
- * `vendor/codemaster-py/codemaster/activities/post_review_results.py` (the `_do_post` state machine +
- * its publication ladder + the per-finding renderers + the activity entry point).
- *
- * THE core durable-mutation seam of the spine: the CLAUDE.md invariant-12 publication-outcome state
+ * `post_review_results` activity — THE core durable-mutation seam of the spine: the CLAUDE.md
+ * invariant-12 publication-outcome state
  * machine layered over the Sprint-14.D 2-phase atomic-claim flow (closes audit B1.5 TOCTOU).
  *
  * ## The 2-phase atomic-claim flow (Sprint 14 / S14.D)
@@ -45,7 +42,7 @@
  *
  * The lost-claim age computation lives in the SELECT (`EXTRACT(EPOCH FROM (now() − posted_at))`) so there
  * is NO JS clock primitive to inject — Postgres `now()` is the source of truth (the same one the Phase-1
- * INSERT's `posted_at DEFAULT now()` used). Faithful to the Python, and replay-safe by construction.
+ * INSERT's `posted_at DEFAULT now()` used). Replay-safe by construction.
  *
  * ## Runtime context
  *
@@ -91,8 +88,7 @@ import { PostedReviewV1, PublicationOutcome } from "#contracts/posted_review.v1.
 // ─── constants ──────────────────────────────────────────────────────────────────────────────────
 
 /** Per-review inline-comment cap (matches Sprint-8's S8.3.4a per-review cap; the aggregator caps
- *  upstream — this activity asserts the contract on the KEPT (post-filter) set). 1:1 with the Python
- *  `MAX_INLINE_COMMENTS_PER_REVIEW`. */
+ *  upstream — this activity asserts the contract on the KEPT (post-filter) set). */
 export const MAX_INLINE_COMMENTS_PER_REVIEW = 50;
 
 /**
@@ -100,18 +96,16 @@ export const MAX_INLINE_COMMENTS_PER_REVIEW = 50;
  * row with `github_review_id IS NULL` overloads two meanings: in-flight (winner between Phase 1 and
  * Phase 2 → raise so Temporal retries) vs terminal-degraded (winner double-422'd, left the row NULL by
  * design → return DEGRADED_UNPOSTED). The age cutoff defaults to 300s (5 min); MUST be ≥ the activity's
- * start_to_close_timeout. 1:1 with the Python `_IN_FLIGHT_WINDOW_SECONDS_DEFAULT`.
+ * start_to_close_timeout.
  */
 export const IN_FLIGHT_WINDOW_SECONDS_DEFAULT = 300;
 
-/** The hidden HTML-comment marker embedded in the review body for idempotent re-post lookup. 1:1 with
- *  the Python `_marker_for`. */
+/** The hidden HTML-comment marker embedded in the review body for idempotent re-post lookup. */
 export function markerFor(prId: string): string {
   return `<!-- codemaster:review-marker:${prId} -->`;
 }
 
-// ─── severity + review-type prefix mapping (Phase 1 PR-1a) ──────────────────────────────────────
-// 1:1 with the Python `_SEVERITY_PREFIX` / `_CATEGORY_REVIEW_TYPE` / `_finding_prefix_line`.
+// ─── severity + review-type prefix mapping ───────────────────────────────────────────────────────
 
 const SEVERITY_PREFIX: Readonly<Record<string, string>> = {
   blocker: "🔴 Critical",
@@ -133,8 +127,7 @@ const CATEGORY_REVIEW_TYPE: Readonly<Record<string, string>> = {
 };
 
 /** The two-token italic header that opens every inline comment. `severity === "nit"` always renders as
- *  "🧹 Nitpick" regardless of category. Defensive lookups keep posting on a future enum bump. 1:1 with
- *  the Python `_finding_prefix_line`. */
+ *  "🧹 Nitpick" regardless of category. Defensive lookups keep posting on a future enum bump. */
 function findingPrefixLine(f: ReviewFindingV1): string {
   let reviewType: string;
   if (f.severity === "nit") {
@@ -152,8 +145,7 @@ function findingPrefixLine(f: ReviewFindingV1): string {
   return `_${reviewType}_ | _${severityLabel}_`;
 }
 
-// ─── inline source citation (Phase 1 PR-1b) ─────────────────────────────────────────────────────
-// 1:1 with the Python `_AUTHORITY_RANK` / `_inline_source_line`.
+// ─── inline source citation ──────────────────────────────────────────────────────────────────────
 
 const AUTHORITY_RANK: Readonly<Record<string, number>> = {
   knowledge_chunk: 0,
@@ -162,13 +154,12 @@ const AUTHORITY_RANK: Readonly<Record<string, number>> = {
 };
 
 /** The blockquote inline-citation line for the highest-authority source, or "" when no sources. Shape
- *  `"\n\n> 📎 Source: \`<locator>\`"` so callers can unconditionally concatenate. 1:1 with the Python
- *  `_inline_source_line`. */
+ *  `"\n\n> 📎 Source: \`<locator>\`"` so callers can unconditionally concatenate. */
 function inlineSourceLine(sources: ReadonlyArray<CitationV1>): string {
   if (sources.length === 0) {
     return "";
   }
-  // min by authority rank — first occurrence wins ties (matches Python `min(..., key=...)`).
+  // min by authority rank — first occurrence wins ties.
   let top = sources[0]!;
   let topRank = AUTHORITY_RANK[top.kind] ?? 99;
   for (const s of sources) {
@@ -181,9 +172,9 @@ function inlineSourceLine(sources: ReadonlyArray<CitationV1>): string {
   return `\n\n> 📎 Source: \`${top.locator}\``;
 }
 
-// ─── citation footnote block (render_sources_block — ported inline; Sprint 10 / S10.1.3) ─────────
-// 1:1 with the frozen `codemaster/review/citation_renderer.py::render_sources_block`. Ported inline here
-// (its sole consumer) rather than as a separate module — the only call site is the inline-comment body.
+// ─── citation footnote block ──────────────────────────────────────────────────────────────────────
+// Ported inline here (its sole consumer) rather than as a separate module — the only call site is the
+// inline-comment body.
 
 const KIND_LABEL: Readonly<Record<string, string>> = {
   repo_path: "repo",
@@ -208,7 +199,7 @@ function formatOneCitation(idx: number, c: CitationV1): string {
 }
 
 /** Render the per-finding footnote block. Returns "" when `sources` is empty (callers concatenate
- *  unconditionally). 1:1 with `render_sources_block`. */
+ *  unconditionally). */
 function renderSourcesBlock(sources: ReadonlyArray<CitationV1>): string {
   if (sources.length === 0) {
     return "";
@@ -217,9 +208,7 @@ function renderSourcesBlock(sources: ReadonlyArray<CitationV1>): string {
   return `\n\n---\n**Sources:**\n\n${body}`;
 }
 
-// ─── inline-comment construction ────────────────────────────────────────────────────────────────
-// 1:1 with the Python `_InlineComment` / `_suggestion_block` / `_finding_to_inline_comment` /
-// `_serialise_inline`.
+// ─── inline-comment construction ─────────────────────────────────────────────────────────────────
 
 /** One inline comment payload before serialisation. `startLine` is only set for multi-line comments. */
 type InlineComment = {
@@ -267,9 +256,9 @@ function serialiseInline(c: InlineComment): ReviewComment {
   return out;
 }
 
-/** Embed the marker into the walkthrough body. Idempotent (a re-post finds the same marker). 1:1 with
- *  the Python `_build_review_body`. `droppedSectionMd` defaults to "" — when present it begins with the
- *  leading horizontal-rule separator so concatenation is unconditional. */
+/** Embed the marker into the walkthrough body. Idempotent (a re-post finds the same marker).
+ *  `droppedSectionMd` defaults to "" — when present it begins with the leading horizontal-rule separator
+ *  so concatenation is unconditional. */
 export function buildReviewBody(args: {
   walkthroughMd: string;
   prId: string;
@@ -279,14 +268,12 @@ export function buildReviewBody(args: {
   return `${args.walkthroughMd}\n\n${marker}\n${args.droppedSectionMd ?? ""}`;
 }
 
-// ─── finding classifier (diff-window containment) ───────────────────────────────────────────────
-// 1:1 with the Python `_classify_findings_against_diff` and its helper predicates. The TS port pins the
-// production-default STRICT_CONTAINMENT mode (the OVERLAP_LEGACY emergency-revert env override is not
-// wired here — STRICT is the only production-legitimate predicate; restoring the smoke-#82 failure mode
-// on a running cluster has no operational use case).
+// ─── finding classifier (diff-window containment) ────────────────────────────────────────────────
+// STRICT_CONTAINMENT mode only (the OVERLAP_LEGACY emergency-revert env override is not wired here —
+// STRICT is the only production-legitimate predicate; restoring the smoke-#82 failure mode on a running
+// cluster has no operational use case).
 
-/** EligibilityReason drop-reason vocabulary (1:1 with `codemaster/domain/review_findings/
- *  eligibility_reasons.py::EligibilityReason` .value strings). */
+/** EligibilityReason drop-reason vocabulary. */
 const DROP_FILE_NOT_IN_DIFF = "file_not_in_diff";
 const DROP_LINE_AFTER_LAST_HUNK = "line_after_last_hunk";
 const DROP_LINE_BEFORE_FIRST_HUNK = "line_before_first_hunk";
@@ -318,7 +305,7 @@ function spansMultipleHunks(f: ReviewFindingV1, ranges: ReadonlyArray<Hunk>): bo
 }
 
 /** Pick the drop reason for a finding that failed strict containment. Priority order is LOAD-BEARING
- *  (before-first → after-last → spans-hunks → in-gap catch-all). 1:1 with `_classify_drop_reason`. */
+ *  (before-first → after-last → spans-hunks → in-gap catch-all). */
 function classifyDropReason(f: ReviewFindingV1, ranges: ReadonlyArray<Hunk>): string {
   if (isBeforeFirstHunk(f, ranges)) {
     return DROP_LINE_BEFORE_FIRST_HUNK;
@@ -332,15 +319,13 @@ function classifyDropReason(f: ReviewFindingV1, ranges: ReadonlyArray<Hunk>): st
   return DROP_LINE_IN_UNCHANGED_GAP;
 }
 
-/** STRICT_CONTAINMENT accept predicate: some `(lo, hi)` satisfies `lo <= start AND end <= hi`. 1:1 with
- *  the Python `_finding_accepted` STRICT_CONTAINMENT branch (the production default). */
+/** STRICT_CONTAINMENT accept predicate: some `(lo, hi)` satisfies `lo <= start AND end <= hi`. */
 function findingAccepted(f: ReviewFindingV1, ranges: ReadonlyArray<Hunk>): boolean {
   return ranges.some(([lo, hi]) => lo <= f.start_line && f.end_line <= hi);
 }
 
 /** Classify each finding by whether its coordinates lie fully inside a single diff hunk. Files absent
- *  from `changedLineRanges` → every finding for them is dropped FILE_NOT_IN_DIFF. 1:1 with
- *  `_classify_findings_against_diff` under the default STRICT_CONTAINMENT mode. */
+ *  from `changedLineRanges` → every finding for them is dropped FILE_NOT_IN_DIFF. */
 function classifyFindingsAgainstDiff(
   findings: ReadonlyArray<ReviewFindingV1>,
   changedLineRanges: Readonly<Record<string, ReadonlyArray<Hunk>>>,
@@ -364,8 +349,7 @@ function classifyFindingsAgainstDiff(
   return results;
 }
 
-// ─── "Additional findings detected" walkthrough section ─────────────────────────────────────────
-// 1:1 with the Python dropped-findings section renderer (bucket classifier + caps + char-cap).
+// ─── "Additional findings detected" walkthrough section ──────────────────────────────────────────
 
 type Bucket = "security" | "correctness" | "nits";
 
@@ -394,7 +378,7 @@ const SECTION_CAP = 30;
 const SECTION_CHAR_CAP = 8 * 1024;
 const SECTION_CHAR_CAP_SLACK = 256;
 
-/** First `linter_rule` citation's locator, or "" if none. 1:1 with `_rule_id_from_sources`. */
+/** First `linter_rule` citation's locator, or "" if none. */
 function ruleIdFromSources(sources: ReadonlyArray<CitationV1>): string {
   for (const s of sources) {
     if (s.kind === "linter_rule") {
@@ -404,8 +388,7 @@ function ruleIdFromSources(sources: ReadonlyArray<CitationV1>): string {
   return "";
 }
 
-/** Map a finding to its walkthrough-section bucket (category signal beats rule-id heuristic). 1:1 with
- *  `_finding_bucket`. */
+/** Map a finding to its walkthrough-section bucket (category signal beats rule-id heuristic). */
 function findingBucket(finding: ReviewFindingV1): Bucket {
   if (finding.category === "security") {
     return "security";
@@ -423,7 +406,7 @@ function findingBucket(finding: ReviewFindingV1): Bucket {
   return "nits";
 }
 
-/** Minimal markdown escape for link-text / code-span content. 1:1 with `_md_escape_text`. */
+/** Minimal markdown escape for link-text / code-span content. */
 function mdEscapeText(s: string): string {
   return s
     .split("\\")
@@ -436,8 +419,7 @@ function mdEscapeText(s: string): string {
     .join(" ");
 }
 
-/** GitHub blob URL anchoring at `path#Lline`; falls back to HEAD when `headSha` is empty. 1:1 with
- *  `_deep_link`. */
+/** GitHub blob URL anchoring at `path#Lline`; falls back to HEAD when `headSha` is empty. */
 function deepLink(args: {
   owner: string;
   repo: string;
@@ -449,7 +431,7 @@ function deepLink(args: {
   return `https://github.com/${args.owner}/${args.repo}/blob/${ref}/${args.path}#L${args.line}`;
 }
 
-/** One bullet line for a dropped finding. 1:1 with `_render_bullet_line`. */
+/** One bullet line for a dropped finding. */
 function renderBulletLine(
   finding: ReviewFindingV1,
   ctx: { owner: string; repo: string; headSha: string },
@@ -468,7 +450,7 @@ function renderBulletLine(
   return `- [\`${safeFile}:${finding.start_line}\`](${link})${ruleSegment} — ${safeTitle}`;
 }
 
-/** Render SECURITY or CORRECTNESS bucket lines. 1:1 with `_render_top_bucket_lines`. */
+/** Render SECURITY or CORRECTNESS bucket lines. */
 function renderTopBucketLines(args: {
   bucket: Bucket;
   items: ReadonlyArray<ReviewFindingV1>;
@@ -490,7 +472,7 @@ function renderTopBucketLines(args: {
 }
 
 /** Render the NITS bucket (collapsed `<details>` block, or a one-line overflow notice under section-cap
- *  pressure). 1:1 with `_render_nits_lines`. */
+ *  pressure). */
 function renderNitsLines(args: {
   nits: ReadonlyArray<ReviewFindingV1>;
   suppressItems: boolean;
@@ -522,16 +504,16 @@ function renderNitsLines(args: {
   return out;
 }
 
-/** Hard byte-truncate when over the section char cap; re-balances any unclosed `<details>`. 1:1 with
- *  `_apply_character_cap` (measures UTF-8 BYTES, not chars). */
+/** Hard byte-truncate when over the section char cap; re-balances any unclosed `<details>`. Measures
+ *  UTF-8 BYTES, not chars. */
 function applyCharacterCap(rendered: string): string {
   const encoded = Buffer.from(rendered, "utf-8");
   if (encoded.length <= SECTION_CHAR_CAP) {
     return rendered;
   }
   const budget = SECTION_CHAR_CAP - SECTION_CHAR_CAP_SLACK;
-  // Decode with the lossy default (errors="ignore" analogue): slicing mid-codepoint yields U+FFFD; we
-  // strip trailing replacement chars to mirror Python's "drop the partial trailing codepoint".
+  // Decode lossily: slicing mid-codepoint yields U+FFFD; we strip trailing replacement chars to drop
+  // the partial trailing codepoint.
   let truncated = encoded.subarray(0, budget).toString("utf-8");
   truncated = truncated.replace(/�+$/u, "");
   let footer =
@@ -545,8 +527,7 @@ function applyCharacterCap(rendered: string): string {
 }
 
 /** Render the 'Additional findings detected' walkthrough section from DROPPED classifications. Returns
- *  "" when zero are dropped (caller omits both the rule and the section). 1:1 with
- *  `_render_dropped_findings_section`. */
+ *  "" when zero are dropped (caller omits both the rule and the section). */
 function renderDroppedFindingsSection(args: {
   classifications: ReadonlyArray<Classification>;
   owner: string;
@@ -622,7 +603,7 @@ function renderDroppedFindingsSection(args: {
 
 // ─── typed errors ───────────────────────────────────────────────────────────────────────────────
 
-/** The PR was closed between workflow start + this post (GitHub 422). 1:1 with `PrClosedError`. */
+/** The PR was closed between workflow start + this post (GitHub 422). */
 export class PrClosedError extends Error {
   public constructor(message: string) {
     super(message);
@@ -630,8 +611,7 @@ export class PrClosedError extends Error {
   }
 }
 
-/** codemaster lacks pull_requests:write on this repo (GitHub 403/401). 1:1 with
- *  `PostReviewPermissionError`. */
+/** codemaster lacks pull_requests:write on this repo (GitHub 403/401). */
 export class PostReviewPermissionError extends Error {
   public constructor(message: string) {
     super(message);
@@ -639,8 +619,7 @@ export class PostReviewPermissionError extends Error {
   }
 }
 
-/** GitHub 5xx / lost-claim in-flight / DB-inconsistency; caller (Temporal) should retry. 1:1 with
- *  `PostReviewTransientError`. */
+/** GitHub 5xx / lost-claim in-flight / DB-inconsistency; caller (Temporal) should retry. */
 export class PostReviewTransientError extends Error {
   public constructor(message: string) {
     super(message);
@@ -651,7 +630,7 @@ export class PostReviewTransientError extends Error {
 // ─── publication ladder (inline → body-only fallback) ───────────────────────────────────────────
 
 /** Outcome of the publication ladder. `created === null` IFF both attempts raised
- *  GitHubUnprocessableError (the caller then returns DEGRADED_UNPOSTED). 1:1 with `_PublicationAttempt`. */
+ *  GitHubUnprocessableError (the caller then returns DEGRADED_UNPOSTED). */
 type PublicationAttempt = {
   created: CreatedReviewV1 | null;
   inlineSucceeded: boolean;
@@ -662,7 +641,7 @@ type PublicationAttempt = {
  * Publication ladder (v7-A3): POST with inline comments → on GitHub 422 retry body-only (comments=[])
  * → on a SECOND 422 return `{ created: null, … }` so the caller returns DEGRADED_UNPOSTED WITHOUT
  * raising. Non-422 errors (5xx, network, auth) PROPAGATE normally (the caller's `doPost` wraps them per
- * H-2). 1:1 with `_attempt_create_with_body_only_fallback`.
+ * H-2).
  */
 export async function attemptCreateWithBodyOnlyFallback(args: {
   ghClient: GhReviewClient;
@@ -864,13 +843,8 @@ async function attemptSameRunTakeover(args: {
 }
 
 // ─── best-effort OTel counters (publication outcome + drop reasons) ──────────────────────────────
-// 1:1 with `record_post_review_publication_total` / `record_findings_dropped_outside_diff`. Best-effort:
-// failures are swallowed; the activity NEVER blocks on observability. Counters are emitted INLINE (NOT
-// via PendingEmits) exactly as the Python does — these are terminal-outcome signals, not txn-coupled.
-//
-// NOTE: the Python uses `installation_id` + `repo` as labels. The TS metric-seam convention prefers
-// bounded-cardinality labels only, but parity with the Python wire-shape is preserved here (faithful
-// port). The cardinality tightening is a separate observability concern, not this activity's job.
+// Best-effort: failures are swallowed; the activity NEVER blocks on observability. Counters are emitted
+// INLINE (NOT via PendingEmits) — these are terminal-outcome signals, not txn-coupled.
 
 const POST_REVIEW_PUBLICATION_COUNTER: Counter = getMeter(
   "codemaster.activities.post_review_results",
@@ -901,7 +875,7 @@ const COMMENT_IDS_REPAIR_NEEDED_COUNTER: Counter = getMeter(
     "No labels (bounded cardinality).",
 });
 
-/** Best-effort emit of the publication-outcome counter. 1:1 with `_record_publication_outcome`. */
+/** Best-effort emit of the publication-outcome counter. */
 function recordPublicationOutcome(prMeta: PrMetaV1, outcome: PublicationOutcome): void {
   try {
     POST_REVIEW_PUBLICATION_COUNTER.add(1, {
@@ -915,7 +889,7 @@ function recordPublicationOutcome(prMeta: PrMetaV1, outcome: PublicationOutcome)
 }
 
 /** Dual-emit the dropped-findings counter (legacy aggregated label + per-reason labels). Each emit is
- *  independent best-effort. 1:1 with `_emit_drop_metrics`. */
+ *  independent best-effort. */
 function emitDropMetrics(args: {
   installationId: string;
   repo: string;
@@ -985,11 +959,11 @@ function parseStoredCommentIds(raw: string | null): Array<number> {
 
 /**
  * The JSON-safe dropped-state details packed into the {@link ActivityError}.details[0] the publication
- * ladder raises when GitHub fails AFTER the classifier partitioned findings into kept/dropped (H-2). 1:1
- * with the frozen Python `_build_dropped_state_details` return shape: `dropped_classifications` as a list of
- * `{schema_version, index, eligibility_reason}` dicts, `kept_finding_indices` as int[], and
- * `posted_review_pr_id` as a string. The workflow-body handler ({@link extractDroppedStateFromPostFailure}
- * in posting.ts) reads exactly this shape to dispatch `record_delivery_skipped` for the dropped rows.
+ * ladder raises when GitHub fails AFTER the classifier partitioned findings into kept/dropped (H-2):
+ * `dropped_classifications` as `{schema_version, index, eligibility_reason}[]`, `kept_finding_indices`
+ * as int[], and `posted_review_pr_id` as a string. The workflow-body handler
+ * ({@link extractDroppedStateFromPostFailure} in posting.ts) reads exactly this shape to dispatch
+ * `record_delivery_skipped` for the dropped rows.
  */
 function buildDroppedStateDetails(args: {
   droppedClassifications: ReadonlyArray<DroppedClassificationV1>;
@@ -1001,7 +975,7 @@ function buildDroppedStateDetails(args: {
   posted_review_pr_id: string;
 } {
   return {
-    // The DroppedClassificationV1 entries are already JSON-safe Zod objects (= the Python model_dump shape);
+    // The DroppedClassificationV1 entries are already JSON-safe Zod objects;
     // spread to a fresh array so the details payload is an own-property array Temporal's converter serializes.
     dropped_classifications: [...args.droppedClassifications],
     kept_finding_indices: [...args.keptIndices],
@@ -1044,8 +1018,7 @@ export type DoPostDeps = {
 
 /**
  * Post (or update) the review on GitHub, atomically claiming the PR so two concurrent Temporal retries
- * cannot both POST. The full Sprint-14.D 2-phase flow + the v7 publication-outcome state machine. 1:1
- * with the frozen Python `_do_post`.
+ * cannot both POST. The full Sprint-14.D 2-phase flow + the v7 publication-outcome state machine.
  */
 export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promise<PostedReviewV1> {
   const {
@@ -1150,10 +1123,10 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
   await db.transaction().execute(async (txTyped) => {
     const tx = txTyped as unknown as Transaction<unknown>;
 
-    // AD-4 stale-write guard inside a raw SAVEPOINT (1:1 with the Python begin_nested + sp.commit on
-    // error). RELEASE — not ROLLBACK TO — on a throw so the guard's STALE_WRITE_BLOCKED INSERT is merged
-    // into the outer transaction, then the throw propagates out of .execute() → outer rollback (so a
-    // superseded run wins NEITHER the claim NOR — at the outer level — the merged forensic row).
+    // AD-4 stale-write guard inside a raw SAVEPOINT. RELEASE — not ROLLBACK TO — on a throw so the
+    // guard's STALE_WRITE_BLOCKED INSERT is merged into the outer transaction, then the throw propagates
+    // out of .execute() → outer rollback (so a superseded run wins NEITHER the claim NOR the merged
+    // forensic row).
     await sql`SAVEPOINT sp_post_review_claim`.execute(tx);
     try {
       await assertCurrentRun({
@@ -1185,7 +1158,7 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
 
   if (wonClaim) {
     // ── WON the claim: run the publication ladder (HTTP, no DB tx held). ──
-    // H-2 (1:1 with the Python `_do_post` won-claim try/except): wrap ONLY the publication ladder so a
+    // H-2: wrap ONLY the publication ladder so a
     // non-422 failure (5xx after retries, network error, auth error, etc.) converts into a typed
     // ActivityError carrying the classifier output. The workflow body's `postReviewResults` closure
     // reads `appErr.details[0]` (via extractDroppedStateFromPostFailure) to dispatch
@@ -1195,7 +1168,7 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
     // an exception-type whitelist. `droppedClassifications`, `keptIndices`, and `prMeta.pr_id` were all
     // computed BEFORE the atomic claim INSERT above, so they're in scope on every code path here.
     // Boundary: the double-422 DEGRADED case is a RETURN value (`attempt.created === null`), NOT a throw,
-    // so it falls OUTSIDE this try — only a thrown non-422 ladder error is wrapped (matching Python).
+    // so it falls OUTSIDE this try — only a thrown non-422 ladder error is wrapped.
     // W4.3 (gate ①): no NEW GitHub write starts after abort. Gate OUTSIDE the H-2 try so the
     // TerminalCancelError propagates as itself (it must NOT be rewrapped into the dropped-state
     // ActivityError). The claim row stays NULL (github_review_id never set) → W3.2 recovers it.
@@ -1217,7 +1190,7 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
         message: "post-review failed; classifier state preserved for skip-dispatch",
         type: POST_REVIEW_FAILED_WITH_DROPPED_STATE,
         // nonRetryable LEFT DEFAULT (false): the contract we OWN is the payload-preservation, NOT the
-        // retry semantics; the workflow's retry policy controls the retry decision (1:1 with Python).
+        // retry semantics; the workflow's retry policy controls the retry decision.
         nonRetryable: false,
         details: [
           buildDroppedStateDetails({
@@ -1467,12 +1440,12 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
     });
   }
 
-  // A prior winner published. Dispatch the idempotent body-refresh update. H-2 (1:1 with the Python
-  // lost-claim try/except): wrap ONLY the update_review call so a GitHub-side failure on the update path
+  // A prior winner published. Dispatch the idempotent body-refresh update. H-2: wrap ONLY the
+  // update_review call so a GitHub-side failure on the update path
   // ALSO preserves classifier state via ActivityError.details — same shape + same payload as the
   // won-claim wrap above. The classifier output is IDENTICAL here: this branch uses the SAME
   // `keptIndices` + `droppedClassifications` computed at the top of doPost (BEFORE the atomic claim), so
-  // the state survives both publication paths. The message carries the "(update path)" variant per Python.
+  // the state survives both publication paths. The message carries the "(update path)" variant.
   // W4.3 (gate ①): no NEW GitHub write starts after abort. Gate OUTSIDE the H-2 try so the
   // TerminalCancelError propagates as itself (not rewrapped into the dropped-state ActivityError).
   throwIfAborted(deps.signal);
@@ -1488,7 +1461,7 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
     throw new ActivityError({
       message: "post-review failed (update path); classifier state preserved for skip-dispatch",
       type: POST_REVIEW_FAILED_WITH_DROPPED_STATE,
-      // nonRetryable LEFT DEFAULT (false) — same rationale as the won-claim wrap (1:1 with Python).
+      // nonRetryable LEFT DEFAULT (false) — same rationale as the won-claim wrap.
       nonRetryable: false,
       details: [
         buildDroppedStateDetails({
@@ -1541,11 +1514,9 @@ export async function doPost(input: PostReviewInputV1, deps: DoPostDeps): Promis
 /**
  * The registered `post_review_results` Temporal activity (single typed-input envelope per CLAUDE.md
  * invariant 11). Resolves the DSN from `CODEMASTER_PG_CORE_DSN` + the numeric GitHub installation id from
- * the activity input (`github_installation_id` — per-review routing, replacing the removed
- * `CODEMASTER_GITHUB_INSTALLATION_ID` env pin), constructs the production {@link GitHubApiReviewClient} over a
+ * the activity input (per-review routing), constructs the production {@link GitHubApiReviewClient} over a
  * {@link GitHubApiClient} (Vault token provider + the shared GitHub HTTP transport), and delegates to
- * {@link doPost}. Mirrors the sibling `postCheckRun` wiring (ONE token provider → ONE GitHubApiClient →
- * wrapped client) and is 1:1 in intent with the frozen Python `PostReviewActivity.post_review_results`.
+ * {@link doPost}.
  */
 export async function postReviewResults(input: PostReviewInputV1): Promise<PostedReviewV1> {
   const parsed = PostReviewInputV1.parse(input);
@@ -1567,7 +1538,7 @@ export async function postReviewResults(input: PostReviewInputV1): Promise<Poste
   }
   const clock = new WallClock();
   // One GitHub HTTP transport shared by the token-provider's JWT→installation-token mint AND the
-  // GitHubApiClient's review calls (mirrors the frozen-Python worker passing one `_http_client` to both).
+  // GitHubApiClient's review calls.
   const githubHttp = new FetchGitHubHttpClient({});
   const vault = VaultHttpPort.fromEnv();
   const tokenProvider = await GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });

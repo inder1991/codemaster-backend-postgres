@@ -1,8 +1,7 @@
 /**
- * Run-state lifecycle activities — REAL de-stubbed ports of the frozen Python `@activity.defn`s in
- * `vendor/codemaster-py/codemaster/activities/record_review_lifecycle.py` (Phase 4 Task 4 + BF-5 + BF-13).
+ * Run-state lifecycle activities (Phase 4 Task 4 + BF-5 + BF-13).
  *
- * The review activity composes the analysis-stage milestones into the `audit.workflow_events` stream and
+ * Composes the analysis-stage milestones into the `audit.workflow_events` stream and
  * advances `core.review_runs.lifecycle_state` to its terminal state at the boundaries of the workflow.
  * This module owns the four activities the workflow body calls at those boundaries:
  *
@@ -53,8 +52,8 @@ import type {
 } from "#contracts/record_review_lifecycle_inputs.v1.js";
 
 /**
- * Granular event types {@link recordReviewLifecycleEvent} is allowed to emit (1:1 with the Python
- * `_ALLOWED_GRANULAR_EVENTS`). `FINDINGS_PERSISTED` is intentionally excluded — see the module docstring.
+ * Granular event types {@link recordReviewLifecycleEvent} is allowed to emit. `FINDINGS_PERSISTED` is
+ * intentionally excluded — see the module docstring.
  */
 export const ALLOWED_GRANULAR_EVENTS: ReadonlySet<string> = new Set<string>([
   "ANALYSIS_STARTED",
@@ -88,8 +87,7 @@ function resolveDb(deps: RecordReviewLifecycleDeps): Kysely<unknown> {
 }
 
 /**
- * Emit ONE granular `audit.workflow_events` row, idempotently (1:1 with the frozen Python
- * `record_review_lifecycle_event_activity`).
+ * Emit ONE granular `audit.workflow_events` row, idempotently.
  *
  * Pre-INSERT idempotency: a SELECT under the open transaction checks whether an event of this type
  * already exists for the `run_id`. If so, the call is a no-op — Temporal at-least-once retries must NOT
@@ -98,7 +96,7 @@ function resolveDb(deps: RecordReviewLifecycleDeps): Kysely<unknown> {
  * this path (those have dedicated emit sites), and (belt-and-braces) against {@link EVENT_TYPES} so a
  * future schema bump catches allow-list drift.
  *
- * @throws {Error} `event_type` not in {@link ALLOWED_GRANULAR_EVENTS} (the Python `ValueError`), OR not in
+ * @throws {Error} `event_type` not in {@link ALLOWED_GRANULAR_EVENTS}, OR not in
  *                 {@link EVENT_TYPES} (the table-CHECK defensive analogue).
  */
 export async function recordReviewLifecycleEvent(
@@ -194,10 +192,9 @@ async function driveTransition(
 }
 
 /**
- * Transition the run RUNNING → COMPLETED via the lifecycle primitive (1:1 with the frozen Python
- * `finalize_review_run_activity`). AD-8 idempotency: a Temporal retry observes ALREADY_APPLIED (the run
- * is already COMPLETED) and is a no-op — no second `lifecycle_transition` event, no second
- * terminal-timestamp stamp.
+ * Transition the run RUNNING → COMPLETED via the lifecycle primitive. AD-8 idempotency: a Temporal
+ * retry observes ALREADY_APPLIED (the run is already COMPLETED) and is a no-op — no second
+ * `lifecycle_transition` event, no second terminal-timestamp stamp.
  *
  * @throws {StateDrift} the run row is missing OR the current `lifecycle_state` is neither RUNNING nor
  *                      COMPLETED (e.g. drifted to CANCELLED via a concurrent supersede).
@@ -222,8 +219,8 @@ export async function finalizeReviewRun(
 }
 
 /**
- * Transition the run RUNNING → FAILED via the lifecycle primitive (BF-5; 1:1 with the frozen Python
- * `record_run_failed_activity`). Closes the AD-7 invariant `failed_at NOT NULL ⇒ state='FAILED'`: every
+ * Transition the run RUNNING → FAILED via the lifecycle primitive (BF-5). Closes the AD-7 invariant
+ * `failed_at NOT NULL ⇒ state='FAILED'`: every
  * failure path stamps `failed_at` + emits one `lifecycle_transition` event with `to='FAILED'`. AD-8
  * idempotency: a Temporal retry observes ALREADY_APPLIED and is a no-op.
  *
@@ -251,8 +248,8 @@ export async function recordRunFailed(
 }
 
 /**
- * Transition the run RUNNING → CANCELLED via the lifecycle primitive (BF-13; 1:1 with the frozen Python
- * `record_run_cancelled_activity`). Distinct from supersede-driven cancellation (which goes through the
+ * Transition the run RUNNING → CANCELLED via the lifecycle primitive (BF-13). Distinct from
+ * supersede-driven cancellation (which goes through the
  * dedicated `supersede_run` primitive and stamps `superseded_by_run_id`): this path stamps `cancelled_at`
  * only — the run was cancelled by an external signal, not displaced by a newer run. Closes the AD-7
  * invariant `cancelled_at NOT NULL ⇒ state='CANCELLED'`. AD-8 idempotency: a Temporal retry observes

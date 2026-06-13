@@ -1,10 +1,8 @@
 /**
- * `computePolicyRules` activity — Phase-2.1 core-loop activity #4 port. 1:1 in intent with the frozen
- * Python `@activity.defn compute_policy_rules`
- * (vendor/codemaster-py/codemaster/activities/compute_policy_rules.py): the workflow-callable wrapper
- * over the deterministic A-1 → A-2 → A-3 chain.
+ * `computePolicyRules` activity — workflow-callable wrapper over the deterministic A-1 → A-2 → A-3
+ * chain (CLAUDE.md invariant 11 / ADR-0047).
  *
- * ## The chain (ported EXACTLY)
+ * ## The chain
  *
  *   1. validate input.
  *   2. if NOT `knowledge_enabled` → return `ComputedPolicyRulesV1{ bundles: {}, truncated: false }`
@@ -23,14 +21,10 @@
  * byte-identical envelope (no clock/random; `node:crypto` sha256 is content-addressable; fs reads are
  * sorted before the cap).
  *
- * ## Typed-input envelope — CLAUDE.md invariant 11 / ADR-0047 closure
+ * ## Typed-input envelope — CLAUDE.md invariant 11 / ADR-0047
  *
- * The frozen Python activity takes `payload_dict: dict` and validates it internally
- * (`ComputePolicyRulesInputV1.model_validate(payload_dict)`) — a dict-dispatch deviation from the
- * single-typed-input invariant. This port takes the TYPED {@link ComputePolicyRulesInputV1} directly;
- * the Temporal DataConverter handles serialization on the wire, so the activity body never re-validates
- * a raw dict. That CLOSES the dict-dispatch deviation, matching the sibling ported activities
- * (`classifyFiles`, `aggregateFindings`).
+ * Takes the TYPED {@link ComputePolicyRulesInputV1} directly; the Temporal DataConverter handles
+ * serialization on the wire, so the activity body never re-validates a raw dict.
  *
  * ## Runtime context (vs. the workflow body)
  *
@@ -53,7 +47,7 @@ import {
 } from "#contracts/policy_compute.v1.js";
 import { type ResolvedGuidanceBundleV1 } from "#contracts/resolved_guidance.v1.js";
 
-// ─── M9 caps (W4.4 — TS hardening divergence; the frozen Python has neither) ─────────────────────
+// ─── M9 caps (W4.4 — TS hardening divergence) ─────────────────────────────────────────────────────
 // The A-1 cap bounds FILES (MAX_GUIDELINE_FILES_PER_REPO = 200), not RULES — a code-fence-confused
 // or list-heavy doc set can mint rules far past anything useful — and `changed_paths` had NO cap, so
 // resolution was unbounded O(changed_paths × total_rules) synchronous CPU. Both caps surface through
@@ -78,8 +72,8 @@ function yieldToEventLoop(): Promise<void> {
   });
 }
 
-/** Python-parity dedup + sort of custom patterns (`tuple(sorted(set(...)))`; UTF-16 code-unit order
- *  matches Python's str sort on the ASCII pattern domain). */
+/** Dedup + sort of custom patterns (`tuple(sorted(set(...)))`; UTF-16 code-unit order matches on the
+ *  ASCII pattern domain). */
 function dedupSortPatterns(patterns: ReadonlyArray<string>): Array<string> {
   return [...new Set(patterns)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
@@ -109,9 +103,9 @@ function cappedChangedPaths(
 }
 
 /**
- * The A-1 → A-2 → A-3 chain, ported EXACTLY (short-circuit + dedup/sort + discover + flatMap-extract +
- * per-path resolve). Pure orchestration over the three ported helpers — exported so the Tier-1 parity
- * oracle drives the same chain the activity runs (mirrors the frozen Python activity body).
+ * The A-1 → A-2 → A-3 chain (short-circuit + dedup/sort + discover + flatMap-extract + per-path
+ * resolve). Pure orchestration over the three ported helpers — exported so the Tier-1 parity oracle
+ * drives the same chain the activity runs.
  *
  * Returns the `ComputedPolicyRulesV1` envelope. When `knowledge_enabled` is false it short-circuits to
  * empty bundles WITHOUT walking the workspace (no `discoverGuidelineFiles` call).
@@ -122,7 +116,7 @@ export function computePolicyChain(input: ComputePolicyRulesInputV1): ComputedPo
     return ComputedPolicyRulesV1.parse({ schema_version: 1, bundles: {}, truncated: false });
   }
 
-  // Step 3: dedup + sort the custom patterns (Python `tuple(sorted(set(input.custom_patterns)))`).
+  // Step 3: dedup + sort the custom patterns.
   const customPatterns = dedupSortPatterns(input.custom_patterns);
 
   // Step 4: A-1 discovery walk.

@@ -1,23 +1,18 @@
-// TreeSitterTsJsChunker — 1:1 port of the frozen Python chunker
-// (vendor/codemaster-py/codemaster/chunking/treesitter_tsjs.py).
-//
-// AST-aware chunker for TypeScript / TSX / JavaScript / JSX. Emits one DiffChunkV1 per top-level
-// function declaration, class declaration, or `const fn = () => {...}` arrow / function-expression
-// assignment. Methods live inside their class chunk. Files with no AST candidates (constants-only)
-// fall back to a single module-level chunk; parse errors fall back to the same single chunk + WARN
-// log. The chunker itself NEVER raises on unparseable input.
+// TreeSitterTsJsChunker — AST-aware chunker for TypeScript / TSX / JavaScript / JSX. Emits one
+// DiffChunkV1 per top-level function declaration, class declaration, or `const fn = () => {...}`
+// arrow / function-expression assignment. Methods live inside their class chunk. Files with no AST
+// candidates (constants-only) fall back to a single module-level chunk; parse errors fall back to the
+// same single chunk + WARN log. The chunker itself NEVER raises on unparseable input.
 //
 // LINE-BASED / encoding-agnostic (ADR-0067 cond 5): chunk spans derive from tree-sitter
-// startPosition.row / endPosition.row (= Python node.start_point[0] / .end_point[0]) plus the
-// endPosition.column===0 backup, and the body is sliced BY LINES (splitlines keepends). NO byte
-// offsets, NO UTF-16↔UTF-8 mapping — rows + column-0 match the Python reference byte-for-byte.
+// startPosition.row / endPosition.row plus the endPosition.column===0 backup, and the body is sliced
+// BY LINES (splitlines keepends). NO byte offsets, NO UTF-16↔UTF-8 mapping.
 //
 // ── tsx grammar (JSX) ───────────────────────────────────────────────────────────────────────────────
-// `.tsx` routes through tree-sitter-typescript's `language_tsx()` variant, which parses JSX — exactly
-// as the frozen Python chunker does. The tsx grammar is vendored as grammars/tree-sitter-tsx.wasm
-// (pinned in manifest.json) and the loader's `tsx` entry points at it. Parity verified: byte-identical
-// parse + DiffChunkV1 output to the Python reference on jsx_body.tsx (per-decl chunks, not the module
-// fallback).
+// `.tsx` routes through tree-sitter-typescript's `language_tsx()` variant, which parses JSX. The tsx
+// grammar is vendored as grammars/tree-sitter-tsx.wasm (pinned in manifest.json) and the loader's
+// `tsx` entry points at it. Parity verified: byte-identical parse + DiffChunkV1 output on
+// jsx_body.tsx (per-decl chunks, not the module fallback).
 
 import {
   computeChunkId,
@@ -29,12 +24,11 @@ import { getParser, type GrammarName } from "./treesitter_loader.js";
 import { DiffTooLargeError, type HunkRange, MAX_DIFF_LINES } from "./treesitter_python.js";
 
 // Re-export the shared port primitives so callers can import the whole chunker surface from this
-// module (mirrors the Python module re-using chunker_port's HunkRange / DiffTooLargeError /
-// MAX_DIFF_LINES).
+// module.
 export { DiffTooLargeError, MAX_DIFF_LINES };
 export type { HunkRange };
 
-/** Port of treesitter_tsjs.py::_LANG_BY_EXT — file extension → tree-sitter grammar kind. */
+/** File extension → tree-sitter grammar kind. */
 const LANG_BY_EXT: Readonly<Record<string, GrammarName>> = {
   ".ts": "typescript",
   ".tsx": "tsx",
@@ -44,24 +38,23 @@ const LANG_BY_EXT: Readonly<Record<string, GrammarName>> = {
   ".cjs": "javascript",
 };
 
-/** AST node types that name a top-level reviewable unit. Port of _FUNCTION_NODE_TYPES. */
+/** AST node types that name a top-level reviewable unit. */
 const FUNCTION_NODE_TYPES: ReadonlySet<string> = new Set([
   "function_declaration",
   "function_expression",
 ]);
-/** Port of _CLASS_NODE_TYPES. */
+/** Class declaration node types. */
 const CLASS_NODE_TYPES: ReadonlySet<string> = new Set([
   "class_declaration",
   "abstract_class_declaration",
 ]);
-/** Wrappers we descend through to find the underlying declaration. Port of _EXPORT_WRAPPER_TYPES. */
+/** Wrappers we descend through to find the underlying declaration. */
 const EXPORT_WRAPPER_TYPES: ReadonlySet<string> = new Set([
   "export_statement",
   "export_default_declaration",
 ]);
 /** The two lexical-declaration node types whose `const fn = () => {}` / `= function() {}` initializer
- *  the chunker promotes to a function-kind chunk. Port of the `("lexical_declaration",
- *  "variable_declaration")` tuple in _chunk_kind_for_node. */
+ *  the chunker promotes to a function-kind chunk. */
 const LEXICAL_DECL_TYPES: ReadonlySet<string> = new Set([
   "lexical_declaration",
   "variable_declaration",
@@ -84,9 +77,8 @@ type TsNode = {
 // Newline byte (0x0A). assertDiffSize counts these to reject oversize diffs without decoding.
 const NEWLINE_BYTE = 0x0a;
 
-/** Port of chunker_port.py::_assert_diff_size. Counts newline BYTES (avoids decoding on the reject
- *  path); a body not ending in a newline still counts its final partial line. Identical to the python
- *  chunker's copy — kept local so this module owns its own entry guard. */
+/** Counts newline BYTES (avoids decoding on the reject path); a body not ending in a newline still
+ *  counts its final partial line. Kept local so this module owns its own entry guard. */
 function assertDiffSize(body: Uint8Array): void {
   if (body.length === 0) {
     return;
@@ -105,24 +97,21 @@ function assertDiffSize(body: Uint8Array): void {
   }
 }
 
-/** Port of treesitter_tsjs.py::_overlaps. */
+/** Returns true when range [startA, endA] overlaps [startB, endB]. */
 function overlaps(startA: number, endA: number, startB: number, endB: number): boolean {
   return startA <= endB && endA >= startB;
 }
 
-/** Port of treesitter_tsjs.py::_estimate_tokens — `max(1, len(body) // 4)`. `len(body)` is the
- *  CODE-POINT length (Python str length); `//` is floor division → Math.trunc on a non-negative. */
+/** `max(1, len(body) // 4)` — code-point length, floor division. */
 function estimateTokens(body: string): number {
   const codePointLen = [...body].length;
   return Math.max(1, Math.trunc(codePointLen / 4));
 }
 
-// ── Python str.splitlines(keepends=True) ────────────────────────────────────────────────────────────
+// ── splitlines, keepends ────────────────────────────────────────────────────────────────────────
 // Parity-critical: the chunker slices lines[start-1:end] where start/end are tree-sitter rows, so the
-// line array MUST be split exactly as the frozen Python str.splitlines(keepends=True). Python's line
-// boundaries are the full Unicode set; \r\n is ONE boundary. We replicate that set verbatim (identical
-// to the python chunker's copy). The production corpus is LF-only, but porting the quirk keeps
-// arbitrary input byte-identical.
+// line array MUST split on the full Unicode line-boundary set with \r\n as ONE boundary. The
+// production corpus is LF-only, but the full boundary set keeps arbitrary input byte-identical.
 const LINE_BOUNDARY_CODEPOINTS: ReadonlySet<number> = new Set([
   0x0a, // \n  line feed
   0x0d, // \r  carriage return
@@ -136,12 +125,11 @@ const LINE_BOUNDARY_CODEPOINTS: ReadonlySet<number> = new Set([
   0x2029, // paragraph separator
 ]);
 
-/** Port of Python `str.splitlines(keepends=True)`: split into lines INCLUDING their terminators, with
- *  \r\n treated as a single terminator. A trailing terminator does NOT yield an empty final element
- *  (matching Python). */
+/** Split into lines INCLUDING their terminators, with \r\n treated as a single terminator.
+ *  A trailing terminator does NOT yield an empty final element. */
 function splitlinesKeepends(text: string): Array<string> {
   const out: Array<string> = [];
-  const chars = [...text]; // code-point iteration (matches Python str semantics)
+  const chars = [...text]; // iterate by code point, not UTF-16 code unit
   let lineStart = 0;
   let i = 0;
   while (i < chars.length) {
@@ -167,9 +155,8 @@ function splitlinesKeepends(text: string): Array<string> {
   return out;
 }
 
-/** Port of Path(path).suffix.lower() — the lowercased final extension (including the dot), or "" when
- *  there is none. Matches CPython's pathlib suffix semantics: leading-dot names ('.bashrc') and names
- *  ending in a dot ('foo.') have NO suffix. */
+/** Lowercased final extension (including the dot), or "" when there is none. Leading-dot names
+ *  ('.bashrc') and names ending in a dot ('foo.') have NO suffix. */
 function lowerSuffix(path: string): string {
   const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
   const name = slash >= 0 ? path.slice(slash + 1) : path;
@@ -182,20 +169,20 @@ function lowerSuffix(path: string): string {
 }
 
 /**
- * Port of TreeSitterTsJsChunker. The frozen class lazily caches parsers at class level; here the
- * loader (treesitter_loader.ts) owns the process-wide parser cache, so this chunker is a thin,
- * stateless adapter — construct once at worker boot, reuse across files (selector.py rationale).
+ * AST-aware TS/JS/JSX chunker. The loader (`treesitter_loader.ts`) owns the process-wide parser
+ * cache, so this chunker is a thin, stateless adapter — construct once at worker boot, reuse across
+ * files.
  */
 export class TreeSitterTsJsChunker {
-  /** Port of `_kind_for` — extension → grammar kind, defaulting to typescript. */
+  /** Extension → grammar kind, defaulting to typescript. */
   private static kindFor(path: string): GrammarName {
     const ext = lowerSuffix(path);
     // eslint-disable-next-line security/detect-object-injection -- `ext` indexes a frozen const map; absence → default, not undefined-injection
     return LANG_BY_EXT[ext] ?? "typescript";
   }
 
-  /** Port of `_language_label_for` — the persisted `language` label (typescript for .ts/.tsx, else
-   *  javascript). NOTE: this is the human label, distinct from the grammar kind (tsx ≠ a label). */
+  /** The persisted `language` label (typescript for .ts/.tsx, else javascript). NOTE: this is the
+   *  human label, distinct from the grammar kind (tsx ≠ a label). */
   private static languageLabelFor(path: string): "typescript" | "javascript" {
     const ext = lowerSuffix(path);
     if (ext === ".ts" || ext === ".tsx") {
@@ -205,11 +192,10 @@ export class TreeSitterTsJsChunker {
   }
 
   /**
-   * Port of `chunk`. Carve `body` into review-sized chunks anchored on changed lines.
+   * Carve `body` into review-sized chunks anchored on changed lines.
    *
    * @param path workspace-relative path; selects the grammar + language label, copied onto each chunk.
-   * @param body raw file bytes; decoded UTF-8 with replacement (matches Python
-   *   `body.decode("utf-8", errors="replace")`) for parsing + line-slicing.
+   * @param body raw file bytes; decoded UTF-8 with replacement for parsing + line-slicing.
    * @param hunkRanges inclusive 1-based (start, end) pairs of changed lines; empty → whole file.
    */
   async chunk(args: {
@@ -221,15 +207,15 @@ export class TreeSitterTsJsChunker {
     assertDiffSize(body);
     const kind = TreeSitterTsJsChunker.kindFor(path);
     const language = TreeSitterTsJsChunker.languageLabelFor(path);
-    // errors="replace": one U+FFFD per invalid byte, identical to Python bytes.decode(errors=replace).
+    // errors="replace" semantics: exactly one U+FFFD per invalid byte (a load-bearing invariant).
     const decoded = new TextDecoder("utf-8").decode(body);
     if (decoded === "") {
       return [];
     }
 
     let candidates: Array<DiffChunkV1>;
-    // web-tree-sitter Trees hold WASM-heap memory that JS GC does NOT reclaim (the Python bindings free
-    // it automatically). Extract the plain DiffChunkV1 candidate data, then delete() the tree in
+    // web-tree-sitter Trees hold WASM-heap memory that JS GC does NOT reclaim automatically.
+    // Extract the plain DiffChunkV1 candidate data, then delete() the tree in
     // `finally` so a long-lived worker processing many PRs does not leak WASM memory.
     let tree: { rootNode: unknown; delete(): void } | null = null;
     try {
@@ -265,8 +251,8 @@ export class TreeSitterTsJsChunker {
   }
 
   // ── candidate extraction ──────────────────────────────────────────────────────────────────────
-  /** Port of `_extract_candidates`. Walk the top-level declarations (descending through export
-   *  wrappers); emit one chunk per function / class / arrow-or-function-expression const assignment. */
+  /** Walk the top-level declarations (descending through export wrappers); emit one chunk per
+   *  function / class / arrow-or-function-expression const assignment. */
   private extractCandidates(args: {
     root: TsNode;
     body: string;
@@ -310,8 +296,8 @@ export class TreeSitterTsJsChunker {
     return out;
   }
 
-  /** Port of `_iter_top_level_decls` — yield every top-level declaration node, descending through
-   *  export-statement wrappers but no further. */
+  /** Yield every top-level declaration node, descending through export-statement wrappers but no
+   *  further. */
   private static *iterTopLevelDecls(root: TsNode): Generator<TsNode> {
     for (const child of root.children) {
       if (child === null) {
@@ -329,7 +315,7 @@ export class TreeSitterTsJsChunker {
     }
   }
 
-  /** Port of `_chunk_kind_for_node` — function / class / arrow-or-fn-expr const → kind, else null. */
+  /** function / class / arrow-or-fn-expr const → kind, else null. */
   private static chunkKindForNode(node: TsNode): DiffChunkKind | null {
     if (FUNCTION_NODE_TYPES.has(node.type)) {
       return "function";
@@ -354,8 +340,8 @@ export class TreeSitterTsJsChunker {
   }
 
   // ── fallback ──────────────────────────────────────────────────────────────────────────────────
-  /** Port of `_fallback_module`: a single module-level chunk spanning the whole file, or — when hunk
-   *  ranges are present — the clamped union window of the changed lines. */
+  /** A single module-level chunk spanning the whole file, or — when hunk ranges are present — the
+   *  clamped union window of the changed lines. */
   private fallbackModule(args: {
     path: string;
     body: string;

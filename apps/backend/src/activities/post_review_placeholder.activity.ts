@@ -1,16 +1,13 @@
 /**
- * `post_review_placeholder` activity — 1:1 TypeScript port of the frozen Python
- * `vendor/codemaster-py/codemaster/activities/post_review_placeholder.py` (Phase 1 PR-1c).
- *
- * Posts a short "reviewing this PR..." placeholder **PR conversation-tab comment** (issue comment)
- * immediately when the review workflow starts — after the gate accepts the PR, before the heavy
- * clone/classify/chunk/review work runs. Engineers see life on the PR within ~5 seconds of webhook
- * receipt instead of a 30-120s silent gap.
+ * `post_review_placeholder` activity — posts a short "reviewing this PR..." placeholder **PR
+ * conversation-tab comment** (issue comment) immediately when the review workflow starts — after the gate
+ * accepts the PR, before the heavy clone/classify/chunk/review work runs. Engineers see life on the PR
+ * within ~5 seconds of webhook receipt instead of a 30-120s silent gap.
  *
  * ## Surface choice — issue comment, NOT review
  *
  * The placeholder uses the issue-comment surface (POST /issues/{n}/comments) NOT the review surface
- * (POST /pulls/{n}/reviews) — three reasons, all preserved from the Python docstring:
+ * (POST /pulls/{n}/reviews) — three reasons:
  *   1. The heavy `post_review_results._do_post` activity claims `core.posted_reviews` atomically
  *      (Sprint 14 / S14.D). The placeholder does NOT participate in that claim — the correctness-load-
  *      bearing review path stays completely untouched.
@@ -38,20 +35,17 @@
  * `CODEMASTER_REVIEW_PLACEHOLDER_ENABLED` is enabled by DEFAULT; only an explicit `"0"` disables it
  * (unset / "1" / any other value enables). The flag is read INSIDE {@link postReviewPlaceholder} (not at
  * module import) so a Helm value flip takes effect on the next workflow without a worker restart. NOTE:
- * the default-ON polarity INTENTIONALLY DIVERGES from the frozen Python (`os.getenv(...) != "1"`, opt-in)
- * per the platform-owner "enabled everytime" directive — see {@link placeholderEnabled}.
+ * the default-ON polarity is INTENTIONAL (a deliberate divergence from the prior opt-in default) per the
+ * platform-owner "enabled everytime" directive — see {@link placeholderEnabled}.
  *
- * ## DI idiom (matches the sibling `allocate_workspace` / `post_review_results` ports)
+ * ## DI idiom
  *
- * The Python uses a module-level `configure(gh_client, session_factory, clock)` + `_require_configured`.
- * The TS port follows the established activity idiom instead: a pure inner function {@link doPostPlaceholder}
- * that takes its collaborators as INJECTED deps (so unit tests drive it with a stub GitHub client + a stub
- * audit-emit callback, and the DB-integration test drives it with the real {@link emitWorkflowEvent} over a
- * disposable PG), plus a thin Temporal-activity wrapper {@link postReviewPlaceholder} that constructs the
- * production GitHub client (Vault-token-provider → GitHubApiClient → GitHubApiReviewClient) + the
- * audit-emit closure (a transaction over the ADR-0062 shared pool). The `not_configured` RuntimeError
- * swallow has no analogue here — the wrapper's deps are constructed unconditionally, so the
- * "configure() was never called" failure mode is structurally unreachable in TS.
+ * A pure inner function {@link doPostPlaceholder} takes its collaborators as INJECTED deps (so unit tests
+ * drive it with a stub GitHub client + a stub audit-emit callback, and the DB-integration test drives it
+ * with the real {@link emitWorkflowEvent} over a disposable PG), plus a thin Temporal-activity wrapper
+ * {@link postReviewPlaceholder} that constructs the production GitHub client (Vault-token-provider →
+ * GitHubApiClient → GitHubApiReviewClient) + the audit-emit closure (a transaction over the ADR-0062
+ * shared pool).
  */
 
 import { tenantKysely } from "#platform/db/database.js";
@@ -74,7 +68,7 @@ import { PostReviewPlaceholderInput } from "#contracts/post_review_placeholder_i
 // The placeholder marker is DELIBERATELY DISTINCT from the review marker
 // (`<!-- codemaster:review-marker:{pr_id} -->` in post_review_results.activity.ts::markerFor) so the
 // two surfaces cannot accidentally collide. The cleanup activity finds the placeholder via THIS marker;
-// the review's atomic claim path uses its own marker. 1:1 with the Python `_marker_for`.
+// the review's atomic claim path uses its own marker.
 
 /** The hidden HTML-comment marker embedded in the placeholder issue-comment body. */
 export function markerForPlaceholder(prId: string): string {
@@ -82,9 +76,9 @@ export function markerForPlaceholder(prId: string): string {
 }
 
 /**
- * Render the placeholder issue-comment body with the embedded marker. 1:1 (byte-for-byte) with the
- * Python `_placeholder_body`. The marker is the contract with `delete_review_placeholder_activity`; its
- * list-issue-comments + marker filter locates this comment for cleanup.
+ * Render the placeholder issue-comment body with the embedded marker. The marker is the contract with
+ * `delete_review_placeholder_activity`; its list-issue-comments + marker filter locates this comment for
+ * cleanup.
  */
 export function placeholderBody(prId: string): string {
   const marker = markerForPlaceholder(prId);
@@ -101,7 +95,7 @@ export function placeholderBody(prId: string): string {
 /**
  * The minimal issue-comment GitHub surface the placeholder POST depends on — a structural subset of
  * {@link GhReviewClient}, so the production `GitHubApiReviewClient` satisfies it and a unit-test stub need
- * only implement these two methods. 1:1 with the Python `GhIssueCommentClient` Protocol (list + create).
+ * only implement these two methods.
  */
 export type GhIssueCommentPostClient = {
   listIssueComments(args: {
@@ -120,8 +114,7 @@ export type GhIssueCommentPostClient = {
 /**
  * Best-effort audit-emit callback: writes the `REVIEW_PLACEHOLDER_POSTED` workflow event. The production
  * wrapper closes over a transaction on the ADR-0062 shared pool + {@link emitWorkflowEvent}; the unit test
- * supplies a spy (or a throwing stub to exercise the swallow path). 1:1 in role with the Python
- * `emit_workflow_event(...)` call inside the `session_factory()` block.
+ * supplies a spy (or a throwing stub to exercise the swallow path).
  */
 export type PlaceholderAuditEmit = (args: {
   runId: string;
@@ -134,8 +127,7 @@ export type PlaceholderAuditEmit = (args: {
 
 /**
  * Injected collaborators for {@link doPostPlaceholder}. Both REQUIRED here — the pure function takes its
- * deps explicitly (the wrapper constructs the production ones). 1:1 in role with the Python
- * `configure(gh_client=..., session_factory=...)` triple (the clock is folded into {@link emitEvent}).
+ * deps explicitly (the wrapper constructs the production ones).
  */
 export type PostPlaceholderDeps = {
   ghClient: GhIssueCommentPostClient;
@@ -145,9 +137,7 @@ export type PostPlaceholderDeps = {
 // ─── pure activity body ────────────────────────────────────────────────────────────────────────────
 
 /**
- * Post the placeholder issue comment (best-effort, never raises). 1:1 with the frozen Python
- * `post_review_placeholder_activity` body (sans the flag check + the not-configured guard — both handled
- * by the wrapper):
+ * Post the placeholder issue comment (best-effort, never raises):
  *
  *   1. List existing PR issue comments; if one already carries our marker → skip the POST (Temporal-retry
  *      idempotency). A list failure is logged + swallowed (return without posting).
@@ -229,8 +219,7 @@ export async function doPostPlaceholder(
 /**
  * Build the production {@link PlaceholderAuditEmit}: open ONE transaction over the ADR-0062 shared pool
  * for `dsn` and emit `REVIEW_PLACEHOLDER_POSTED` inside it (the caller owns no outer transaction — the
- * placeholder audit row stands alone). 1:1 with the Python `async with session_factory() as session,
- * session.begin(): await emit_workflow_event(...)` block.
+ * placeholder audit row stands alone).
  */
 export function makePlaceholderAuditEmit(dsn: string, clock: Clock): PlaceholderAuditEmit {
   const db = tenantKysely<unknown>(dsn);
@@ -259,11 +248,8 @@ export function makePlaceholderAuditEmit(dsn: string, clock: Clock): Placeholder
 /**
  * Read the feature flag. The placeholder is core UX (engineers see life on the PR within seconds), so it is
  * enabled by DEFAULT: only an explicit `CODEMASTER_REVIEW_PLACEHOLDER_ENABLED === "0"` disables it (opt-out);
- * unset / "1" / any other value enables. Static `process.env.X` access (no dynamic indexing) so no
- * object-injection sink is introduced.
- *
- * INTENTIONAL DIVERGENCE from the frozen Python (`os.getenv(...) != "1"` → opt-in, default OFF): platform-owner
- * product decision (2026-06-07) — "enabled everytime". Same sensible-default family as default-enable repos.
+ * unset / "1" / any other value enables. The default-ON polarity is INTENTIONAL (a deliberate divergence from
+ * the prior opt-in default; platform-owner product decision 2026-06-07 — "enabled everytime").
  */
 export function placeholderEnabled(): boolean {
   return process.env.CODEMASTER_REVIEW_PLACEHOLDER_ENABLED !== "0";
@@ -273,12 +259,10 @@ export function placeholderEnabled(): boolean {
  * The registered `post_review_placeholder` Temporal activity (single typed-input envelope per CLAUDE.md
  * invariant 11). Reads the feature flag (returns early when disabled); resolves the DSN from
  * `CODEMASTER_PG_CORE_DSN` + the per-review numeric installation id from the input's `github_installation_id`
- * (per-review routing — replaces the removed `CODEMASTER_GITHUB_INSTALLATION_ID` env pin; a null id skips);
- * constructs the production {@link GitHubApiReviewClient} (Vault token provider → GitHubApiClient → wrapped
- * client) — the SAME wiring the `post_review_results` activity uses — and delegates to
- * {@link doPostPlaceholder} with the production audit-emit closure. Mirrors the frozen Python
- * `post_review_placeholder_activity`. NEVER raises (best-effort): even the env-resolution faults are
- * swallowed so a misconfigured pod cannot fail the review pipeline.
+ * (per-review routing; a null id skips); constructs the production {@link GitHubApiReviewClient} (Vault
+ * token provider → GitHubApiClient → wrapped client) and delegates to {@link doPostPlaceholder} with the
+ * production audit-emit closure. NEVER raises (best-effort): even the env-resolution faults are swallowed
+ * so a misconfigured pod cannot fail the review pipeline.
  */
 export async function postReviewPlaceholder(input: PostReviewPlaceholderInput): Promise<void> {
   if (!placeholderEnabled()) {
@@ -314,7 +298,7 @@ export async function postReviewPlaceholder(input: PostReviewPlaceholderInput): 
     deps = { ghClient, emitEvent: makePlaceholderAuditEmit(dsn, clock) };
   } catch (e) {
     // Programmer/operator error (missing env, Vault unreachable at construction) — surfaced for
-    // visibility but NEVER fails the review pipeline (the analogue of the Python not-configured swallow).
+    // visibility but NEVER fails the review pipeline (the not-configured case is swallowed).
     console.warn(
       `post_review_placeholder.not_configured pr_id=${parsed.pr_id} ` +
         `error=${e instanceof Error ? e.message : String(e)}`,

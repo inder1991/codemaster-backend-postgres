@@ -1,9 +1,5 @@
 /**
- * `static_analysis_activity` — the REAL in-worker static-analysis activity.
- *
- * 1:1 port of the frozen Python `StaticAnalysisActivity`
- * (vendor/codemaster-py/codemaster/activities/static_analysis.py) FUSED with the production
- * `_ProductionPipeline` wiring (vendor/.../worker/main.py:2275-2327). The holder owns:
+ * `static_analysis_activity` — the REAL in-worker static-analysis activity. The holder owns:
  *   - the three in-worker runners (Ruff / ESLint / Gitleaks);
  *   - the NEWER soft-barrier {@link StaticAnalysisOrchestrator} (it owns the Tier-1 deadline, spawns
  *     the runners concurrently, soft-barrier-cancels at the deadline, and emits per-tool
@@ -14,10 +10,9 @@
  * The bound activity method dispatches:
  *   1. EMPTY-ROUTING FAST PATH — when `sandbox_files` is empty (every PR file was reviewer-routed),
  *      return the default {@link StaticAnalysisResultV1} without constructing or running any runner.
- *      Mirrors the frozen Python `if not files: return StaticAnalysisResultV1()`.
+ *      Returns the default {@link StaticAnalysisResultV1} when `sandbox_files` is empty.
  *   2. ROUTE files by language → a `RunnerSpec` list (`.py`→ruff, `.ts/.tsx/.js/.jsx`→eslint, ALL
- *      files→gitleaks — gitleaks is a secret scanner, file-language is irrelevant). 1:1 with the
- *      Python `_ProductionPipeline.run`.
+ *      files→gitleaks — gitleaks is a secret scanner, file-language is irrelevant).
  *   3. RUN the orchestrator → RAW findings (uncapped, unfiltered, registration-ordered) + per-tool
  *      `tool_statuses`. The orchestrator NEVER raises (recoverable failures degrade to failure
  *      statuses); a degraded tool does NOT fail the review.
@@ -38,10 +33,8 @@
  *
  * ## Invariant-11 / typed-input envelope (ADR-0047)
  *
- * The frozen Python activity dispatches with FOUR positional args (an invariant-11 violation). This
- * port closes it: the single positional input is the {@link StaticAnalysisInputV1} envelope
- * (workspace_path + sandbox_files + changed_line_ranges + pr_meta), consistent with the sibling
- * envelopes that closed the other known live invariant-11 dispatches.
+ * The single positional input is the {@link StaticAnalysisInputV1} envelope (workspace_path +
+ * sandbox_files + changed_line_ranges + pr_meta).
  *
  * ## Runtime context (vs the workflow body)
  *
@@ -79,7 +72,7 @@ import type { PrMetaV1 } from "#contracts/walkthrough.v1.js";
 /**
  * Per-tool raw-findings cap applied BEFORE curation (and before the changed-line filter). Protects the
  * curator's Bedrock budget from a misbehaving tool that emits thousands of findings. Drops surface in
- * `truncated_per_tool`. 1:1 with the frozen Python `static_analysis_pipeline.MAX_RAW_PER_TOOL`.
+ * `truncated_per_tool`.
  */
 export const MAX_RAW_PER_TOOL = 500;
 
@@ -107,8 +100,7 @@ export const MAX_FILES_PER_RUNNER = 1000;
  */
 export const TIER1_SOFT_BARRIER_SECONDS = 45;
 
-/** ESLint-eligible extensions (1:1 with the Python `_ProductionPipeline` `.endswith((".ts", ".tsx",
- *  ".js", ".jsx"))` routing). */
+/** ESLint-eligible extensions. */
 const ESLINT_EXTENSIONS: ReadonlyArray<string> = [".ts", ".tsx", ".js", ".jsx"];
 
 /** Tool-status labels that represent a per-tool DEGRADATION (vs `completed` / `skipped`). Their
@@ -143,8 +135,7 @@ export type StaticAnalysisRunners = {
 /**
  * Activity holder. Owns the runners + soft-barrier orchestrator + curator, and binds
  * `static_analysis_activity` as a 1-arg method `buildActivities` registers under the Temporal name
- * `staticAnalysis`. Same one-instance-per-worker pattern as `WalkthroughActivities` /
- * `AggregateFindingsActivity`.
+ * `staticAnalysis`.
  */
 export class StaticAnalysisActivity {
   private readonly runners: StaticAnalysisRunners;
@@ -175,14 +166,14 @@ export class StaticAnalysisActivity {
     // (defaulted + validated) value so every downstream read uses it.
     const input = StaticAnalysisInputV1.parse(rawInput);
     const files = input.sandbox_files;
-    // 1. Empty-routing fast path — no runner fires; the default envelope is the faithful "nothing to
-    //    analyze" answer (1:1 with the frozen Python `if not files: return StaticAnalysisResultV1()`).
+    // 1. Empty-routing fast path — no runner fires; the default envelope is the "nothing to analyze"
+    //    answer.
     if (files.length === 0) {
       return StaticAnalysisResultV1.parse({});
     }
 
-    // 2. Route files by language → the RunnerSpec list (1:1 with `_ProductionPipeline.run`),
-    //    each list bounded at MAX_FILES_PER_RUNNER (W2.6 / M1 — see the constant's doc).
+    // 2. Route files by language → the RunnerSpec list, each list bounded at MAX_FILES_PER_RUNNER
+    //    (W2.6 / M1 — see the constant's doc).
     const pyFiles = files.filter((f) => f.endsWith(".py"));
     const tsJsFiles = files.filter((f) => ESLINT_EXTENSIONS.some((ext) => f.endsWith(ext)));
     const runners: ReadonlyArray<RunnerSpec> = [
@@ -214,7 +205,7 @@ export class StaticAnalysisActivity {
     const curated = await this.curator.curate(filtered, { prMeta: input.pr_meta });
 
     // 8. per_tool_errors — the per-tool degradation surface, derived from the failed/timed-out
-    //    statuses (the walkthrough footer renders it). 1:1 with the legacy pipeline's per_tool_errors.
+    //    statuses (the walkthrough footer renders it).
     const perToolErrors = perToolErrorsFromStatuses(toolStatuses);
 
     // 9. Assemble the envelope (.strict() validates the wire shape the orchestrator re-validates).
@@ -260,9 +251,8 @@ function capRunnerFiles(spec: RunnerSpec): RunnerSpec {
 
 /**
  * Cap each tool's findings at {@link MAX_RAW_PER_TOOL}, preserving registration order. Per-tool drop
- * counts surface in `truncatedPerTool`. 1:1 with the frozen `static_analysis_pipeline.py` Stage-2 cap
- * (which capped each runner's `findings` BEFORE merging). Findings retain their input order; the cap
- * keeps the FIRST `MAX_RAW_PER_TOOL` per tool.
+ * counts surface in `truncatedPerTool`. Applied BEFORE merging; findings retain their input order and
+ * the cap keeps the FIRST `MAX_RAW_PER_TOOL` per tool.
  */
 function capPerTool(rawFindings: ReadonlyArray<AnalysisFindingV1>): {
   capped: ReadonlyArray<AnalysisFindingV1>;
@@ -285,9 +275,8 @@ function capPerTool(rawFindings: ReadonlyArray<AnalysisFindingV1>): {
 
 /**
  * Derive `per_tool_errors` from the per-tool statuses: every DEGRADED status (failed_startup /
- * failed_runtime / timed_out / auth_failed) contributes `{tool_name: error_message}`. Mirrors the
- * frozen legacy pipeline's `per_tool_errors[tool_name] = str(e)`, now sourced from the orchestrator's
- * first-class statuses (the single source of per-tool outcome truth).
+ * failed_runtime / timed_out / auth_failed) contributes `{tool_name: error_message}`. Sourced from the
+ * orchestrator's first-class statuses (the single source of per-tool outcome truth).
  */
 function perToolErrorsFromStatuses(
   toolStatuses: ReadonlyArray<ToolStatusV1>,
@@ -302,11 +291,10 @@ function perToolErrorsFromStatuses(
 }
 
 /**
- * Build the production {@link StaticAnalysisActivity} holder — 1:1 with the frozen Python
- * `_wire_static_analysis_activity`. Constructs the three in-worker runners (default binary names on
- * `$PATH`; the worker-image provides ruff/eslint/gitleaks) + the orchestrator (deadline + clock) + the
- * Haiku curator (which owns the injected LLM cache). `buildActivities` calls this with the shared
- * ledger-wired LlmClientCache + the WallClock + the configured Tier-1 deadline.
+ * Build the production {@link StaticAnalysisActivity} holder. Constructs the three in-worker runners
+ * (default binary names on `$PATH`; the worker-image provides ruff/eslint/gitleaks) + the orchestrator
+ * (deadline + clock) + the Haiku curator (which owns the injected LLM cache). `buildActivities` calls
+ * this with the shared ledger-wired LlmClientCache + the WallClock + the configured Tier-1 deadline.
  */
 export function buildStaticAnalysisActivity(args: {
   runners: StaticAnalysisRunners;

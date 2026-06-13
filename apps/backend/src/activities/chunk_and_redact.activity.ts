@@ -1,8 +1,5 @@
 /**
- * `chunkAndRedact` activity — 1:1-in-intent port of the frozen Python composite activity
- * `@activity.defn chunk_and_redact_activity` (vendor/codemaster-py/codemaster/activities/chunk_and_redact.py).
- *
- * Composite activity: `ChunkerRegistry.selectFor(path)` per changed file + INLINE redaction. Reads
+ * `chunkAndRedact` activity — composite activity: `ChunkerRegistry.selectFor(path)` per changed file + INLINE redaction. Reads
  * each file's body from disk, routes it through the registry-selected chunker (Python / TS-JS /
  * hunk-fallback), accumulates every chunk in INPUT FILE ORDER, then redacts the whole accumulated
  * list in place and returns the merged `DiffChunkV1[]` ready for the per-chunk review activity to
@@ -11,19 +8,16 @@
  * ## Redaction reuse (the ported half is DONE — this activity REUSES it)
  *
  * Redaction is INLINED rather than delegated to a separate Temporal activity, to avoid a round-trip
- * per chunk — exactly the frozen Python rationale (`_redact_chunks_inline`). It reuses the already-
- * ported Sprint-7 detectors: `redactPii` (#backend/redact/pii_redactor) for the `[REDACTED:<kind>]`
- * PII markers, and `detectSecrets` (#backend/redact/secret_detector) spliced as `[REDACTED:<kind>]`.
+ * per chunk — to avoid a round-trip per chunk. It reuses the already-ported Sprint-7 detectors:
+ * `redactPii` (#backend/redact/pii_redactor) for the `[REDACTED:<kind>]` PII markers, and
+ * `detectSecrets` (#backend/redact/secret_detector) spliced as `[REDACTED:<kind>]`.
  * The standalone {@link redactChunks} activity (the thin wrapper) shares the same `doRedact` helper —
- * one redaction implementation, two entry points, matching the frozen `redact_chunks.py` + the
- * activity's `_redact_chunks_inline` both routing through `_do_redact`.
+ * one redaction implementation, two entry points.
  *
  * ## Typed-input envelope — CLAUDE.md invariant 11 / ADR-0047 closure
  *
- * The frozen Python activity dispatches with THREE positional arguments (`chunk_and_redact_activity(
- * workspace_path, files, changed_line_ranges)`) — a known live invariant-11 violation. This port
- * CLOSES it: the single positional input is the {@link ChunkAndRedactInputV1} envelope. There is no
- * Python Pydantic counterpart — it is introduced during the port (see the contract header).
+ * The single positional input is the {@link ChunkAndRedactInputV1} envelope (closes the 3-positional
+ * invariant-11 violation — see the contract header).
  *
  * ## Runtime context (vs. the workflow body)
  *
@@ -32,15 +26,13 @@
  * reads; the redactors + chunkers are pure). `doChunkAndRedact` is the pure orchestration that
  * tests/parity drive directly; `chunkAndRedact` is the registered activity that constructs the REAL
  * {@link ChunkerRegistry} and delegates. The registry is INJECTED into `doChunkAndRedact` so the
- * parity oracle drives the same orchestration with the real chunkers (mirroring the frozen Python
- * exporting its inner orchestration).
+ * parity oracle drives the same orchestration with the real chunkers.
  *
  * ## Path-traversal defense (parity-significant)
  *
  * `workspace_path` is resolved to an absolute path; each `workspace / rel_path` is resolved and
- * verified to stay UNDER the workspace root — a `..`-escape throws {@link WorkspacePathOutsideRootError}
- * (mirrors the frozen Python `target.relative_to(workspace)` ValueError → raise). Missing / deleted
- * files are skipped (mirrors `if not target.is_file(): continue`).
+ * verified to stay UNDER the workspace root — a `..`-escape throws {@link WorkspacePathOutsideRootError}.
+ * Missing / deleted files are skipped.
  */
 
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -58,7 +50,7 @@ import { ChunkAndRedactInputV1 } from "#contracts/chunk_and_redact.v1.js";
 /** Platform path separator (resolved paths use it). Module-level so the traversal check reads cleanly. */
 const pathSep = process.platform === "win32" ? "\\" : "/";
 
-/** Port of chunk_and_redact.py::WorkspacePathOutsideRootError — a file path resolved outside the root. */
+/** A file path resolved outside the workspace root. */
 export class WorkspacePathOutsideRootError extends Error {
   constructor(message: string) {
     super(message);
@@ -66,17 +58,16 @@ export class WorkspacePathOutsideRootError extends Error {
   }
 }
 
-// ── Redaction (port of redact_chunks.py — the ported detectors are REUSED) ───────────────────────────
+// ── Redaction ────────────────────────────────────────────────────────────────────────────────────────
 
-/** Port of redact_chunks.py::_estimate_tokens — `max(1, len(body) // 4)` (CODE-POINT length). */
+/** `max(1, len(body) // 4)` (CODE-POINT length). */
 function estimateTokens(body: string): number {
   return Math.max(1, Math.trunc([...body].length / 4));
 }
 
 /**
- * Port of redact_chunks.py::_redact_secrets — replace each detected secret with a `[REDACTED:<kind>]`
- * marker. Splices from the END (findings sorted DESCENDING by start_offset) so earlier offsets stay
- * valid as later ones are replaced — byte-identical to the frozen Python.
+ * Replace each detected secret with a `[REDACTED:<kind>]` marker. Splices from the END (findings
+ * sorted DESCENDING by start_offset) so earlier offsets stay valid as later ones are replaced.
  */
 function redactSecrets(text: string): string {
   const findings = detectSecrets(text);
@@ -93,12 +84,12 @@ function redactSecrets(text: string): string {
 }
 
 /**
- * Port of redact_chunks.py::_redact_chunk — run a chunk's body through PII then secret redaction.
+ * Run a chunk's body through PII then secret redaction.
  *
  * Order: PII first (so email/SSN/credit-card patterns see the raw bytes), then secrets on the
- * PII-cleaned text. If the body is UNCHANGED, the SAME chunk object is returned (identity preserved —
- * the Python `if redacted_body == chunk.body: return chunk`). If changed, the chunk_id is RE-MINTED
- * deterministically from the post-redaction content (R-7: the redacted chunk is a different content
+ * PII-cleaned text. If the body is UNCHANGED, the SAME chunk object is returned (identity preserved).
+ * If changed, the chunk_id is RE-MINTED deterministically from the post-redaction content (R-7: the
+ * redacted chunk is a different content
  * artifact, so its content-addressable UUIDv5 differs but stays stable).
  */
 function redactChunk(chunk: DiffChunkV1): DiffChunkV1 {
@@ -124,8 +115,7 @@ function redactChunk(chunk: DiffChunkV1): DiffChunkV1 {
   });
 }
 
-/** Port of redact_chunks.py::_do_redact — the pure redaction helper. Tests + both activity entry
- *  points (inline composite + standalone wrapper) invoke this. */
+/** The pure redaction helper. Tests + both activity entry points (inline composite + standalone wrapper) invoke this. */
 export function doRedact(chunks: ReadonlyArray<DiffChunkV1>): Array<DiffChunkV1> {
   return chunks.map((c) => redactChunk(c));
 }
@@ -133,7 +123,7 @@ export function doRedact(chunks: ReadonlyArray<DiffChunkV1>): Array<DiffChunkV1>
 // ── Composite chunk + redact orchestration ───────────────────────────────────────────────────────
 
 /**
- * The composite orchestration, ported EXACTLY (iteration order + path-traversal defense + skip-missing
+ * The composite orchestration (iteration order + path-traversal defense + skip-missing
  * + per-file chunk accumulation + final whole-list redaction):
  *
  *   workspace = resolve(workspace_path)
@@ -163,8 +153,7 @@ export async function doChunkAndRedact(args: {
     const target = resolve(workspace, relPath);
 
     // Path-traversal defense: `target` must stay UNDER `workspace`. A `relative(workspace, target)`
-    // that starts with ".." (or is absolute) means the resolved path escaped the root — mirrors the
-    // frozen Python `target.relative_to(workspace)` ValueError branch.
+    // that starts with ".." (or is absolute) means the resolved path escaped the root.
     const rel = relative(workspace, target);
     if (rel === ".." || rel.startsWith(`..${pathSep}`) || isAbsolute(rel)) {
       throw new WorkspacePathOutsideRootError(
@@ -172,7 +161,7 @@ export async function doChunkAndRedact(args: {
       );
     }
 
-    // Skip deleted / missing files (mirrors `if not target.is_file(): continue`). `target` is a path
+    // Skip deleted / missing files. `target` is a path
     // resolved under the workspace root and verified by the traversal check above — never user-injected.
     // eslint-disable-next-line security/detect-non-literal-fs-filename -- `target` is verified to resolve under the workspace root (traversal check above)
     if (!existsSync(target) || !statSync(target).isFile()) {
@@ -212,11 +201,9 @@ export async function chunkAndRedact(input: ChunkAndRedactInputV1): Promise<Arra
 }
 
 /**
- * Port of the standalone `redact_chunks` activity (redact_chunks.py::RedactChunksActivity.redact_chunks)
- * — a thin wrapper over the ported redactors. Routes every chunk's body through PII + secret redaction
- * via the shared {@link doRedact} helper. Single positional input (the chunk list) already satisfies
- * invariant 11. Kept as a distinct entry point because it is independently wired in the frozen worker
- * registry (it is the second line of defence after archive-side redaction).
+ * Standalone `redact_chunks` activity — a thin wrapper over the redactors. Routes every chunk's body
+ * through PII + secret redaction via the shared {@link doRedact} helper. Kept as a distinct entry
+ * point (it is the second line of defence after archive-side redaction).
  */
 export async function redactChunks(chunks: ReadonlyArray<DiffChunkV1>): Promise<Array<DiffChunkV1>> {
   return doRedact(chunks);

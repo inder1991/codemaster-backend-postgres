@@ -1,24 +1,20 @@
-// CURATE_TOOL_SCHEMA + parseCurateToolUse — 1:1 port of the frozen Python
-//   vendor/codemaster-py/codemaster/analysis/curator_schema.py (Sprint 9 / S9.2.2).
+// CURATE_TOOL_SCHEMA + parseCurateToolUse — the Anthropic tool-use schema the Haiku curator hands
+// the model for linter-finding curation, plus the parser that turns each `curate_finding` tool_use
+// block back into a ReviewFindingV1. The model's job per call: receive a list of AnalysisFindingV1s
+// + PR metadata; for each finding, decide PROMOTE (emit one ReviewFindingV1) or DROP (silently skip).
 //
-// The Anthropic tool-use schema the Haiku curator hands the model for linter-finding curation, plus
-// the parser that turns each `curate_finding` tool_use block back into a ReviewFindingV1. The model's
-// job per call: receive a list of AnalysisFindingV1s + PR metadata; for each finding, decide PROMOTE
-// (emit one ReviewFindingV1) or DROP (silently skip).
-//
-// Parser policy (byte-faithful with Python `parse_curate_tool_use`):
+// Parser policy:
 //   * Non-dict blocks ignored; non-tool_use blocks ignored; non-curate_finding tool blocks ignored.
 //   * Malformed individual blocks raise CurateParseError(block_id, reason); the curator catches
 //     per-block, logs, skips (whole call survives) — see curator.ts::parseWithSkipMalformed.
 //   * input missing / not an object → CurateParseError.
 //   * Over-length strings are coerced (truncated) BEFORE validation via coerceForContract so a
-//     length overshoot never crashes the parser — the same resilience the review-pipeline parsers
-//     carry (Python smoke #7, 2026-05-16). Non-length validation errors still surface as CurateParseError.
+//     length overshoot never crashes the parser. Non-length validation errors still surface as
+//     CurateParseError.
 //
 // The schema is key-ORDER-significant (the LLM sees the exact byte sequence in the function-calling
-// tool definition), so the object-literal key order mirrors the Python dict insertion order exactly.
-// The Tier-1 parity test (test/parity/curate.parity.test.ts) proves parseCurateToolUse is byte-equal
-// to the frozen Python over adversarial tool-use blocks.
+// tool definition). The Tier-1 parity test (test/parity/curate.parity.test.ts) proves
+// parseCurateToolUse is byte-equal to the reference over adversarial tool-use blocks.
 
 import { coerceForContract } from "#backend/llm/contract_coercion.js";
 
@@ -26,12 +22,12 @@ import { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
 
 import type { JsonValue } from "#backend/llm/review_prompt.js";
 
-/** The single tool the curator exposes. 1:1 with the Python `CURATE_TOOL_NAME`. */
+/** The single tool the curator exposes. */
 export const CURATE_TOOL_NAME = "curate_finding" as const;
 
 /**
  * The Anthropic tool-use schema for curation. Key-order-significant (the function-calling definition is
- * serialized byte-for-byte to the model), so the property order mirrors the frozen Python dict exactly.
+ * serialized byte-for-byte to the model), so the property order is significant.
  * `suggestion` is the ONLY optional field (it is absent from `required`).
  */
 export const CURATE_TOOL_SCHEMA: { readonly [k: string]: JsonValue } = {
@@ -64,8 +60,8 @@ export const CURATE_TOOL_SCHEMA: { readonly [k: string]: JsonValue } = {
 
 /**
  * Raised when a `curate_finding` tool block can't be validated. Carries the originating `blockId` so
- * the curator can log a precise marker without retaining the payload. Mirrors the Python class:
- * message = `block {block_id}: {reason}`.
+ * the curator can log a precise marker without retaining the payload. Message format:
+ * `block {block_id}: {reason}`.
  */
 export class CurateParseError extends Error {
   public readonly blockId: string;
@@ -78,14 +74,13 @@ export class CurateParseError extends Error {
   }
 }
 
-/** True iff `value` is a plain (non-array, non-null) object — the Python `isinstance(x, dict)`. */
+/** True iff `value` is a plain (non-array, non-null) object. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
- * Extract every well-formed `curate_finding` block as a ReviewFindingV1. 1:1 with the frozen Python
- * `parse_curate_tool_use`.
+ * Extract every well-formed `curate_finding` block as a ReviewFindingV1.
  *
  * Non-curate / non-tool_use / non-dict blocks are silently ignored. A `curate_finding` block whose
  * `input` is missing/non-object raises CurateParseError; a block whose input fails contract validation
@@ -106,7 +101,7 @@ export function parseCurateToolUse(
     if (block["name"] !== CURATE_TOOL_NAME) {
       continue;
     }
-    // Python: `str(block.get("id", "<no-id>"))`. `id` may be any type; stringify, defaulting to "<no-id>".
+    // `id` may be any type; stringify, defaulting to "<no-id>" when absent.
     const rawId = block["id"];
     const blockId = rawId === undefined ? "<no-id>" : String(rawId);
     const payload = block["input"];

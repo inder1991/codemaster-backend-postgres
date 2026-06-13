@@ -1,7 +1,5 @@
 /**
- * `fetchLinkedIssues` activity — 1:1 port of the frozen Python
- * `codemaster/activities/fetch_linked_issues.py::FetchLinkedIssuesActivity.fetch_linked_issues`
- * (DM-WIRE T4 / S22.DM.16).
+ * `fetchLinkedIssues` activity (DM-WIRE T4 / S22.DM.16).
  *
  * Resolves the PR's linked-issues envelope: reads parsed `(github_issue_number, linkage_kind, source)`
  * link rows from `core.pr_issue_links`, layers a `(title, state)` cache (`core.github_issues_cache`) +
@@ -9,7 +7,7 @@
  * envelope. Per ADR-0026 § 3 the assembly happens INSIDE the activity so the workflow body only carries
  * the final contract type across the Temporal payload boundary.
  *
- * Flow per invocation (ported exactly):
+ * Flow per invocation:
  *   1. SELECT issue link rows from `core.pr_issue_links` for the PR.
  *   2. Distinct, ASC-sorted issue numbers; cap at MAX_ISSUES_PER_INVOCATION (the remainder surface as
  *      (null, null) in the resolver → "(title unavailable)").
@@ -33,8 +31,7 @@
  * sandbox), so the GitHub API / DB I/O is permitted. ALL timing (the cache-TTL age math) flows through
  * the injected {@link Clock}; there is no `Date.now()` here.
  *
- * Typed-input envelope (CLAUDE.md invariant 11 / ADR-0047): the frozen Python dispatches with SIX
- * positional arguments; this port CLOSES that violation — the single positional input is the
+ * Typed-input envelope (CLAUDE.md invariant 11 / ADR-0047): the single positional input is the
  * {@link FetchLinkedIssuesInputV1} envelope.
  */
 
@@ -48,29 +45,27 @@ import type { FetchLinkedIssuesInputV1 } from "#contracts/fetch_linked_issues_in
 import type { LinkedIssueV1 } from "#contracts/walkthrough.v1.js";
 
 /**
- * TTL after which a cache entry is considered stale enough to attempt an ETag-aware refresh. 5 minutes
- * (1:1 with the Python `CACHE_TTL_SECONDS`).
+ * TTL after which a cache entry is considered stale enough to attempt an ETag-aware refresh. 5 minutes.
  */
 export const CACHE_TTL_SECONDS = 5 * 60;
 
-/** HTTP status sentinels exposed by `getIssue` (mirroring the Python `_HTTP_*` finals). */
+/** HTTP status sentinels exposed by `getIssue`. */
 const HTTP_OK = 200;
 const HTTP_NOT_MODIFIED = 304;
 const HTTP_RATE_LIMITED = 403;
 
 /**
  * Circuit-breaker: after N consecutive non-success responses, skip remaining issue lookups in the same
- * activity invocation. 1:1 with the Python `MAX_CONSECUTIVE_FAILURES`.
+ * activity invocation.
  */
 export const MAX_CONSECUTIVE_FAILURES = 3;
 
-/** Hard cap on issues fetched per invocation. 1:1 with the Python `MAX_ISSUES_PER_INVOCATION`. */
+/** Hard cap on issues fetched per invocation. */
 export const MAX_ISSUES_PER_INVOCATION = 50;
 
 /**
  * The GitHub-API slice the activity consumes. Returns `[payload, etag, status]`. The concrete
  * {@link GitHubIssueClient} satisfies this shape verbatim (its `getIssue` is structurally compatible).
- * 1:1 with the Python `GithubIssuePort`.
  */
 export type GithubIssuePort = {
   getIssue(args: {
@@ -82,7 +77,7 @@ export type GithubIssuePort = {
   }): Promise<readonly [Record<string, unknown> | null, string | null, number]>;
 };
 
-/** Bound-method holder for `fetchLinkedIssues` (1:1 with the Python `FetchLinkedIssuesActivity`). */
+/** Bound-method holder for `fetchLinkedIssues`. */
 export class FetchLinkedIssuesActivity {
   readonly #linksRepo: LinkedIssuesPort;
   readonly #cacheRepo: GithubIssuesCacheRepoPort;
@@ -103,7 +98,7 @@ export class FetchLinkedIssuesActivity {
 
   /**
    * Build the walkthrough's `linked_issues` envelope. Returns an empty array when the PR has no parsed
-   * links, or all rows produced no resolvable titles. 1:1 with the Python `fetch_linked_issues`.
+   * links, or all rows produced no resolvable titles.
    */
   public async fetchLinkedIssues(input: FetchLinkedIssuesInputV1): Promise<Array<LinkedIssueV1>> {
     // Step 1 — read pr_issue_links rows (full link triples).
@@ -223,12 +218,8 @@ export class FetchLinkedIssuesActivity {
 
   /**
    * Wrap the GitHub-API call in a broad error trap. Failures degrade to `[null, null, 0]` per the
-   * fail-mode contract (1:1 with the Python `_safe_fetch`).
-   *
-   * Note: the Python wraps the call in `asyncio.wait_for(2.0s)`; the TS `GitHubIssueClient` enforces
-   * its transport timeout via the injected `FetchGitHubHttpClient` AbortSignal seam, so the per-call
-   * wall-clock bound lives in the transport rather than a clock-driven race here. The error-trap
-   * fail-open semantics are identical.
+   * fail-mode contract. The per-call wall-clock bound lives in the transport (via the injected
+   * `FetchGitHubHttpClient` AbortSignal seam) rather than a clock-driven race here.
    */
   private async safeFetch(args: {
     installationId: number;
@@ -252,22 +243,21 @@ export class FetchLinkedIssuesActivity {
   }
 }
 
-/** Extract + bound the issue title (1:1 with the Python `_extract_title`). */
+/** Extract + bound the issue title. */
 function extractTitle(payload: Record<string, unknown>): string {
   const title = payload["title"];
   return typeof title === "string" ? title.slice(0, 500) : "";
 }
 
-/** Extract the issue body, null when absent/non-string (1:1 with the Python `_extract_body`). */
+/** Extract the issue body, null when absent/non-string. */
 function extractBody(payload: Record<string, unknown>): string | null {
   const body = payload["body"];
   return typeof body === "string" ? body : null;
 }
 
 /**
- * Extract the issue state, mapping anything other than "open" to "closed" (1:1 with the Python
- * `_extract_state` — soft-deleted issues sometimes return a non-vocabulary state; the conservative
- * default keeps the contract Literal valid).
+ * Extract the issue state, mapping anything other than "open" to "closed" — soft-deleted issues
+ * sometimes return a non-vocabulary state; the conservative default keeps the contract Literal valid.
  */
 function extractState(payload: Record<string, unknown>): "open" | "closed" {
   const state = payload["state"];

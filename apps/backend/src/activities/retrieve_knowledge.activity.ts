@@ -1,8 +1,7 @@
-// RetrieveKnowledgeActivity — port of the frozen Python
-// vendor/codemaster-py/codemaster/activities/retrieve_knowledge.py::RetrieveKnowledgeActivity
-// (Sprint 26 / PR-2 follow-up + the Sub-spec B T12 confluence/hybrid extension).
+// RetrieveKnowledgeActivity — Sprint 26 / PR-2 follow-up + the Sub-spec B T12 confluence/hybrid
+// extension.
 //
-// Composition (legacy path — the Python default when `hybrid_retriever is None`):
+// Composition (legacy path — when `hybrid_retriever is None`):
 //   BM25 + ANN run in parallel under `Promise.all` (the TS analogue of `asyncio.gather`); RRF fuses to
 //   `input.top_k`. Both retrievers over-fetch `PRE_FUSION_TOP_K` candidates so RRF has enough material
 //   to fuse. Degradation on either side flows into the result envelope's `retrieval_degraded` flag.
@@ -18,22 +17,18 @@
 //   None of those is the legacy default, so a caller that does not thread the confluence-supporting
 //   fields runs the legacy fusion unchanged (back-compat).
 //
-// ── DEFERRED (faithful to the Python, surfaced as FOLLOW-UPs for the verifier) ──────────────────────
-//   - The production LLM-backed reranker is OWNER-PROVIDED (FOLLOW-UP-production-reranker). The frozen
-//     Python ships only an `IdentityRerankPort` no-op; the wiring (retrievers.ts) constructs the
-//     HybridRetriever with `LlmRerank({ port: new IdentityRerankPort() })` to match.
+// ── DEFERRED (surfaced as FOLLOW-UPs) ────────────────────────────────────────────────────────────────
+//   - The production LLM-backed reranker is OWNER-PROVIDED (FOLLOW-UP-production-reranker). The wiring
+//     (retrievers.ts) constructs the HybridRetriever with `LlmRerank({ port: new IdentityRerankPort() })`.
 //   - The EmbedderCache seam (Phase-A/Phase-C generation dispatch) is unported
 //     (FOLLOW-UP-embedder-cache); PostgresConfluenceRetrieval falls back to the legacy direct query.
-//   - `get_platform_config()` (the `default_pool_token_reservation_pct` runtime knob,
-//     codemaster.runtime.platform_config_cache) is unported (FOLLOW-UP-platform-config-cache-port). The
-//     Python reads it with a fail-open fallback to the in-code DEFAULT 0.15; the TS port uses the
-//     KnowledgeQueryV1 contract default (0.15) directly — byte-identical to the Python fallback an
-//     unconfigured cache yields. Wiring the cache later only changes the value when an operator tunes it.
+//   - `get_platform_config()` (the `default_pool_token_reservation_pct` runtime knob) is unported
+//     (FOLLOW-UP-platform-config-cache-port). The TS port uses the KnowledgeQueryV1 contract default
+//     (0.15) directly — identical to the fail-open fallback an unconfigured cache yields.
 //
 // ── OTel span ──
-// The Python wraps the BM25+ANN+RRF composition in the `retrieval.hybrid_retrieve` OTel span. That
-// observability module is not ported yet, so this port keeps the composition intact but omits the
-// (absent) span — exactly as the sibling AnnRetriever / Bm25Retriever ports omit their histograms.
+// The `retrieval.hybrid_retrieve` OTel span observability module is not ported yet, so the span is
+// omitted (consistent with the sibling AnnRetriever / Bm25Retriever ports).
 
 import { computeEffectiveLabels } from "#backend/retrieval/effective_labels.js";
 import { PRE_FUSION_TOP_K } from "#backend/retrieval/constants.js";
@@ -59,14 +54,14 @@ export type RetrieveKnowledgeActivityOptions = {
    * Optional {@link HybridRetriever} (Sub-spec B T12). When supplied AND {@link RetrieveKnowledgeActivity}
    * receives all five confluence-supporting fields, the activity uses the hybrid (BM25 + ANN + Confluence
    * + floors + rerank) composition. When omitted (the legacy wiring), the activity always runs the legacy
-   * BM25 + ANN + RRF fusion (1:1 with the Python `hybrid_retriever=None` default).
+   * BM25 + ANN + RRF fusion (the legacy default when no hybrid retriever is wired).
    */
   hybridRetriever?: HybridRetriever;
   /**
    * Optional rerank LLM cache (E). When wired AND `CODEMASTER_LLM_RERANK_ENABLED=true`, the activity builds
    * a per-invocation {@link LlmBackedRerankPort} (carrying the query's installation_id for cost attribution)
    * and passes it to the hybrid retriever, REPLACING the static IdentityRerankPort no-op. Omitted or
-   * flag-off → identity rerank (1:1 with the frozen Python, which ships only the no-op).
+   * flag-off → identity rerank (no-op).
    */
   rerankCache?: RerankLlmCacheLike;
   /**
@@ -87,9 +82,9 @@ function rerankEnabled(): boolean {
 
 /**
  * Build the per-invocation LLM-backed rerank override (E): a {@link LlmRerank} wrapping a
- * {@link LlmBackedRerankPort} keyed to `installationId`, but ONLY when the flag is on AND a cache is wired.
- * Returns `undefined` otherwise, so the {@link HybridRetriever} falls back to its static IdentityRerankPort
- * no-op (1:1 with Python). Exported for unit testing the flag-gated construction.
+ * {@link LlmBackedRerankPort} keyed to `installationId`, but ONLY when the flag is on AND a cache is
+ * wired. Returns `undefined` otherwise, so the {@link HybridRetriever} falls back to its static
+ * IdentityRerankPort no-op. Exported for unit testing the flag-gated construction.
  */
 export function buildRerankOverride(args: {
   enabled: boolean;
@@ -120,9 +115,9 @@ export function buildRerankOverride(args: {
  * Bound-method holder for `retrieve_knowledge_activity` (legacy BM25 + ANN + RRF OR the Sub-spec B T12
  * confluence/hybrid path).
  *
- * `topK` is the per-chunk retrieval result cap (default 5, 1:1 with the Python `top_k=5`); the input's
- * `top_k` overrides it per call. The hybrid/Confluence branch is taken only when `hybridRetriever` is
- * wired AND `_shouldUseHybrid` holds (all five preconditions); otherwise the legacy fusion runs.
+ * `topK` is the per-chunk retrieval result cap (default 5); the input's `top_k` overrides it per call.
+ * The hybrid/Confluence branch is taken only when `hybridRetriever` is wired AND `_shouldUseHybrid`
+ * holds (all five preconditions); otherwise the legacy fusion runs.
  */
 export class RetrieveKnowledgeActivity {
   private readonly bm25: Bm25Retriever;
@@ -149,8 +144,7 @@ export class RetrieveKnowledgeActivity {
   }
 
   /**
-   * The Sub-spec B T12 hybrid path is taken iff ALL preconditions hold (1:1 with the Python
-   * `_should_use_hybrid`):
+   * The Sub-spec B T12 hybrid path is taken iff ALL preconditions hold:
    *   1. a hybrid retriever is wired,
    *   2. `include_confluence` is true,
    *   3. `pr_context` is non-null,
@@ -239,11 +233,9 @@ export class RetrieveKnowledgeActivity {
   }
 
   /**
-   * Sub-spec B T12 path: use HybridRetriever with Confluence (1:1 with the Python
-   * `_retrieve_with_confluence`).
-   *
-   * The caller has satisfied `_shouldUseHybrid`: all inputs are non-null. The activity computes
-   * effective_labels via T9 ({@link computeEffectiveLabels}), builds a {@link KnowledgeQueryV1} with
+   * Sub-spec B T12 path: use HybridRetriever with Confluence. The caller has satisfied
+   * `_shouldUseHybrid`: all inputs are non-null. Computes effective_labels via T9
+   * ({@link computeEffectiveLabels}), builds a {@link KnowledgeQueryV1} with
    * include_confluence=true, invokes HybridRetriever, and unwraps the scored chunks back to bare
    * KnowledgeChunkV1 (preserving the ReviewContext type shape).
    */
@@ -267,11 +259,10 @@ export class RetrieveKnowledgeActivity {
       platformExposedLabels: new Set(input.platform_exposed_labels),
     });
 
-    // FOLLOW-UP-platform-config-cache-port: the Python reads `default_pool_token_reservation_pct` from
-    // codemaster.runtime.platform_config_cache.get_platform_config() with a fail-open fallback to the
-    // in-code DEFAULT (0.15). That cache is unported; the KnowledgeQueryV1 contract default IS 0.15, which
-    // is byte-identical to the Python fallback an unconfigured cache yields. Wiring the cache later only
-    // changes the value when an operator tunes the platform_config row.
+    // FOLLOW-UP-platform-config-cache-port: `default_pool_token_reservation_pct` is sourced from the
+    // platform_config_cache (unported). The KnowledgeQueryV1 contract default IS 0.15, which matches the
+    // fail-open fallback an unconfigured cache yields. Wiring the cache later only changes the value when
+    // an operator tunes the platform_config row.
     const query: KnowledgeQueryV1 = {
       schema_version: 2,
       query: input.query,
@@ -305,7 +296,7 @@ export class RetrieveKnowledgeActivity {
     }
 
     // E: per-invocation LLM rerank override (flag-gated; carries the query's installation_id). Undefined
-    // when off → the hybrid retriever's static IdentityRerankPort no-op runs (1:1 with Python).
+    // when off → the hybrid retriever's static IdentityRerankPort no-op runs.
     const rerankOverride =
       bedrockOverride ??
       buildRerankOverride({

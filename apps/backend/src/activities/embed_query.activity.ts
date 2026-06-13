@@ -1,7 +1,4 @@
-// EmbedQueryActivity — port of the frozen Python
-// vendor/codemaster-py/codemaster/activities/embed_query.py (Sprint 26 / R-11 multi-lens audit follow-up).
-//
-// Bound-method holder for the Temporal-registered `embed_query_activity`. Computes ONE 1024-dim
+// EmbedQueryActivity — computes ONE 1024-dim
 // embedding for a caller-supplied query string. The workflow body memoizes results per unique chunk
 // path so a 100-chunk PR spread across 5 files issues 5 embed RPCs instead of 100.
 //
@@ -9,13 +6,13 @@
 // embed service itself controls). Temporal retries are safe; double-emit just produces duplicate OTel
 // histogram records, no state change.
 //
-// ── 1024-dim guard (FAITHFUL to the Python) ──
+// ── 1024-dim guard ──
 // The platform-model contract is EMBEDDING_DIM = 1024 (the pgvector `core.knowledge_chunks.vector`
 // column width). This activity defensively rejects a wrong-shape vector — a contract violation from the
 // embed service — rather than returning it and poisoning the downstream ANN cosine search.
 //
 // ── Purpose alignment (W1.3 — RL-appendix embed-mode) ──
-// HARDENING DIVERGENCE from the frozen Python: the Python used `_QUERY_PURPOSE = "in_repo_doc"` here
+// HARDENING DIVERGENCE (W1.3): the prior implementation used `_QUERY_PURPOSE = "in_repo_doc"` here
 // while AnnRetriever's per-chunk fallback used "review_query" — so a chunk whose memoized embed failed
 // got a DIFFERENT query vector than its siblings (depressed cosine for the truly relevant chunk). Both
 // paths now share the ONE {@link QUERY_EMBED_PURPOSE} ("review_query") + the flag-gated Qwen
@@ -35,7 +32,7 @@ export type EmbedQueryActivityOptions = {
   modelName: string;
 };
 
-/** Bound-method holder for `embed_query_activity` (1:1 with the Python `EmbedQueryActivity`). */
+/** Bound-method holder for `embed_query_activity`. */
 export class EmbedQueryActivity {
   private readonly embeddings: EmbeddingsPort;
   private readonly modelName: string;
@@ -74,8 +71,7 @@ export class EmbedQueryActivity {
       );
     }
     // The result carries the RESULT contract's CURRENT_SCHEMA_VERSION, NOT the echoed input version —
-    // input + result are distinct, independently versioned contracts (1:1 with the Python
-    // `EmbedQueryResultV1(vector=vector)`, which leaves schema_version at its field default).
+    // input + result are distinct, independently versioned contracts.
     return { schema_version: CURRENT_SCHEMA_VERSION, vector };
   }
 }

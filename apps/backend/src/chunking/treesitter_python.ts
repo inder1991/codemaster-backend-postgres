@@ -1,15 +1,11 @@
-// TreeSitterPythonChunker — 1:1 port of the frozen Python chunker
-// (vendor/codemaster-py/codemaster/chunking/treesitter_python.py).
-//
-// AST-aware chunker for Python. Emits one DiffChunkV1 per top-level def / async def / class /
+// TreeSitterPythonChunker — AST-aware chunker for Python. Emits one DiffChunkV1 per top-level def / async def / class /
 // @decorated def. Methods live inside their class chunk. Files with no AST candidates fall back to a
 // single module-level chunk; parse errors fall back to the same single chunk + WARN log. The chunker
 // itself NEVER raises on unparseable input.
 //
 // LINE-BASED / encoding-agnostic (ADR-0067 cond 5): chunk spans derive from tree-sitter
-// startPosition.row / endPosition.row (= Python node.start_point[0] / .end_point[0]) plus the
-// endPosition.column===0 backup, and the body is sliced BY LINES (splitlines keepends). NO byte
-// offsets, NO UTF-16↔UTF-8 mapping — rows + column-0 match the Python reference byte-for-byte.
+// startPosition.row / endPosition.row plus the endPosition.column===0 backup, and the body is sliced
+// BY LINES (splitlines keepends). NO byte offsets, NO UTF-16↔UTF-8 mapping.
 
 import {
   computeChunkId,
@@ -19,14 +15,12 @@ import {
 
 import { getParser } from "./treesitter_loader.js";
 
-/** Inclusive 1-based (start_line, end_line) pair. Port of Python `HunkRange = tuple[int, int]`. */
+/** Inclusive 1-based (start_line, end_line) pair. */
 export type HunkRange = readonly [number, number];
 
-/** Port of chunker_port.py::MAX_DIFF_LINES. */
 export const MAX_DIFF_LINES = 50_000;
 
-/** Port of chunker_port.py::DiffTooLargeError. Carries the actual line count so callers can
- *  log / metric without re-counting. */
+/** Carries the actual line count so callers can log / metric without re-counting. */
 export class DiffTooLargeError extends Error {
   readonly line_count: number;
   constructor(args: { line_count: number }) {
@@ -45,8 +39,8 @@ const CLASS_NODE_TYPES: ReadonlySet<string> = new Set(["class_definition"]);
 // Newline byte (0x0A). _assert_diff_size counts these to reject oversize diffs without decoding.
 const NEWLINE_BYTE = 0x0a;
 
-/** Port of chunker_port.py::_assert_diff_size. Counts newline BYTES (avoids decoding on the reject
- *  path); a body not ending in a newline still counts its final partial line. */
+/** Counts newline BYTES (avoids decoding on the reject path); a body not ending in a newline still
+ *  counts its final partial line. */
 function assertDiffSize(body: Uint8Array): void {
   if (body.length === 0) {
     return;
@@ -65,23 +59,22 @@ function assertDiffSize(body: Uint8Array): void {
   }
 }
 
-/** Port of treesitter_python.py::_overlaps. */
+/** True iff the two inclusive [start, end] ranges overlap. */
 function overlaps(startA: number, endA: number, startB: number, endB: number): boolean {
   return startA <= endB && endA >= startB;
 }
 
-/** Port of treesitter_python.py::_estimate_tokens — `max(1, len(body) // 4)`. `len(body)` is the
- *  CODE-POINT length (Python str length); `//` is floor division → Math.trunc on a non-negative. */
+/** `max(1, len(body) // 4)` — CODE-POINT length, floor division. */
 function estimateTokens(body: string): number {
   const codePointLen = [...body].length;
   return Math.max(1, Math.trunc(codePointLen / 4));
 }
 
-// ── Python str.splitlines(keepends=True) ──────────────────────────────────────────────────────────
-// Parity-critical: the chunker slices lines[start-1:end] where start/end are tree-sitter rows, so the
-// line array MUST be split exactly as the frozen Python str.splitlines(keepends=True). Python's line
-// boundaries are the full Unicode set; \r\n is ONE boundary. We replicate that set verbatim. (The
-// production corpus is LF-only, but porting the quirk keeps arbitrary input byte-identical.)
+// ── line splitting (keep terminators) ──────────────────────────────────────────────────────────────
+// The chunker slices lines[start-1:end] where start/end are tree-sitter rows, so the line array MUST
+// be split keeping terminators, over the FULL Unicode line-boundary set, with \r\n treated as ONE
+// boundary. (The production corpus is LF-only, but handling the full set keeps arbitrary-input chunk
+// boundaries stable.)
 const LINE_BOUNDARY_CODEPOINTS: ReadonlySet<number> = new Set([
   0x0a, // \n  line feed
   0x0d, // \r  carriage return
@@ -95,12 +88,11 @@ const LINE_BOUNDARY_CODEPOINTS: ReadonlySet<number> = new Set([
   0x2029, // paragraph separator
 ]);
 
-/** Port of Python `str.splitlines(keepends=True)`: split into lines INCLUDING their terminators, with
- *  \r\n treated as a single terminator. A trailing terminator does NOT yield an empty final element
- *  (matching Python). */
+/** Split into lines INCLUDING their terminators, with \r\n treated as a single terminator. A trailing
+ *  terminator does NOT yield an empty final element. */
 function splitlinesKeepends(text: string): Array<string> {
   const out: Array<string> = [];
-  const chars = [...text]; // code-point iteration (matches Python str semantics)
+  const chars = [...text]; // code-point iteration (not UTF-16 code units)
   let lineStart = 0;
   let i = 0;
   while (i < chars.length) {
@@ -136,17 +128,16 @@ type TsNode = {
 };
 
 /**
- * Port of TreeSitterPythonChunker. The frozen class lazily caches a parser at class level; here the
- * loader (treesitter_loader.ts) owns the process-wide parser cache, so this chunker is a thin,
- * stateless adapter — construct once at worker boot, reuse across files (selector.py rationale).
+ * The loader (treesitter_loader.ts) owns the process-wide parser cache, so this chunker is a thin,
+ * stateless adapter — construct once at worker boot, reuse across files.
  */
 export class TreeSitterPythonChunker {
   /**
-   * Port of `chunk`. Carve `body` into review-sized chunks anchored on changed lines.
+   * Carve `body` into review-sized chunks anchored on changed lines.
    *
    * @param path workspace-relative path, copied verbatim onto every chunk for citation.
-   * @param body raw file bytes; decoded UTF-8 with replacement (matches Python
-   *   `body.decode("utf-8", errors="replace")`) for parsing + line-slicing.
+   * @param body raw file bytes; decoded UTF-8 with replacement (one U+FFFD per invalid byte) for
+   *   parsing + line-slicing.
    * @param hunkRanges inclusive 1-based (start, end) pairs of changed lines; empty → whole file.
    */
   async chunk(args: {
@@ -156,16 +147,16 @@ export class TreeSitterPythonChunker {
   }): Promise<Array<DiffChunkV1>> {
     const { path, body, hunkRanges } = args;
     assertDiffSize(body);
-    // errors="replace": one U+FFFD per invalid byte, identical to Python bytes.decode(errors=replace).
+    // Lenient decode: one U+FFFD per invalid byte (never throws on malformed input).
     const decoded = new TextDecoder("utf-8").decode(body);
     if (decoded === "") {
       return [];
     }
 
     let candidates: Array<DiffChunkV1>;
-    // web-tree-sitter Trees hold WASM-heap memory that JS GC does NOT reclaim (the Python bindings free
-    // it automatically). Extract the plain DiffChunkV1 candidate data, then delete() the tree in
-    // `finally` so a long-lived worker processing many PRs does not leak WASM memory.
+    // web-tree-sitter Trees hold WASM-heap memory that JS GC does NOT reclaim automatically. Extract
+    // the plain DiffChunkV1 candidate data, then delete() the tree in `finally` so a long-lived
+    // worker processing many PRs does not leak WASM memory.
     let tree: { rootNode: unknown; delete(): void } | null = null;
     try {
       const parser = await getParser("python");
@@ -200,9 +191,8 @@ export class TreeSitterPythonChunker {
   }
 
   // ── candidate extraction ────────────────────────────────────────────────────────────────────
-  /** Port of `_extract_candidates`. Walk `root.children`; emit one chunk per top-level def/class/
-   *  decorated-def. The decorated unit's span includes the decorator line(s) (anchor = the
-   *  decorated_definition node). */
+  /** Walk `root.children`; emit one chunk per top-level def/class/decorated-def. The decorated unit's
+   *  span includes the decorator line(s) (anchor = the decorated_definition node). */
   private extractCandidates(args: { root: TsNode; body: string; path: string }): Array<DiffChunkV1> {
     const { root, body, path } = args;
     const lines = splitlinesKeepends(body);
@@ -265,8 +255,8 @@ export class TreeSitterPythonChunker {
     return out;
   }
 
-  /** Port of `_fallback_module`: a single module-level chunk spanning the whole file, or — when hunk
-   *  ranges are present — the clamped union window of the changed lines. */
+  /** A single module-level chunk spanning the whole file, or — when hunk ranges are present — the
+   *  clamped union window of the changed lines. */
   private fallbackModule(args: {
     path: string;
     body: string;

@@ -1,8 +1,5 @@
 /**
- * `syncCodeOwners` activity — registered Temporal activity name `sync_code_owners_activity`.
- *
- * FAITHFUL 1:1 port of the frozen Python
- * `vendor/codemaster-py/codemaster/activities/sync_code_owners.py::SyncCodeOwnersActivity.sync_code_owners`
+ * `syncCodeOwners` activity — registered Temporal activity name `sync_code_owners_activity`
  * (Sprint 21 / S21.DM.11; consumer-wired S23.AR.4 / DM-WIRE T0).
  *
  * Fetches the repository's CODEOWNERS file from the default branch via the injected {@link CodeOwnersFilePort}
@@ -25,7 +22,7 @@
  * NO clock / random. The repo's `INSERT … ON CONFLICT (repository_id, path_pattern, source_file_sha) DO
  * NOTHING` collapses replays against the same CODEOWNERS SHA to a no-op (returns 0).
  *
- * ## Empty-output cases (return 0 cleanly, 1:1 with the Python)
+ * ## Empty-output cases (return 0 cleanly)
  *   - `code_owners_v1` flag disabled.
  *   - Repo has no CODEOWNERS file (the port returns null).
  *   - File parses to zero valid rules (all malformed).
@@ -33,14 +30,13 @@
  *
  * ## Typed-input envelope (CLAUDE.md invariant 11 / ADR-0047)
  *
- * The frozen Python dispatches with SIX positional arguments; this port CLOSES that violation — the single
- * positional input is the {@link SyncCodeOwnersPayloadV1} envelope (field names mirror the Python payload
- * dict keys verbatim so the webhook emitter needs no rename adapter).
+ * The single positional input is the {@link SyncCodeOwnersPayloadV1} envelope (field names match the
+ * webhook emitter's payload dict keys so no rename adapter is needed).
  *
  * ## Runtime context
  *
  * The activity runs in the NORMAL Node runtime (NOT the workflow V8-isolate sandbox), so real GitHub + DB
- * I/O is fine. The clock is injected for parity with the Python constructor; the sync path does no time math
+ * I/O is fine. The clock is injected for constructor parity; the sync path does no time math
  * (`synced_at` is set by the DB server clock inside `upsertRules`).
  */
 
@@ -54,16 +50,13 @@ import { parseCodeowners } from "#backend/integrations/github/codeowners_parser.
 
 /**
  * uuid5 namespace — stable across replays so the same `(repository_id, path_pattern, source_file_sha)`
- * tuple always maps to the same code_owner_id. 1:1 with the Python
- * `_CODE_OWNER_UUID5_NAMESPACE = uuid.UUID("8c8c9d13-0a3e-5e0f-9b7e-fc2c3a8d9703")`. MUST NOT change — it
- * would re-key every rule.
+ * tuple always maps to the same code_owner_id. MUST NOT change — it would re-key every rule.
  */
 export const CODE_OWNER_UUID5_NAMESPACE = "8c8c9d13-0a3e-5e0f-9b7e-fc2c3a8d9703";
 
 /**
- * Stable per-rule UUIDv5 keyed on the natural-key tuple. 1:1 with the Python `derive_code_owner_id`:
- * `uuid5(NAMESPACE, f"{repository_id}|{path_pattern}|{source_file_sha}")`. Deterministic (no randomness),
- * so byte-for-byte identical to the Python derivation across replays + across the TS/Python impls.
+ * Stable per-rule UUIDv5 keyed on the natural-key tuple:
+ * `uuid5(NAMESPACE, f"{repository_id}|{path_pattern}|{source_file_sha}")`. Deterministic (no randomness).
  */
 export function deriveCodeOwnerId(args: {
   repositoryId: string;
@@ -75,7 +68,7 @@ export function deriveCodeOwnerId(args: {
 }
 
 /**
- * The slice of GitHub the activity needs (1:1 with the Python `CodeOwnersFilePort`).
+ * The slice of GitHub the activity needs.
  *
  * Returns either `[contentBytes, blobSha]` or `null` when no CODEOWNERS file is present in the repo. The
  * activity treats the null case as a no-op (some repos genuinely don't have a CODEOWNERS file).
@@ -94,7 +87,7 @@ export type CodeOwnersFilePort = {
 };
 
 /**
- * Repo Protocol consumed by the activity (1:1 with the Python `CodeOwnersRepoPort`).
+ * Repo Protocol consumed by the activity.
  *
  * `upsertRules` returns the count of rules written; ON CONFLICT DO NOTHING absorbs replays against the same
  * SHA. The concrete {@link PostgresCodeOwnersRepo} satisfies this shape.
@@ -107,12 +100,12 @@ export type CodeOwnersRepoPort = {
   }): Promise<number>;
 };
 
-/** An async feature-flag check (1:1 with the Python `Callable[[], Awaitable[bool]]`). */
+/** An async feature-flag check. */
 export type IsEnabled = () => Promise<boolean>;
 
 /**
  * GitHub's contents API returns base64-encoded bodies. Decode + utf-8 the result. Defensive against odd
- * encoding hints. 1:1 with the Python `_decode_github_contents` (default encoding "base64").
+ * encoding hints.
  *
  * `content` are the base64-ASCII bytes from the port; `Buffer.from(content).toString("base64")` would be
  * wrong — the bytes ARE the base64 text, so we read them as a base64-encoded latin1 string and decode.
@@ -129,7 +122,7 @@ export function decodeGithubContents(content: Uint8Array, encoding = "base64"): 
 
 /**
  * Map parser output → wire envelope rows. Filters out rules whose SHA-derived UUIDv5 collides (defensive —
- * should not happen under normal CODEOWNERS shapes). 1:1 with the Python `_to_v1_rules`.
+ * should not happen under normal CODEOWNERS shapes).
  */
 export function toV1Rules(args: {
   parsed: ReadonlyArray<{ path_pattern: string; owner_logins: ReadonlyArray<string> }>;
@@ -163,13 +156,13 @@ export function toV1Rules(args: {
   return out;
 }
 
-/** Bound-method holder for `sync_code_owners_activity` (1:1 with the Python `SyncCodeOwnersActivity`). */
+/** Bound-method holder for `sync_code_owners_activity`. */
 export class SyncCodeOwnersActivity {
   readonly #github: CodeOwnersFilePort;
   readonly #repo: CodeOwnersRepoPort;
   readonly #isEnabled: IsEnabled;
-  // The injected clock is part of the Python constructor's dependency set; retained for parity even though
-  // the sync path does no time math (`synced_at` is the DB server clock in upsertRules).
+  // The injected clock is kept for constructor alignment; the sync path does no time math
+  // (`synced_at` is the DB server clock in upsertRules).
   readonly #clock: Clock;
 
   public constructor(args: {
@@ -185,12 +178,12 @@ export class SyncCodeOwnersActivity {
   }
 
   /**
-   * Fetch + parse + upsert. Returns the count of rules persisted. 1:1 with the Python `sync_code_owners`.
+   * Fetch + parse + upsert. Returns the count of rules persisted.
    *
    * Returns 0 when: `code_owners_v1` disabled; repo has no CODEOWNERS file; file parses to zero valid
    * rules; or the file's SHA matches an already-persisted batch (ON CONFLICT no-ops everything).
    *
-   * @param input the typed single-arg envelope (closes the Python 6-positional dispatch).
+   * @param input the typed single-arg envelope.
    */
   public async syncCodeOwners(input: SyncCodeOwnersPayloadV1): Promise<number> {
     if (!(await this.#isEnabled())) {
@@ -229,7 +222,7 @@ export class SyncCodeOwnersActivity {
     });
   }
 
-  /** Exposed for parity with the Python constructor's clock dependency (kept reachable). */
+  /** Exposed so the constructor's clock dependency is kept reachable. */
   public clock(): Clock {
     return this.#clock;
   }

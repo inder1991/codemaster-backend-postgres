@@ -1,8 +1,5 @@
 /**
- * Cassette-based HTTP replay — 1:1 port of `codemaster/infra/cassettes.py`
- * (frozen Python, Sprint 0 / Story S0.5a).
- *
- * A {@link CassetteHttpClient} replays HTTP interactions recorded to a YAML file. Used in tests to
+ * Cassette-based HTTP replay — {@link CassetteHttpClient} replays HTTP interactions recorded to a YAML file. Used in tests to
  * make external-service integration (GitHub REST, Bedrock, Vault, …) deterministic, fast, and
  * forensically valuable. The GitHub API client takes an injected http client; in production that is
  * a real `fetch` transport, in tests it is this cassette double.
@@ -48,7 +45,7 @@ import { z } from "zod";
 
 // === Cassette contract ===
 
-/** JSON value — the body_json / structured-body type (Python `dict | list | scalar | None`). */
+/** JSON value — the body_json / structured-body type (object | array | scalar | null). */
 export type JsonValue =
   | string
   | number
@@ -68,7 +65,7 @@ const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   ]),
 );
 
-/** The HTTP methods a recorded request may carry (mirrors the Python `Literal[...]`). */
+/** The HTTP methods a recorded request may carry. */
 export const CASSETTE_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"] as const;
 export type CassetteMethod = (typeof CASSETTE_METHODS)[number];
 
@@ -204,7 +201,7 @@ export class CassetteMismatch extends Error {
   }
 }
 
-/** Arguments to {@link CassetteHttpClient.request} — mirrors the Python keyword-only signature. */
+/** Arguments to {@link CassetteHttpClient.request}. */
 export type CassetteRequestArgs = {
   method: string;
   url: string;
@@ -220,7 +217,7 @@ export type CassetteRequestArgs = {
  * `await client.request({ method, url, ... })`. The client matches the request against the NEXT
  * interaction (by cursor) and returns the recorded response.
  *
- * Match strategy (strict by default, 1:1 with the Python):
+ * Match strategy (strict by default):
  * - Method must match exactly (case-insensitive on the caller side — uppercased before compare).
  * - URL must match at path-and-query level; scheme + host are case-normalised and query params sorted
  *   (so `?b=2&a=1` ≡ `?a=1&b=2`).
@@ -260,7 +257,7 @@ export class CassetteHttpClient {
    * drift (method / URL / body) or on cassette exhaustion.
    */
   public async request(args: CassetteRequestArgs): Promise<CassetteResponse> {
-    // Async to mirror the Python `async def request`; the body is synchronous (no awaits needed).
+    // Async so the signature is awaitable; the body is synchronous (no awaits needed).
     await Promise.resolve();
 
     if (this.cursor >= this.cassette.interactions.length) {
@@ -340,9 +337,8 @@ export class CassetteHttpClient {
  * Normalize a URL for comparison: lowercase scheme/host; sort query params.
  *
  * Scheme/host case-normalisation runs REGARDLESS of whether the URL has a query string (RFC 3986
- * §3.1 + §3.2.2 declare both case-insensitive) — mirroring the frozen Python `_normalize_url` fix
- * that stopped early-returning on no-query URLs and leaving `HTTPS://API.Example.com/widgets`
- * distinct from `https://api.example.com/widgets`.
+ * §3.1 + §3.2.2 declare both case-insensitive) — a `HTTPS://API.Example.com/widgets` URL must
+ * normalise to the same form as `https://api.example.com/widgets`.
  */
 export function normalizeUrl(url: string): string {
   const queryIndex = url.indexOf("?");
@@ -370,8 +366,7 @@ export function normalizeUrl(url: string): string {
 }
 
 /**
- * Structural deep-equality for JSON values. Object key ORDER is irrelevant (compares by key set),
- * matching Python `dict == dict` semantics used by the frozen `json_body != recorded` check.
+ * Structural deep-equality for JSON values. Object key ORDER is irrelevant (compares by key set).
  */
 function deepEqual(a: JsonValue | null, b: JsonValue | null): boolean {
   if (a === b) return true;

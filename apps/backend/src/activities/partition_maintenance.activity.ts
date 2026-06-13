@@ -1,20 +1,16 @@
 /**
- * `runPgPartmanMaintenanceActivity` — REAL de-stubbed port of the frozen Python
- * `@activity.defn run_pg_partman_maintenance`
- * (vendor/codemaster-py/codemaster/activities/partition_maintenance.py). Sprint 3 / S3.1.7.
- *
- * Drives pg_partman's `partman.run_maintenance(p_analyze := true)` once per day (the daily Temporal
+ * `runPgPartmanMaintenanceActivity` — drives pg_partman's `partman.run_maintenance(p_analyze := true)` once per day (the daily Temporal
  * Schedule fires {@link partitionMaintenanceWorkflow} at 02:00 UTC). `run_maintenance` premakes the
  * upcoming FUTURE range partitions and drops aged ones on every pg_partman-managed parent (the hot
  * partitioned tables registered in `partman.part_config` — e.g. `audit.audit_events` /
  * `audit.workflow_events`). The retention/premake WINDOW and the table list are NOT hardcoded here: they
- * live in each parent's `partman.part_config` row (premake / retention columns), exactly as in the frozen
- * Python — this activity issues NO `CREATE TABLE … PARTITION OF …` / `DROP TABLE` DDL of its own. It
- * delegates 100% to pg_partman and merely COUNTS the effect.
+ * live in each parent's `partman.part_config` row (premake / retention columns): this activity issues NO
+ * `CREATE TABLE … PARTITION OF …` / `DROP TABLE` DDL of its own. It delegates 100% to pg_partman and
+ * merely COUNTS the effect.
  *
- * ## What it reports (byte-faithful with the Python)
+ * ## What it reports
  *
- * Inside ONE transaction (the Python `engine.begin()` bracket):
+ * Inside ONE transaction:
  *   1. `tables_processed` = `SELECT COUNT(*) FROM partman.part_config` — how many pg_partman parents exist
  *      (the count is reported verbatim, before/independent of the maintenance result).
  *   2. `partitions_before` = child-partition count across ALL parents, via
@@ -22,16 +18,14 @@
  *   3. `SELECT partman.run_maintenance(p_analyze := true)` — the actual premake-future + drop-aged sweep.
  *   4. `partitions_after` = the same child-partition count.
  *   5. `partitions_created` = `max(after - before, 0)` — floored at 0 (a sweep that NET-drops aged
- *      partitions must not report a negative "created" count). 1:1 with the Python
- *      `max(int(after) - int(before), 0)`.
+ *      partitions must not report a negative "created" count).
  *
  * ## NO CREATE INDEX CONCURRENTLY / autocommit handling
  *
- * The frozen Python issues NO `CREATE INDEX CONCURRENTLY` and opens NO autocommit block — all four
- * statements run inside the single `engine.begin()` transaction. We mirror that EXACTLY: one
- * {@link withPgTransaction} bracket, no autocommit escape. (pg_partman's own internal DDL runs inside the
- * function call; the CLAUDE.md "CREATE INDEX CONCURRENTLY outside the txn" rule governs *our* migrations,
- * not pg_partman's internal partition-template index creation, and the Python does no such thing here.)
+ * All four statements run inside one {@link withPgTransaction} bracket, no autocommit escape.
+ * (pg_partman's own internal DDL runs inside the function call; the CLAUDE.md "CREATE INDEX
+ * CONCURRENTLY outside the txn" rule governs *our* migrations, not pg_partman's internal
+ * partition-template index creation.)
  *
  * ## Cross-tenant by design (the catalog queries carry no tenancy)
  *
@@ -40,25 +34,23 @@
  * The inline `// tenant:exempt …` markers are belt-and-suspenders documenting the by-design cross-tenant
  * (cluster-wide) nature of partition maintenance — it MUST see every parent regardless of tenant.
  *
- * ## DSN resolution (divergence from the Python — maint-pool env, with a core-pool fallback)
+ * ## DSN resolution (maint-pool env, with a core-pool fallback)
  *
- * The frozen Python reads `CODEMASTER_PG_MAINT_DSN` (the dedicated maintenance pool populated from Vault
- * Agent). Faithful 1:1: the injected `dsn` wins, else `CODEMASTER_PG_MAINT_DSN`, else
- * `CODEMASTER_PG_CORE_DSN` (the ADR-0062 shared pool) — the fallback lets the integration tier point the
- * activity at the disposable PG via the standard `CODEMASTER_PG_CORE_DSN` seam every other ported sweep
- * uses, without provisioning a separate maint DSN. Production still prefers the dedicated maint pool when
+ * The injected `dsn` wins, else `CODEMASTER_PG_MAINT_DSN`, else `CODEMASTER_PG_CORE_DSN` (the
+ * ADR-0062 shared pool). The fallback lets the integration tier point at the disposable PG without
+ * provisioning a separate maint DSN. Production still prefers the dedicated maint pool when
  * `CODEMASTER_PG_MAINT_DSN` is set. Re-basing onto a ported maintenance-pool config is
  * FOLLOW-UP-partition-maintenance-dedicated-pool.
  *
  * ## Clock authority
  *
  * NONE. This activity reads no wall clock and emits no `created_at` — pg_partman computes every partition
- * boundary from the DB `now()` internally. 1:1 with the Python (which injects no clock here).
+ * boundary from the DB `now()` internally.
  *
  * ## Runtime context / shared-wiring boundary
  *
  * Runs in the NORMAL Node runtime (DB access sanctioned), inside one {@link withPgTransaction} bracket so
- * the count → maintain → recount sequence is a single atomic snapshot (the Python `engine.begin()`).
+ * the count → maintain → recount sequence is a single atomic snapshot.
  * Exports the registered activity function only; the Integrate/Workflow phase binds it under the Temporal
  * name `run_pg_partman_maintenance` and owns the worker registry — NOT this module.
  */
@@ -69,7 +61,7 @@ import { PartitionMaintenanceResultV1 } from "#contracts/partition_maintenance_r
 
 /**
  * Injected collaborators. `dsn` is OPTIONAL — production resolves the dedicated maintenance pool from
- * `CODEMASTER_PG_MAINT_DSN` (1:1 with the Python), falling back to the ADR-0062 `CODEMASTER_PG_CORE_DSN`
+ * `CODEMASTER_PG_MAINT_DSN`, falling back to the ADR-0062 `CODEMASTER_PG_CORE_DSN`
  * shared pool; tests inject a disposable-PG `dsn`.
  */
 export type PartitionMaintenanceDeps = {
@@ -78,9 +70,8 @@ export type PartitionMaintenanceDeps = {
 };
 
 /**
- * Resolve the DSN: the injected one, else `CODEMASTER_PG_MAINT_DSN` (the Python's
- * {@link https | PG_MAINT_DSN_ENV}), else `CODEMASTER_PG_CORE_DSN`. Throws if none is set — fail-closed,
- * 1:1 with the Python `RuntimeError(f"{PG_MAINT_DSN_ENV} unset; …")`.
+ * Resolve the DSN: the injected one, else `CODEMASTER_PG_MAINT_DSN`, else `CODEMASTER_PG_CORE_DSN`.
+ * Throws if none is set — fail-closed.
  */
 function resolveDsn(deps: PartitionMaintenanceDeps): string {
   if (deps.dsn !== undefined && deps.dsn !== "") {
@@ -100,7 +91,7 @@ function resolveDsn(deps: PartitionMaintenanceDeps): string {
   );
 }
 
-/** The child-partition count across ALL pg_partman parents — the Python before/after `pg_inherits` query. */
+/** The child-partition count across ALL pg_partman parents — the before/after `pg_inherits` query. */
 const CHILD_PARTITION_COUNT_SQL =
   "SELECT COUNT(*) AS n FROM pg_inherits " +
   "WHERE inhparent IN (" +
@@ -116,7 +107,7 @@ function countOf(rows: ReadonlyArray<{ n: string | number }>): number {
 
 /**
  * The registered activity — count parents + child partitions, run pg_partman maintenance, recount, and
- * return the typed envelope. 1:1 with the Python `run_pg_partman_maintenance`.
+ * return the typed envelope.
  */
 export async function runPgPartmanMaintenanceActivity(
   deps: PartitionMaintenanceDeps = {},
@@ -154,7 +145,7 @@ export async function runPgPartmanMaintenanceActivity(
 
   return PartitionMaintenanceResultV1.parse({
     tables_processed: tablesProcessed,
-    // Floored at 0 — a net-drop sweep must not report negative "created". 1:1 with the Python max(…, 0).
+    // Floored at 0 — a net-drop sweep must not report negative "created".
     partitions_created: Math.max(partitionsAfter - partitionsBefore, 0),
   });
 }

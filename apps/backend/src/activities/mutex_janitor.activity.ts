@@ -1,14 +1,10 @@
 /**
- * `mutexJanitorActivity` — REAL de-stubbed port of the frozen Python
- * `@activity.defn mutex_janitor_activity`
- * (vendor/codemaster-py/codemaster/activities/mutex_janitor.py).
- *
- * Sweeps `core.pr_review_mutex` rows whose lease has expired (or is NULL — defensive). A row is eligible
+ * `mutexJanitorActivity` — sweeps `core.pr_review_mutex` rows whose lease has expired (or is NULL — defensive). A row is eligible
  * for sweeping when:
  *   - `released_at IS NULL` (still logically held), AND
  *   - `lease_expires_at IS NULL OR lease_expires_at < now()`.
  *
- * The `IS NULL` disjunct is mandatory in the frozen Python: SQL NULL semantics mean NULL never satisfies
+ * The `IS NULL` disjunct is mandatory: SQL NULL semantics mean NULL never satisfies
  * `< now()`, so legacy/old-writer rows without a `lease_expires_at` would leak forever without it. (In the
  * current DB the `pr_review_mutex_live_has_lease` CHECK makes a live NULL-lease row unreachable, so the
  * disjunct is purely defensive for pre-CHECK legacy rows — but it is ported byte-faithfully.)
@@ -21,18 +17,18 @@
  * The eligibility predicate `lease_expires_at < now()` uses the DB `now()` (server transaction time). The
  * `released_at` value written by the per-row UPDATE, and the audit `after.released_at` timestamp, come from
  * the INJECTED {@link Clock} (default {@link WallClock}) — NOT the DB `now()`. This split is byte-faithful
- * with the Python (the SELECT uses `now()`; the UPDATE binds `:now = clock.now()`).
+ * (the SELECT uses `now()`; the UPDATE binds `:now = clock.now()`).
  *
  * ## Transaction / commit semantics
  *
  * The whole sweep runs in ONE transaction via {@link withPgTransaction} (BEGIN/COMMIT on a single checked-out
  * client) — the SELECT … FOR UPDATE SKIP LOCKED, every per-row UPDATE, and every audit INSERT commit
- * atomically, mirroring the Python `async with session.begin():`. A throw rolls the whole sweep back.
+ * atomically. A throw rolls the whole sweep back.
  *
  * ## Tenancy (cross-tenant by design)
  *
- * The sweep SELECT carries NO `installation_id` filter — it is a cross-tenant liveness sweep (the Python is
- * `@privileged_path`). The raw-SQL tenancy gate requires the `tenant:exempt reason=… follow_up=…` marker on
+ * The sweep SELECT carries NO `installation_id` filter — it is a cross-tenant liveness sweep. The raw-SQL
+ * tenancy gate requires the `tenant:exempt reason=… follow_up=…` marker on
  * the touching query, present below.
  *
  * ## Runtime context / shared-wiring boundary
@@ -56,7 +52,7 @@ import { type Clock, WallClock } from "#platform/clock.js";
 export type MutexJanitorDeps = {
   /** DSN for the shared pool; default `CODEMASTER_PG_CORE_DSN`. */
   dsn?: string;
-  /** Time seam for the `released_at` stamp + audit `after` timestamp; default {@link WallClock} (1:1 Python). */
+  /** Time seam for the `released_at` stamp + audit `after` timestamp; default {@link WallClock}. */
   clock?: Clock;
   /** W3.5 (OM7): per-invocation sweep bound; default {@link DEFAULT_SWEEP_LIMIT}. The cron fires
    *  every 5 min, so a post-incident backlog drains across ticks instead of one unbounded
@@ -106,9 +102,9 @@ export async function mutexJanitorActivity(
   let swept = 0;
 
   await withPgTransaction(pool, async (client) => {
-    // Cross-tenant liveness sweep: NO installation_id filter by design (Python @privileged_path). The
-    // eligibility predicate `lease_expires_at < now()` uses the DB now() (server transaction time); the
-    // `released_at` value written below uses the INJECTED clock — that split is preserved verbatim.
+    // Cross-tenant liveness sweep: NO installation_id filter by design. The eligibility predicate
+    // `lease_expires_at < now()` uses the DB now() (server transaction time); the `released_at` value
+    // written below uses the INJECTED clock — that split is preserved verbatim.
     // tenant:exempt reason=cross-tenant-liveness-sweep follow_up=PERMANENT-EXEMPTION-mutex-janitor
     // OM7: BOUNDED — oldest-expiry first, at most sweepLimit rows per invocation; the next tick
     // (every 5 min) continues. NULLS FIRST keeps any pre-CHECK legacy NULL-lease rows drainable.

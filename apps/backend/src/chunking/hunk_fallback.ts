@@ -1,13 +1,8 @@
-// HunkFallbackChunker — port of the frozen Python fallback chunker
-// (vendor/codemaster-py/codemaster/chunking/hunk_fallback.py).
-//
-// ── NON-PARITY (best-effort) ────────────────────────────────────────────────────────────────────────
-// This chunker is the routing FALLBACK for languages we have no tree-sitter grammar for (Go, Rust,
-// YAML, Dockerfile, …). It is line-window-anchored, NOT AST-anchored, so it carries no AST-shape
-// parity obligation against the Python reference the way the tree-sitter chunkers do. Its OUTPUT SHAPE
+// HunkFallbackChunker — NON-PARITY (best-effort) routing fallback for languages with no tree-sitter
+// grammar (Go, Rust, YAML, Dockerfile, …). Line-window-anchored, NOT AST-anchored. Its OUTPUT SHAPE
 // (DiffChunkV1 fields, chunk_kind="hunk", the expand/merge/clamp arithmetic, the extension→language
-// table) is nonetheless ported 1:1 so it composes identically with the post-passes (token budget /
-// batcher) and the selector. The behavioral tests are marked NON-PARITY sanity checks.
+// table) is implemented to compose identically with the post-passes (token budget / batcher) and the
+// selector. The behavioral tests are marked NON-PARITY sanity checks.
 //
 // Emits one chunk per hunk range, expanded by `lineWindow` (default 20) on BOTH sides, clamped to the
 // file boundaries; ranges whose expanded windows touch or overlap (`start <= prev_end + 1`) merge into
@@ -18,7 +13,7 @@ import { computeChunkId, DiffChunkV1 } from "#contracts/diff_chunking.v1.js";
 
 import { DiffTooLargeError, type HunkRange, MAX_DIFF_LINES } from "./treesitter_python.js";
 
-/** Port of hunk_fallback.py::_LANG_BY_EXT — extension → language label. */
+/** Extension → language label. */
 const LANG_BY_EXT: Readonly<Record<string, string>> = {
   ".go": "go",
   ".rs": "rust",
@@ -43,9 +38,8 @@ const LANG_BY_EXT: Readonly<Record<string, string>> = {
 
 const NEWLINE_BYTE = 0x0a;
 
-/** Port of chunker_port.py::_assert_diff_size. Counts newline BYTES (avoids decoding on the reject
- *  path); a body not ending in a newline still counts its final partial line. Local copy (the Python
- *  hunk_fallback imports this from chunker_port; the TS chunkers each keep their own copy). */
+/** Counts newline BYTES (avoids decoding on the reject path); a body not ending in a newline still
+ *  counts its final partial line. Each chunker keeps its own local copy. */
 function assertDiffSize(body: Uint8Array): void {
   if (body.length === 0) {
     return;
@@ -64,7 +58,7 @@ function assertDiffSize(body: Uint8Array): void {
   }
 }
 
-// ── Python str.splitlines(keepends=True) — identical copy to the chunkers (see token_budget.ts note).
+// ── splitlines, keepends — see token_budget.ts for the full boundary rationale.
 const LINE_BOUNDARY_CODEPOINTS: ReadonlySet<number> = new Set([
   0x0a, 0x0d, 0x0b, 0x0c, 0x1c, 0x1d, 0x1e, 0x85, 0x2028, 0x2029,
 ]);
@@ -96,15 +90,14 @@ function splitlinesKeepends(text: string): Array<string> {
   return out;
 }
 
-/** Port of hunk_fallback.py::_estimate_tokens — `max(1, len(body) // 4)` (INTEGER floor division,
- *  NO non-ASCII factor; this is the simpler estimate the hunk fallback uses, matching the frozen
- *  Python). `len(body)` is the CODE-POINT length. */
+/** `max(1, len(body) // 4)` — integer floor division, no non-ASCII factor. `len(body)` is the
+ *  CODE-POINT length. */
 function estimateTokens(body: string): number {
   return Math.max(1, Math.trunc([...body].length / 4));
 }
 
-/** Lowercased final extension including the dot, or "" — port of `Path(path).suffix.lower()`
- *  (leading-dot names and trailing-dot names have no suffix). */
+/** Lowercased final extension including the dot, or "" (leading-dot and trailing-dot names have no
+ *  suffix). */
 function lowerSuffix(path: string): string {
   const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
   const name = slash >= 0 ? path.slice(slash + 1) : path;
@@ -115,14 +108,14 @@ function lowerSuffix(path: string): string {
   return name.slice(dot).toLowerCase();
 }
 
-/** Lowercased final path segment — port of `Path(path).name.lower()`. */
+/** Lowercased final path segment. */
 function lowerName(path: string): string {
   const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
   const name = slash >= 0 ? path.slice(slash + 1) : path;
   return name.toLowerCase();
 }
 
-/** Port of hunk_fallback.py::_language_for — Dockerfile by NAME, else the extension table (else null). */
+/** Dockerfile by NAME, else the extension table (else null). */
 function languageFor(path: string): string | null {
   const name = lowerName(path);
   if (name === "dockerfile" || name.startsWith("dockerfile.")) {
@@ -134,8 +127,8 @@ function languageFor(path: string): string | null {
 }
 
 /**
- * Port of HunkFallbackChunker. NON-PARITY best-effort fallback (see module header). Construct once at
- * worker boot (selector singleton); reuse across files.
+ * NON-PARITY best-effort fallback chunker (see module header). Construct once at worker boot
+ * (selector singleton); reuse across files.
  */
 export class HunkFallbackChunker {
   private readonly lineWindow: number;
@@ -149,10 +142,10 @@ export class HunkFallbackChunker {
   }
 
   /**
-   * Port of `chunk`. Emit one chunk per merged hunk range, line-window-expanded + clamped.
+   * Emit one chunk per merged hunk range, line-window-expanded + clamped.
    *
    * @param path workspace-relative path; copied onto every chunk + drives the language label.
-   * @param body raw file bytes; decoded UTF-8 with replacement (matches Python `decode(errors=replace)`).
+   * @param body raw file bytes; decoded UTF-8 with replacement.
    * @param hunkRanges inclusive 1-based (start, end) pairs of changed lines; EMPTY → no chunks (`()`).
    */
   async chunk(args: {

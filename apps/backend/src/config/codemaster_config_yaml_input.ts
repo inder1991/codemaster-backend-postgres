@@ -4,7 +4,7 @@
  * ## Why this layer exists
  *
  * The TS port parses `.codemaster.yaml` with **js-yaml (YAML 1.2)** and validates with the **STRICT**
- * {@link CodemasterConfigV1} Zod contract (`.strict()` + no `z.coerce`). The frozen Python source-of-truth
+ * {@link CodemasterConfigV1} Zod contract (`.strict()` + no `z.coerce`). The source-of-truth
  * parses with **PyYAML (YAML 1.1)** and validates with **lax Pydantic v2** (which coerces scalars). Those
  * two stacks DIVERGE on realistic customer scalars, and the divergence is MATERIAL:
  *

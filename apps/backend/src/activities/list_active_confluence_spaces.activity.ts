@@ -1,28 +1,19 @@
 /**
- * `ListActiveConfluenceSpacesActivity` — FAITHFUL 1:1 TypeScript port of the frozen Python
- * `vendor/codemaster-py/codemaster/activities/list_active_confluence_spaces.py` (Sub-spec A T12).
- *
- * Tiny entry-point activity: reads `core.integrations` to enumerate the ENABLED `confluence_space`
- * rows. The ConfluenceIngestWorkflow calls this once per 6-hour cycle to learn which spaces to sync
- * (BEFORE the per-space sync loop). It lives in its own file (not in confluence_sync.activity.ts),
- * mirroring the class-per-file convention the Python uses — keeping the test seam clean.
- *
- * ## Runtime context / DSN
- *
- * Runs in the NORMAL Node runtime (DB access sanctioned). Resolves the shared ADR-0062 pool from the
- * injected `dsn` (default `CODEMASTER_PG_CORE_DSN`) via {@link getPool}. The class-holder shape mirrors
- * the other class-based activities (EmbedQueryActivity, FetchLinkedIssuesActivity) so Stage 8 registers
- * the bound `listActiveSpaces` method under the Temporal name `list_active_confluence_spaces_activity`.
+ * `ListActiveConfluenceSpacesActivity` (Sub-spec A T12) — reads `core.integrations` to enumerate the
+ * ENABLED `confluence_space` rows. The ConfluenceIngestWorkflow calls this once per 6-hour cycle to
+ * learn which spaces to sync (BEFORE the per-space sync loop). It lives in its own file to keep the
+ * test seam clean. Stage 8 registers the bound `listActiveSpaces` method under the Temporal name
+ * `list_active_confluence_spaces_activity`.
  *
  * ## Tenancy (cross-tenant by design)
  *
  * `core.integrations` IS in TENANT_SCOPED_TABLES, but the confluence corpus is PLATFORM-WIDE — there is
- * no per-installation Confluence space. The SELECT therefore carries the `// tenant:exempt` marker
- * (1:1 with the frozen Python source) per the raw-SQL tenancy gate.
+ * no per-installation Confluence space. The SELECT therefore carries the `// tenant:exempt` marker per
+ * the raw-SQL tenancy gate.
  *
- * ## JSONB gotcha (1:1 with the Python)
+ * ## JSONB gotcha
  *
- * `config_json->>'space_key'` extracts the scalar IN SQL — sidestepping the asyncpg/node-pg JSONB
+ * `config_json->>'space_key'` extracts the scalar IN SQL — sidestepping the node-pg JSONB
  * deserialization gotcha (a `config_json` column read back as an object). The space_key comes out as a
  * plain text column.
  */
@@ -82,10 +73,9 @@ export class ListActiveConfluenceSpacesActivity {
        ORDER  BY config_json->>'space_key'`,
     );
 
-    // Validate EACH row through ConfluenceSpaceRef (space_key: min_length 1, max_length 64) — 1:1 with the
-    // Python, which constructs `ConfluenceSpaceRef(...)` per row, so a malformed integration whose config_json
-    // has no 'space_key' (the SQL `->>'space_key'` yields NULL) FAILS LOUDLY here rather than silently
-    // emitting a NULL-space_key entry into the sync loop.
+    // Validate EACH row through ConfluenceSpaceRef (space_key: min_length 1, max_length 64) — a
+    // malformed integration whose config_json has no 'space_key' (the SQL `->>'space_key'` yields NULL)
+    // FAILS LOUDLY here rather than silently emitting a NULL-space_key entry into the sync loop.
     const spaces: Array<ConfluenceSpaceRef> = result.rows.map((r) =>
       ConfluenceSpaceRefSchema.parse({
         schema_version: 1,

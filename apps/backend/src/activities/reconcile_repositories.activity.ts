@@ -1,10 +1,8 @@
 /**
  * `reconcileRepositories` activity — registered Temporal activity name `reconcile_repositories_activity`.
  *
- * FAITHFUL 1:1 port of the frozen Python `@activity.defn("reconcile_repositories_activity")`
- * (vendor/codemaster-py/codemaster/activities/reconcile_repositories.py). Idempotent upsert of
- * `core.repositories` rows from a GitHub `installation_repositories` event. Replay-safe (same payload
- * twice → same end state).
+ * Idempotent upsert of `core.repositories` rows from a GitHub `installation_repositories` event.
+ * Replay-safe (same payload twice → same end state).
  *
  * Default-deny / auto-enable rule (CLAUDE.md invariant 10):
  *  - `repositories_added`: upsert via the shared {@link upsertRepository} helper with
@@ -19,16 +17,15 @@
  * `installation_repositories` can arrive BEFORE `installation.created`. When the parent installations
  * row is not yet present, the activity THROWS (a plain Error, NOT a validation/ValueError) so the
  * workflow's RetryPolicy (which marks only ValueError non-retryable) redrives until the parent exists.
- * This is 1:1 with the Python `raise RuntimeError(...)`.
+ * The plain Error (not ValueError) keeps it retryable under Temporal's RetryPolicy.
  *
  * ## DSN + transaction + deferred audit
  *
  * Reads `CODEMASTER_PG_CORE_DSN`; runs all mutations in ONE transaction over the ADR-0062 shared pool.
  * Counter semantics: `added` increments UNCONDITIONALLY per repo in `repositories_added` (even an
- * UPDATE-refresh of an existing row — 1:1 with the Python loop, which does NOT gate on `before`);
- * `removed` increments ONLY for repos that were previously recorded (a remove of an unrecorded repo is
- * a no-op and does NOT count). The `repository.added` / `repository.removed` audit.audit_events emits
- * are DEFERRED (see // FOLLOW-UP) alongside the rest of the TS audit-emit port.
+ * UPDATE-refresh of an existing row); `removed` increments ONLY for repos that were previously recorded
+ * (a remove of an unrecorded repo is a no-op and does NOT count). The `repository.added` /
+ * `repository.removed` audit.audit_events emits are DEFERRED (see // FOLLOW-UP).
  */
 
 import { resolveInternalInstallationId } from "#backend/ingest/_webhook_resolvers.js";
@@ -45,8 +42,6 @@ import { ReconcileRepositoriesResultV1 } from "#contracts/reconcile_results.v1.j
 
 /**
  * The registered `reconcile_repositories_activity` Temporal activity.
- *
- * 1:1 with reconcile_repositories.py:115-187.
  */
 export async function reconcileRepositories(
   payloadDict: unknown,
@@ -69,8 +64,8 @@ export async function reconcileRepositories(
   await db.transaction().execute(async (tx) => {
     const iid = await resolveInternalInstallationId(tx, payload.installation.id);
     if (iid === null) {
-      // `installation_repositories` arrived before `installation.created`. The workflow retries; this
-      // activity THROWS so Temporal redrives (plain Error → retryable; only ValueError is non-retryable).
+      // `installation_repositories` arrived before `installation.created`. The workflow retries; plain
+      // Error keeps this retryable under Temporal's RetryPolicy.
       throw new Error(
         `installation_id=${payload.installation.id} not yet recorded; retry`,
       );
@@ -79,7 +74,7 @@ export async function reconcileRepositories(
     // FOLLOW-UP (DEFERRED): bind_audit_context(tx, installationId=iid) here before the per-repo emits.
 
     for (const repo of payload.repositories_added) {
-      // _, before, after — `before`/`after` feed the deferred audit emit.
+      // `before`/`after` feed the deferred audit emit.
       await upsertRepository(tx, {
         installationId: iid,
         githubRepoId: repo.id,
@@ -92,13 +87,13 @@ export async function reconcileRepositories(
       added += 1;
       // FOLLOW-UP (DEFERRED): emitAuditEvent({ actorKind: sender.type !== "Bot" ? "user" : "bot",
       // actorId: null, action: "repository.added", targetKind: "repository", targetId: String(repo.id),
-      // before: before || null, after, clock }). 1:1 the Python emits UNCONDITIONALLY (even on refresh).
+      // before: before || null, after, clock }). Emits UNCONDITIONALLY (even on refresh).
     }
 
     for (const repo of payload.repositories_removed) {
       const { id } = await removeRepository(tx, { githubRepoId: repo.id, clock });
       if (id === null) {
-        continue; // repo never recorded — no audit, removed NOT incremented (1:1 with the Python).
+        continue; // repo never recorded — no audit, removed NOT incremented.
       }
       removed += 1;
       // FOLLOW-UP (DEFERRED): emitAuditEvent({ actorKind: sender.type !== "Bot" ? "user" : "bot",

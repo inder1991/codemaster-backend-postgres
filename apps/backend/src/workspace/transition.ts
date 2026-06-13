@@ -1,21 +1,18 @@
 /**
- * `transitionLease` — atomic state-machine primitive for `core.workspace_leases`. 1:1 TypeScript/Kysely
- * port of the frozen Python spine primitive
- * `vendor/codemaster-py/codemaster/workspace/_transition.py` (Phase 6 / Task 7, AD-11).
+ * `transitionLease` — atomic state-machine primitive for `core.workspace_leases` (Phase 6 / Task 7, AD-11).
  *
  * The single primitive every workspace caller uses to mutate `core.workspace_leases.state`. No version
  * column, no per-row attempt counter: the state machine excludes most race patterns (only one valid
  * transition from each state); `SELECT … FOR UPDATE` on the lease row + a `WHERE state` precondition
  * serializes the rest.
  *
- * ## Six-step protocol (1:1 with the Python)
+ * ## Six-step protocol
  *
  *   1. Validate `fromState` / `toState` ∈ {@link LEASE_STATES} and `activity` non-empty — typed errors
  *      at the boundary, not Postgres CHECK violations.
- *   2. Assert an OPEN transaction. The TS analogue of the Python `session.in_transaction()`
- *      `RuntimeError`: reject a handle that is not an `instanceof Transaction` (a bare `Kysely` engine).
- *      Without a txn the `SELECT FOR UPDATE` releases its row lock immediately and the UPDATE + event
- *      emit chain degenerates to TOCTOU.
+ *   2. Assert an OPEN transaction: reject a handle that is not an `instanceof Transaction` (a bare
+ *      `Kysely` engine). Without a txn the `SELECT FOR UPDATE` releases its row lock immediately and
+ *      the UPDATE + event emit chain degenerates to TOCTOU.
  *   3. `SELECT state, run_id, review_id, installation_id … WHERE workspace_id = :wid FOR UPDATE`.
  *   4. Branch:
  *        * row missing → {@link StateDrift} with `actualState = "<missing>"`.
@@ -45,15 +42,15 @@ import { emitWorkflowEvent, EVENT_TYPES } from "../ingest/_workflow_events_repos
 
 import { CrossInstallationViolation, StateDrift } from "./errors.js";
 
-// BF-9 Phase A — cross-installation safety identifiers (1:1 with the Python constants). They surface
-// the offending primitive + key kind in CrossInstallationViolation payloads + structured WARN logs.
+// BF-9 Phase A — cross-installation safety identifiers. They surface the offending primitive + key
+// kind in CrossInstallationViolation payloads + structured WARN logs.
 const BF9_PRIMITIVE_NAME = "transition_lease";
 const BF9_KEY_KIND = "workspace_id";
 
 /**
- * Outcome of a {@link transitionLease} call (1:1 with the Python `LeaseTransitionOutcome` enum, modeled
- * as a frozen `as const` object + derived union per the repo's no-TS-enum style rule — callers still
- * read `LeaseTransitionOutcome.APPLIED` and compare against the string value identically).
+ * Outcome of a {@link transitionLease} call (modeled as a frozen `as const` object + derived union per
+ * the repo's no-TS-enum style rule — callers read `LeaseTransitionOutcome.APPLIED` and compare against
+ * the string value identically).
  *
  *   - `APPLIED` — the UPDATE advanced the row and the `WORKSPACE_*` audit event was emitted.
  *   - `ALREADY_APPLIED` — the current state already equalled `toState` (Temporal-retry safety; no
@@ -69,9 +66,8 @@ export type LeaseTransitionOutcome =
   (typeof LeaseTransitionOutcome)[keyof typeof LeaseTransitionOutcome];
 
 /**
- * Valid lease states (1:1 with the Python `LEASE_STATES` frozenset / the migration-0076
- * `core.workspace_lease_state` ENUM). Kept as a `Set` so validation rejects bad values before any SQL
- * round-trip — callers see a typed error, not a Postgres CHECK violation.
+ * Valid lease states (matches the migration-0076 `core.workspace_lease_state` ENUM). Kept as a `Set`
+ * so validation rejects bad values before any SQL round-trip — typed error, not a Postgres CHECK violation.
  */
 export const LEASE_STATES: ReadonlySet<string> = new Set<string>([
   "ALLOCATED",
@@ -82,11 +78,11 @@ export const LEASE_STATES: ReadonlySet<string> = new Set<string>([
 ]);
 
 /**
- * State → required timestamp column (1:1 with the Python `_STATE_TIMESTAMP_COLUMNS`). `ORPHANED` has no
- * required timestamp (its only invariant is the partial-index exclusion from the active set);
- * `ALLOCATED` (entry state) is stamped by the INSERT, not by a transition. The migration's biconditional
- * CHECKs require these timestamps present when the row is in the corresponding state, so the primitive
- * stamps them in lockstep with the state flip. Keys are validated `toState` values; never user input.
+ * State → required timestamp column. `ORPHANED` has no required timestamp (its only invariant is the
+ * partial-index exclusion from the active set); `ALLOCATED` (entry state) is stamped by the INSERT,
+ * not by a transition. The migration's biconditional CHECKs require these timestamps present when the
+ * row is in the corresponding state, so the primitive stamps them in lockstep with the state flip.
+ * Keys are validated `toState` values; never user input.
  */
 export const STATE_TIMESTAMP_COLUMNS: ReadonlyMap<string, string> = new Map<string, string>([
   ["RELEASE_REQUESTED", "release_requested_at"],
@@ -95,10 +91,9 @@ export const STATE_TIMESTAMP_COLUMNS: ReadonlyMap<string, string> = new Map<stri
 ]);
 
 /**
- * Return the `WORKSPACE_<state>` audit-event type for a target state (1:1 with the Python
- * `_event_type_for`). All 5 lease states have a corresponding event_type (migration 0078). NOTE:
- * `FAILED_CLEANUP` lease state maps to the `WORKSPACE_CLEANUP_FAILED` event-type per the spec §5.3
- * naming convention.
+ * Return the `WORKSPACE_<state>` audit-event type for a target state. All 5 lease states have a
+ * corresponding event_type (migration 0078). NOTE: `FAILED_CLEANUP` maps to the
+ * `WORKSPACE_CLEANUP_FAILED` event-type per the spec §5.3 naming convention.
  */
 export function eventTypeFor(state: string): string {
   if (state === "FAILED_CLEANUP") {
@@ -115,7 +110,7 @@ type CurrentLeaseRow = {
   installation_id: string;
 };
 
-/** Arguments for {@link transitionLease}. 1:1 with the Python keyword-only signature. */
+/** Arguments for {@link transitionLease}. */
 export type TransitionLeaseArgs = {
   /**
    * Open transaction handle. The caller owns the boundary; this neither opens nor commits. A bare
@@ -153,8 +148,7 @@ export type TransitionLeaseArgs = {
 };
 
 /**
- * Atomic state transition on a `core.workspace_leases` row (1:1 with the Python `transition_lease`).
- * See the module docstring for the six-step protocol.
+ * Atomic state transition on a `core.workspace_leases` row. See the module docstring for the six-step protocol.
  *
  * @throws {Error}                      `fromState`/`toState` not in {@link LEASE_STATES}; `activity`
  *                                      empty; OR `tx` is not an open `Transaction` (the RuntimeError
@@ -189,9 +183,8 @@ export async function transitionLease(args: TransitionLeaseArgs): Promise<LeaseT
     throw new Error(`transitionLease: activity must be a non-empty string, got ${JSON.stringify(activity)}`);
   }
 
-  // ── Step 2: assert an OPEN transaction (the Python `session.in_transaction()` RuntimeError). The
-  // SELECT FOR UPDATE + UPDATE + event-emit chain only composes safely inside one. A Kysely
-  // `Transaction` is structurally in a txn; a bare `Kysely` engine is not — reject it loudly. ──
+  // ── Step 2: assert an OPEN transaction — the SELECT FOR UPDATE + UPDATE + event-emit chain only
+  // composes safely inside one. A bare `Kysely` engine is not a transaction — reject it loudly. ──
   if (!(tx instanceof Transaction)) {
     throw new Error(
       "transitionLease requires an already-open transaction. Pass the Kysely Transaction handle from " +
@@ -216,7 +209,7 @@ export async function transitionLease(args: TransitionLeaseArgs): Promise<LeaseT
   const currentRow = currentResult.rows[0];
   if (currentRow === undefined) {
     // StateDrift carries actualState: string (not optional), so the row-missing case uses the literal
-    // sentinel "<missing>" (1:1 with the Python). The caller treats it identically to a state mismatch.
+    // sentinel "<missing>". The caller treats it identically to a state mismatch.
     throw new StateDrift({ workspaceId, expectedFrom: fromState, actualState: "<missing>" });
   }
 
@@ -231,8 +224,7 @@ export async function transitionLease(args: TransitionLeaseArgs): Promise<LeaseT
   //   * mismatch — raise CrossInstallationViolation BEFORE any UPDATE / event emit so the outer
   //     transaction rolls back and the row is unchanged.
   if (expectedInstallationId === undefined) {
-    // Structured WARN grace-period notice (1:1 with the Python `_LOG.warning`); no logger seam in the
-    // domain layer yet — `console.warn` is the sanctioned stderr surface here.
+    // Structured WARN grace-period notice; `console.warn` is the sanctioned stderr surface here.
     console.warn(
       `cross-installation: ${BF9_PRIMITIVE_NAME} called without expectedInstallationId; ` +
         `Phase B will require it. key_kind=${BF9_KEY_KIND} key_value=${workspaceId}`,
@@ -262,7 +254,7 @@ export async function transitionLease(args: TransitionLeaseArgs): Promise<LeaseT
   // land in ONE UPDATE so no constraint observes the row mid-transition. The SET clause is composed
   // exclusively from string literals + the static STATE_TIMESTAMP_COLUMNS lookup (keys are validated
   // `toState` values); every value is bound via a parameterised `sql` fragment — no user input enters
-  // the SQL string (mirrors the Python's `noqa: S608` static-composition note). ──
+  // the SQL string (static-composition, not user input). ──
   const setClauses: Array<RawBuilder<unknown>> = [sql`state = ${toState}`];
   const tcol = STATE_TIMESTAMP_COLUMNS.get(toState);
   if (tcol !== undefined) {
@@ -292,7 +284,7 @@ export async function transitionLease(args: TransitionLeaseArgs): Promise<LeaseT
   // Defensive: every workspace event_type must be registered in EVENT_TYPES (migration 0078). Failure
   // here is a programming error — the LEASE_STATES / eventTypeFor / EVENT_TYPES tables drifted.
   // emitWorkflowEvent itself rejects unknown event_types, but we raise earlier with a workspace-specific
-  // message so the cause is obvious in operator logs (1:1 with the Python `pragma: no cover` guard).
+  // message so the cause is obvious in operator logs.
   if (!EVENT_TYPES.has(eventType)) {
     throw new Error(
       `transitionLease: eventType='${eventType}' missing from EVENT_TYPES; migration 0078 / LEASE_STATES drift`,

@@ -1,12 +1,9 @@
 /**
- * `allocateWorkspace` activity — REAL de-stubbed port of the frozen Python
- * `@activity.defn allocate_workspace_activity`
- * (vendor/codemaster-py/codemaster/activities/_workspace_allocate.py).
+ * `allocateWorkspace` activity — pure `mkdir` + DB lease INSERT + handle construction. Does NOT touch
+ * git — that is the separate `cloneRepoIntoWorkspace` activity. Cheap enough to retry freely
+ * (CLAUDE.md core-loop discipline).
  *
- * Pure `mkdir` + DB lease INSERT + handle construction. Does NOT touch git — that is the separate
- * `cloneRepoIntoWorkspace` activity. Cheap enough to retry freely (CLAUDE.md core-loop discipline).
- *
- * ## Steps (1:1 with the Python body, minus the AD-13 diagnostic `_meta/workspace.json` write)
+ * ## Steps
  *
  *   1. Build the on-disk path: `<root>/installations/<installation_id>/runs/<run_id>` and `mkdir -p`.
  *   2. Mint a candidate `workspace_id` (uuid4) and INSERT an ALLOCATED lease row via {@link LeaseRepo}
@@ -19,18 +16,15 @@
  *   4. Resolve the workspace path (`realpath`, after mkdir so it exists) + validate it is contained
  *      under the resolved root (rejecting a hostile symlink escape) and return a {@link WorkspaceHandle}.
  *
- * The Python `_meta/workspace.json` write is AD-13 diagnostic-only (no reconciliation logic reads it)
- * and is explicitly DROPPED here per the port brief — the observable contract (the lease row + the
- * returned handle) does not depend on it.
+ * The `_meta/workspace.json` write is AD-13 diagnostic-only (no reconciliation logic reads it) and is
+ * explicitly DROPPED — the observable contract (the lease row + the returned handle) does not depend on it.
  *
- * ## Pod identity + root + orphan grace (the WorkspaceManager replacement)
+ * ## Pod identity + root + orphan grace
  *
- * The Python pulls pod/worker identity + the workspace root + the orphan-grace timedelta off the
- * worker-process-singleton {@link WorkspaceManager}. This minimal port reads them from env (the K8s
- * Downward API surface: `POD_NAME` / `POD_NAMESPACE` / `NODE_NAME`, plus `WORKER_ID` and
+ * Pod/worker identity + workspace root + orphan-grace timedelta are read from env (the K8s Downward
+ * API surface: `POD_NAME` / `POD_NAMESPACE` / `NODE_NAME`, plus `WORKER_ID` and
  * `CODEMASTER_WORKSPACE_ROOT`) with sane non-empty defaults so the NOT-NULL lease columns are always
- * satisfied. `orphan_check_after = clock.now() + 30min` is inlined (the `WorkspaceConfig` default) —
- * the full config object is NOT ported.
+ * satisfied. `orphan_check_after = clock.now() + 30min` is inlined — the full config object is NOT ported.
  *
  * ## Transaction / pool discipline (ADR-0062)
  *
@@ -55,20 +49,19 @@ import type { AllocateWorkspaceInput } from "#contracts/allocate_workspace_input
 
 import type { Kysely } from "kysely";
 
-/** Default workspace root when `CODEMASTER_WORKSPACE_ROOT` is unset. Non-empty (the Python `WorkspaceConfig` requires one). */
+/** Default workspace root when `CODEMASTER_WORKSPACE_ROOT` is unset. Non-empty. */
 const DEFAULT_WORKSPACE_ROOT = "/var/lib/codemaster/workspaces";
 
-/** Orphan grace, inlined from the Python `WorkspaceConfig.workspace_orphan_grace` default (30 minutes). */
+/** Orphan grace, inlined from `WorkspaceConfig.workspace_orphan_grace` default (30 minutes). */
 const ORPHAN_GRACE_SECONDS = 30 * 60;
 
 /** Module-shared CSPRNG seam — the sanctioned crypto-randomness entry point (clock/random gate). */
 const RANDOM = new SystemRandom();
 
 /**
- * Mint a random RFC4122 v4 UUID (canonical lowercase hyphenated) via the platform randomness seam.
- * 1:1 in shape with the Python `uuid.uuid4()` (122 random bits). Minted via `SystemRandom.tokenBytes`
- * because the clock/random gate bans `crypto.randomUUID` outside the seam file (mirrors the
- * `_workflow_events_repository.ts` minter).
+ * Mint a random RFC4122 v4 UUID (canonical lowercase hyphenated) via the platform randomness seam
+ * (122 random bits). Minted via `SystemRandom.tokenBytes` because the clock/random gate bans
+ * `crypto.randomUUID` outside the seam file.
  */
 function uuid4(): string {
   const b = Buffer.from(RANDOM.tokenBytes(16));
@@ -129,7 +122,6 @@ export type AllocateWorkspaceDeps = {
 
 /**
  * Compute `<root>/installations/<installation_id>/runs/<run_id>` (the INTENDED, pre-validation path).
- * 1:1 with `WorkspaceManager.installation_root(iid) / "runs" / str(run_id)`.
  */
 export function deriveWorkspacePath(
   workspaceRoot: string,
@@ -141,11 +133,9 @@ export function deriveWorkspacePath(
 
 /**
  * Canonicalize + validate the (now-existing) workspace path is contained under the resolved root.
- * 1:1 with `WorkspaceManager._resolve_path` (strict=True): `realpath` follows symlinks, then we assert
- * the resolved path is under the resolved root. A hostile symlink escape (`runs/y → /etc`) resolves
- * outside the root → {@link WorkspaceSecurityViolation}. The directory MUST exist (the caller mkdir'd
- * it) — a missing path is treated as a violation, exactly as the Python strict resolve maps
- * FileNotFoundError → WorkspaceSecurityViolation.
+ * `realpath` follows symlinks, then we assert the resolved path is under the resolved root. A hostile
+ * symlink escape (`runs/y → /etc`) resolves outside the root → {@link WorkspaceSecurityViolation}.
+ * The directory MUST exist (the caller mkdir'd it) — a missing path is treated as a violation.
  */
 async function resolveAndValidate(workspaceRoot: string, candidate: string): Promise<string> {
   let rootResolved: string;
@@ -162,7 +152,7 @@ async function resolveAndValidate(workspaceRoot: string, candidate: string): Pro
   }
   const rel = path.relative(rootResolved, resolved);
   // `relative` returns a path starting with ".." (or an absolute path on a different volume) when
-  // `resolved` is NOT under `rootResolved` — the lexical analogue of Python's `relative_to` raising.
+  // `resolved` is NOT under `rootResolved`; that lexical check is how this rejects an escaping path.
   if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
     throw new WorkspaceSecurityViolation(
       `path ${JSON.stringify(candidate)} escapes root ${JSON.stringify(workspaceRoot)}`,
@@ -186,8 +176,7 @@ function resolveDb(deps: AllocateWorkspaceDeps): Kysely<unknown> {
 }
 
 /**
- * Allocate a fresh workspace for a review run. 1:1 with the frozen Python `allocate_workspace_activity`
- * (see the module docstring for the contract + divergences). Returns the validated {@link WorkspaceHandle}.
+ * Allocate a fresh workspace for a review run. Returns the validated {@link WorkspaceHandle}.
  *
  * @throws {Error} the lease row vanished between INSERT and the canonical SELECT (a concurrent
  *                 transition moved it out of the active set; defensive — should be impossible).
@@ -202,8 +191,7 @@ export async function allocateWorkspace(
   const identity = deps.identity ?? podIdentityFromEnv();
   const db = resolveDb(deps);
 
-  // 1. Build the on-disk path + mkdir -p (idempotent: exist_ok). The Python also mkdir's a `_meta/`
-  // subdir for the dropped diagnostic file — omitted here (AD-13 drop).
+  // 1. Build the on-disk path + mkdir -p (idempotent: exist_ok). `_meta/` subdir omitted (AD-13 drop).
   const workspacePath = deriveWorkspacePath(workspaceRoot, req.installation_id, req.run_id);
   await fs.mkdir(workspacePath, { recursive: true });
 
@@ -229,7 +217,7 @@ export async function allocateWorkspace(
     if (canonical === undefined) {
       // The INSERT (or a pre-existing active row) guarantees findActiveByRun returns a row. Reaching
       // here means a concurrent transition moved the row out of the active set between INSERT and
-      // SELECT — defensive (1:1 with the Python RuntimeError).
+      // SELECT — defensive, should be impossible.
       throw new Error(
         `allocateWorkspace: no active lease for run_id=${JSON.stringify(req.run_id)} after insert`,
       );
@@ -237,8 +225,7 @@ export async function allocateWorkspace(
     return canonical.workspace_id;
   });
 
-  // 4. Resolve + validate the path (it exists now — we just mkdir'd it) and build the handle. The
-  // canonical installation_id / run_id come straight off the request (the active row is keyed by them).
+  // 4. Resolve + validate the path (it exists now — we just mkdir'd it) and build the handle.
   const derivedPath = await resolveAndValidate(workspaceRoot, workspacePath);
 
   return WorkspaceHandle.parse({

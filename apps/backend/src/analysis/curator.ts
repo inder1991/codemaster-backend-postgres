@@ -1,14 +1,10 @@
-// AnalysisCurator — 1:1 port of the frozen Python
-//   vendor/codemaster-py/codemaster/analysis/curator.py (Sprint 9 / S9.2.2).
+// AnalysisCurator — promotes AnalysisFindingV1s (linter output) to ReviewFindingV1s
+// (reviewer-facing comments) via two paths:
 //
-// Promotes AnalysisFindingV1s (linter output) to ReviewFindingV1s (reviewer-facing comments) via two
-// paths:
-//
-//   1. ALWAYS-PROMOTE: gitleaks + trivy findings translate 1:1 to
-//      ReviewFindingV1(severity="blocker", category="security") with NO LLM invocation. The runner
-//      already stamps severity_raw="blocker"; we honour it without curation.
-//   2. CURATED: eslint / ruff (and any future eligible tool's) findings are sent to Haiku via the
-//      CURATE_TOOL_SCHEMA. The model decides which to promote; non-promoted findings are dropped.
+//   1. ALWAYS-PROMOTE: gitleaks + trivy findings translate directly to
+//      ReviewFindingV1(severity="blocker", category="security") with NO LLM invocation.
+//   2. CURATED: eslint / ruff findings are sent to Haiku via the CURATE_TOOL_SCHEMA. The model
+//      decides which to promote; non-promoted findings are dropped.
 //
 // Degradation (curator_skipped):
 //   * zero findings → skipped (empty result, no LLM call).
@@ -16,28 +12,24 @@
 //   * ANY failure during the Haiku path EXCEPT LlmOutputUnsafeError → FAIL-OPEN (W1.9b / C1): WARN
 //     log + return the always-promote findings only + curator_skipped=True.
 //
-// W1.9b (C1) HARDENING DIVERGENCE — the frozen Python re-raised budget / output-unsafe / invocation
-// errors as ApplicationError (`except ApplicationError: raise`), which made a Tier-1 curator hiccup
-// review-fatal: an org at its daily cost cap had EVERY review die on the cheap Haiku call before the
-// expensive Tier-2 fan-out ran (priority inversion against the documented contract — "Tier 1 is an
-// optimization layer for Tier 2 quality, not a correctness dependency"). The TS curator now fails
-// OPEN on BedrockBudgetExceededError and the whole retryable LlmInvocationError family (throttle /
-// 5xx / timeout / auth / role-resolution); ONLY LlmOutputUnsafeError still re-raises (output safety
-// is not negotiable — and the orchestrator's static_analysis stageOutcome wrap degrades even that to
-// a review-level note rather than a dead review).
+// W1.9b (C1) HARDENING DIVERGENCE — the original implementation re-raised budget / output-unsafe /
+// invocation errors as ApplicationError, which made a Tier-1 curator hiccup review-fatal: an org at
+// its daily cost cap had EVERY review die on the cheap Haiku call before the expensive Tier-2 fan-out
+// ran (priority inversion against the documented contract — "Tier 1 is an optimization layer for
+// Tier 2 quality, not a correctness dependency"). The TS curator now fails OPEN on
+// BedrockBudgetExceededError and the whole retryable LlmInvocationError family (throttle / 5xx /
+// timeout / auth / role-resolution); ONLY LlmOutputUnsafeError still re-raises (output safety is not
+// negotiable — and the orchestrator's static_analysis stageOutcome wrap degrades even that to a
+// review-level note rather than a dead review).
 //
-// ── PORT NOTE: the curator's LlmClientCache seam ─────────────────────────────────────────────────
-// The frozen Python curator takes an injected BedrockClient + resolves its model at call time via the
-// DB-backed purpose→model resolver. This TS port mirrors the sibling walkthrough_activity.ts port: it
-// holds an injected LlmClientCache and resolves the curator's LlmClient per call via the SECONDARY
-// role (Haiku — the secondary slot per the primary/secondary contract). The model is sourced from the
-// central purpose→model seed (analysis_curator → claude-haiku-4-5; ADR-0060 step 0); the DB-backed
-// async resolve that merges DB rows over the seed is out of scope here (no DB in this slice), so the
-// pure seed resolver IS the unconfigured fallback — identical to the walkthrough port.
+// The curator holds an injected LlmClientCache and resolves the curator's LlmClient per call via the
+// SECONDARY role (Haiku — the secondary slot per the primary/secondary contract). The model is sourced
+// from the central purpose→model seed (analysis_curator → claude-haiku-4-5; ADR-0060 step 0); the
+// DB-backed async resolve is out of scope here, so the pure seed resolver IS the unconfigured
+// fallback.
 //
 // Runtime context: this runs inside the static_analysis ACTIVITY (the normal Node runtime, NOT the
-// workflow V8-isolate sandbox), so the LLM client / crypto / clock all live in the activity, exactly
-// like bedrockReviewChunk + generateWalkthrough.
+// workflow V8-isolate sandbox).
 
 import { createHash } from "node:crypto";
 
@@ -69,9 +61,8 @@ export type LlmClientCacheLike = {
  * de-Temporal Phase 2 (D2 / W2.2) — the tool-schema-version component of the curator's LLM-invocation
  * idempotency key. A content-addressable digest of CURATE_TOOL_SCHEMA: a tool-schema change (which changes
  * the SHAPE of the structured output, and therefore the parse) changes the key, so a stale stored response
- * is NOT replayed. Per-site (distinct from the other PR-level purposes' digests). `createHash` is the
- * gate-sanctioned hashing primitive (clock_random gate bans random fns, NOT createHash; mirrors
- * review_activity.ts:55).
+ * is NOT replayed. `createHash` is the gate-sanctioned hashing primitive (clock_random gate bans random fns,
+ * NOT createHash).
  */
 export const CURATE_TOOL_SCHEMA_VERSION = `cts-${createHash("sha256")
   .update(Buffer.from(JSON.stringify(CURATE_TOOL_SCHEMA), "utf-8"))
@@ -80,25 +71,24 @@ export const CURATE_TOOL_SCHEMA_VERSION = `cts-${createHash("sha256")
 
 /**
  * Tools whose findings ALWAYS bypass the curator + go straight to ReviewFindingV1 at severity=blocker,
- * category=security. 1:1 with the frozen Python `_ALWAYS_PROMOTE_TOOLS = frozenset({"gitleaks",
- * "trivy"})`. A ReadonlySet keeps the membership test off a dynamic object index.
+ * category=security. A ReadonlySet keeps the membership test off a dynamic object index.
  */
 const ALWAYS_PROMOTE_TOOLS: ReadonlySet<string> = new Set<string>(["gitleaks", "trivy"]);
 
 /**
- * Curator output. 1:1 with the frozen Python frozen dataclass `CuratedResult`.
+ * Curator output.
  *
  * `findings` is the full curated set (always-promote + Haiku-promoted). `curator_skipped` is True when
  * the Haiku call was skipped (zero curatable input) or failed (degradation path); callers surface it
- * via the walkthrough degradation_note. Named `curator_skipped` (snake_case) to match the Python
- * field the downstream StaticAnalysisResultV1 envelope carries.
+ * via the walkthrough degradation_note. Named `curator_skipped` (snake_case) to match the field the
+ * downstream StaticAnalysisResultV1 envelope carries.
  */
 export type CuratedResult = {
   readonly findings: ReadonlyArray<ReviewFindingV1>;
   readonly curator_skipped: boolean;
 };
 
-/** Translate an always-promote (gitleaks/trivy) finding 1:1. 1:1 with the Python `_auto_promote`. */
+/** Translate an always-promote (gitleaks/trivy) finding directly to a ReviewFindingV1. */
 function autoPromote(finding: AnalysisFindingV1): ReviewFindingV1 {
   return ReviewFindingV1.parse({
     file: finding.file,
@@ -114,9 +104,8 @@ function autoPromote(finding: AnalysisFindingV1): ReviewFindingV1 {
 }
 
 /**
- * Assemble the untrusted-wrapped user content for Haiku. 1:1 with the frozen Python
- * `_build_curator_user_message`. Exported for the Tier-1 parity oracle — char-for-char significant
- * (the recorded LLM interaction is keyed on these exact bytes).
+ * Assemble the untrusted-wrapped user content for Haiku. Exported for the Tier-1 parity oracle —
+ * char-for-char significant (the recorded LLM interaction is keyed on these exact bytes).
  */
 export function buildCuratorUserMessage(args: {
   prMeta: PrMetaV1;
@@ -146,10 +135,10 @@ export function buildCuratorUserMessage(args: {
 
 /**
  * Parse curate tool_use blocks one-at-a-time so a single malformed block doesn't poison the whole
- * response. 1:1 with the frozen Python `_parse_with_skip_malformed` (the curator-local one, which does
- * NOT enforce v9-MINIMAL scope / v10 evidence_refs — curator findings are Tier-1 derivatives that are
- * structurally chunk-local with no LLM-cited evidence, so the contract defaults scope=chunk_observed +
- * evidence_refs=[] are correct without enforcement). A CurateParseError on one block is logged + skipped.
+ * response. Does NOT enforce v9-MINIMAL scope / v10 evidence_refs — curator findings are Tier-1
+ * derivatives that are structurally chunk-local with no LLM-cited evidence, so the contract defaults
+ * scope=chunk_observed + evidence_refs=[] are correct without enforcement. A CurateParseError on one
+ * block is logged + skipped.
  */
 function parseWithSkipMalformed(
   blocks: ReadonlyArray<Record<string, unknown>>,
@@ -161,8 +150,8 @@ function parseWithSkipMalformed(
       out.push(...chunk);
     } catch (e) {
       if (e instanceof CurateParseError) {
-        // Skip the malformed block; the rest of the call survives. Observability-only WARN log on the
-        // Python side (block_id + reason) has no return-value effect, so it is intentionally omitted.
+        // Skip the malformed block; the rest of the call survives. An observability-only WARN log
+        // (block_id + reason) would have no return-value effect, so it is intentionally omitted.
         continue;
       }
       throw e;
@@ -172,8 +161,7 @@ function parseWithSkipMalformed(
 }
 
 /**
- * Promote linter findings to reviewer-facing comments via Haiku. 1:1 with the frozen Python
- * `AnalysisCurator`.
+ * Promote linter findings to reviewer-facing comments via Haiku.
  */
 export class AnalysisCurator {
   private readonly cache: LlmClientCacheLike;
@@ -223,9 +211,9 @@ export class AnalysisCurator {
       const curated = await this.invokeHaiku(curatable, { prMeta: args.prMeta });
       return { findings: [...alwaysPromote, ...curated], curator_skipped: false };
     } catch (e) {
-      // W1.9b (C1) — HARDENING DIVERGENCE from the frozen Python (`except ApplicationError: raise`).
-      // The curator is an OPTIMIZATION layer for Tier-2 quality, not a correctness dependency, so the
-      // typed-error re-raise inverted priorities: a BedrockBudgetExceededError (a NORMAL steady-state
+      // W1.9b (C1) — HARDENING DIVERGENCE: an earlier typed-error re-raise inverted priorities.
+      // The curator is an OPTIMIZATION layer for Tier-2 quality, not a correctness dependency, so a
+      // re-raise here was wrong: a BedrockBudgetExceededError (a NORMAL steady-state
       // condition at per-org cost caps) or a retryable LlmInvocationError (throttle / 5xx / timeout —
       // routine under load) killed the whole static-analysis envelope, and — pre the orchestrator
       // fail-open wrap — the entire review, BEFORE the expensive Tier-2 fan-out ran.
@@ -282,7 +270,7 @@ export class AnalysisCurator {
       // budget.
       purpose: "analysis_curator",
       // The REAL installation_id flows to the cost-cap (per-org isolation), blob put, and
-      // telemetry/Langfuse rows — mirrors the walkthrough port. Python platform-scopes the call; the
+      // telemetry/Langfuse rows — mirrors the walkthrough port. Unlike a platform-scoped call, the
       // curation is per-PR, so the PR's installation owns it.
       installationId: args.prMeta.installation_id,
       // de-Temporal Phase 2 (D2 / W2.2 / F9) — ledger this PR-level paid call by PURPOSE. The stable key is

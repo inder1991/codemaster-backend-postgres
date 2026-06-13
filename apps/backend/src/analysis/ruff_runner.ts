@@ -1,9 +1,6 @@
 /**
- * RuffInWorkerRunner — 1:1 port of `vendor/codemaster-py/codemaster/analysis/ruff_runner.py`
- * (Sprint 9 / S9.1.4).
- *
- * Runs Ruff via the in-worker subprocess sandbox and parses its `--output-format=json` output into
- * {@link AnalysisFindingV1}s.
+ * RuffInWorkerRunner — runs Ruff via the in-worker subprocess sandbox and parses its
+ * `--output-format=json` output into {@link AnalysisFindingV1}s.
  *
  * Ruff JSON shape (per `ruff check --output-format=json`):
  *   [{ "code": "F401", "filename": "/abs/path.py",
@@ -29,8 +26,8 @@ import { uuid4 } from "./uuid4.js";
 import { AnalysisFindingV1 } from "#contracts/analysis_findings.v1.js";
 import { type Clock } from "#platform/clock.js";
 
-/** Coarse rule-prefix → severity_raw map (1:1 with the Python `_SEVERITY_BY_PREFIX`). The curator
- *  (S9.2.2) handles the precise ReviewFindingV1 severity; this is the tool's-own-string layer. */
+/** Coarse rule-prefix → severity_raw map. The curator (S9.2.2) handles the precise ReviewFindingV1
+ *  severity; this is the tool's-own-string layer. */
 const SEVERITY_BY_PREFIX: ReadonlyMap<string, string> = new Map([
   ["S", "error"],
   ["B", "error"],
@@ -135,7 +132,7 @@ export function parseRuffOutput(
   try {
     payload = JSON.parse(stdout);
   } catch {
-    // Degrade to no findings rather than crash the review (matches Python WARN + return ()).
+    // Degrade to no findings rather than crash the review.
     return [];
   }
   if (!Array.isArray(payload)) return [];
@@ -150,8 +147,8 @@ export function parseRuffOutput(
     const location = isRecord(e["location"]) ? e["location"] : {};
     const endLocation = isRecord(e["end_location"]) ? e["end_location"] : location;
 
-    // Mirror the frozen Python's single try-block: int(location["row"], 1) → start_line, then
-    // int(end_location["row"], start_line) → end_line; ANY non-coercible value collapses to (1, 1).
+    // Coerce line numbers: int(location["row"], 1) → start_line, int(end_location["row"], start_line)
+    // → end_line; ANY non-coercible value collapses to (1, 1).
     let startLine: number;
     let endLine: number;
     const startRaw = toInt(location["row"], 1);
@@ -206,8 +203,7 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
-/** Mirror Python `int(x)` coercion with a default; returns null on a non-coercible value (→ Python's
- *  `except (TypeError, ValueError)` fallback to (1, 1)). */
+/** Coerce `x` to int with a default; returns null on a non-coercible value (→ (1, 1) fallback). */
 function toInt(v: unknown, fallback: number): number | null {
   if (v === undefined || v === null) return fallback;
   if (typeof v === "number") return Number.isFinite(v) ? Math.trunc(v) : null;

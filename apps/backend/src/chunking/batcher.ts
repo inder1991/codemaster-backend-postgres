@@ -1,10 +1,7 @@
-// Adjacent-file batching — 1:1 port of the frozen Python post-pass
-// (vendor/codemaster-py/codemaster/chunking/batcher.py).
-//
-// Post-pass over a chunker's output that collapses runs of adjacent same-directory chunks whose
-// combined `token_estimate` fits the batch budget into a single `chunk_kind="batch"` chunk. Saves an
-// LLM call per trivial change (single-line config tweak across 5 sibling YAML files → one review
-// call instead of five).
+// Adjacent-file batching — post-pass over a chunker's output that collapses runs of adjacent
+// same-directory chunks whose combined `token_estimate` fits the batch budget into a single
+// `chunk_kind="batch"` chunk. Saves an LLM call per trivial change (single-line config tweak across
+// 5 sibling YAML files → one review call instead of five).
 //
 // A run breaks when:
 //   * the next chunk's directory differs;
@@ -21,13 +18,12 @@
 
 import { computeChunkId, DiffChunkV1 } from "#contracts/diff_chunking.v1.js";
 
-/** Port of batcher.py::BATCH_TOKEN_BUDGET. */
+/** Maximum combined token_estimate for one batch group. */
 export const BATCH_TOKEN_BUDGET = 2_000;
 
 /**
- * Port of `os.path.dirname` (POSIX semantics — the production corpus uses workspace-relative POSIX
- * paths). Mirrors CPython `posixpath.dirname`: split on the LAST `/` (the separator stays on the head),
- * then rstrip trailing slashes UNLESS the head is all slashes.
+ * POSIX dirname (the production corpus uses workspace-relative POSIX paths): split on the LAST `/`
+ * (the separator stays on the head), then rstrip trailing slashes UNLESS the head is all slashes.
  *
  *   "a/b/c.py" → "a/b"   "c.py" → ""   "a/" → "a"   "/x.py" → "/"   "///x.py" → "///"   "a///b.py" → "a"
  */
@@ -40,12 +36,12 @@ function posixDirname(path: string): string {
   return head;
 }
 
-/** Port of batcher.py::_separator — the per-source body prefix line. */
+/** The per-source body prefix line. */
 function separator(c: DiffChunkV1): string {
   return `--- ${c.path}:${c.start_line}-${c.end_line} ---\n`;
 }
 
-/** Count of `\n` occurrences in `s` (port of Python `str.count("\n")`). */
+/** Count of `\n` occurrences in `s`. */
 function countNewlines(s: string): number {
   let n = 0;
   for (let i = 0; i < s.length; i += 1) {
@@ -57,15 +53,13 @@ function countNewlines(s: string): number {
 }
 
 /**
- * Port of batcher.py::_make_batch — fold a multi-source group into one `chunk_kind="batch"` chunk.
+ * Fold a multi-source group into one `chunk_kind="batch"` chunk.
  *
  *   body        = "".join(separator(c) + c.body + ("\n" if not c.body.endswith("\n") else "") for c)
- *   n_lines     = body.count("\n") or 1          (0 → 1, matching Python `or 1`)
- *   dirname     = _dirname(group[0].path) or "." (empty → ".", matching Python `or "."`)
+ *   n_lines     = body.count("\n") or 1          (0 → 1)
+ *   dirname     = _dirname(group[0].path) or "." (empty → ".")
  *   language    = the single common language iff exactly ONE distinct non-null language across the
- *                 group, else null. NOTE: `{c.language for c in group if c.language}` is a Python set —
- *                 iteration order is NOT defined, but `len == 1` collapses to a single value so the
- *                 ordering ambiguity cannot affect the result.
+ *                 group, else null.
  *   batch_path  = `${dirname}/[${group.length} files]`
  *   token_est   = sum of the group's token_estimate
  */
@@ -106,12 +100,11 @@ function makeBatch(group: ReadonlyArray<DiffChunkV1>): DiffChunkV1 {
 }
 
 /**
- * Port of batcher.py::batch_adjacent — collapse adjacent same-dir chunks under `budgetTokens`. Returns
- * the input UNCHANGED (same array reference, matching the Python `return chunks`) when fewer than 2
- * chunks. A pre-existing `chunk_kind="batch"` chunk flushes the current run and passes through (no
- * nesting).
+ * Collapse adjacent same-dir chunks under `budgetTokens`. Returns the input unchanged when fewer
+ * than 2 chunks. A pre-existing `chunk_kind="batch"` chunk flushes the current run and passes
+ * through (no nesting).
  *
- * @throws RangeError when `budgetTokens <= 0` (mirrors the Python `ValueError`).
+ * @throws RangeError when `budgetTokens <= 0`.
  */
 export function batchAdjacent(
   chunks: ReadonlyArray<DiffChunkV1>,

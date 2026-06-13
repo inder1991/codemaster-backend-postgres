@@ -1,16 +1,13 @@
-// path_match — 1:1 port of the frozen Python
-// codemaster/config/path_match.py (Sprint 10 / S10.0.1 gitignore-style glob matcher).
+// path_match — gitignore-style glob matcher (Sprint 10 / S10.0.1).
 //
 // ONE matcher backs BOTH consumers:
 //   1. ADR-0001 per-glob `path_instructions` — `matchPathInstructions(rules, path)` returns every
-//      `PathInstructionV1` whose `path` glob matches the chunk path, in declaration order. The
-//      frozen workflow body (`review_pull_request.py::_review_chunk`) calls the Python original
-//      `match_path_instructions(path=..., rules=_repo_config.path_instructions)` to populate
-//      `ReviewContextV1.matched_path_instructions`.
+//      `PathInstructionV1` whose `path` glob matches the chunk path, in declaration order, used to
+//      populate `ReviewContextV1.matched_path_instructions`.
 //   2. `.codemaster.yaml::path_filters` — `filterReviewPaths(paths, pathFilters)` selects which
 //      files are reviewed via gitignore last-match-wins (bare INCLUDES, '!'-prefixed EXCLUDES).
 //
-// Glob semantics (locked — see the Python module docstring):
+// Glob semantics (locked):
 //   * `**` — matches zero or more path segments (crosses `/`).
 //   * `*`  — matches zero or more characters EXCEPT `/`.
 //   * `?`  — matches exactly one character (not `/`).
@@ -18,32 +15,25 @@
 //   * Leading `/` is anchor-to-root; without it the match is unanchored (matches anywhere).
 //   * Case-sensitive (gitignore default on linux).
 //
-// Byte-parity notes (vs the frozen Python `re` module):
+// Glob→regex translation notes:
 //   * The translation walks the pattern char-by-char, emitting `.*` for `**`, `[^/]*` for `*`,
-//     `[^/]` for `?`, and a faithful single-char `re.escape` for everything else. `**/` consumes a
-//     trailing `/` so the pattern matches "any descendant" cleanly. This reproduces Python's regex
-//     verbatim (verified against `_glob_to_regex(...).pattern` in the parity test).
-//   * `escapeRegexChar` replicates Python `re.escape`'s EXACT special-char set (the 3.13/3.14
-//     `_special_chars_map`: whitespace 9-13/32 plus `# $ & ( ) * + - . ? [ \ ] ^ { | } ~`). Every
-//     other code point — including `/`, `=`, `:`, `@`, non-ASCII — passes through verbatim.
-//   * The compiled `RegExp` uses NO `u` (unicode) flag. Python's regex is not unicode-strict about
-//     identity escapes (`\#`, `\~`, `\ `), so a non-`u` JS RegExp matches Python's `Pattern.fullmatch`
-//     behaviour exactly; a `u`-flag RegExp would THROW on those escapes. The body is `^...$`-anchored,
-//     so `RegExp.test` is the parity-equivalent of Python's `fullmatch` for the newline-free path inputs.
-//   * Module-level memoization mirrors Python's `@lru_cache(maxsize=512)` on `_glob_to_regex` — a
-//     pure compile cache keyed by the raw pattern string. Cache hits/misses are not observable, so
-//     using an unbounded `Map` instead of an LRU has no parity impact (patterns per review are few).
+//     `[^/]` for `?`, and `escapeRegexChar` for everything else. `**/` consumes a
+//     trailing `/` so the pattern matches "any descendant" cleanly.
+//   * `escapeRegexChar` escapes special chars (whitespace 9-13/32 plus
+//     `# $ & ( ) * + - . ? [ \ ] ^ { | } ~`). Every other code point passes through verbatim.
+//   * The compiled `RegExp` uses NO `u` (unicode) flag — identity escapes (`\#`, `\~`, `\ `) are
+//     non-standard; a non-`u` JS RegExp accepts them while a `u`-flag RegExp would THROW. The body
+//     is `^...$`-anchored so `RegExp.test` is the fullmatch equivalent for newline-free path inputs.
+//   * Module-level memoization: a pure compile cache keyed by the raw pattern string (unbounded Map
+//     is fine; patterns per review are few).
 
 import type { PathInstructionV1 } from "#contracts/codemaster_config.v1.js";
 
-// Compile cache, keyed by the raw pattern string. Mirrors `@lru_cache(maxsize=512)` on the Python
-// `_glob_to_regex` — a pure, side-effect-free compile cache (an unbounded Map is parity-equivalent;
-// see the byte-parity note above).
+// Compile cache, keyed by the raw pattern string — a pure, side-effect-free compile cache.
 const REGEX_CACHE = new Map<string, RegExp>();
 
-// Python `re.escape`'s special-char set (3.13/3.14 `_special_chars_map`). Each of these code points
-// gets a leading backslash; every other char passes through verbatim. Single-char only — matches the
-// per-char `re.escape(ch)` call sites in the Python translator.
+// Escaped special-char set. Each of these code points gets a leading backslash;
+// every other char passes through verbatim. Single-char only.
 const RE_ESCAPE_CHARS: ReadonlySet<string> = new Set([
   "\t", // 9
   "\n", // 10
@@ -71,7 +61,7 @@ const RE_ESCAPE_CHARS: ReadonlySet<string> = new Set([
   "~", // 126
 ]);
 
-/** Faithful single-char Python `re.escape`: backslash-prefix the special set; pass everything else. */
+/** Single-char regex escape: backslash-prefix the special set; pass everything else verbatim. */
 function escapeRegexChar(ch: string): string {
   return RE_ESCAPE_CHARS.has(ch) ? `\\${ch}` : ch;
 }
@@ -79,15 +69,15 @@ function escapeRegexChar(ch: string): string {
 /**
  * Translate a gitignore-style glob to a compiled `RegExp`, memoized by raw pattern.
  *
- * 1:1 port of the Python `_glob_to_regex`. The body is built `^...$`-anchored (root-anchored when the
- * pattern begins with `/`, otherwise prefixed with the unanchored `(?:.* slash)?` prefix for
- * gitignore's "match anywhere" behaviour). Compiled WITHOUT the `u` flag — see the module byte-parity note.
+ * The body is built `^...$`-anchored (root-anchored when the pattern begins with `/`, otherwise
+ * prefixed with the unanchored `(?:.* slash)?` prefix for gitignore's "match anywhere" behaviour).
+ * Compiled WITHOUT the `u` flag — see the module translation notes above.
  */
 function globToRegex(pattern: string): RegExp {
   const cached = REGEX_CACHE.get(pattern);
   if (cached !== undefined) return cached;
 
-  // Strip trailing slash (directory match) for normalisation — Python `pattern.rstrip("/")`.
+  // Strip trailing slash (directory match) for normalisation.
   let pat = pattern.replace(/\/+$/u, "");
 
   const anchorRoot = pat.startsWith("/");
@@ -122,8 +112,7 @@ function globToRegex(pattern: string): RegExp {
       out.push("[^/]");
       i += 1;
     } else {
-      // Both the Python `elif ch in ".+()|^$[]{}\\"` and the `else` branch funnel through
-      // `re.escape(ch)`; the single-char `escapeRegexChar` reproduces both verbatim.
+      // All other chars go through `escapeRegexChar`.
       out.push(escapeRegexChar(ch));
       i += 1;
     }
@@ -132,22 +121,21 @@ function globToRegex(pattern: string): RegExp {
   const body = out.join("");
   // Unanchored patterns may match anywhere in the path (gitignore behaviour); anchored bind to root.
   // The dynamic regex is the WHOLE POINT — `body` is the glob→regex translation of a trusted repo
-  // config pattern (max 200 chars, contract-validated), mirroring the frozen Python `re.compile`.
+  // config pattern (max 200 chars, contract-validated).
   // eslint-disable-next-line security/detect-non-literal-regexp -- glob translation of a contract-validated config pattern; 1:1 with the frozen Python re.compile
   const regex = anchorRoot ? new RegExp(`^${body}$`) : new RegExp(`^(?:.*/)?${body}$`);
   REGEX_CACHE.set(pattern, regex);
   return regex;
 }
 
-/** True iff `path` matches the gitignore-style `pattern`. Port of Python `matches_glob`. */
+/** True iff `path` matches the gitignore-style `pattern`. */
 export function matchesGlob(args: { path: string; pattern: string }): boolean {
   return globToRegex(args.pattern).test(args.path);
 }
 
 /**
- * White-box diagnostic: the compiled `RegExp.source` for `pattern`. Mirrors the Python original's
- * `_glob_to_regex(pattern).pattern`. Exported so the parity test can pin the EXACT regex translation
- * (not just match outcomes) against the source-of-truth; not part of the matcher's runtime surface.
+ * White-box diagnostic: the compiled `RegExp.source` for `pattern`. Exported so the parity test can
+ * pin the EXACT regex translation (not just match outcomes); not part of the matcher's runtime surface.
  */
 export function globToRegexSource(pattern: string): string {
   return globToRegex(pattern).source;
@@ -156,10 +144,9 @@ export function globToRegexSource(pattern: string): string {
 /**
  * Return every rule whose `path` glob matches `chunkPath`, in declaration order.
  *
- * 1:1 port of Python `match_path_instructions`. This is the helper the workflow body uses to build
- * `ReviewContextV1.matched_path_instructions` from `repo_config.path_instructions` for a chunk path.
- * The argument order is `(rules, chunkPath)` per the task contract; the Python original is keyword-
- * only `match_path_instructions(path=..., rules=...)` — same semantics, TS-idiomatic positional shape.
+ * Build `ReviewContextV1.matched_path_instructions` from `repo_config.path_instructions` for a chunk
+ * path. The argument order is `(rules, chunkPath)` per the task contract; semantics are the same as
+ * the keyword-only `match_path_instructions(path=..., rules=...)` in TS-idiomatic positional shape.
  */
 export function matchPathInstructions(
   rules: ReadonlyArray<PathInstructionV1>,
@@ -174,7 +161,7 @@ export function matchPathInstructions(
 /**
  * Match `path` against `pattern` using ROOT-ANCHORED semantics.
  *
- * Port of Python `_filter_matches_glob`. All patterns are treated as root-anchored by prepending `/`
+ * All patterns are treated as root-anchored by prepending `/`
  * when not already present. `**` still crosses directory boundaries; `*` and `?` do not. This differs
  * from `matchesGlob`'s default unanchored behaviour and is the correct semantic for `path_filters`.
  */
@@ -184,7 +171,7 @@ function filterMatchesGlob(path: string, pattern: string): boolean {
 }
 
 /**
- * Select which paths are reviewed, gitignore last-match-wins. Port of Python `filter_review_paths`.
+ * Select which paths are reviewed, gitignore last-match-wins.
  *
  * Bare pattern INCLUDES; '!'-prefixed EXCLUDES. The LAST matching pattern decides. Default state:
  * any include exists → allow-list (default excluded); only excludes → deny-list (default included).

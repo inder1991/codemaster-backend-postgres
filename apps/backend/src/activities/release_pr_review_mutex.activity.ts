@@ -1,38 +1,31 @@
 /**
- * `releasePrReviewMutexActivity` — REAL de-stubbed port of the frozen Python
- * `@activity.defn release_pr_review_mutex_activity`
- * (vendor/codemaster-py/codemaster/activities/release_pr_review_mutex.py).
- *
- * Releases the per-PR review mutex. The workflow body calls this in a `finally` block around the
- * orchestrator invocation, so it MUST be safe to call against an already-released / expired / swept
- * mutex.
+ * `releasePrReviewMutexActivity` — releases the per-PR review mutex. The workflow body calls this in
+ * a `finally` block around the orchestrator invocation, so it MUST be safe to call against an
+ * already-released / expired / swept mutex.
  *
  * ## Idempotency (the finally-block contract)
  *
  * Releasing an already-released mutex is a NO-OP: the underlying UPDATE filters on `released_at IS NULL`,
- * so a second release touches zero rows and does not throw. A missing mutex row is likewise a no-op. This
- * is 1:1 with the frozen Python `release_pr_review_mutex` (whose `rowcount == 0` is "fine — release on an
- * already-released row is a no-op"). The activity returns `void`.
+ * so a second release touches zero rows and does not throw. A missing mutex row is likewise a no-op.
+ * The activity returns `void`.
  *
- * ## Commit semantics (the 37-leaked-rows bug this port must NOT reintroduce)
+ * ## Commit semantics (the 37-leaked-rows bug this must NOT reintroduce)
  *
- * The release UPDATE MUST COMMIT. The pre-2026-06-03 Python used a bare `async with session:` with no
- * commit, so every release rolled back on close and 37 mutex rows leaked (0 ever released — ADR-0064).
+ * The release UPDATE MUST COMMIT. An earlier (pre-2026-06-03) implementation used a non-committing
+ * transaction, so every release rolled back on close and 37 mutex rows leaked (0 ever released — ADR-0064).
  * {@link withMutexTransaction} brackets the work in `BEGIN`/`COMMIT` on one checked-out client — a clean
  * return commits; a throw rolls back (and releases the advisory lock, though release takes none).
  *
  * ## installation_id resolution
  *
- * Same divergence as the renew activity: the frozen Python keys on `mutex_id` only (the PK); the ported
- * TS {@link releasePrReviewMutex} additionally takes a redundant `installationId` WHERE predicate. The
- * activity resolves it by a PK lookup inside the same transaction. A vanished row resolves nothing → the
- * release is a no-op (idempotent), exactly as if the UPDATE had matched zero rows.
+ * {@link releasePrReviewMutex} takes a redundant `installationId` WHERE predicate; the activity resolves
+ * it by a PK lookup inside the same transaction. A vanished row resolves nothing → the release is a
+ * no-op (idempotent), exactly as if the UPDATE had matched zero rows.
  *
  * ## Clock authority
  *
- * The `released_at` audit timestamp comes from the injected {@link Clock} (default {@link WallClock}),
- * 1:1 with the Python `release_pr_review_mutex(..., clock=WallClock())`. (Acquire/renew use the DB
- * `now()`; only release stamps `released_at` from the injected clock — verbatim with the helper.)
+ * The `released_at` audit timestamp comes from the injected {@link Clock} (default {@link WallClock}).
+ * Acquire/renew use the DB `now()`; only release stamps `released_at` from the injected clock.
  *
  * ## Runtime context / shared-wiring boundary
  *
@@ -46,8 +39,7 @@ import { releasePrReviewMutex, withMutexTransaction } from "#backend/concurrency
 import { getPool } from "#platform/db/database.js";
 import { type Clock, WallClock } from "#platform/clock.js";
 
-/** RFC4122 UUID shape (any version/variant). Mirrors the Python `uuid.UUID(mutex_id)` parse, which raises
- *  `ValueError("not a valid UUID: ...")` before any DB work on a malformed id. */
+/** RFC4122 UUID shape (any version/variant). Raises before any DB work on a malformed id. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
@@ -58,7 +50,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 export type ReleasePrReviewMutexDeps = {
   /** DSN for the shared pool; default `CODEMASTER_PG_CORE_DSN`. */
   dsn?: string;
-  /** Time seam for the `released_at` audit stamp; default {@link WallClock} (1:1 with the Python). */
+  /** Time seam for the `released_at` audit stamp; default {@link WallClock}. */
   clock?: Clock;
 };
 
@@ -79,7 +71,7 @@ function resolveDsn(deps: ReleasePrReviewMutexDeps): string {
 /**
  * The registered activity — releases `mutex_id`. Idempotent + commit-safe; returns `void`.
  *
- * @param mutexId UUID of the mutex row to release. A malformed UUID raises (1:1 with Python `uuid.UUID`).
+ * @param mutexId UUID of the mutex row to release. A malformed UUID raises.
  * @throws {RangeError} `mutexId` is not a valid UUID.
  */
 export async function releasePrReviewMutexActivity(

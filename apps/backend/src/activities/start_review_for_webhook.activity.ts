@@ -1,14 +1,12 @@
 /**
- * `startReviewForWebhook` activity — the decision + mutex-aware GATE for the review chain. 1:1 in intent
- * with the frozen Python `@activity.defn start_review_for_webhook_activity`
- * (`vendor/codemaster-py/codemaster/activities/start_review_for_webhook.py`): a thin tenancy re-check +
- * per-PR mutex acquire over the typed `ReviewPullRequestPayloadV1` envelope.
+ * `startReviewForWebhook` activity — the decision + mutex-aware GATE for the review chain. A thin
+ * tenancy re-check + per-PR mutex acquire over the typed `ReviewPullRequestPayloadV1` envelope.
  *
  * ## Behaviour (the gate's status surface)
  *
  * The single positional input is the RAW `ReviewPullRequestPayloadV1`-shaped dict (CLAUDE.md invariant 11
  * — one positional arg). The activity re-validates it INDEPENDENTLY (it does not trust the dispatcher),
- * and carries the v1-tolerance shim, exactly like the Python gate:
+ * and carries the v1-tolerance shim:
  *
  *   1. **v1-tolerance shim.** A legacy (pre-S19.SMOKE.2) outbox payload has 5 fields and NO `pr_id`. The
  *      gate detects this by the missing `pr_id` BEFORE parsing against the v2 contract and returns
@@ -24,17 +22,15 @@
  *      PR → `status='skipped_busy'` (`mutex_id` null).
  *
  * The `closed` status stays in the result contract enum (a future surface) but this gate never produces
- * it — closed PRs don't reach the gate; the webhook handler emits the audit upstream. (1:1 with the
- * Python docstring: "`closed` is no longer produced".)
+ * it — closed PRs don't reach the gate; the webhook handler emits the audit upstream.
  *
  * ## Transaction / connection contract
  *
- * The Python wraps the tenancy SELECT + the mutex acquire in ONE `session.begin()` transaction (so the
- * re-check and the acquire are atomic against the race window). The TS mutex helper requires its advisory
- * xact-lock + `FOR UPDATE` + INSERT to run on ONE client in ONE transaction; we run the tenancy SELECT on
- * that SAME client inside {@link withMutexTransaction}, preserving the atomicity. The pool is the shared
- * ADR-0062 single pool for the `CODEMASTER_PG_CORE_DSN` DSN (via {@link getPool}) — the activity does NOT
- * open its own pool.
+ * The tenancy SELECT + mutex acquire run in ONE transaction so the re-check and the acquire are atomic
+ * against the race window. The TS mutex helper requires its advisory xact-lock + `FOR UPDATE` + INSERT
+ * to run on ONE client in ONE transaction; we run the tenancy SELECT on that SAME client inside
+ * {@link withMutexTransaction}, preserving the atomicity. The pool is the shared ADR-0062 single pool
+ * for the `CODEMASTER_PG_CORE_DSN` DSN (via {@link getPool}) — the activity does NOT open its own pool.
  *
  * ## Runtime context
  *
@@ -47,10 +43,9 @@
  *
  * The gate writes an `audit.audit_events` row on every branch (`pr.accepted`, `pr.skipped_disabled`,
  * `pr.skipped_busy`, `pr.skipped_legacy_payload`) via the encrypted (AES-256-GCM, per-column AAD)
- * {@link emitAuditEvent} / {@link bindAuditContext} helpers — the TS port of the frozen-Python
- * `codemaster/audit/emit.py`. The emit runs on the SAME transaction client as the tenancy re-check + the
- * mutex acquire, so the audit row commits atomically with the gate's decision (1:1 with the Python
- * `session.begin()` wrapping both). The `after` payloads are byte-for-byte the Python shapes:
+ * {@link emitAuditEvent} / {@link bindAuditContext} helpers. The emit runs on the SAME transaction client
+ * as the tenancy re-check + mutex acquire, so the audit row commits atomically with the gate's decision.
+ * The `after` payloads:
  *   - `pr.accepted`              → `{ head_sha }` (the I3 fix: the SHA, not the repo full_name).
  *   - `pr.skipped_disabled`      → `{ reason: "repository.enabled=false" }`.
  *   - `pr.skipped_busy`          → `{ holder_workflow_id }` (the live lease's holder).
@@ -76,7 +71,7 @@ import { ReviewPullRequestPayloadV1, ReviewPullRequestResultV1 } from "#contract
 
 /**
  * Detect a v1 (pre-S19.SMOKE.2) outbox payload — 5 fields, no `pr_id`. The v2 envelope always has
- * `pr_id`. 1:1 with the Python `_is_legacy_v1_payload`.
+ * `pr_id`.
  */
 function isLegacyV1Payload(payloadDict: Record<string, unknown>): boolean {
   return !("pr_id" in payloadDict);
@@ -87,22 +82,18 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 /**
  * The V1-tolerance shim — rolling-deploy window. Emits a `pr.skipped_legacy_payload` audit row (so an
- * operator can drain the v1 rows) and returns the clear `skipped_legacy_payload` signal. 1:1 with the
- * Python `_handle_legacy_v1_payload`, INCLUDING the installation_id-parse tolerance: the audit row is
- * only emitted when the legacy payload's `installation_id` parses as a UUID (the audit tenancy context
- * cannot bind otherwise); a non-parseable id still returns the signal, just without the audit row.
- *
- * The emit runs in its OWN short transaction on a fresh client (the Python opens a separate
- * `session.begin()` here — the legacy path never touches the mutex, so it does not share the
- * withMutexTransaction client).
+ * operator can drain the v1 rows) and returns the clear `skipped_legacy_payload` signal. The audit row
+ * is only emitted when the legacy payload's `installation_id` parses as a UUID (the audit tenancy
+ * context cannot bind otherwise); a non-parseable id still returns the signal, just without the audit
+ * row. The emit runs in its OWN short transaction (the legacy path never touches the mutex).
  */
 async function handleLegacyV1Payload(
   payloadDict: Record<string, unknown>,
   pool: Pool,
   clock: Clock,
 ): Promise<ReviewPullRequestResultV1> {
-  // Python: `int(payload_dict.get("pr_number", -1))` with a try/except → -1 on a non-coercible value,
-  // then `max(1, pr_number)` on return.
+  // Coerce pr_number to an int; a missing or non-coercible value falls back to the -1 sentinel, later
+  // clamped to `max(1, prNumber)` on return.
   const rawPrNumber = payloadDict["pr_number"];
   let prNumber = -1;
   if (typeof rawPrNumber === "number" && Number.isInteger(rawPrNumber)) {
@@ -112,8 +103,8 @@ async function handleLegacyV1Payload(
     if (!Number.isNaN(parsed)) prNumber = parsed;
   }
 
-  // Tolerant installation_id parse — bind + emit only when it is a syntactically-valid UUID (mirrors the
-  // Python `uuid.UUID(install_uuid_str)` try/except → None on failure → skip the bind).
+  // Tolerant installation_id parse — bind + emit only when it is a syntactically-valid UUID; a
+  // non-UUID value yields null and skips the bind.
   const rawIid = payloadDict["installation_id"];
   const installationId = typeof rawIid === "string" && UUID_RE.test(rawIid) ? rawIid : null;
 
@@ -131,8 +122,7 @@ async function handleLegacyV1Payload(
         targetId: String(prNumber),
         before: null,
         after: {
-          // The RAW received values (could be any JSON type) — 1:1 with the Python
-          // `payload_dict.get("schema_version")` / `.get("delivery_id")` (→ null when absent).
+          // The RAW received values (could be any JSON type; null when absent).
           schema_version_received: (payloadDict["schema_version"] ?? null) as unknown,
           delivery_id: (payloadDict["delivery_id"] ?? null) as unknown,
         },
@@ -162,7 +152,7 @@ async function handleLegacyV1Payload(
  * `skipped_disabled`, `skipped_legacy_payload`. Raises on a reconcile race (repository row missing).
  *
  * The single positional input is the RAW payload dict (typed `unknown` — the activity re-validates it
- * independently, mirroring the Python `dict[str, Any]` + `ReviewPullRequestPayloadV1.model_validate`).
+ * independently against `ReviewPullRequestPayloadV1`).
  */
 export async function startReviewForWebhook(
   payloadDict: unknown,
@@ -185,13 +175,12 @@ export async function startReviewForWebhook(
     }
   }
 
-  // v2 path: re-validate INDEPENDENTLY (don't trust the dispatcher). 1:1 with
-  // `ReviewPullRequestPayloadV1.model_validate(payload_dict)`.
+  // v2 path: re-validate INDEPENDENTLY (don't trust the dispatcher).
   const payload = ReviewPullRequestPayloadV1.parse(payloadDict);
 
   // ONE transaction on ONE client: the tenancy re-check SELECT + the mutex acquire (advisory xact lock +
-  // FOR UPDATE + INSERT) + the audit emit are atomic against the race window, mirroring the Python
-  // `session.begin()`. Bind the audit tenancy context on this client so emitAuditEvent attributes rows.
+  // FOR UPDATE + INSERT) + the audit emit are atomic against the race window. Bind the audit tenancy
+  // context on this client so emitAuditEvent attributes rows.
   return withMutexTransaction(pool, async (client) => {
     bindAuditContext(client, { installationId: payload.installation_id });
 
@@ -207,7 +196,7 @@ export async function startReviewForWebhook(
     if (enabledRow === undefined) {
       // Repository row deleted between webhook enqueue and gate execution — a reconcile race. Raise so
       // Temporal retries; subsequent retries will likely also fail and dead-letter, which is the right
-      // behaviour. 1:1 with the Python RuntimeError. (No audit row — the Python raises before emit too.)
+      // behaviour. (No audit row — we raise before emit.)
       throw new Error(
         `repository_id=${payload.repository_id} not found for ` +
           `installation_id=${payload.installation_id}; reconcile race`,
@@ -232,7 +221,7 @@ export async function startReviewForWebhook(
     }
 
     const fullName = `${payload.gh_owner}/${payload.gh_repo_name}`;
-    // Python holder format EXACTLY: ReviewPR-{owner}/{repo}-{pr_number}-{head_sha[:8]}.
+    // Holder format: ReviewPR-{owner}/{repo}-{pr_number}-{head_sha[:8]}.
     const holder = `ReviewPR-${fullName}-${payload.pr_number}-${payload.head_sha.slice(0, 8)}`;
     const acquired = await acquirePrReviewMutex({
       client,
@@ -263,7 +252,7 @@ export async function startReviewForWebhook(
     // Mutex stays held; the workflow's finally block releases it via the release activity.
     //
     // I3 fix (S19.SMOKE.2): the `after` carries head_sha=the actual SHA (a pre-PR#115 bug set it to the
-    // repo full_name); `action` is dropped (no downstream consumer). 1:1 with the Python emit.
+    // repo full_name); `action` is dropped (no downstream consumer).
     await emitAuditEvent({
       client,
       actorKind: "system",

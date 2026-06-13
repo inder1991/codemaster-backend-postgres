@@ -1,15 +1,11 @@
 /**
- * `emitOutputSafetyAuditEvent` activity — 1:1 in intent with the frozen Python
- * `@activity.defn emit_output_safety_audit_event_activity`
- * (vendor/codemaster-py/codemaster/activities/emit_output_safety_audit.py).
- *
- * Workflow-scheduled, idempotent. Writes ONE row to `audit.audit_events` with
+ * `emitOutputSafetyAuditEvent` activity — workflow-scheduled, idempotent. Writes ONE row to `audit.audit_events` with
  * `action='output_safety.sanitized'` whenever an upstream LLM activity (`bedrock_review_chunk` /
  * `generate_walkthrough`) returns its envelope with a populated `sanitization_event`. The encrypted
  * `before` payload carries the original (pre-redaction) LLM text + the redacted text + spans + detector
  * kinds + stage; `after` is NULL because sanitization is a one-way transform.
  *
- * ## Idempotency model (port of the Python `_derive_audit_event_id` + pre-INSERT SELECT)
+ * ## Idempotency model
  *
  * `audit_event_id` is derived DETERMINISTICALLY from the sanitization event via
  * `uuidv5(_NAMESPACE_OUTPUT_SAFETY, request_id|kinds_sorted|spans|stage)`. A pre-INSERT SELECT under the
@@ -58,14 +54,13 @@ import { AUDIT_BEFORE_AAD, encryptAuditJsonBytea } from "#backend/security/audit
 /**
  * Stable namespace for the deterministic `audit_event_id` derivation. FROZEN: changing it would break
  * idempotency for any in-flight workflow whose `sanitization_event` was produced under the old
- * namespace. Byte-identical to the Python `_NAMESPACE_OUTPUT_SAFETY` UUID. Under the gate-collapse
- * directive a change here would require a fresh content basis, NOT a `workflow.patched` guard.
+ * namespace. Under the gate-collapse directive a change here would require a fresh content basis,
+ * NOT a `workflow.patched` guard.
  */
 const NAMESPACE_OUTPUT_SAFETY = "fa01b6f4-9e2c-4d8f-b3a0-7f1e8c2a5b39";
 
 /**
- * RFC4122 v5 UUID (SHA-1 of namespace bytes ++ name bytes), canonical lowercase hyphenated form. 1:1
- * with Python `uuid.uuid5` and the existing ports in review_findings_repo.ts / retrieved_evidence.v1.ts.
+ * RFC4122 v5 UUID (SHA-1 of namespace bytes ++ name bytes), canonical lowercase hyphenated form.
  */
 function uuid5(namespaceHex: string, name: string): string {
   const nsBytes = Buffer.from(namespaceHex.replace(/-/g, ""), "hex"); // 16 bytes
@@ -79,9 +74,9 @@ function uuid5(namespaceHex: string, name: string): string {
 
 /**
  * Compute the deterministic `audit_event_id` for a sanitization event. Basis:
- * `(request_id, detector_kinds_sorted_joined, spans_redacted, stage)`. 1:1 with the Python
- * `_derive_audit_event_id`. `detector_kinds` is sorted before joining (order-invariance); `stage`
- * widens the basis so reuse across the chunk + walkthrough call sites does not collapse rows.
+ * `(request_id, detector_kinds_sorted_joined, spans_redacted, stage)`. `detector_kinds` is sorted
+ * before joining (order-invariance); `stage` widens the basis so reuse across the chunk + walkthrough
+ * call sites does not collapse rows.
  */
 function deriveAuditEventId(event: EmitOutputSafetyAuditEventInput["event"]): string {
   const kindsSorted = [...event.detector_kinds].sort().join(",");
@@ -95,8 +90,7 @@ function deriveAuditEventId(event: EmitOutputSafetyAuditEventInput["event"]): st
  * retry), the call is a no-op.
  *
  * The single positional input is an {@link EmitOutputSafetyAuditEventInput} (CLAUDE.md invariant 11).
- * Re-validated INDEPENDENTLY against the Zod contract (don't trust the dispatcher), mirroring the Python
- * activity receiving a typed Pydantic model through the payload converter.
+ * Re-validated INDEPENDENTLY against the Zod contract (don't trust the dispatcher).
  */
 export async function emitOutputSafetyAuditEvent(input: unknown): Promise<void> {
   const { event } = EmitOutputSafetyAuditEventInput.parse(input);
@@ -113,7 +107,7 @@ export async function emitOutputSafetyAuditEvent(input: unknown): Promise<void> 
   try {
     await client.query("BEGIN");
 
-    // Pre-INSERT idempotency — same pattern as the Python pre-INSERT SELECT. Filters on installation_id
+    // Pre-INSERT idempotency — SELECT before INSERT. Filters on installation_id
     // too: tenancy-gate safety (audit.audit_events is TenantScoped) + defence-in-depth against a (near-
     // impossible) uuid5 collision across installations.
     const existing = await client.query(

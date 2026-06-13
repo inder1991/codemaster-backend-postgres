@@ -1,20 +1,16 @@
-// Tree-sitter grammar loader — 1:1 port of the frozen Python class-level parser caches
-// (vendor/codemaster-py/codemaster/chunking/treesitter_python.py::TreeSitterPythonChunker._get_parser
-// and treesitter_tsjs.py::TreeSitterTsJsChunker._parsers).
-//
-// web-tree-sitter / WASM adoption per ADR-0067: the grammar .wasm artifacts are VENDORED alongside
+// Tree-sitter grammar loader — manages the process-wide parser caches (ADR-0067).
+// The grammar .wasm artifacts are VENDORED alongside
 // this module (./grammars/*.wasm, pinned by SHA-256 in ./grammars/manifest.json) and loaded from disk
 // at startup. They are NEVER fetched at runtime — that is the load-bearing condition of the dep
 // adoption (ADR-0067 cond 2 "no_runtime_fetch").
 //
 // Parity-critical: the chunk boundaries these grammars produce ARE the per-chunk LLM input, so the
-// grammar versions MUST match the frozen Python reference exactly. `startupSelfCheck()` verifies each
+// grammar versions MUST stay pinned to the manifest. `startupSelfCheck()` verifies each
 // required .wasm SHA-256 against the manifest (ADR-0067 cond 3 "fail loud on tamper/drift") and loads
 // every required grammar so a missing/corrupt artifact crashes at boot, not mid-review.
 //
 // Process-wide singletons: `Parser.init()` runs once; each grammar Language + its bound Parser are
-// cached. Mirrors the Python class-level `_parser` / `_parsers` caches — the parser warms up once per
-// worker, not per file.
+// cached — the parser warms up once per worker, not per file.
 
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -23,8 +19,7 @@ import { fileURLToPath } from "node:url";
 
 import { Language, Parser } from "web-tree-sitter";
 
-/** Logical grammar names the loader knows how to load. Mirrors the frozen Python grammar set:
- *  the Python chunker uses `python`; the TS/JS chunker uses `typescript` / `tsx` / `javascript`. */
+/** Logical grammar names the loader knows how to load. */
 export type GrammarName = "python" | "typescript" | "tsx" | "javascript";
 
 /** Resolve the vendored grammars directory relative to THIS module (import.meta.url) so the path is
@@ -32,9 +27,8 @@ export type GrammarName = "python" | "typescript" | "tsx" | "javascript";
 const GRAMMARS_DIR = join(dirname(fileURLToPath(import.meta.url)), "grammars");
 
 /** Filename of each grammar's vendored .wasm, relative to {@link GRAMMARS_DIR}. The `.ts` and `.tsx`
- *  variants are TWO distinct languages exported from the tree-sitter-typescript tarball — typescript
- *  (`language_typescript()`) and tsx (`language_tsx()`, which parses JSX). Both .wasm are vendored;
- *  `.tsx` MUST use the tsx grammar to match the Python reference byte-for-byte on JSX. */
+ *  variants are TWO distinct languages from the tree-sitter-typescript tarball — typescript and tsx
+ *  (which parses JSX). `.tsx` MUST use the tsx grammar for correct JSX chunk boundaries. */
 const GRAMMAR_WASM: Readonly<Record<GrammarName, string>> = {
   python: "tree-sitter-python.wasm",
   typescript: "tree-sitter-typescript.wasm",
@@ -82,8 +76,8 @@ export async function getLanguage(name: GrammarName): Promise<Language> {
   return lang;
 }
 
-/** Return (and cache) a {@link Parser} with `name`'s grammar bound. Mirrors the Python class-level
- *  parser cache: one parser per grammar per process, reused across every chunk call. */
+/** Return (and cache) a {@link Parser} with `name`'s grammar bound. One parser per grammar per process,
+ *  reused across every chunk call. */
 export async function getParser(name: GrammarName): Promise<Parser> {
   const cached = parserCache.get(name);
   if (cached) {

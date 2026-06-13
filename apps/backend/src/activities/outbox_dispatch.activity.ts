@@ -1,10 +1,8 @@
-// The 4 OutboxDispatcherWorkflow activities (1:1 with the @activity.defn functions in
-// vendor/codemaster-py/codemaster/activities/outbox.py: claim_pending_rows / dispatch_row /
-// mark_dispatched / mark_attempt_failed). Bundled in one collaborator-injected holder (Shape B) —
-// buildOutboxActivities constructs it once at worker boot and registers the four arrow-property methods.
-// Phase 3c / RC7 adds a 5th, LOOP-ONLY method (markPermanentlyFailed — the immediate dead-letter for
-// non-retryable sink failures); it has no Python counterpart and is NOT Temporal-registered: only the
-// Temporal-free OutboxDispatcherLoop consumes it.
+// The 4 OutboxDispatcherWorkflow activities (claim_pending_rows / dispatch_row / mark_dispatched /
+// mark_attempt_failed). Bundled in one collaborator-injected holder (Shape B) — buildOutboxActivities
+// constructs it once at worker boot and registers the four arrow-property methods.
+// A 5th LOOP-ONLY method (markPermanentlyFailed — the immediate dead-letter for non-retryable sink
+// failures) is NOT Temporal-registered: only the Temporal-free OutboxDispatcherLoop consumes it.
 //
 // Activities run in the NORMAL Node runtime (NOT the workflow V8-isolate sandbox), so they freely touch
 // Postgres + the injected Clock. Each registered method takes exactly ONE typed input (CLAUDE.md
@@ -30,8 +28,7 @@ import {
   MarkPermanentlyFailedInputV1,
 } from "#contracts/outbox_dispatch.v1.js";
 
-// Sprint 14.5 / S14.5.D — lease-heartbeat tunables (1:1 with vendor/codemaster-py/codemaster/activities/
-// outbox.py: HEARTBEAT_INTERVAL_SECONDS / HEARTBEAT_LEASE_SECONDS). The default claim lease is 10s; the
+// Lease-heartbeat tunables. The default claim lease is 10s; the
 // heartbeat fires every 2s so a multi-second sink handler keeps the lease fresh. A db blip on the heartbeat
 // is logged at WARN and NOT propagated — the lease itself is the safety net (it expires; another pod
 // re-claims; the handler's eventual write either commits cleanly or surfaces a CHECK violation).
@@ -62,8 +59,8 @@ export class OutboxDispatchActivities {
   readonly #maxAttempts: number;
 
   public constructor(o: OutboxDispatchActivitiesOptions) {
-    // 1:1 with the Python configure() ValueError, hardened against an env-sourced NaN (Number("abc")):
-    // `NaN < 1` is false, so a plain `< 1` check would let a non-dead-lettering threshold through.
+    // Hardened against an env-sourced NaN (Number("abc")): `NaN < 1` is false, so a plain `< 1` check
+    // would let a non-dead-lettering threshold through.
     if (!Number.isInteger(o.maxAttempts) || o.maxAttempts < 1) {
       throw new Error(`max_attempts must be an integer >= 1; got ${String(o.maxAttempts)}`);
     }
@@ -75,7 +72,7 @@ export class OutboxDispatchActivities {
 
   /** `claim_pending_rows` — lease a batch of pending rows for the dispatcher loop. */
   public readonly claimPendingRows = async (input: ClaimPendingRowsInputV1): Promise<Array<OutboxRow>> => {
-    const v = ClaimPendingRowsInputV1.parse(input); // boundary validation (parity with the Python data-converter)
+    const v = ClaimPendingRowsInputV1.parse(input); // boundary validation
     return this.#repo.claimPending({
       db: this.#db,
       batchSize: v.batch_size,
@@ -92,21 +89,20 @@ export class OutboxDispatchActivities {
   public readonly dispatchRow = async (
     input: DispatchRowInputV1,
     // W1.9e — the dispatching OUTBOX ROW's delivery_id, threaded by the Postgres drain loop as a
-    // RUNTIME-ONLY 2nd argument: DispatchRowInputV1 is parity-locked to the frozen Python model
-    // (which carries no delivery_id field), so the wire contract stays byte-identical while the
-    // sinks gain the independent identity source for the destination-side cross-check. The
-    // Temporal proxy path never passes it → null, 1:1 with the frozen Python's SinkContext.
+    // RUNTIME-ONLY 2nd argument: DispatchRowInputV1 carries no delivery_id field (the wire contract
+    // stays byte-identical) while the sinks gain the independent identity source for the
+    // destination-side cross-check. The Temporal proxy path never passes it → null.
     // DEFAULTED (not `?:`) so Function.length stays 1 — the worker-registration arity pin
     // (invariant 11: single-typed-input activities) holds on the Temporal-registered surface.
     extras: { deliveryId?: string | null } = {},
   ): Promise<void> => {
     // Boundary validation FIRST — restores the DispatchRowInputV1.superRefine tagged-union guard
-    // (installation_id null IFF orphan_reason set) that the Python pydantic_data_converter re-runs on
-    // activity-side deserialization. The TS stock JSON converter does not, so without this the BF-3
-    // NULL-tenant-column invariant would be enforced nowhere at runtime.
+    // (installation_id null IFF orphan_reason set) on activity-side deserialization. The TS stock JSON
+    // converter does not re-run it, so without this the BF-3 NULL-tenant-column invariant would be
+    // enforced nowhere at runtime.
     const v = DispatchRowInputV1.parse(input);
 
-    const handler = getSink(v.sink); // throws UnknownSinkError BEFORE any DB work (1:1 with Python)
+    const handler = getSink(v.sink); // throws UnknownSinkError BEFORE any DB work
 
     if (v.run_id !== null && v.review_id !== null) {
       await this.#guardTransitionAndIngest(v, v.run_id, v.review_id);
@@ -122,18 +118,16 @@ export class OutboxDispatchActivities {
       outboxRowId: v.row_id,
     };
 
-    // Lease-heartbeat (S14.5.D — 1:1 with the Python dispatch_row _heartbeat closure). A background loop
-    // extends `leased_until` by HEARTBEAT_LEASE_SECONDS (10s) every HEARTBEAT_INTERVAL_SECONDS (2s) for the
-    // life of the handler, so a sink that runs close to the 10s claim lease (up to the 60s start-to-close
-    // timeout) does not lose its lease and get double-dispatched by another pod. A heartbeat extendLease
-    // failure is logged at WARN and NOT propagated (fail-open) — the lease itself is the safety net (it
-    // expires; another pod re-claims). The loop is stopped in `finally` so a zombie task can't keep writing
-    // after the handler returns.
+    // Lease-heartbeat (S14.5.D): a background loop extends `leased_until` by HEARTBEAT_LEASE_SECONDS (10s)
+    // every HEARTBEAT_INTERVAL_SECONDS (2s) for the life of the handler, so a sink that runs close to the
+    // 10s claim lease does not lose its lease and get double-dispatched by another pod. A heartbeat
+    // extendLease failure is logged at WARN and NOT propagated (fail-open) — the lease itself is the safety
+    // net. The loop is stopped in `finally` so a zombie task can't keep writing after the handler returns.
     const heartbeat = this.#startLeaseHeartbeat(v.row_id);
     try {
       // SEAM (trace-restore — DEFER §E): OTel trace-context restore is not ported. `v.trace_context` is
-      // carried through the contract but not bound to the OTel context here (fail-open — Python's
-      // bind_trace_context({}) is a no-op for empty context). Activate by binding it around this call.
+      // carried through the contract but not bound to the OTel context here (fail-open — binding an empty
+      // context is a no-op anyway). Activate by binding it around this call.
       await handler({ payload: v.payload, context });
     } finally {
       heartbeat.stop();
@@ -179,8 +173,8 @@ export class OutboxDispatchActivities {
   };
 
   /**
-   * `markPermanentlyFailed` (Phase 3c / RC7 — NO Python counterpart; NOT registered on the Temporal
-   * worker): the IMMEDIATE terminal settle for a NON-RETRYABLE dispatch failure. The
+   * `markPermanentlyFailed` (Phase 3c / RC7 — NOT registered on the Temporal worker): the IMMEDIATE
+   * terminal settle for a NON-RETRYABLE dispatch failure. The
    * OutboxDispatcherLoop classifies PermanentSinkError / UnknownSinkError in its per-row catch and
    * routes them here instead of {@link markAttemptFailed} — same fenced atomic UPDATE (attempts+1 +
    * last_error recorded; the R-6 expected_attempts fence suppresses duplicate settlement) but routed
@@ -214,11 +208,10 @@ export class OutboxDispatchActivities {
   };
 
   /**
-   * The guard + lifecycle + INGESTED block (1:1 with the Python dispatch_row guard, outbox.py:633-721).
-   * One transaction: the AD-4 stale-write guard (in a raw SAVEPOINT so its forensic STALE_WRITE_BLOCKED
-   * row survives the re-raise), then PENDING→RUNNING, then the INGESTED milestone gated on APPLIED (a
-   * Temporal retry observes ALREADY_APPLIED → no duplicate milestone). `pending` collects the post-commit
-   * OTel emits, drained only after a successful commit.
+   * The guard + lifecycle + INGESTED block. One transaction: the AD-4 stale-write guard (in a raw
+   * SAVEPOINT so its forensic STALE_WRITE_BLOCKED row survives the re-raise), then PENDING→RUNNING, then
+   * the INGESTED milestone gated on APPLIED (a Temporal retry observes ALREADY_APPLIED → no duplicate
+   * milestone). `pending` collects the post-commit OTel emits, drained only after a successful commit.
    */
   async #guardTransitionAndIngest(input: DispatchRowInputV1, runId: string, reviewId: string): Promise<void> {
     const pending = new PendingEmits();
@@ -229,8 +222,8 @@ export class OutboxDispatchActivities {
       const tx = txTyped as unknown as Transaction<unknown>;
 
       // FIRST: the AD-4 guard in a raw SAVEPOINT. RELEASE (not ROLLBACK TO) on a StaleWriteError merges the
-      // guard's forensic INSERT into the outer transaction (1:1 with Python's begin_nested + sp.commit()),
-      // then the re-raise propagates out of .execute() → outer rollback (no partial state).
+      // guard's forensic INSERT into the outer transaction, then the re-raise propagates out of .execute()
+      // → outer rollback (no partial state).
       await sql`SAVEPOINT sp_outbox_stale_write_guard`.execute(tx);
       try {
         await assertCurrentRun({
@@ -289,11 +282,10 @@ export class OutboxDispatchActivities {
   }
 
   /**
-   * Lease-heartbeat loop (1:1 with the Python `_heartbeat` closure in dispatch_row). Spawns a fire-and-forget
-   * background loop that, until {@link stop} is called, sleeps HEARTBEAT_INTERVAL_SECONDS on the injected
-   * Clock then extends the row's lease by HEARTBEAT_LEASE_SECONDS. An extendLease failure is logged at WARN
-   * and swallowed (fail-open: the lease itself is the safety net — Python catches `Exception` and continues).
-   * `stop()` flips a flag so the loop exits after its current sleep (the Python `finally` cancels the task).
+   * Lease-heartbeat loop. Spawns a fire-and-forget background loop that, until {@link stop} is called,
+   * sleeps HEARTBEAT_INTERVAL_SECONDS on the injected Clock then extends the row's lease by
+   * HEARTBEAT_LEASE_SECONDS. An extendLease failure is logged at WARN and swallowed (fail-open: the lease
+   * itself is the safety net). `stop()` flips a flag so the loop exits after its current sleep.
    *
    * W3.2 (RM3): the loop is CAPPED at {@link HEARTBEAT_MAX_TOTAL_SECONDS} of monotonic lifetime.
    * Past the cap it stops extending (one structured WARN — `outbox.lease_heartbeat_capped`) and

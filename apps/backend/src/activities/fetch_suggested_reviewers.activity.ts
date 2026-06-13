@@ -1,12 +1,10 @@
 /**
- * `fetchSuggestedReviewers` activity — 1:1 port of the frozen Python
- * `codemaster/activities/fetch_suggested_reviewers.py::FetchSuggestedReviewersActivity.fetch_suggested_reviewers`
- * (S23.AR.3 / B5 producer).
+ * `fetchSuggestedReviewers` activity (S23.AR.3 / B5 producer).
  *
  * Resolves the top-N CODEOWNERS-derived reviewer logins for a PR's changed files. The walkthrough's
  * "Suggested reviewers" section reads this output.
  *
- * Flow per invocation (ported exactly):
+ * Flow per invocation:
  *   1. Flag check on `code_owners_v1` (the injected `isEnabled`). Disabled → return `[]` without I/O.
  *   2. SELECT changed file paths for the PR from `core.pr_files`.
  *   3. SELECT CODEOWNERS rules for the repository from `core.code_owners`.
@@ -21,8 +19,7 @@
  * whose try/except converts it to a "skipped" degradation note on the `fetch_suggested_reviewers` stage
  * → the renderer drops the section. That workflow wrapper is wired in the Workflow phase (NOT here).
  *
- * Typed-input envelope (CLAUDE.md invariant 11 / ADR-0047): the frozen Python dispatches with THREE
- * positional arguments; this port CLOSES that violation — the single positional input is the
+ * Typed-input envelope (CLAUDE.md invariant 11 / ADR-0047): the single positional input is the
  * {@link FetchSuggestedReviewersInputV1} envelope.
  */
 
@@ -35,10 +32,10 @@ import type { Clock } from "#platform/clock.js";
 import type { FetchSuggestedReviewersInputV1 } from "#contracts/fetch_suggested_reviewers_input.v1.js";
 
 /**
- * The CODEOWNERS-rules read slice the activity consumes (1:1 with the Python `CodeOwnersListPort`). The
- * concrete {@link PostgresCodeOwnersRepo} satisfies this shape — the activity depends on this narrow
- * surface, not the whole repo. The `CodeOwnerRule` shape is the parser's output type (path_pattern +
- * owner_logins drive the ranker), not the wire envelope.
+ * The CODEOWNERS-rules read slice the activity consumes. The concrete {@link PostgresCodeOwnersRepo}
+ * satisfies this shape — the activity depends on this narrow surface, not the whole repo. The
+ * `CodeOwnerRule` shape is the parser's output type (path_pattern + owner_logins drive the ranker),
+ * not the wire envelope.
  */
 export type CodeOwnersListPort = {
   listRulesForRepository(args: {
@@ -47,16 +44,16 @@ export type CodeOwnersListPort = {
   }): Promise<ReadonlyArray<CodeOwnerRule>>;
 };
 
-/** An async feature-flag check (1:1 with the Python `Callable[[], Awaitable[bool]]`). */
+/** An async feature-flag check. */
 export type IsEnabled = () => Promise<boolean>;
 
-/** Bound-method holder for `fetchSuggestedReviewers` (1:1 with `FetchSuggestedReviewersActivity`). */
+/** Bound-method holder for `fetchSuggestedReviewers`. */
 export class FetchSuggestedReviewersActivity {
   readonly #prFilesRepo: PrFilesRepoPort;
   readonly #codeOwnersRepo: CodeOwnersListPort;
   readonly #isEnabled: IsEnabled;
-  // The injected clock is part of the Python constructor's dependency set; retained for parity even
-  // though the read path does no time math (the renderer-wiring sprint may surface a use).
+  // The clock is retained even though the read path does no time math (the renderer-wiring sprint may
+  // surface a use).
   readonly #clock: Clock;
   readonly #topN: number;
 
@@ -76,8 +73,7 @@ export class FetchSuggestedReviewersActivity {
 
   /**
    * Build the walkthrough's `suggested_reviewers` envelope. Returns the top-N reviewer logins
-   * (markdown-escaped, no `@`); empty array in any of the empty-output cases. 1:1 with the Python
-   * `fetch_suggested_reviewers`.
+   * (markdown-escaped, no `@`); empty array in any of the empty-output cases.
    */
   public async fetchSuggestedReviewers(input: FetchSuggestedReviewersInputV1): Promise<Array<string>> {
     if (!(await this.#isEnabled())) {
@@ -110,7 +106,7 @@ export class FetchSuggestedReviewersActivity {
     });
   }
 
-  /** Exposed for parity with the Python constructor's clock dependency (kept reachable). */
+  /** Exposed to keep the clock dependency reachable. */
   public clock(): Clock {
     return this.#clock;
   }

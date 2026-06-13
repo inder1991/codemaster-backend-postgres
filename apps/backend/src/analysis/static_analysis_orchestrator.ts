@@ -1,43 +1,32 @@
 /**
- * StaticAnalysisOrchestrator — the NEWER soft-barrier deadline orchestrator.
+ * StaticAnalysisOrchestrator — the soft-barrier deadline orchestrator. OWNS the Tier-1 deadline,
+ * spawns the registered runners concurrently, applies a SOFT BARRIER (collect-until-deadline, then
+ * cancel-remaining), and returns `(findings, tool_statuses)` — where `findings` are RAW (uncapped,
+ * unfiltered, flattened in runner-REGISTRATION order) and `tool_statuses` is a per-tool
+ * {@link ToolStatusV1} as a FIRST-CLASS output.
  *
- * 1:1 port of `vendor/codemaster-py/codemaster/analysis/static_analysis_orchestrator.py`
- * (Phase B / static-analysis-coverage-gap fix). It OWNS the Tier-1 deadline, spawns the registered
- * runners concurrently, applies a SOFT BARRIER (collect-until-deadline, then cancel-remaining), and
- * returns `(findings, tool_statuses)` — where `findings` are RAW (uncapped, unfiltered, flattened
- * across tools in runner-REGISTRATION order) and `tool_statuses` is a per-tool {@link ToolStatusV1}
- * as a FIRST-CLASS output.
+ * Division of labor: the MAX_RAW_PER_TOOL cap, the changed-line filter, and the Haiku curator do NOT
+ * live here — they live in the static-analysis ACTIVITY (`static_analysis.activity.ts`). Keeping the
+ * orchestrator's output RAW lets the activity derive BOTH `tier1_findings` (raw, for the Tier-2 LLM
+ * prompt to cite) AND the curated `findings` (cap → filter → curate) from a single run.
  *
- * Division of labor (1:1 with the frozen Python): the MAX_RAW_PER_TOOL cap, the changed-line filter,
- * and the Haiku curator do NOT live here — they live in the static-analysis ACTIVITY
- * (`static_analysis.activity.ts`), exactly as the frozen `static_analysis_pipeline.py` owns the
- * cap/filter and `activities/static_analysis.py` assembles the envelope. Keeping the orchestrator's
- * output RAW lets the activity derive BOTH `tier1_findings` (raw, for the Tier-2 LLM prompt to cite)
- * AND the curated `findings` (cap → filter → curate) from the single orchestrator run.
- *
- * Architecture principle (project-owner framing, preserved verbatim from the Python docstring):
- *   "Tier 1 is an optimization layer for Tier 2 quality, not a correctness dependency for the
- *    review. The orchestrator owns the authoritative deadline. Tool-level timeouts exist only as
- *    safety guards."
+ * Architecture principle: "Tier 1 is an optimization layer for Tier 2 quality, not a correctness
+ * dependency for the review. The orchestrator owns the authoritative deadline. Tool-level timeouts
+ * exist only as safety guards."
  *
  * Fail-open is the contract: the orchestrator NEVER throws. Recoverable runner failures degrade to
  * failure statuses; unknown exception classes are degraded to `failed_runtime`.
  *
- * Cancellation model (TS vs Python): Python cancels the asyncio Task. JS promises aren't cancellable,
- * so the soft barrier arms ONE shared {@link AbortController} that fires at the deadline; the
- * subprocess runners tear down their process group when they observe the abort (see
- * `in_worker_runner.ts`). A runner that ignores the signal is simply stopped-being-awaited and
- * recorded `timed_out` regardless. The orchestrator runs in the static-analysis ACTIVITY (normal
- * Node runtime), NOT the workflow sandbox — so a Clock seam + an AbortController are both fine here.
+ * Cancellation model: JS promises aren't cancellable, so the soft barrier arms ONE shared
+ * {@link AbortController} that fires at the deadline; the subprocess runners tear down their process
+ * group when they observe the abort (see `in_worker_runner.ts`). A runner that ignores the signal is
+ * simply stopped-being-awaited and recorded `timed_out` regardless.
  *
- * Determinism: findings AND statuses are emitted in runner-REGISTRATION order (not completion order),
- * exactly as the Python iterates `tasks_by_name` in dict-insertion order.
+ * Determinism: findings AND statuses are emitted in runner-REGISTRATION order (not completion order).
  *
- * JobRunnerPort (DEFERRED): the heavy K8s-Job tools (Semgrep / Trivy / Checkov / Kube-linter) run as
- * one-shot K8s Jobs via a {@link JobRunnerPort} adapter. Only the IN-WORKER runners (Ruff / ESLint /
- * Gitleaks) are registered today; the K8s adapter is owner-provided infra. See
- * FOLLOW-UP-static-analysis-k8s-job-runners. The port type below documents the seam so a future
- * registration is a drop-in (a JobRunner satisfies the same {@link AnalysisRunner} contract).
+ * JobRunnerPort (DEFERRED): the heavy K8s-Job tools (Semgrep / Trivy / Checkov / Kube-linter) are
+ * owner-provided infra. See FOLLOW-UP-static-analysis-k8s-job-runners. The port type below documents
+ * the seam so a future registration is a drop-in.
  */
 
 import type { AnalysisFindingV1 } from "#contracts/analysis_findings.v1.js";
@@ -49,7 +38,7 @@ import { RunnerToolError } from "./eslint_runner.js";
 import { SubprocessLaunchError, SubprocessOomError, SubprocessTimeoutError } from "./in_worker_runner.js";
 import type { AnalysisRunner, ChangedLineRanges } from "./runner_port.js";
 
-/** One registered runner + the files it should scan. 1:1 with the Python `RunnerSpec`. */
+/** One registered runner + the files it should scan. */
 export type RunnerSpec = {
   /** Stable tool identifier; matches `AnalysisFindingV1.tool` / `ToolStatusV1.tool_name`. */
   readonly name: string;
@@ -83,9 +72,8 @@ export type JobRunnerPort = AnalysisRunner & {
 };
 
 /**
- * Orchestrator output. 1:1 with the Python `tuple[tuple[AnalysisFindingV1, ...], tuple[ToolStatusV1,
- * ...]]`. `findings` are RAW (uncapped, unfiltered) flattened across tools in registration order; one
- * status per registered runner (including timed-out / failed / skipped ones).
+ * Orchestrator output. `findings` are RAW (uncapped, unfiltered) flattened across tools in
+ * registration order; one status per registered runner (including timed-out / failed / skipped ones).
  */
 export type StaticAnalysisOrchestratorResult = {
   readonly findings: ReadonlyArray<AnalysisFindingV1>;
@@ -243,7 +231,7 @@ export class StaticAnalysisOrchestrator {
       if (e instanceof RunnerToolError) {
         return { kind: "failed_runtime", errorClass: e.name, errorMessage: e.message };
       }
-      // Defensive: unknown error class still degrades fail-open (Python logs + → failed_runtime).
+      // Defensive: unknown error class still degrades fail-open → failed_runtime.
       return {
         kind: "failed_runtime",
         errorClass: e instanceof Error ? e.name : "Error",
@@ -273,7 +261,7 @@ export class StaticAnalysisOrchestrator {
   }
 }
 
-// ─── status helpers (1:1 with the Python module functions) ───────────────────────────────────────
+// ─── status helpers ───────────────────────────────────────────────────────────────────────────────
 
 function completedStatus(spec: RunnerSpec, startedAt: Date, finishedAt: Date, findingsProduced: number): ToolStatusV1 {
   return ToolStatusV1.parse({

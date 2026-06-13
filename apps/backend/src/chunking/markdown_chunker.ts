@@ -1,12 +1,9 @@
-// Section-anchored markdown chunker.
+// Section-anchored markdown chunker — pure function: turns one markdown file into a tuple of
+// section-anchored MarkdownChunkV1. Anchoring on ATX headings keeps each chunk a coherent thought;
+// the heading_path metadata makes the citation legible without re-parsing the source at render time.
+// Parity-proven byte-for-byte in test/parity/chunking.parity.test.ts.
 //
-// 1:1 port of the frozen Python codemaster/chunking/markdown_chunker.py::chunk_markdown (Sprint 10 /
-// S10.2.2). Pure function: turns one markdown file into a tuple of section-anchored MarkdownChunkV1.
-// Anchoring on ATX headings keeps each chunk a coherent thought; the heading_path metadata makes the
-// citation legible without re-parsing the source at render time. Parity-proven byte-for-byte against
-// the source-of-truth in test/parity/chunking.parity.test.ts.
-//
-// Algorithm (one linear pass), mirrored exactly from the source:
+// Algorithm (one linear pass):
 //   1. Walk lines, tracking fence state, the active H1/H2/H3 heading_path, and a pending line buffer.
 //   2. On an H1/H2/H3 heading at column 0: flush pending; (re)compute heading_path; the heading line
 //      itself becomes the first line of the next chunk. H4+ is body content, not structural.
@@ -17,8 +14,7 @@
 //
 // NOTE: this module deliberately does NOT mint chunk_id — MarkdownChunkV1 carries no chunk_id field
 // (it keys on (relative_path, chunk_index)). The deterministic chunk_id derivation for the v8/v10
-// evidence pipeline lives in computeChunkId (#contracts/diff_chunking.v1); its byte-parity on
-// invalid-UTF-8 bodies (invariant #15) is asserted alongside this chunker's parity test.
+// evidence pipeline lives in computeChunkId (#contracts/diff_chunking.v1).
 
 import { MarkdownChunkV1 } from "#contracts/markdown_chunk.v1.js";
 
@@ -26,11 +22,10 @@ import { MarkdownChunkV1 } from "#contracts/markdown_chunk.v1.js";
 export const DEFAULT_TARGET_CHARS = 1500;
 export const MAX_CHUNK_CHARS = 6000;
 
-// ── Python str.strip() / strip("\n") parity ──────────────────────────────────────────────────────
-// Python's argless str.strip() whitespace set differs from JS String.prototype.trim(): Python ALSO
-// strips U+001C–U+001F and U+0085 but NOT U+FEFF, whereas JS trim() does the opposite. We reproduce
-// Python's exact set so whitespace-only chunk suppression and body trimming are byte-identical.
-// Code points of Python's str.strip() whitespace set (enumerated from the frozen interpreter).
+// ── Whitespace stripping with a fixed code-point set ───────────────────────────────────────────────
+// The whitespace set used here differs from JS String.prototype.trim(): it ALSO strips
+// U+001C–U+001F and U+0085 but NOT U+FEFF, whereas JS trim() does the opposite. The exact set below
+// is the load-bearing invariant — whitespace-only chunk suppression and body trimming depend on it.
 const PY_WHITESPACE_CODEPOINTS: ReadonlyArray<number> = [
   0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x85, 0xa0, 0x1680, 0x2000, 0x2001,
   0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f,
@@ -40,9 +35,9 @@ const PY_WHITESPACE: ReadonlySet<string> = new Set(
   PY_WHITESPACE_CODEPOINTS.map((cp) => String.fromCodePoint(cp)),
 );
 
-/** Port of Python `str.strip()` (argless): strip Python's whitespace set from both ends. */
+/** Strip the fixed whitespace set (see above) from both ends, argless-strip style. */
 function pyStrip(text: string): string {
-  const chars = [...text]; // code-point iteration (matches Python str semantics)
+  const chars = [...text]; // iterate by code point, not UTF-16 code unit
   let lo = 0;
   let hi = chars.length;
   while (lo < hi && PY_WHITESPACE.has(chars.at(lo)!)) {
@@ -54,7 +49,7 @@ function pyStrip(text: string): string {
   return chars.slice(lo, hi).join("");
 }
 
-/** Port of Python `str.strip("\n")`: strip ONLY newline chars from both ends. */
+/** Strip ONLY newline chars from both ends. */
 function stripNewlines(text: string): string {
   let lo = 0;
   let hi = text.length;
@@ -67,7 +62,7 @@ function stripNewlines(text: string): string {
   return text.slice(lo, hi);
 }
 
-/** Port of Python `s[:n]` on a str: slice by CODE POINT, not UTF-16 code unit. */
+/** Slice the first `n` characters by CODE POINT (not UTF-16 code unit). */
 function codePointSlice(text: string, n: number): string {
   const chars = [...text];
   if (chars.length <= n) {
@@ -76,16 +71,14 @@ function codePointSlice(text: string, n: number): string {
   return chars.slice(0, n).join("");
 }
 
-// `^(#{1,6})\s+(.*?)\s*#*\s*$` — ATX heading; `^(?:```|~~~)` — fence at column 0. Both mirror the
-// frozen `re` patterns. Python `\s` (no re.UNICODE on str by default in py3 IS unicode-aware) — but
-// the realistic inputs are ASCII whitespace; we use the JS default (also unicode-naive on \s? no, JS
-// \s is unicode-aware too). The capture/trim below reconciles either way.
+// `^(#{1,6})\s+(.*?)\s*#*\s*$` — ATX heading; `^(?:```|~~~)` — fence at column 0. Realistic inputs
+// are ASCII whitespace; JS `\s` is unicode-aware, and the capture/trim below reconciles either way.
 const ATX_HEADING = /^(#{1,6})\s+(.*?)\s*#*\s*$/;
 const FENCE = /^(?:```|~~~)/;
 
 type HeadingLevelTitle = { readonly level: number; readonly title: string };
 
-/** Port of `_heading_level_and_title`: parse an ATX heading line → (level, stripped title) or null. */
+/** Parse an ATX heading line → (level, stripped title) or null. */
 function headingLevelAndTitle(line: string): HeadingLevelTitle | null {
   const m = ATX_HEADING.exec(line);
   if (!m) {
@@ -95,7 +88,7 @@ function headingLevelAndTitle(line: string): HeadingLevelTitle | null {
 }
 
 /**
- * Port of `_push_path`: update heading_path when entering a heading at `level`.
+ * Update heading_path when entering a heading at `level`.
  * H1 resets to a single entry; H2/H3 extend or replace the deepest slot; H4+ leave path unchanged.
  */
 function pushPath(path: ReadonlyArray<string>, level: number, title: string): Array<string> {
@@ -103,8 +96,6 @@ function pushPath(path: ReadonlyArray<string>, level: number, title: string): Ar
     return [title];
   }
   if (level === 2) {
-    // Python: `(path[0],) + (title,) if path else (title,)` — note `+` binds tighter than the
-    // conditional, so this is `((path[0], title)) if path else (title,)`.
     return path.length > 0 ? [path[0]!, title] : [title];
   }
   if (level === 3) {
@@ -130,8 +121,8 @@ type DraftChunk = {
 };
 
 /**
- * Port of `_split_long_chunk`: break one oversize chunk along blank-line paragraph boundaries. Each
- * shard inherits heading_path; chunk_index is rewritten by the caller after all shards land.
+ * Break one oversize chunk along blank-line paragraph boundaries. Each shard inherits heading_path;
+ * chunk_index is rewritten by the caller after all shards land.
  */
 function splitLongChunk(chunk: DraftChunk, targetChars: number): Array<DraftChunk> {
   if (chunk.body.length <= targetChars) {
@@ -164,7 +155,7 @@ function splitLongChunk(chunk: DraftChunk, targetChars: number): Array<DraftChun
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines.at(i)!;
     current.push(line);
-    // `sum(len(line_) + 1 for line_ in current)` — Python len() counts code points.
+    // Joined length, counting CODE POINTS (not UTF-16 units): sum of each line's length plus 1 for "\n".
     let joinedLen = 0;
     for (const lineInner of current) {
       joinedLen += [...lineInner].length + 1;
@@ -193,7 +184,7 @@ function splitLongChunk(chunk: DraftChunk, targetChars: number): Array<DraftChun
   return shards;
 }
 
-/** Arguments to {@link chunkMarkdown} — keyword-only, mirroring the frozen Python signature. */
+/** Arguments to {@link chunkMarkdown} — keyword-only. */
 export type ChunkMarkdownArgs = {
   readonly relative_path: string;
   readonly body: string;
@@ -201,7 +192,7 @@ export type ChunkMarkdownArgs = {
 };
 
 /**
- * Carve `body` into section-anchored chunks. 1:1 port of `chunk_markdown`.
+ * Carve `body` into section-anchored chunks.
  *
  * @param relative_path workspace-relative path, copied verbatim onto every chunk for citation.
  * @param body full file contents.
