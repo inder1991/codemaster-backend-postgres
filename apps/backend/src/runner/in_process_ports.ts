@@ -72,7 +72,6 @@ import { GitHubApiClient } from "#backend/integrations/github/api_client.js";
 import { GitHubApiReviewClient, type GhReviewClient } from "#backend/integrations/github/review_client.js";
 import { FetchGitHubHttpClient } from "#backend/integrations/github/api_client.js";
 import { GitHubAppTokenProvider } from "#backend/integrations/github/token_provider.js";
-import { VaultHttpPort } from "#backend/adapters/vault_http.js";
 import { resolveEmbeddingsConsumer } from "#backend/adapters/resolve_embeddings.js";
 
 import {
@@ -181,8 +180,7 @@ export function buildStrictLedgerReviewCache(dsn: string): LlmClientCacheLike {
 async function buildGithubApiClient(): Promise<GitHubApiClient> {
   const clock = new WallClock();
   const githubHttp = new FetchGitHubHttpClient({});
-  const vault = VaultHttpPort.fromEnv();
-  const tokenProvider = await GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
+  const tokenProvider = await GitHubAppTokenProvider.fromEnv({ http: githubHttp, clock });
   return new GitHubApiClient({
     tokenProvider: tokenProvider.getToken.bind(tokenProvider),
     http: githubHttp,
@@ -245,8 +243,7 @@ function makeLazyPostReviewGhClient(): (installationId: number) => Promise<GhRev
 async function buildClonerDeps(): Promise<CloneRepoIntoWorkspaceDeps> {
   const clock = new WallClock();
   const githubHttp = new FetchGitHubHttpClient({});
-  const vault = VaultHttpPort.fromEnv();
-  const tokenProvider = await GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
+  const tokenProvider = await GitHubAppTokenProvider.fromEnv({ http: githubHttp, clock });
   const cloner = new GitSubprocessCloner({
     tokenProvider: tokenProvider.getToken.bind(tokenProvider),
   });

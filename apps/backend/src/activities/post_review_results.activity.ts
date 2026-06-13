@@ -73,7 +73,6 @@ import {
   GitHubUnprocessableError,
 } from "#backend/integrations/github/api_client.js";
 import { GitHubAppTokenProvider } from "#backend/integrations/github/token_provider.js";
-import { VaultHttpPort } from "#backend/adapters/vault_http.js";
 import { assertCurrentRun } from "#backend/domain/stale_write_guard.js";
 import { PendingEmits } from "#backend/infra/post_commit_emit.js";
 import { POST_REVIEW_FAILED_WITH_DROPPED_STATE } from "#backend/review/pipeline/posting.js";
@@ -1540,8 +1539,7 @@ export async function postReviewResults(input: PostReviewInputV1): Promise<Poste
   // One GitHub HTTP transport shared by the token-provider's JWT→installation-token mint AND the
   // GitHubApiClient's review calls.
   const githubHttp = new FetchGitHubHttpClient({});
-  const vault = VaultHttpPort.fromEnv();
-  const tokenProvider = await GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
+  const tokenProvider = await GitHubAppTokenProvider.fromEnv({ http: githubHttp, clock });
   const api = new GitHubApiClient({
     tokenProvider: tokenProvider.getToken.bind(tokenProvider),
     http: githubHttp,

@@ -298,11 +298,9 @@ export async function hydrateInstallationRepositories(
   // Dynamic import keeps the static import graph light and matches the seam-injected body.
   const { FetchGitHubHttpClient } = await import("#backend/integrations/github/api_client.js");
   const { GitHubAppTokenProvider } = await import("#backend/integrations/github/token_provider.js");
-  const { VaultHttpPort } = await import("#backend/adapters/vault_http.js");
 
   const githubHttp = new FetchGitHubHttpClient({});
-  const vault = VaultHttpPort.fromEnv();
-  const tokenProvider = await GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
+  const tokenProvider = await GitHubAppTokenProvider.fromEnv({ http: githubHttp, clock });
   const api = new GitHubApiClient({
     tokenProvider: tokenProvider.getToken.bind(tokenProvider),
     http: githubHttp,

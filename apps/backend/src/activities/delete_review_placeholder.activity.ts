@@ -55,7 +55,6 @@ import {
 } from "#backend/integrations/github/review_client.js";
 import { FetchGitHubHttpClient, GitHubApiClient } from "#backend/integrations/github/api_client.js";
 import { GitHubAppTokenProvider } from "#backend/integrations/github/token_provider.js";
-import { VaultHttpPort } from "#backend/adapters/vault_http.js";
 import { emitWorkflowEvent } from "#backend/ingest/_workflow_events_repository.js";
 
 import { DeleteReviewPlaceholderInput } from "#contracts/delete_review_placeholder_input.v1.js";
@@ -244,8 +243,7 @@ export async function deleteReviewPlaceholder(input: DeleteReviewPlaceholderInpu
     }
     const clock = new WallClock();
     const githubHttp = new FetchGitHubHttpClient({});
-    const vault = VaultHttpPort.fromEnv();
-    const tokenProvider = await GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
+    const tokenProvider = await GitHubAppTokenProvider.fromEnv({ http: githubHttp, clock });
     const api = new GitHubApiClient({
       tokenProvider: tokenProvider.getToken.bind(tokenProvider),
       http: githubHttp,

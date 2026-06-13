@@ -13,6 +13,7 @@ import { makeWebhookSecretProvider } from "#backend/ingest/webhook_secret_provid
 afterEach(() => {
   delete process.env["CODEMASTER_VAULT_SECRET_SOURCE"];
   delete process.env["CODEMASTER_VAULT_SECRETS_DIR"];
+  delete process.env["CODEMASTER_GITHUB_WEBHOOK_SECRET"];
 });
 
 describe("makeWebhookSecretProvider (ADR-0071 source selector)", () => {
@@ -48,6 +49,16 @@ describe("makeWebhookSecretProvider (ADR-0071 source selector)", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it("env mode (P0-C): CODEMASTER_GITHUB_WEBHOOK_SECRET resolves WITHOUT touching Vault", async () => {
+    // vault-api mode (no VAULT_ADDR): if the env tier did NOT win, the Vault tier would build
+    // VaultHttpPort.fromEnv() and throw. Returning the env secret proves DB>env>Vault short-circuits at env.
+    delete process.env["CODEMASTER_VAULT_SECRET_SOURCE"];
+    process.env["CODEMASTER_GITHUB_WEBHOOK_SECRET"] = "whsec_env";
+
+    const provider = makeWebhookSecretProvider();
+    expect(new TextDecoder().decode(await provider.currentSecret())).toBe("whsec_env");
   });
 
   it("default (vault-api) mode returns a provider and does NOT read the file at construction (lazy)", () => {

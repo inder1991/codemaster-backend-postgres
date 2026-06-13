@@ -311,7 +311,9 @@ describe("GitHubAppTokenProvider.fromEnv", () => {
     expect(count()).toBe(1);
   });
 
-  it("throws PermanentTokenError when the Vault secret is missing required keys", async () => {
+  it("throws PermanentTokenError when no source has complete creds (Vault secret missing private_key_pem)", async () => {
+    // P0-C: with DB + env both empty (the unit env), the Vault secret missing private_key_pem means no tier
+    // yields creds → a single "not configured" PermanentTokenError naming all three sources.
     const vault = new InMemoryVault();
     await vault.kvWrite({ path: VAULT_KV_PATH, data: { app_id: String(APP_ID) } });
     const { http } = scriptedHttp([{ kind: "resp", status: 201, bodyText: tokenBody() }]);
@@ -320,9 +322,9 @@ describe("GitHubAppTokenProvider.fromEnv", () => {
     await expect(GitHubAppTokenProvider.fromEnv({ vault, http, clock })).rejects.toBeInstanceOf(
       PermanentTokenError,
     );
-    await expect(
-      GitHubAppTokenProvider.fromEnv({ vault, http, clock }),
-    ).rejects.toThrow(/missing required keys.*expected: app_id, private_key_pem.*got: \['app_id'\]/s);
+    await expect(GitHubAppTokenProvider.fromEnv({ vault, http, clock })).rejects.toThrow(
+      /not configured.*app_id \+ private_key_pem/s,
+    );
   });
 
   it("propagates VaultPathNotFound (fail-closed at deployment) — does NOT catch", async () => {

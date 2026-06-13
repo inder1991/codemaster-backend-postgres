@@ -187,11 +187,9 @@ function makeLazyHydrateGithubPort(): GitHubListReposPort {
         const { GitHubAppTokenProvider } = await import(
           "#backend/integrations/github/token_provider.js"
         );
-        const { VaultHttpPort } = await import("#backend/adapters/vault_http.js");
         const clock = new WallClock();
         const githubHttp = new FetchGitHubHttpClient({});
-        const vault = VaultHttpPort.fromEnv();
-        const tokenProvider = await GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
+        const tokenProvider = await GitHubAppTokenProvider.fromEnv({ http: githubHttp, clock });
         return new GitHubApiClient({
           tokenProvider: tokenProvider.getToken.bind(tokenProvider),
           http: githubHttp,
@@ -234,11 +232,9 @@ function makeLazyCodeOwnersFilePort(): CodeOwnersFilePort {
         const { GitHubAppTokenProvider } = await import(
           "#backend/integrations/github/token_provider.js"
         );
-        const { VaultHttpPort } = await import("#backend/adapters/vault_http.js");
         const clock = new WallClock();
         const githubHttp = new FetchGitHubHttpClient({});
-        const vault = VaultHttpPort.fromEnv();
-        const tokenProvider = await GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
+        const tokenProvider = await GitHubAppTokenProvider.fromEnv({ http: githubHttp, clock });
         return new RealGitHubApiClient({
           tokenProvider: tokenProvider.getToken.bind(tokenProvider),
           http: githubHttp,
@@ -289,11 +285,9 @@ function makeLazyCloneTokenProvider(): TokenProvider {
         const { GitHubAppTokenProvider } = await import(
           "#backend/integrations/github/token_provider.js"
         );
-        const { VaultHttpPort } = await import("#backend/adapters/vault_http.js");
         const clock = new WallClock();
         const githubHttp = new FetchGitHubHttpClient({});
-        const vault = VaultHttpPort.fromEnv();
-        return GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
+        return GitHubAppTokenProvider.fromEnv({ http: githubHttp, clock });
       })();
     }
     return memo;

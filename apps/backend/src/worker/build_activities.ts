@@ -280,8 +280,7 @@ function requireCoreDsn(): string {
 async function buildClonerDeps(): Promise<CloneRepoIntoWorkspaceDeps> {
   const clock = new WallClock();
   const githubHttp = new FetchGitHubHttpClient({});
-  const vault = VaultHttpPort.fromEnv();
-  const tokenProvider = await GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
+  const tokenProvider = await GitHubAppTokenProvider.fromEnv({ http: githubHttp, clock });
   // The cloner shells out to git with the minted installation token; it needs only the bound `getToken`
   // (a `(installationId) => Promise<string>` — the `TokenProvider` shape). Per-review routing: the cloner is
   // NO LONGER bound to one installation id — the clone activity passes the per-PR id to `cloner.clone()`.
@@ -330,8 +329,7 @@ type GithubIssuePortShape = {
 async function buildIssueClient(): Promise<GitHubIssueClient> {
   const clock = new WallClock();
   const githubHttp = new FetchGitHubHttpClient({});
-  const vault = VaultHttpPort.fromEnv();
-  const tokenProvider = await GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
+  const tokenProvider = await GitHubAppTokenProvider.fromEnv({ http: githubHttp, clock });
   return new GitHubIssueClient({
     tokenProvider: tokenProvider.getToken.bind(tokenProvider),
     http: githubHttp,
@@ -389,8 +387,7 @@ type FixPromptIssueCommentClientShape = {
 async function buildFixPromptApi(): Promise<GitHubApiClient> {
   const clock = new WallClock();
   const githubHttp = new FetchGitHubHttpClient({});
-  const vault = VaultHttpPort.fromEnv();
-  const tokenProvider = await GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
+  const tokenProvider = await GitHubAppTokenProvider.fromEnv({ http: githubHttp, clock });
   return new GitHubApiClient({
     tokenProvider: tokenProvider.getToken.bind(tokenProvider),
     http: githubHttp,
@@ -549,8 +546,7 @@ function makeLazyLlmClientCache(dsn: string): LlmClientCacheLike {
 async function buildManifestContentsClient(): Promise<GitHubApiClient> {
   const clock = new WallClock();
   const githubHttp = new FetchGitHubHttpClient({});
-  const vault = VaultHttpPort.fromEnv();
-  const tokenProvider = await GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
+  const tokenProvider = await GitHubAppTokenProvider.fromEnv({ http: githubHttp, clock });
   return new GitHubApiClient({
     tokenProvider: tokenProvider.getToken.bind(tokenProvider),
     http: githubHttp,
@@ -596,8 +592,7 @@ function makeLazyTokenProvider(): TokenProvider {
       memo = (async (): Promise<GitHubAppTokenProvider> => {
         const clock = new WallClock();
         const githubHttp = new FetchGitHubHttpClient({});
-        const vault = VaultHttpPort.fromEnv();
-        return GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
+        return GitHubAppTokenProvider.fromEnv({ http: githubHttp, clock });
       })();
     }
     return memo;
@@ -668,8 +663,8 @@ function makeCodeOwnersFilePort(): CodeOwnersFilePort {
  * refresh loop is started so the cached token stays fresh across the 6h sync cadence.
  */
 async function buildConfluenceClient(): Promise<ConfluenceClient> {
-  const vault = VaultHttpPort.fromEnv();
   const clock = new WallClock();
+  const vault = VaultHttpPort.fromEnv();
   const tokenProvider = await ConfluenceTokenProvider.fromVault({ vault, clock });
   tokenProvider.startRefreshLoop();
   // `authEmail` selects HTTP-Basic (Atlassian Cloud) vs Bearer (Server/DC PAT). It is OMITTED (not set to

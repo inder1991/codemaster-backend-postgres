@@ -46,7 +46,6 @@ import {
   GitHubApiClient,
 } from "#backend/integrations/github/api_client.js";
 import { GitHubAppTokenProvider } from "#backend/integrations/github/token_provider.js";
-import { VaultHttpPort } from "#backend/adapters/vault_http.js";
 import {
   type PrFilesRepoPort,
   PostgresPrFilesRepo,
@@ -319,8 +318,7 @@ export async function enrichPrFilesV2(
   // One GitHub HTTP transport shared by the token-provider's JWT→installation-token mint AND the
   // GitHubApiClient's files calls.
   const githubHttp = new FetchGitHubHttpClient({});
-  const vault = VaultHttpPort.fromEnv();
-  const tokenProvider = await GitHubAppTokenProvider.fromEnv({ vault, http: githubHttp, clock });
+  const tokenProvider = await GitHubAppTokenProvider.fromEnv({ http: githubHttp, clock });
   const api = new GitHubApiClient({
     tokenProvider: tokenProvider.getToken.bind(tokenProvider),
     http: githubHttp,

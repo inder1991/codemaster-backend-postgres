@@ -51,10 +51,19 @@ import { formatException } from "#platform/errors.js";
 import { type Clock } from "#platform/clock.js";
 import { getTracer } from "#platform/observability/tracing.js";
 
+import { VaultHttpPort } from "#backend/adapters/vault_http.js";
 import { type VaultPort } from "#backend/adapters/vault_port.js";
 import { type GitHubHttpClient } from "#backend/integrations/github/api_client.js";
 import { signAppJwt } from "#backend/integrations/github/app_jwt.js";
+import { PostgresGitHubAppSettingsRepo } from "#backend/integrations/github/github_app_settings_repo.js";
+import {
+  type GitHubCreds,
+  gitHubCredsFromEnv,
+  gitHubCredsFromVaultData,
+  resolveGitHubCreds,
+} from "#backend/integrations/github/github_config_resolver.js";
 import { KeyedMutex } from "#backend/integrations/github/installation_token.js";
+import { getAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
 
 const TRACER = getTracer("codemaster.integrations.github.token_provider");
 
@@ -183,6 +192,19 @@ export type GitHubAppTokenProviderOptions = {
   baseUrl?: string;
 };
 
+/** DB tier of the creds resolver (review P0-C): the UI-saved platform GitHub App row (field-codec
+ *  decrypted via the boot-installed registry), or null when no core DSN / no registry / no enabled row.
+ *  The registry guard keeps unit tests (no registry installed) from ever opening a DB connection. */
+async function readGitHubCredsFromDb(): Promise<GitHubCreds | null> {
+  const dsn = process.env["CODEMASTER_PG_CORE_DSN"];
+  const registry = getAuditKeyRegistry();
+  if (dsn === undefined || dsn === "" || registry === null) {
+    return null;
+  }
+  const settings = await PostgresGitHubAppSettingsRepo.fromDsn({ dsn, registry }).read();
+  return settings === null ? null : { appId: settings.appId, privateKeyPem: settings.privateKeyPem };
+}
+
 /**
  * Implements the `_TokenProvider` contract: `getToken(installationId) => Promise<string>`.
  *
@@ -249,21 +271,31 @@ export class GitHubAppTokenProvider {
     http,
     clock,
   }: {
-    vault: VaultPort;
+    vault?: VaultPort | undefined;
     http: GitHubHttpClient;
     clock: Clock;
   }): Promise<GitHubAppTokenProvider> {
-    const secret = await vault.kvRead({ path: VAULT_KV_PATH });
-    if (!("app_id" in secret) || !("private_key_pem" in secret)) {
-      const gotKeys = Object.keys(secret).sort();
+    // Resolve the token-mint creds DB (UI) > env > Vault > disabled (review P0-C) — so a UI-saved GitHub
+    // App takes effect at runtime, not just at GET. The Vault port is built LAZILY (only if DB + env both
+    // miss), so an openshift-no-Vault pod configured via UI/env never touches Vault. A bare VaultPathNotFound
+    // from the Vault tier propagates (fail-closed at the deployment boundary, unchanged).
+    const resolved = await resolveGitHubCreds({
+      fromDb: () => readGitHubCredsFromDb(),
+      fromEnv: () => gitHubCredsFromEnv((n) => process.env[n]),
+      fromVault: async () => {
+        const port = vault ?? VaultHttpPort.fromEnv();
+        return gitHubCredsFromVaultData(await port.kvRead({ path: VAULT_KV_PATH }));
+      },
+    });
+    if (resolved === null) {
       throw new PermanentTokenError(
-        `Vault secret at ${VAULT_KV_PATH} missing required keys ` +
-          `(expected: app_id, private_key_pem; got: [${gotKeys.map((k) => `'${k}'`).join(", ")}])`,
+        `GitHub App not configured: no UI/DB settings, no CODEMASTER_GITHUB_APP_ID/_PRIVATE_KEY_PEM env, ` +
+          `and no Vault secret at ${VAULT_KV_PATH} (app_id + private_key_pem).`,
       );
     }
     return new GitHubAppTokenProvider({
-      appId: parseGithubAppId(secret["app_id"]!),
-      privateKeyPem: secret["private_key_pem"]!,
+      appId: parseGithubAppId(resolved.value.appId),
+      privateKeyPem: resolved.value.privateKeyPem,
       http,
       clock,
     });

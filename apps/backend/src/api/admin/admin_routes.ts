@@ -444,7 +444,8 @@ export async function registerAdminRoutes(
 
     // GitHub App config (UI-editable; go-live Step 4b). Secrets are stored field-codec-encrypted; GET
     // NEVER returns them (only app_id + enabled + configured), PUT (super_admin) writes the platform
-    // singleton. The app resolves creds DB > env > Vault > disabled at use-time, so this is non-blocking.
+    // singleton. At runtime the token provider (github_config_resolver) + the webhook-secret provider
+    // resolve DB (this row) > env > Vault > disabled, so a UI-saved config is actually used — non-blocking.
     scope.get(
       "/api/admin/github-config",
       { preHandler: requireRole(["platform_owner", "super_admin"]) },
