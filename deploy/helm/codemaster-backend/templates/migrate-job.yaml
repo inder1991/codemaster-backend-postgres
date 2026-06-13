@@ -66,11 +66,17 @@ spec:
               exec npm run migrate:up
           {{- else if eq .Values.secretSource "vault" }}
           # vault SA-auth: there is no agent-rendered env-file, so resolve the DB DSN from Vault (the pod's
-          # ServiceAccount login) and export it before migrating. resolve_dsn fails loud if Vault is unreachable.
+          # ServiceAccount login) and export it before migrating. `set -e` + the separate assign/export +
+          # non-empty check are REQUIRED: `export VAR=$(cmd)` always exits 0 (the export builtin's status,
+          # not the substitution's), so without this a resolve_dsn failure (Vault unreachable) would be
+          # masked and migrate:up would run with an EMPTY DSN + a confusing error (review P1).
           command: ["/bin/sh", "-c"]
           args:
             - |
-              export CODEMASTER_PG_CORE_DSN="$(node apps/backend/src/resolve_dsn.js)"
+              set -e
+              CODEMASTER_PG_CORE_DSN="$(node apps/backend/src/resolve_dsn.js)"
+              test -n "$CODEMASTER_PG_CORE_DSN" || { echo "resolve_dsn returned an empty DSN" >&2; exit 1; }
+              export CODEMASTER_PG_CORE_DSN
               exec npm run migrate:up
           {{- else }}
           command: ["npm", "run", "migrate:up"]

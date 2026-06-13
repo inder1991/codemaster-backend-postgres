@@ -48,10 +48,15 @@ spec:
       {{- else if eq .Values.secretSource "vault" }}
       # vault SA-auth: resolve the DSN from Vault (the pod's SA login) before deploy_check — same preamble as
       # the migrate Job + the app, so the check validates the SAME contract the real pod sees (review P1).
+      # `set -e` + separate assign/export + non-empty check so a resolve_dsn failure isn't masked by
+      # `export VAR=$(cmd)` always exiting 0 (review P1).
       command: ["/bin/sh", "-c"]
       args:
         - |
-          export CODEMASTER_PG_CORE_DSN="$(node apps/backend/src/resolve_dsn.js)"
+          set -e
+          CODEMASTER_PG_CORE_DSN="$(node apps/backend/src/resolve_dsn.js)"
+          test -n "$CODEMASTER_PG_CORE_DSN" || { echo "resolve_dsn returned an empty DSN" >&2; exit 1; }
+          export CODEMASTER_PG_CORE_DSN
           exec node apps/backend/src/deploy_check.js
       {{- else }}
       command: ["node", "apps/backend/src/deploy_check.js"]
