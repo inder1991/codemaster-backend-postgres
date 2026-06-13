@@ -173,3 +173,15 @@ describe("assertDeployReady", () => {
     }), FILE_AND_ENV)).resolves.toBeUndefined();
   });
 });
+
+describe("parseRenderedSecret", () => {
+  it("parses a JSON object into a string map, dropping non-string values", async () => {
+    const { parseRenderedSecret } = await import("#backend/deploy_preflight.js");
+    expect(parseRenderedSecret('{"app_id":"1","n":2}')).toEqual({ app_id: "1" });
+  });
+  it("returns null for non-object or invalid JSON", async () => {
+    const { parseRenderedSecret } = await import("#backend/deploy_preflight.js");
+    expect(parseRenderedSecret("not json")).toBeNull();
+    expect(parseRenderedSecret("[1,2]")).toBeNull();
+  });
+});

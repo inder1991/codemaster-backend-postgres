@@ -77,9 +77,17 @@ async function main(): Promise<void> {
   if (dsn !== undefined && dsn !== "") {
     const { Kysely, PostgresDialect } = await import("kysely");
     const { assertSchemaRevision } = await import("#backend/schema_preflight.js");
+    const { assertDeployReady } = await import("#backend/deploy_preflight.js");
+    const { makeObserveDeps } = await import("#backend/deploy_preflight_io.js");
     // A Kysely facade over the SHARED ADR-0062 pool — never destroyed here (destroy would end the
     // pool the API + runner share for the process lifetime).
-    await assertSchemaRevision(new Kysely({ dialect: new PostgresDialect({ pool: getPool(dsn) }) }));
+    const db = new Kysely({ dialect: new PostgresDialect({ pool: getPool(dsn) }) });
+    // Turnkey deploy-contract preflight FIRST: validates required secrets + DB extensions/schemas +
+    // config, throwing a single remediation list (each with its fix) before serving — so a
+    // misconfigured first deploy gets root-cause messages, not a Ready-but-dead pod. Then the exact
+    // migration-sequence pin.
+    await assertDeployReady(makeObserveDeps({ db }));
+    await assertSchemaRevision(db);
   }
 
   // HTTP API first — app.listen() returns once bound; the server keeps serving on the event loop.

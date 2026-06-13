@@ -340,3 +340,27 @@ export async function assertDeployReady(
     throw new DeployContractError(failures);
   }
 }
+
+/**
+ * Parse a Vault-Agent-rendered secret file's contents into a string→string map (the
+ * `.Data.data | toJSON` shape), or null when the content is not a JSON object. Non-string values
+ * are dropped (KV secret material is always strings). Pure — the fs read is the caller's.
+ */
+export function parseRenderedSecret(raw: string): Record<string, string> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return null;
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(parsed)) {
+    if (typeof v === "string") {
+      out[k] = v;
+    }
+  }
+  return out;
+}
