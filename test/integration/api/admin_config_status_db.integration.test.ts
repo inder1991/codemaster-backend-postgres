@@ -132,6 +132,19 @@ describeDb("admin config-status — DB tier (P1)", () => {
     expect(github.every((i) => i.state === "configured" && i.source === "db")).toBe(true);
   });
 
+  it("a saved-but-DISABLED github row → github_app.* state 'disabled' (not pending, not configured) (P2)", async () => {
+    await new PostgresGitHubAppSettingsRepo({ db, registry: reg }).write({
+      appId: "123456",
+      privateKeyPem: PEM,
+      webhookSecret: "whsec",
+      enabled: false, // saved but turned off
+      rotatedByUserId: ROTATOR,
+    });
+    const github = (await statusItems()).filter((i) => i.key.startsWith("github_app."));
+    expect(github.length).toBeGreaterThan(0);
+    expect(github.every((i) => i.state === "disabled" && i.source === "db")).toBe(true);
+  });
+
   it("with no DB rows, github_app.* stay pending and llm.provider is pending", async () => {
     const items = await statusItems();
     expect(items.filter((i) => i.key.startsWith("github_app.")).every((i) => i.state === "pending")).toBe(

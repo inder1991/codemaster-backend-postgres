@@ -457,8 +457,10 @@ export function parseRenderedSecret(raw: string): Record<string, string> | null 
 /** A non-blocking feature-config item's state, for /config-status (never carries the secret value). */
 export type ConfigStatusItem = {
   readonly key: string;
-  /** configured = a value is present; pending = not yet set in any source. */
-  readonly state: "configured" | "pending";
+  /** configured = a value is present + active; disabled = saved in the UI but enabled=false (creds exist
+   *  but the feature is turned off — distinct from pending so the checklist doesn't imply it's live OR
+   *  unconfigured); pending = not yet set in any source. */
+  readonly state: "configured" | "disabled" | "pending";
   /** Where the value came from: "db" (UI-saved, overrides env/file), "env"/"file" (the observed tier),
    *  or "none" (pending). */
   readonly source: SecretSource | "db" | "none";

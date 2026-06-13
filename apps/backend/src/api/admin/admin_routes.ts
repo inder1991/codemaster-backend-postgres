@@ -425,17 +425,19 @@ export async function registerAdminRoutes(
         return envFileItems;
       }
       // Presence-only (readNonSecret — no decrypt): a corrupt/rotated-out key must NOT 500 the whole
-      // non-blocking checklist (review P1). configured = a row exists AND is enabled.
+      // non-blocking checklist (review P1). A saved-but-disabled row (enabled=false) reports state:"disabled"
+      // — distinct from "pending", so the checklist doesn't imply creds are absent when they exist (P2).
       const githubRow = await new PostgresGitHubAppSettingsRepo({ db: opts.db, registry }).readNonSecret();
       const confluenceRow = await new PostgresConfluenceSettingsRepo({ db: opts.db, registry }).readNonSecret();
-      const githubConfigured = githubRow !== null && githubRow.enabled;
-      const confluenceConfigured = confluenceRow !== null && confluenceRow.enabled;
-      const items = envFileItems.map((it) =>
-        (githubConfigured && it.key.startsWith("github_app.")) ||
-        (confluenceConfigured && it.key.startsWith("confluence."))
-          ? { ...it, state: "configured" as const, source: "db" as const }
-          : it,
-      );
+      const dbState = (row: { enabled: boolean } | null): "configured" | "disabled" | null =>
+        row === null ? null : row.enabled ? "configured" : "disabled";
+      const githubDb = dbState(githubRow);
+      const confluenceDb = dbState(confluenceRow);
+      const items = envFileItems.map((it) => {
+        const db =
+          it.key.startsWith("github_app.") ? githubDb : it.key.startsWith("confluence.") ? confluenceDb : null;
+        return db === null ? it : { ...it, state: db, source: "db" as const };
+      });
       const llmRoles = await new PostgresLlmProviderSettingsRepo({
         db: opts.db,
         registry,
