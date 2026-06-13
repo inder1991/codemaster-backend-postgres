@@ -1,9 +1,8 @@
-// GitHub webhook ROUTE (F1·b) — the Fastify port of the FastAPI router in
-// vendor/codemaster-py/codemaster/api/github_webhook.py::build_router (the receive_webhook endpoint).
+// GitHub webhook ROUTE — the Fastify receive_webhook endpoint.
 //
-// This is the "verification edge" slice: header validation → body-size cap → HMAC verification → status
-// code. PERSISTENCE (audit.webhook_events + cache.cache_idempotency dedup + the SERIAL+SUPERSEDE run
-// allocator + outbox emission) is a SUBSEQUENT slice — it threads a session_factory + clock through here.
+// Verification-edge slice: header validation → body-size cap → HMAC verification → status code.
+// PERSISTENCE (audit.webhook_events + cache.cache_idempotency dedup + the SERIAL+SUPERSEDE run
+// allocator + outbox emission) is a subsequent slice — threads a session_factory + clock through here.
 //
 // Raw body: GitHub signs the EXACT bytes it sends, so the route must HMAC over the raw request body, not a
 // re-serialized JSON parse. We register the route inside an encapsulated Fastify scope that removes the
@@ -14,17 +13,16 @@ import type { FastifyInstance } from "fastify";
 
 import { verifyGithubSignature } from "./github_webhook.js";
 
-/** Path constants — 1:1 with the frozen Python (GITHUB_WEBHOOK_PREFIX + GITHUB_WEBHOOK_ROUTE). */
+/** Path constants. */
 export const GITHUB_WEBHOOK_PREFIX = "/v1/github";
 export const GITHUB_WEBHOOK_ROUTE = "/webhook";
 export const GITHUB_WEBHOOK_PATH = `${GITHUB_WEBHOOK_PREFIX}${GITHUB_WEBHOOK_ROUTE}`;
-/** 10 MB — Python WEBHOOK_BODY_CAP_BYTES. */
+/** 10 MB body cap. */
 export const WEBHOOK_BODY_CAP_BYTES = 10 * 1024 * 1024;
 
 /**
- * The webhook-secret source (Python `WebhookSecretProvider` Protocol). `currentSecret()` reads the secret
- * fresh on every call (the Vault-backed impl does no in-process caching, so rotations take effect
- * immediately). Returns the raw secret bytes (Python `bytes`).
+ * The webhook-secret source. `currentSecret()` reads the secret fresh on every call (the Vault-backed
+ * impl does no in-process caching, so rotations take effect immediately).
  */
 export type WebhookSecretProvider = { currentSecret(): Promise<Uint8Array> };
 

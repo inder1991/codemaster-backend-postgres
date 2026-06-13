@@ -1,7 +1,5 @@
-// Two-person-approval predicate helpers — 1:1 port of
-// vendor/codemaster-py/codemaster/api/admin/_two_person_approval.py.
-//
-// Each predicate is PURE (no I/O, no clock beyond the `now` passed in) so the admin pending-change flows
+// Two-person-approval predicate helpers — each is PURE (no I/O, no clock beyond the `now` passed in)
+// so the admin pending-change flows
 // (members, cost-caps, flags) can compose them regardless of their storage shape. Each raises a
 // TwoPersonApprovalError subclass carrying the relevant context; consumers catch and re-raise their own
 // typed, HTTP-mappable errors (`... from err`).

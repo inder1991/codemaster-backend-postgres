@@ -1,10 +1,7 @@
 /**
- * GitHubIssueClient — 1:1 port of the ETag-aware `get_issue` method on the frozen Python
- * `codemaster/integrations/github/api_client.py::GitHubApiClient` (DM-WIRE T4 / S22.DM.16).
- *
- * The Python `get_issue` deliberately bypasses the shared `_request` retry/refresh loop because the
- * ETag round-trip needs a CUSTOM request header (`If-None-Match`) and a CUSTOM response-header read
- * (`ETag`) that `_request` does not expose. This port mirrors that: it talks to the injected
+ * GitHubIssueClient — ETag-aware `get_issue` client (DM-WIRE T4 / S22.DM.16). Bypasses the shared
+ * `_request` retry/refresh loop because the ETag round-trip needs a CUSTOM `If-None-Match` request
+ * header and a CUSTOM `ETag` response-header read that `_request` does not expose. Talks to the injected
  * {@link GitHubHttpClient} transport directly (the same seam the `GitHubApiClient` uses — production
  * `FetchGitHubHttpClient`, tests the cassette double), wraps the same `tokenProvider` pattern, and
  * NEVER raises on a non-2xx — it returns `(payload, etag, status)` so the consuming
@@ -16,7 +13,7 @@
  * injected transport + token-provider seams, exactly as the Python keeps `get_issue` as a method that
  * uses the lower-level client directly.
  *
- * Return contract (1:1 with the Python tuple `(payload, etag, status_code)`):
+ * Return contract:
  *   - 200  → `[payload dict, fresh ETag header value, 200]`. Caller upserts the cache.
  *   - 304  → `[null, the inbound if_none_match (still valid), 304]`. Caller refreshes cached_at,
  *            keeps the cached body.
@@ -79,7 +76,7 @@ export class GitHubIssueClient {
   }
 
   /**
-   * GET `/repos/{owner}/{repo}/issues/{n}` with ETag support, 1:1 with the Python `get_issue`.
+   * GET `/repos/{owner}/{repo}/issues/{n}` with ETag support.
    *
    * Sends `If-None-Match` when `ifNoneMatch` is provided. Reads the `ETag` response header (case
    * insensitive). Returns `[payload, etag, status]` per the contract documented on this module —

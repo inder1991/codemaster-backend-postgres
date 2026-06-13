@@ -1,10 +1,5 @@
 /**
- * ConfluenceTokenProvider — 1:1 port of
- * `vendor/codemaster-py/codemaster/integrations/confluence/token_provider.py` (frozen Python,
- * FOLLOW-UP-confluence-vault-token / S15.X).
- *
- * Vault-backed single-token Confluence credential provider. Mirrors the GitHubAppTokenProvider
- * operational shape adapted to Confluence's simpler single-token model:
+ * ConfluenceTokenProvider — Vault-backed single-token Confluence credential provider.
  *   - No per-installation fan-out (single platform-wide bearer token); no installation_id arg.
  *   - Background refresh loop (every 30 min ± jitter), driven through the injected {@link Clock} sleep.
  *   - Runtime refresh failure is fail-OPEN (keep serving the cached token).
@@ -20,9 +15,8 @@
  *     wall-clock timestamp — goes through the injected {@link Clock}, NEVER `setTimeout`/`Date`.
  *   - `jitterRng`: the {@link Random} seam for anti-storm refresh jitter (default {@link SystemRandom}).
  *
- * NOTE ON ENV FALLBACK: the frozen Python `from_vault` is Vault-ONLY (no env fallback). The
- * env-fallback path lives in the worker-bootstrap composition root (`worker/main.py`), which is out of
- * scope for this port (shared wiring). The `recordEnvFallbackUsed` counter that path emits is ported in
+ * NOTE ON ENV FALLBACK: this is Vault-ONLY (no env fallback). The env-fallback path lives in the
+ * worker-bootstrap composition root. The `recordEnvFallbackUsed` counter lives in
  * `#backend/observability/confluence_token_metrics.js` for the eventual bootstrap caller to wire.
  */
 
@@ -32,7 +26,7 @@ import { type Random, SystemRandom } from "#platform/randomness.js";
 import { type VaultPort } from "#backend/adapters/vault_port.js";
 import * as metrics from "#backend/observability/confluence_token_metrics.js";
 
-// ─── Operational defaults (locked per plan doc; 1:1 with the Python finals) ───────────────────────
+// ─── Operational defaults (locked per plan doc) ───────────────────────────────────────────────────
 
 /** Mirrors the GitHub Vault refresh cadence (ADR-0033). */
 const REFRESH_INTERVAL_SECONDS = 1800; // 30 min
@@ -51,7 +45,7 @@ const REQUIRED_VAULT_KEYS: ReadonlyArray<string> = ["base_url", "token"];
 
 const MIN_REFRESH_INTERVAL_SECONDS = 60;
 
-// ─── Errors (1:1 with the Python error hierarchy) ─────────────────────────────────────────────────
+// ─── Errors ───────────────────────────────────────────────────────────────────────────────────────
 
 /** Base class for ConfluenceTokenProvider failures. */
 export class ConfluenceTokenError extends Error {
@@ -232,7 +226,7 @@ export class ConfluenceTokenProvider {
         await this.refreshOnce({ isStartup: false });
       } catch {
         // refreshOnce handles its own logging/metrics; this catch exists only so a never-classified
-        // exception can't kill the background loop (1:1 with the Python broad-except guard).
+        // exception can't kill the background loop.
       }
     }
   }

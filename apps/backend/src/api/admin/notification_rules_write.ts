@@ -1,9 +1,8 @@
-// Notification-rules write repo — 1:1 port of postgres_notification_rules_repo.py write methods
-// (create_rule, update_rule, delete_rule) + the _recipient_summary helper. Platform-scope (no
+// Notification-rules write repo — create_rule, update_rule, delete_rule. Platform-scope (no
 // installation_id column). Reuses the read repo's row mapper + column projection for the RETURNING shape.
 //
-// JSONB columns (filters, recipients) are bound via CAST(<json-text> AS jsonb) — the node-pg jsonb idiom
-// (Python binds `:x::jsonb` with json.dumps). recipients is the validated RecipientV1[] (plain objects).
+// JSONB columns (filters, recipients) are bound via CAST(<json-text> AS jsonb). recipients is the
+// validated RecipientV1[] (plain objects).
 
 import { type Kysely, sql } from "kysely";
 

@@ -1,11 +1,10 @@
-// Members read — 1:1 port of the READ path of postgres_members_repo.py::list_members +
-// list_pending_changes, assembled by members.py::_build_members_page. GET /api/admin/members.
+// Members read — GET /api/admin/members.
 //
 // Two reads merged into one MembersPageV1: the active role grants (core.role_grants ⋈ core.users)
 // and every in-flight pending change (core.role_grant_pending). Platform-scope rows (installation_id
 // NULL) are returned in EVERY per-install view AND exclusively in the zero-UUID platform view — a
-// deliberate cross-tenant read gated by explicit SQL scope predicates (mirrors the Python repo's
-// documented tenancy carve-out; the Kysely tenancy plugin only fires on ORM statements, not raw sql).
+// deliberate cross-tenant read gated by explicit SQL scope predicates (the Kysely tenancy plugin only
+// fires on ORM statements, not raw sql).
 //
 // 1:1-DIVERGENCES from the frozen Python SQL (both are stale against the real production schema — the
 // 0001_baseline.sql pg_dump — and would raise UndefinedColumn at runtime; the Python integration test
@@ -82,7 +81,7 @@ async function listMembers(
     WHERE ${where}
   `.execute(db);
 
-  // Deterministic order: display_name ASC (mirrors the Python app-side sorted()).
+  // Deterministic order: display_name ASC.
   const rows = [...r.rows].sort((a, b) =>
     a.display_name < b.display_name ? -1 : a.display_name > b.display_name ? 1 : 0,
   );

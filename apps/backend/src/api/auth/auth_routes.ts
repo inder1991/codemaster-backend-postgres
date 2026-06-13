@@ -1,23 +1,19 @@
-// Fastify auth router — port of codemaster/api/auth/routes.py (Sprint 14 / S14.A).
-//
-// Single-factor (username + password). Endpoints (prefix /api/auth):
+// Fastify auth router — single-factor (username + password). Endpoints (prefix /api/auth):
 //   POST /login   — verify credentials, set the HttpOnly session cookie
 //   GET  /me      — return identity from the session cookie
 //   GET  /csrf    — seed the double-submit CSRF token (cookie + body)
 //   POST /logout  — clear the session cookie (idempotent)
 //
-// Registered onto an encapsulated Fastify scope (mirrors github_webhook_routes), so @fastify/cookie is
-// scoped here and the app factory stays pure. The lockout + dispatch substance lives in authenticate()
-// (login.ts); this layer is the HTTP edge: CSRF gate → rate-limit gate → dispatch → metrics → cookie →
-// status mapping.
+// Encapsulated Fastify scope (@fastify/cookie scoped here; app factory stays pure). Substance lives in
+// authenticate() (login.ts); this layer is the HTTP edge: CSRF gate → rate-limit gate → dispatch →
+// metrics → cookie → status mapping.
 //
-// W4.7 closed both deferred seams: CSRF *verification* (EC4 — csrf.ts; mounted whenever csrfSecret is
-// wired, session cookie SameSite=Strict) and login.success/.failure audit emission (EH7 — audit.ts;
-// active whenever auditDb is wired). The audit wiring is three-pronged, 1:1 with the Python router:
-// the same-TX auditCallbackFactory threaded into authenticate() (the R8 contract — the audit INSERT
-// commits/rolls back WITH recordLoginAttempt's user-state UPDATE), a fail-safe post-authenticate emit
-// for outcomes that bypass recordLoginAttempt (locked / disabled / ldap_unreachable), and a fail-safe
-// emit on the pre-dispatch rate-limited 429 (the credential-spray forensic trail — R5).
+// W4.7 closed both deferred seams: CSRF verification (EC4 — csrf.ts; mounted whenever csrfSecret is
+// wired) and login audit emission (EH7 — audit.ts; active whenever auditDb is wired). Audit wiring is
+// three-pronged: same-TX auditCallbackFactory into authenticate() (R8 — audit INSERT commits/rolls back
+// WITH recordLoginAttempt's UPDATE), fail-safe post-authenticate emit for outcomes that bypass
+// recordLoginAttempt (locked / disabled / ldap_unreachable), and fail-safe emit on the rate-limited 429
+// (credential-spray forensic trail — R5).
 
 import cookie from "@fastify/cookie";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";

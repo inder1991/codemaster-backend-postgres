@@ -1,11 +1,6 @@
-// LlmInvocationLedger — the NARROW LLM-invocation idempotency ledger (TS hardening divergence — ADR-0068).
-//
-// TS hardening divergence (ADR-0068) — the frozen Python has NO invocation ledger. In Python, a
-// post-call persistence failure followed by a Temporal activity retry re-invokes Bedrock and buys a
-// SECOND paid completion (the SDK call is the only non-repeatable, paid edge, and Python repeats it on
-// every retry). This ledger makes the paid provider call idempotent: a stable idempotency_key (derived
-// from the deterministic activity inputs) maps to the raw provider response, so a retry REPLAYS the
-// stored response instead of re-invoking Bedrock.
+// LlmInvocationLedger — NARROW LLM-invocation idempotency ledger (ADR-0068). Makes the paid provider
+// call idempotent: a stable idempotency_key (derived from deterministic activity inputs) maps to the
+// raw provider response, so a retry REPLAYS the stored response instead of re-invoking the provider.
 //
 // This is INTENTIONALLY the smallest LLM-invocation ledger that prevents duplicate paid calls, NOT a
 // generic outbox (owner decision: "Do NOT build a broad generic outbox yet — build the smallest LLM

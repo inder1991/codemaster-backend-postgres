@@ -1,7 +1,5 @@
-// Reconcile payload builder — FAITHFUL 1:1 port of
-// vendor/codemaster-py/codemaster/ingest/_reconcile_payload_builder.py.
-//
-// Single canonical interpreter of GitHub installation / installation_repositories webhook bodies for
+// Reconcile payload builder — canonical interpreter of GitHub installation /
+// installation_repositories webhook bodies for
 // reconcile dispatch. The orchestrator (github_webhook_persistence.ts::maybeEmitInstallationReconcile)
 // consumes the tagged-union result:
 //   - { payload }      → a typed GitHub*PayloadV1 ready to wrap in a TemporalWorkflowStartPayloadV1 envelope.
@@ -28,8 +26,8 @@ import {
 } from "#contracts/github_pull_request_payload.v1.js";
 
 /**
- * Granular skip-reason vocabulary (1:1 with the Python `SkipReason` Literal). The granularity lets operators
- * monitoring the drift counter distinguish GitHub schema-drift classes (missing_sender vs malformed_json).
+ * Granular skip-reason vocabulary. The granularity lets operators monitoring the drift counter
+ * distinguish GitHub schema-drift classes (missing_sender vs malformed_json).
  */
 export type SkipReason =
   | "missing_installation"

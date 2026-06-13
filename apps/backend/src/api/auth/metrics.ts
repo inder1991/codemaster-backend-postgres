@@ -1,7 +1,5 @@
-// Auth metrics — 1:1 port of codemaster/api/auth/metrics.py (F1 / Task 7).
-//
-// Per-auth-source OTel telemetry so operators can distinguish "LDAP is down" from "core_local can't log in"
-// from "rate-limit storm" at a glance:
+// Auth metrics — per-auth-source OTel telemetry so operators can distinguish "LDAP is down" from
+// "core_local can't log in" from "rate-limit storm" at a glance:
 //   * codemaster_login_attempts_total  — counter {auth_source, outcome}
 //   * codemaster_login_latency_seconds — histogram {auth_source}
 //

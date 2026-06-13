@@ -1,11 +1,7 @@
 // Auth-secrets provider — the session HMAC signing key + CSRF double-submit secret, read from Vault.
 //
-// The frozen Python read these from AdminBootstrapConfig (Vault Agent → env from
-// `secret/codemaster/api/session_signing_key`). The TS port follows ADR-0071's Vault-read seam instead of
-// env (invariant 3: no secrets in env vars), reusing the same source selector as the webhook secret:
-// CODEMASTER_VAULT_SECRET_SOURCE=agent-file reads the Vault-Agent-rendered file (FileKvReader), else the
-// lazy Vault HTTP API. Both secrets are flat strings, so the agent-file path works (unlike the nested
-// field-encryption keyset).
+// Follows ADR-0071's Vault-read seam (invariant 3: no secrets in env vars): CODEMASTER_VAULT_SECRET_SOURCE=
+// agent-file reads the Vault-Agent-rendered file (FileKvReader), else the lazy Vault HTTP API.
 //
 // Expected Vault layout (to be seeded — these are NOT in the dev seed-vault.sh yet):
 //   secret/codemaster/api/auth  { session_signing_key: "<>=32 chars>", csrf_secret: "<>=32 chars>" }
@@ -18,7 +14,7 @@ import type { VaultKvReadPort } from "#backend/ingest/webhook_secret_provider.js
 export const AUTH_SECRETS_VAULT_PATH = "codemaster/api/auth";
 const SIGNING_KEY = "session_signing_key";
 const CSRF_KEY = "csrf_secret";
-// Matches the Python AdminBootstrapConfig `Field(min_length=32)` on both secrets.
+// Both secrets must be >= 32 chars.
 const MIN_SECRET_LENGTH = 32;
 
 function readKey(data: Record<string, string>, key: string): Uint8Array {

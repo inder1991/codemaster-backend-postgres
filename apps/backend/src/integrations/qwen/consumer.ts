@@ -1,17 +1,14 @@
-// QwenEmbeddingsConsumer — port of the frozen Python
-// vendor/codemaster-py/codemaster/integrations/qwen/consumer.py
-// (Sprint 20 megasprint / S17.X-qwen-embedder-wiring; ADR-0015 closure).
+// QwenEmbeddingsConsumer (ADR-0015 closure) — production {@link EmbeddingsPort} impl against the
+// platform-team-operated Qwen3 HTTP service.
 //
-// Production {@link EmbeddingsPort} impl against the platform-team-operated Qwen3 HTTP service.
-//
-// Wire contract (FAITHFUL to the frozen Python):
+// Wire contract:
 //   - POST {dsn}/embed                            (dsn trailing slash stripped at construction)
 //   - Request body: {texts, model_name, purpose}  (the EmbedRequest JSON dump — exact keys)
 //   - NO auth header (the platform service is reached over the mesh; auth is mTLS at the boundary).
 //   - 10s default per-call timeout, NO retry (a single attempt; the caller decides on backoff via the
 //     typed error).
 //
-// Status mapping (1:1 with the Python):
+// Status mapping:
 //   - 200 + valid EmbedResult shape            → EmbedResult
 //   - 200 + unexpected shape                   → EmbeddingsConnectivityError (transient contract drift)
 //   - 429                                      → EmbeddingsRateLimitedError
@@ -34,28 +31,27 @@ import {
   validateEmbedRequest,
 } from "#backend/adapters/embeddings_port.js";
 
-// HTTP status sentinels (module-scope, mirroring the Python named constants).
+// HTTP status sentinels (module-scope).
 const HTTP_OK = 200;
 const HTTP_TOO_MANY_REQUESTS = 429;
 const HTTP_CLIENT_ERROR_MIN = 400;
 const HTTP_SERVER_ERROR_MIN = 500;
 const HTTP_SERVER_ERROR_MAX = 600; // exclusive upper bound
 
-/** Strip a trailing slash; the adapter appends `/embed` (Python `_normalise_dsn`). */
+/** Strip a trailing slash; the adapter appends `/embed`. */
 function normaliseDsn(dsn: string): string {
   return dsn.replace(/\/+$/, "");
 }
 
-/** Truncate a response-body snippet for an error message (Python `resp.text[:200]`). */
+/** Truncate a response-body snippet for an error message (first 200 chars). */
 function snippet(bodyText: string): string {
   return bodyText.slice(0, 200);
 }
 
 /**
- * Narrow an arbitrary JSON value to an {@link EmbedResult}. Mirrors the Python
- * `EmbedResult.model_validate(resp.json())` — a wrong shape raises (the caller maps it to a transient
- * connectivity error). The Pydantic model coerces `vectors` items to floats and requires
- * `model_name` / `model_version` strings; we do the structural equivalent.
+ * Narrow an arbitrary JSON value to an {@link EmbedResult}. A wrong shape throws (the caller maps it
+ * to a transient connectivity error). Requires `vectors` items to be floats and
+ * `model_name` / `model_version` strings; validates the structural equivalent.
  */
 function parseEmbedResult(body: unknown): EmbedResult {
   if (typeof body !== "object" || body === null) {
@@ -88,7 +84,7 @@ function parseEmbedResult(body: unknown): EmbedResult {
   if (typeof modelVersion !== "string") {
     throw new Error(`'model_version' field is not a string: ${typeof modelVersion}`);
   }
-  // cache_hits defaults to 0 (Python `cache_hits: int = 0`).
+  // cache_hits defaults to 0 when absent.
   const rawCacheHits = obj["cache_hits"];
   const cacheHits =
     rawCacheHits === undefined
@@ -120,7 +116,7 @@ export class QwenEmbeddingsConsumer implements EmbeddingsPort {
   public async embed(req: EmbedRequest): Promise<EmbedResult> {
     validateEmbedRequest(req);
     const url = `${this.dsn}/embed`;
-    // The EmbedRequest JSON dump — exact Python wire keys {texts, model_name, purpose}.
+    // The EmbedRequest JSON dump — wire keys {texts, model_name, purpose}.
     const jsonBody = { texts: [...req.texts], model_name: req.model_name, purpose: req.purpose };
 
     let resp;

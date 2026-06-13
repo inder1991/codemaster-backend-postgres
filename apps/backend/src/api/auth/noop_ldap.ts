@@ -1,6 +1,5 @@
-// Fail-closed LdapClientPort shim — 1:1 port of codemaster/api/auth/noop_ldap.py.
-//
-// The live LDAP wiring until real LDAP ships. Refuses every authentication attempt with LdapBindError, so
+// Fail-closed LdapClientPort shim — the live LDAP wiring until real LDAP ships. Refuses every
+// authentication attempt with LdapBindError, so
 // any username NOT in a local repo (which would otherwise fall through to LDAP) is denied rather than
 // silently authenticated against an unconfigured backend. Local admins authenticate via the local repos;
 // the LDAP path is never invoked for them (the dispatch routes by presence-in-local-repo).

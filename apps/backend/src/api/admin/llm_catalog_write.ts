@@ -1,10 +1,8 @@
-// LLM model-catalog + purpose-routing writes — 1:1 port of the WRITE methods in llm_models_router.py's
-// repos (postgres_llm_purpose_model_repo.upsert; llm-models upsert/delete land here next). Pure DB, no
-// Temporal, no audit (the purpose-routing PUT emits no audit event in the Python).
+// LLM model-catalog + purpose-routing writes. Pure DB, no Temporal, no audit.
 
 import { type Kysely, sql } from "kysely";
 
-/** The engine's accepted model set (1:1 with integrations/llm/client.py BEDROCK_MODELS). A catalog upsert
+/** The engine's accepted model set (mirrors integrations/llm/client.ts BEDROCK_MODELS). A catalog upsert
  *  is rejected for any model_id outside this set, regardless of provider — the engine can't invoke it. */
 export const BEDROCK_MODELS: ReadonlySet<string> = new Set([
   "claude-opus-4-7",

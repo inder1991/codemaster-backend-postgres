@@ -1,11 +1,6 @@
-// LLM invocation error hierarchy — 1:1 port of the frozen Python
-//   - vendor/codemaster-py/codemaster/integrations/llm/error_types.py (the dependency-free hierarchy)
-//   - vendor/codemaster-py/codemaster/integrations/llm/client.py:86-120 (LlmOutputUnsafeError)
-//
-// Why this module is dependency-free of the SDK stack (ADR-0061 D3): the Python error_types module is
-// the single source of truth for the LLM invocation error hierarchy precisely so the Temporal workflow
-// body can `catch` them WITHOUT importing the anthropic/httpx client stack into the workflow sandbox.
-// The TS port preserves that: these classes import nothing from the client/SDK.
+// LLM invocation error hierarchy (ADR-0061 D3) — dependency-free of the SDK stack so the Temporal
+// workflow body can `catch` these WITHOUT importing the anthropic client stack into the workflow
+// sandbox. These classes import nothing from the client/SDK.
 //
 // LlmOutputUnsafeError lives in client.py (not error_types.py) in Python because it depends on the
 // OutputSafetyDecisionV1 contract; the workflow body never references it. It is ported HERE alongside
@@ -85,8 +80,8 @@ export class LlmRoleDisabledError extends LlmInvocationError {
 }
 
 /**
- * Port of `credentials_provider.py::LlmCredentialsExpiredError` (frozen Python). Raised when the
- * credentials provider has been unable to refresh credentials (e.g. a Vault decrypt failure) for
+ * Raised when the credentials provider has been unable to refresh credentials (e.g. a Vault decrypt
+ * failure) for
  * longer than its `hard_stale_seconds` budget. The worker activity catches it, lets Temporal retry,
  * and the exception-rate alert fires. Activity-level retry: YES.
  *

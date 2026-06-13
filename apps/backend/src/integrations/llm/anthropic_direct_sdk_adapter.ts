@@ -1,9 +1,6 @@
 /**
  * `AnthropicDirectSdkAdapter` — REAL `@anthropic-ai/sdk` adapter that calls `api.anthropic.com` directly
- * (NOT Bedrock). 1:1 port of the frozen Python
- * `vendor/codemaster-py/codemaster/integrations/llm/anthropic_direct_sdk_adapter.py::AnthropicDirectSdkAdapter`.
- *
- * The sibling of {@link "./bedrock_sdk_adapter.js".AnthropicBedrockSdkAdapter}: it satisfies the SAME
+ * (NOT Bedrock). Sibling of {@link "./bedrock_sdk_adapter.js".AnthropicBedrockSdkAdapter}: satisfies the SAME
  * `LlmSdk` Protocol (`createMessage(...)`), so review/walkthrough activities are provider-agnostic behind
  * {@link LlmClient}. The {@link "./client_cache.js".defaultSdkFactory} picks this adapter when the
  * `core.llm_provider_settings` row's `provider = "anthropic_direct"`, and the Bedrock adapter when

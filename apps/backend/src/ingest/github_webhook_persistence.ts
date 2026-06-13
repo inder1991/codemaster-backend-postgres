@@ -1,9 +1,6 @@
-// GitHub webhook PERSISTENCE — the producer that turns an authenticated webhook into durable state +
-// (for review-triggering pull_request actions) one temporal_workflow_start outbox row the
-// OutboxDispatcherWorkflow drains. 1:1 in intent with codemaster/ingest/github_webhook_persistence.py;
-// Stage 1 = the core review-dispatch spine. PR-metadata persistence (Stage 3), the pr.closed forensic
-// audit (Stage 3), the repair-drift dispatcher (Stage 2), and the reconcile/sync emitters (Stage 4) are
-// documented stubs below.
+// GitHub webhook PERSISTENCE — turns an authenticated webhook into durable state + (for review-
+// triggering pull_request actions) one temporal_workflow_start outbox row the OutboxDispatcherWorkflow
+// drains. Stage 1 = core review-dispatch spine; Stages 2-4 add repair/reconcile/sync emitters.
 //
 // Transaction model: the whole webhook runs in ONE Kysely transaction (db.transaction().execute) so the
 // audit row + idempotency row + run allocation + outbox row commit (or roll back) atomically. The audit +
@@ -52,7 +49,7 @@ import { uuid4 } from "#platform/randomness.js";
 
 import type { IssueLink } from "#contracts/issue_link.v1.js";
 
-// ─── constants (1:1 with the Python module, except the R1 workflow-type rename) ──────────────────────
+// ─── constants (R1 workflow-type rename applies — see comment on REVIEW_WORKFLOW_TYPE) ───────────────
 
 /**
  * The review workflow TYPE the dispatched outbox row carries. DELIBERATE RENAME vs the Python
@@ -68,18 +65,17 @@ export const REVIEW_WORKFLOW_TYPE = "reviewPullRequest";
 const REVIEW_TASK_QUEUE = resolveReviewTaskQueue();
 
 /**
- * Reconcile workflow TYPE strings + task queue (the auto-registration emitters). DELIBERATE RENAME +
- * RE-TARGET vs the frozen Python (`ReconcileInstallationWorkflow` / `ReconcileRepositoriesWorkflow` on the
- * "ingest" queue): the combined-pod review worker registers these workflows under their camelCase exported
- * function names (`reconcileInstallation` / `reconcileRepositories`) and polls REVIEW_TASK_QUEUE, so the
- * dispatched outbox row MUST carry those type strings + that queue (Temporal starts a workflow by its
- * REGISTERED type name on the queue a worker polls). Project-owner directive: reuse the review worker, no
- * separate "ingest" worker.
+ * Reconcile workflow TYPE strings + task queue (the auto-registration emitters). The combined-pod
+ * review worker registers these workflows under their camelCase exported function names
+ * (`reconcileInstallation` / `reconcileRepositories`) and polls REVIEW_TASK_QUEUE, so the dispatched
+ * outbox row MUST carry those type strings + that queue (Temporal starts a workflow by its REGISTERED
+ * type name on the queue a worker polls). Project-owner directive: reuse the review worker, no separate
+ * "ingest" worker.
  */
 const RECONCILE_INSTALLATION_WORKFLOW_TYPE = "reconcileInstallation";
 const RECONCILE_REPOSITORIES_WORKFLOW_TYPE = "reconcileRepositories";
 
-/** Installation-event actions that trigger reconcile (1:1 with `_RECONCILE_INSTALLATION_ACTIONS`). */
+/** Installation-event actions that trigger reconcile. */
 const RECONCILE_INSTALLATION_ACTIONS: ReadonlySet<string> = new Set([
   "created",
   "deleted",
@@ -169,7 +165,7 @@ async function runInPrIssueLinksSavepoint(tx: Kysely<unknown>, body: () => Promi
  * (branch_name). NOT `commit_message` — the `pull_request` webhook payload lacks the commits[] array, so
  * that fourth source is a documented deferral (`LinkageSource` Literal in issue_link_parser).
  *
- * Fail-CLOSED guard (1:1 with the Python + with `maybePersistPr`): a missing / non-positive
+ * Fail-CLOSED guard (consistent with `maybePersistPr`): a missing / non-positive
  * `githubPullRequestId` skips the write path entirely — without a real PR id the derived `prId` would not
  * match what the review workflow body sees later.
  *
@@ -406,8 +402,8 @@ async function allocateRunForPrWebhook(
 
 /**
  * Emit an `installation_reconcile` outbox row targeting `reconcileRepositories` for an
- * installation_repositories event (1:1 with the Python `_emit_repositories_reconcile`). Body interpretation
- * delegates to the shared builder; a structured skip_reason emits the drift counter and skips enqueue.
+ * installation_repositories event. Body interpretation delegates to the shared builder; a structured
+ * skip_reason emits the drift counter and skips enqueue.
  */
 async function emitRepositoriesReconcile(
   tx: Kysely<unknown>,
@@ -442,8 +438,8 @@ async function emitRepositoriesReconcile(
 }
 
 /**
- * Emit an `installation_reconcile` outbox row when an installation event / PR-backfill / repositories event
- * warrants reconciliation (1:1 with the Python `_maybe_emit_installation_reconcile`). Three cases:
+ * Emit an `installation_reconcile` outbox row when an installation event / PR-backfill / repositories
+ * event warrants reconciliation. Three cases:
  *   1. Back-fill — a pull_request event for a github_installation_id with no core.installations row yet →
  *      seed the installation row (reconcileInstallation). The current PR is lost (its review dispatch was
  *      skipped because internalIid was null); the next PR webhook goes through normally.
@@ -720,8 +716,7 @@ export async function persistWebhook(args: {
           // edited / converted_to_draft: not review-triggering + not closed → no enqueue (correct).
         }
       }
-      // Auto-registration emit (1:1 with the Python unconditional `_maybe_emit_installation_reconcile` call
-      // after the pull_request path): installation events → reconcileInstallation; installation_repositories
+      // Auto-registration emit: installation events → reconcileInstallation; installation_repositories
       // events → reconcileRepositories; a pull_request for an unknown installation → reconcileInstallation
       // back-fill. Skips on deduped / missing github_iid internally.
       await maybeEmitInstallationReconcile({
@@ -734,8 +729,7 @@ export async function persistWebhook(args: {
         deduped,
       });
 
-      // DM-WIRE T0 + Sprint 26 / B-3 (1:1 with the Python unconditional `_maybe_emit_sync_code_owners` +
-      // `_maybe_emit_refresh_semantic_docs` calls): a `push` to the repository's DEFAULT branch enqueues
+      // DM-WIRE T0 + Sprint 26 / B-3: a `push` to the repository's DEFAULT branch enqueues
       // SyncCodeOwners + RefreshSemanticDocs temporal_workflow_start outbox rows. Both skip internally on
       // non-push events / non-default-branch pushes / deduped / unresolved installation+repo. Emitted
       // unconditionally here — the FF gates live inside the workflows/activities, so the operator flips the

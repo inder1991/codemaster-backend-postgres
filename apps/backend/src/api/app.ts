@@ -1,7 +1,4 @@
-// HTTP app factory (F1·a) — the Fastify port of the FastAPI app in
-// vendor/codemaster-py/codemaster/api/app.py::build_app.
-//
-// Owns the built-in /healthz, /readyz, /version endpoints. Routers (the GitHub webhook, auth, admin) are
+// HTTP app factory — owns the built-in /healthz, /readyz, /version endpoints. Routers (the GitHub webhook, auth, admin) are
 // registered by the CALLER onto the returned instance before listen() — keeping this factory pure
 // (no listen, no DB/Vault connection: the health checks are injected seams), so it is fully unit-testable
 // via Fastify's in-process `app.inject(...)`. The listen/bootstrap entrypoint lives in api/server.ts.
@@ -10,14 +7,14 @@ import Fastify, { type FastifyInstance } from "fastify";
 
 import { WallClock, type Clock } from "#platform/clock.js";
 
-/** App version (Python `__version__`). No package.json version yet; pinned here until one lands. */
+/** App version. No package.json version yet; pinned here until one lands. */
 export const APP_VERSION = "0.1.0";
 const CONTRACTS_SCHEMA_VERSION = 1;
-/** 10 MB — the GitHub webhook body cap (Python WEBHOOK_BODY_CAP_BYTES). Set app-wide so the webhook route
- *  can receive up to the cap; the route enforces the exact 413 boundary itself. */
+/** 10 MB — the GitHub webhook body cap. Set app-wide so the webhook route can receive up to the cap;
+ *  the route enforces the exact 413 boundary itself. */
 export const BODY_LIMIT_BYTES = 10 * 1024 * 1024;
 
-/** Port of the Python `HealthResult` (status + latency + error). */
+/** Health check result (status + latency + error). */
 export type HealthResult = {
   status: "ok" | "unknown" | "down";
   latency_ms: number | null;
@@ -72,8 +69,8 @@ async function snapshotHealth(check: HealthCheck | undefined): Promise<HealthRes
 }
 
 /**
- * Build the HTTP app (1:1 in intent with the Python `build_app`). Registers the three built-in endpoints;
- * the caller mounts routers + calls `listen()`. Pure construction — unit-testable via `app.inject(...)`.
+ * Build the HTTP app. Registers the three built-in endpoints; the caller mounts routers + calls
+ * `listen()`. Pure construction — unit-testable via `app.inject(...)`.
  */
 export function buildApp(deps: BuildAppDeps = {}): FastifyInstance {
   const clock = deps.clock ?? new WallClock();
@@ -161,7 +158,7 @@ export function buildApp(deps: BuildAppDeps = {}): FastifyInstance {
     return { schema_version: 1, ready: false, reason: failed.join("; ") };
   });
 
-  // GET /version — build provenance. `node_version` replaces the Python `python_version`.
+  // GET /version — build provenance.
   app.get("/version", async () => ({
     schema_version: 1,
     version,

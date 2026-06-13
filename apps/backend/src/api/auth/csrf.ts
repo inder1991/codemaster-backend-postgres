@@ -1,22 +1,16 @@
-// CSRF double-submit VERIFICATION — port of codemaster/api/middleware/csrf.py (the deferred
-// FOLLOW-UP-csrf-verification-middleware, landed by W4.7 / EC4).
+// CSRF double-submit VERIFICATION (W4.7 / EC4).
 //
 // On unsafe methods (POST / PUT / PATCH / DELETE) the request must carry an `X-CSRF-Token` header
 // whose value matches the `csrf_token` cookie (timing-safe compare). Missing either → 403
-// "csrf token missing"; mismatch → 403 "csrf token mismatch". Safe methods (GET / HEAD / OPTIONS /
-// TRACE) and exempt paths pass through. The token itself is seeded by GET /api/auth/csrf (a stable
-// hex derivation of the Vault csrf_secret — the SPA reads the JS-readable cookie and echoes it as
-// the header; a cross-origin attacker page can do neither).
+// "csrf token missing"; mismatch → 403 "csrf token mismatch". Safe methods and exempt paths pass through.
+// Token seeded by GET /api/auth/csrf (hex of Vault csrf_secret — SPA reads the JS-readable cookie and
+// echoes it as the header; a cross-origin attacker cannot).
 //
-// Divergences from the Python middleware (deliberate, documented):
-//   * Mounted as a Fastify `onRequest` hook on the ENCAPSULATED admin/auth scopes (not app-wide
-//     Starlette middleware) — the GitHub webhook lives on its own scope with HMAC auth, so the
-//     Python's webhook exemption is structural here.
-//   * The cookie-(re)seeding half of the Python dispatch stays on GET /api/auth/csrf (the SPA
-//     seeds on mount per Sprint X.2); this hook is verification-only.
-//   * /api/auth/login is ENFORCED (the Python removed its exemption in Sprint X.2);
-//     /api/auth/logout stays exempt (anchor-navigation logout cannot carry a custom header —
-//     worst-case CSRF is a self-inflictable logout, the Python's documented posture).
+// Design notes:
+//   * Mounted as a Fastify `onRequest` hook on the ENCAPSULATED admin/auth scopes (not app-wide) —
+//     the GitHub webhook lives on its own scope with HMAC auth.
+//   * /api/auth/login is ENFORCED; /api/auth/logout stays exempt (anchor-navigation logout cannot carry
+//     a custom header — worst-case CSRF is a self-inflictable logout, the documented posture).
 
 import { createHash, timingSafeEqual } from "node:crypto";
 

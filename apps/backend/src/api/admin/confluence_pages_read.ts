@@ -1,8 +1,5 @@
 /**
- * Confluence pages read — 1:1 with codemaster/api/admin/postgres_approval_repo.py (list_pages +
- * get_space_key_for_integration) and codemaster/api/admin/postgres_quarantined_chunks_repo.py.
- *
- * Three read operations:
+ * Confluence pages read — three read operations:
  *   1. getSpaceKeyForIntegration — resolve integration_id → space_key (config_json ->> 'space_key')
  *      for the route handlers. Raises IntegrationNotFoundError on a miss.
  *   2. listPagesForIntegration — paginated list of pages per space, with their current approval status
@@ -11,12 +8,10 @@
  *
  * These are bespoke paginated read queries that have NO equivalent on PostgresConfluencePageApprovalsRepo
  * (getActiveApproval / listForSpace) or PostgresConfluenceChunksRepo (upsert / reconcile) — those repos
- * carry the write/lookup paths; the per-space dedup-page-list + quarantine-list reads live here, 1:1 with
- * the Python admin-API postgres repos.
+ * carry the write/lookup paths; the per-space dedup-page-list + quarantine-list reads live here.
  *
- * Tenancy: the confluence + integrations tables are PLATFORM-WIDE (no installation_id; Python migration
- * 0063 dropped it), so they are NOT in TENANT_SCOPED_TABLES — the raw-SQL tenancy gate does not fire. The
- * inline `// tenant:exempt` markers mirror the frozen Python source for documentation parity.
+ * Tenancy: the confluence + integrations tables are PLATFORM-WIDE (no installation_id; migration 0063
+ * dropped it), so they are NOT in TENANT_SCOPED_TABLES — the raw-SQL tenancy gate does not fire.
  */
 
 import { type Kysely, sql } from "kysely";
@@ -51,9 +46,8 @@ function clampPageSize(pageSize: number | undefined): number {
 }
 
 /**
- * Resolve integration_id → space_key from core.integrations.config_json (1:1 with the Python
- * get_space_key_for_integration). Raises IntegrationNotFoundError if the integration_id doesn't match an
- * enabled confluence_space row.
+ * Resolve integration_id → space_key from core.integrations.config_json. Raises
+ * IntegrationNotFoundError if the integration_id doesn't match an enabled confluence_space row.
  */
 export async function getSpaceKeyForIntegration(
   db: Kysely<unknown>,
@@ -161,9 +155,9 @@ export async function listPagesForIntegration(
 }
 
 /**
- * Paginated list of quarantined chunks for a space (resolved from integration_id) (1:1 with the Python
- * list_quarantined_chunks). Chunks are ordered by last_modified_at DESC, chunk_id DESC. The text preview
- * is truncated to QUARANTINE_PREVIEW_CHARS (280). The cursor is an opaque offset.
+ * Paginated list of quarantined chunks for a space (resolved from integration_id). Chunks are ordered
+ * by last_modified_at DESC, chunk_id DESC. The text preview is truncated to QUARANTINE_PREVIEW_CHARS
+ * (280). The cursor is an opaque offset.
  */
 export async function listQuarantinedChunksForIntegration(
   db: Kysely<unknown>,

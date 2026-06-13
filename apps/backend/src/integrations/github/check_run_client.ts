@@ -1,12 +1,7 @@
 /**
- * GhCheckRunClient — 1:1 port of `codemaster/integrations/github/check_run_client.py`
- * (frozen Python, Sprint 15 / S15.X-post-check-run-wiring).
- *
- * Production impl of the 3-method check-run surface the `post_check_run` activity needs (declared in the
- * frozen Python as the `GhCheckRunClient` Protocol at
- * `vendor/codemaster-py/codemaster/activities/post_check_run.py:42-75`). Wraps the ported
- * {@link GitHubApiClient}'s GET / POST / PATCH helpers so the 3 methods route through the shared
- * retry / 401-refresh / rate-limit-header / typed-error envelope (`_request`).
+ * GhCheckRunClient — production impl of the 3-method check-run surface the `post_check_run` activity
+ * needs. Wraps {@link GitHubApiClient}'s GET / POST / PATCH helpers so the 3 methods route through
+ * the shared retry / 401-refresh / rate-limit-header / typed-error envelope (`_request`).
  *
  * ## CLAUDE.md invariant 9 — advisory, never blocks merge
  *
@@ -58,9 +53,8 @@ export const CHECK_RUN_NAME = "codemaster/review";
 export type CheckRunStatus = "completed" | "in_progress";
 
 /**
- * The minimal 3-method surface `doPostCheckRun` needs from the GitHub API — the TS analogue of the
- * frozen Python `GhCheckRunClient` Protocol. Keyword-only Python args → a single args object per method
- * (camelCase members), so the dispatch is positional-arg-free at the seam.
+ * The minimal 3-method surface `doPostCheckRun` needs from the GitHub API. Each method takes a single
+ * camelCase args object, so the dispatch is positional-arg-free at the seam.
  */
 export type GhCheckRunClient = {
   /**
@@ -97,8 +91,8 @@ export type GhCheckRunClient = {
 };
 
 /**
- * Truncate `output.summary` to GitHub's cap with a footer marker. 1:1 with the Python `_truncate_summary`:
- * strings at or under SUMMARY_MAX_CHARS pass through unchanged; longer strings are sliced and footered.
+ * Truncate `output.summary` to GitHub's cap with a footer marker. Strings at or under
+ * SUMMARY_MAX_CHARS pass through unchanged; longer strings are sliced and footered.
  */
 export function truncateSummary(summary: string): string {
   if (summary.length <= SUMMARY_MAX_CHARS) {
@@ -109,7 +103,6 @@ export function truncateSummary(summary: string): string {
 
 /**
  * Production {@link GhCheckRunClient}: implements the 3 methods over an injected {@link GitHubApiClient}.
- * 1:1 with the Python `GhCheckRunHttpClient`.
  */
 export class GitHubApiCheckRunClient implements GhCheckRunClient {
   private readonly api: GitHubApiClient;
@@ -135,7 +128,7 @@ export class GitHubApiCheckRunClient implements GhCheckRunClient {
     name: string;
   }): Promise<number | null> {
     // GitHub supports a `?check_name=` filter but we filter client-side too so the test surface verifies
-    // the contract regardless of which way the API surfaces multi-name responses (1:1 with the Python).
+    // the contract regardless of which way the API surfaces multi-name responses.
     const path = `/repos/${owner}/${repo}/commits/${headSha}/check-runs`;
     const resp = await this.api.get(path, { installationId: this.installationId });
     const body = JSON.parse(resp.body_text ?? "{}") as { check_runs?: Array<Record<string, unknown>> };

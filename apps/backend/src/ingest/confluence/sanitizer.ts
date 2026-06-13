@@ -1,7 +1,4 @@
-// Confluence body sanitization — 1:1 port of the frozen Python
-// vendor/codemaster-py/codemaster/ingest/confluence/sanitizer.py.
-//
-// Three-step pipeline:
+// Confluence body sanitization — three-step pipeline:
 //   1. Strip Confluence macros (<ac:structured-macro>, <ac:layout>, etc.) — unwrap the envelope,
 //      preserve inner text.
 //   2. HTML sanitize via an allowlist (`bleach`-equivalent: sanitize-html) with restrictive allowlist.
@@ -13,10 +10,10 @@
 //       -> redactChunk(sanitized.body) -> final chunk body (with wrapper)
 //
 // PURE: no I/O, no clock, no random. `lastModifiedAt` is caller-provided so the sanitizer remains
-// pure (no clock dependency for replay safety in activities), exactly mirroring the Python signature.
+// pure (no clock dependency for replay safety in activities).
 //
-// bleach -> sanitize-html parity (VERIFIED byte-for-byte against the live frozen Python over the
-// allowlist + macro + idempotency corpus):
+// bleach -> sanitize-html parity (VERIFIED byte-for-byte over the allowlist + macro + idempotency
+// corpus):
 //   - bleach `strip=True` (drop disallowed tags, keep inner text) -> `disallowedTagsMode: 'discard'`.
 //   - bleach KEEPS the text content of disallowed tags including <script>/<style> -> `nonTextTags: []`
 //     (sanitize-html's default would discard <script>/<style> text; we override to match bleach).

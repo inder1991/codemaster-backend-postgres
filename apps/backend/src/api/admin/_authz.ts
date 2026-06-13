@@ -1,16 +1,11 @@
-// Admin RBAC seam — port of codemaster/api/admin/_authz.py (require_role) + the session-resolution intent of
-// session_resolver.py, adapted to Fastify.
-//
-// The Python session_resolver uses a contextvars+middleware workaround to feed 12 legacy zero-arg
-// SessionResolvers without touching 30+ handler signatures. A Fastify port carries no such legacy, so the
-// idiomatic equivalent is a `requireRole` PREHANDLER: it reads the session cookie, verifies it, resolves the
+// Admin RBAC seam — `requireRole` PREHANDLER: reads the session cookie, verifies it, resolves the
 // principal, enforces the per-route allow-set, and attaches the principal to the request for the handler.
 //
-// Authz model (1:1 with _authz.py): each route declares an explicit ALLOW-SET of roles (NOT precedence) and
-// the guard checks `role ∈ allowed`. 401 on missing/invalid cookie; 403 (with a deterministic sorted detail)
-// on role mismatch. Local super_admins / LDAP users have no installation context, so the resolver
-// substitutes the SUPER_ADMIN_SESSION_INSTALLATION_ID sentinel (the fail-closed tenancy hook refuses the
-// zero-UUID for routes that require a real installation).
+// Authz model: each route declares an explicit ALLOW-SET of roles (NOT precedence); guard checks
+// `role ∈ allowed`. 401 on missing/invalid cookie; 403 (with a deterministic sorted detail) on role
+// mismatch. Local super_admins / LDAP users have no installation context, so the resolver substitutes the
+// SUPER_ADMIN_SESSION_INSTALLATION_ID sentinel (the fail-closed tenancy hook refuses the zero-UUID for
+// routes that require a real installation).
 
 import type { FastifyReply, FastifyRequest, preHandlerHookHandler } from "fastify";
 

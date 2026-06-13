@@ -1,27 +1,21 @@
-// Email field codec — 1:1 port of the email-column handling in the frozen Python
-// (security/field_encryption.py::EncryptedStringWithAAD + postgres_local_user_repo._email_fingerprint).
+// Email field codec — two halves:
+//   1. AAD-bound AES-256-GCM string encryption. The per-column AAD constant is bound into the GCM tag
+//      so a ciphertext for one column can't be moved to another and decrypt cleanly.
+//   2. Deterministic SHA-256 fingerprint of the lowercased email for UNIQUE-by-email lookup without
+//      exposing plaintext at the index (email_fingerprint column).
 //
-// Two halves:
-//   1. AAD-bound AES-256-GCM string encryption (reuses the ported encryptField/decryptField crypto layer).
-//      The per-column AAD constant is bound into the GCM tag so a ciphertext written for one column can't
-//      be moved to another and decrypt cleanly. AAD bytes are byte-identical to the Python column AADs, so
-//      rows are cross-readable between the implementations.
-//   2. A deterministic SHA-256 fingerprint of the lowercased email for UNIQUE-by-email lookup without
-//      exposing plaintext at the index (the email_fingerprint column).
-//
-// The key registry is injected (mirroring aes_gcm_aad.encryptField's parameterized design) — the repo
-// passes the shared field-encryption registry, tests pass a registry with a known key.
+// Key registry is injected — repo passes the shared field-encryption registry, tests pass a known key.
 
 import { createHash } from "node:crypto";
 
 import { decryptField, encryptField } from "#platform/crypto/aes_gcm_aad.js";
 import type { KeyRegistry } from "#platform/crypto/key_registry.js";
 
-/** AAD for `core.local_users.email_ciphertext` — byte-identical to the Python column constant. */
+/** AAD for `core.local_users.email_ciphertext`. */
 export const LOCAL_USER_EMAIL_AAD: Uint8Array = new TextEncoder().encode(
   "core.local_users.email_ciphertext",
 );
-/** AAD for `core.users.email` — byte-identical to the Python column constant. */
+/** AAD for `core.users.email`. */
 export const CORE_USER_EMAIL_AAD: Uint8Array = new TextEncoder().encode("core.users.email");
 
 /** Encrypt a plaintext email string under the given per-column AAD → `kms2:vN:<base64>` envelope. */

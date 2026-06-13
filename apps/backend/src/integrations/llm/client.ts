@@ -1,11 +1,9 @@
-// LlmClient — 1:1 port of the PARITY-CRITICAL transform of
-// vendor/codemaster-py/codemaster/integrations/llm/client.py::LlmClient.invoke_model /
-// _invoke_model_impl (lines ~318-584, frozen Python).
+// LlmClient — PARITY-CRITICAL transform (replay-seam slice).
 //
-// SCOPE (replay-seam slice). The OBSERVABLE OUTPUT of bedrock_review_chunk is a DETERMINISTIC pure
-// transform of the (cassette) LLM response: content extraction, raw_content_blocks, token usage, stop
-// reason, output-safety blocking, and the LlmInvokeResultV1 build. THOSE are ported here in full and
-// byte-faithfully (Python lines 491-584).
+// SCOPE: the OBSERVABLE OUTPUT of bedrock_review_chunk is a DETERMINISTIC pure transform of the
+// (cassette) LLM response: content extraction, raw_content_blocks, token usage, stop reason,
+// output-safety blocking, and the LlmInvokeResultV1 build. THOSE are ported here in full and
+// byte-faithfully.
 //
 // The production side-effects are NOT on the observable-output path, so they are modeled as INJECTED
 // collaborator Protocols. The two REAL production side-effects — cost-cap + blob — are REQUIRED
@@ -99,7 +97,7 @@ import type { LlmMessage } from "#contracts/llm_message.v1.js";
  * `idempotency` context. The de-Temporal review-job shell constructs its review {@link LlmClient} with
  * `strictLedger: true`, so EVERY paid Bedrock call in the shell path is provably ledgered — an
  * un-ledgered paid call is a wiring bug, not a silent un-deduplicated spend. The Temporal-legacy path
- * keeps the default (`strictLedger: false`) and pays un-ledgered exactly as the frozen Python does.
+ * keeps the default (`strictLedger: false`) and pays un-ledgered (legacy Temporal path).
  */
 export class LedgerRequiredError extends Error {
   public constructor(message?: string) {
@@ -122,7 +120,7 @@ export const BEDROCK_MODELS = [
 ] as const;
 export type BedrockModel = (typeof BEDROCK_MODELS)[number];
 
-// ─── cost estimation (rough; mirrors the Python module-level tables) ───────────────────────────────
+// ─── cost estimation (rough) ────────────────────────────────────────────────────────────────────────
 
 const USD_CENTS_PER_PROMPT_TOKEN: ReadonlyMap<string, number> = new Map([
   ["claude-opus-4-7", 0.0015],
@@ -154,8 +152,8 @@ function estimateCentsPreCall(model: string, promptChars: number): number {
 const CACHE_READ_PROMPT_COST_FACTOR = 0.1;
 const CACHE_WRITE_PROMPT_COST_FACTOR = 1.25;
 
-/** Post-response final cost. Mirrors `_final_cents`; W2.2 extends it with the prompt-cache token
- *  classes (both 0 on every non-caching path, where the result is identical to the frozen Python). */
+/** Post-response final cost. W2.2 extends it with the prompt-cache token classes (both 0 on every
+ *  non-caching path). */
 function finalCents(
   model: string,
   promptTokens: number,
@@ -174,10 +172,10 @@ function finalCents(
 // ─── injected collaborator Protocols ───────────────────────────────────────────────────────────────
 
 /**
- * The minimal interface the client needs from the SDK (mirrors the Python `_AsyncLlmSdk` Protocol).
- * The real SDK is `anthropic.AsyncAnthropicBedrock(...).messages.create(...)`; the cassette stub
- * returns the recorded response dict. NO @anthropic-ai/* import in this slice — the SDK is this
- * Protocol, satisfied by the cassette stub.
+ * The minimal interface the client needs from the SDK. The real SDK is
+ * `anthropic.AsyncAnthropicBedrock(...).messages.create(...)`; the cassette stub returns the recorded
+ * response dict. NO @anthropic-ai/* import in this slice — the SDK is this Protocol, satisfied by
+ * the cassette stub.
  */
 export type LlmSdk = {
   createMessage(args: {
@@ -226,10 +224,9 @@ export type ArchiveRedactor = {
 };
 
 /**
- * Persists one `telemetry.llm_calls` row per invocation (mirrors the Python inline INSERT +
- * `_record_failure`). The frozen Python writes this row on BOTH the success and failure paths so cost
- * telemetry stays accurate even when the SDK raises. Default: a no-op recorder (the cassette dual-run
- * has no DB); the production `LlmClientCache` injects {@link PostgresLlmCallsTelemetryWriter}.
+ * Persists one `telemetry.llm_calls` row per invocation (both success and failure paths so cost
+ * telemetry stays accurate even when the SDK raises). Default: a no-op recorder (the cassette
+ * dual-run has no DB); the production `LlmClientCache` injects {@link PostgresLlmCallsTelemetryWriter}.
  */
 export type LlmCallsTelemetryWriter = {
   /**
@@ -280,9 +277,8 @@ const NOOP_TELEMETRY_WRITER: LlmCallsTelemetryWriter = {
 };
 
 /**
- * Production `telemetry.llm_calls` writer — the REAL, ALWAYS-ON path the frozen worker wires. INSERTs
- * one row per invocation over the shared single-pool Kysely seam (ADR-0062). The exact column set
- * mirrors the Python inline INSERT + `_record_failure`:
+ * Production `telemetry.llm_calls` writer — the REAL, ALWAYS-ON path. INSERTs one row per invocation
+ * over the shared single-pool Kysely seam (ADR-0062). Column set:
  *   llm_call_id, installation_id, request_id, model, prompt_tokens, completion_tokens, latency_ms,
  *   cost_usd_cents, payload_blob_id, status, created_at
  *
@@ -356,14 +352,13 @@ export class LlmClient {
   private readonly langfuse: LangfuseExporterPort;
   private readonly clock: Clock;
   private readonly random: SystemRandom;
-  // TS hardening divergence (ADR-0068) — OPTIONAL LLM-invocation idempotency ledger. The frozen Python
-  // has no ledger; absent here means "behave exactly as Python" (invoke, no replay). When present AND an
+  // TS hardening divergence (ADR-0068) — OPTIONAL LLM-invocation idempotency ledger. When absent the
+  // invocation proceeds un-ledgered. When present AND an
   // `idempotency` context is passed to invokeModel, a HIT replays the stored provider response and SKIPS
   // the paid SDK call; a MISS stores the raw response BEFORE returning. Platform jobs / unit tests leave
   // it undefined.
   private readonly ledger: LlmInvocationLedgerPort | undefined;
-  // de-Temporal Phase 2 (F4) — STRICT-LEDGER mode. Default false = current Temporal-legacy behavior (a
-  // paid call with no idempotency context invokes the SDK un-ledgered, exactly as the frozen Python).
+  // de-Temporal Phase 2 (F4) — STRICT-LEDGER mode. Default false = Temporal-legacy behavior (un-ledgered).
   // When true (the shell wires it on), a paid invokeModel that lacks an `idempotency` context throws
   // LedgerRequiredError BEFORE any SDK call / cost-cap reservation — so every paid Bedrock call in the
   // shell path is provably ledgered (gate ②). A replay HIT is unaffected (it never reaches the paid
@@ -428,9 +423,8 @@ export class LlmClient {
   }
 
   /**
-   * Drive one LLM invocation and return the structured result. 1:1 with the Python
-   * `invoke_model` → `_invoke_model_impl`. The OTel span the Python wraps the call in is a pure
-   * side-effect with no observable-output effect, so it is omitted (deferred follow-up).
+   * Drive one LLM invocation and return the structured result. The OTel tracing span is a deferred
+   * follow-up (pure side-effect with no observable-output effect).
    *
    * @throws BedrockBudgetExceededError  on a pre-call cost-cap deny (observable: short-circuits the
    *   activity into a non-retryable failure).
@@ -458,7 +452,7 @@ export class LlmClient {
     // reviewId + chunkId + role + model + prompt hash + toolSchemaVersion; a HIT replays the stored
     // provider response (the SDK is NOT called again); a MISS calls the SDK then stores the raw response
     // BEFORE returning. When absent (platform jobs / unit tests) the client behaves exactly as the
-    // frozen Python (invoke, no ledger). The SDK call is the only non-repeatable, paid edge.
+    // un-ledgered path). The SDK call is the only non-repeatable, paid edge.
     idempotency?: {
       reviewId: string;
       chunkId: string;
@@ -538,7 +532,7 @@ export class LlmClient {
     // non-repeatable, paid edge. The post-call transform + output-safety + telemetry/Langfuse below DO run
     // against the replayed response (owner decision: keep telemetry/Langfuse as replayable observability
     // side effects). When `ledger` / `idempotency` are absent (platform jobs / unit tests) `idempotencyKey`
-    // is null, `isReplay` is false, and the path is identical to the frozen Python (invoke, no ledger).
+    // is null, `isReplay` is false, and the invocation proceeds un-ledgered.
     const idempotencyKey =
       this.ledger !== undefined && args.idempotency !== undefined
         ? this.ledger.computeKey({
@@ -605,7 +599,7 @@ export class LlmClient {
       // Cost-cap pre-call check (FAIL-CLOSED). Retry ONCE on lock-timeout (S14.D
       // edge case 5: the telemetry.cost_daily row lock is contended under `SET LOCAL lock_timeout='2s'` →
       // CostCapLockTimeoutError); a second timeout fails closed via BedrockBudgetExceededError so no LLM
-      // invocation proceeds without an atomic cost record. 1:1 with the frozen Python invoke_model.
+      // invocation proceeds without an atomic cost record.
       const todayForCheck = isoDate(this.clock.now());
       try {
         await this.costCap.checkOrRaise({
@@ -1046,13 +1040,13 @@ export class LlmClient {
 
   /**
    * Build a {@link BedrockTraceV1} from the call params + redacted snippets and hand it to the injected
-   * Langfuse exporter. 1:1 with the Python `_maybe_export_langfuse_trace`.
+   * Langfuse exporter.
    *
-   * No-op when the disabled default is wired (the Python `if self._langfuse is None: return`; here the
+   * No-op when the disabled default is wired (the
    * {@link DISABLED_LANGFUSE_EXPORTER}'s `export` is itself a no-op). Fire-and-forget: the exporter
    * swallows its own transport errors, and this method additionally guards the trace BUILD (a validation
-   * failure must never mask the caller's return / raise — the Python `except Exception as e:
-   * _LOG.warning(...)` defense-in-depth). The snippets are redacted + truncated to 200 via
+   * failure must never mask the caller's return / raise — defense-in-depth). The snippets are redacted
+   * + truncated to 200 via
    * {@link redactSnippet}.
    */
   private async maybeExportLangfuseTrace(args: {

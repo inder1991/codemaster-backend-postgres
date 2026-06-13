@@ -1,18 +1,13 @@
-// Core-user repo — 1:1 port of codemaster/api/auth/core_user_repo.py +
-// codemaster/api/auth/postgres_core_user_repo.py (F1 / Task 3).
+// Core-user repo — persistence for core.users rows WITH local credentials (password_hash IS NOT NULL).
 //
-// Persistence for core.users rows WITH local credentials (password_hash IS NOT NULL) — the companion to
-// LocalUserRepo (super_admin in core.local_users). LDAP-bound rows (password_hash IS NULL) are NOT served
-// here: every read filters `password_hash IS NOT NULL`. core.users IS tenant-scoped (installation_id NOT
-// NULL) but reads are by username/user_id (the partial unique index uq_core_users_username_local is GLOBAL),
-// so the raw-SQL tenancy gate WARNs — faithful to the frozen Python.
+// LDAP-bound rows (password_hash IS NULL) are NOT served here: every read filters `password_hash IS NOT
+// NULL`. core.users IS tenant-scoped (installation_id NOT NULL) but reads are by username/user_id
+// (partial unique index uq_core_users_username_local is GLOBAL), so the raw-SQL tenancy gate WARNs.
 //
-// `role` and `state` are NOT columns on core.users: roles come from core.role_grants at session-issue time
-// (see role_resolver), and disabling a user = revoking their grants. The lockout state machine is the SHARED
-// credential_lockout primitive (one place to be correct). email is encrypted under the core.users.email AAD.
+// `role` and `state` are NOT columns: roles come from core.role_grants at session-issue time (see
+// role_resolver), and disabling a user = revoking their grants. email is encrypted under AAD.
 //
-// In production this path is gated behind ENABLE_CORE_USERS_LOCAL_AUTH (the gate lives in the login dispatch,
-// Stage 3/4) — the repo itself is just persistence.
+// Gated behind ENABLE_CORE_USERS_LOCAL_AUTH in the login dispatch — the repo itself is just persistence.
 
 import { type Kysely, sql } from "kysely";
 
@@ -75,7 +70,7 @@ export function isLockedNow(user: CoreLocalCredentialedUser, now: Date): boolean
 
 // ─── In-memory adapter (test-only) ────────────────────────────────────────────────────────────────
 
-/** Test-only impl. Enforces the GLOBAL local-username uniqueness (mirrors uq_core_users_username_local). */
+/** Test-only impl. Enforces the GLOBAL local-username uniqueness (uq_core_users_username_local). */
 export class InMemoryCoreUserRepo implements CoreUserRepo {
   readonly #rows = new Map<string, CoreLocalCredentialedUser>();
 

@@ -1,6 +1,5 @@
-// Shared credential-lockout state machine — 1:1 port of codemaster/api/auth/credential_lockout.py
-// (F1 / Task 2, 2026-05-17). ONE implementation shared by both the local_users (super_admin bootstrap)
-// and core.users (local-credentialed) repos, so the lockout math has a single place to be correct.
+// Shared credential-lockout state machine — ONE implementation shared by both the local_users (super_admin
+// bootstrap) and core.users (local-credentialed) repos, so the lockout math has a single place to be correct.
 //
 // Pure functions — no I/O, no side effects. Callers persist the returned state atomically (the Postgres
 // adapters use a single atomic UPDATE whose CASE branches mirror applyAttempt's exact semantics).

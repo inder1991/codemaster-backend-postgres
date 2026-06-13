@@ -1,10 +1,9 @@
-// Confluence HTML -> chunks — 1:1 port of the frozen Python
-// vendor/codemaster-py/codemaster/ingest/confluence/chunker.py (tiktoken cl100k_base chunker).
+// Confluence HTML -> chunks — tiktoken cl100k_base chunker.
 //
 // Pure-function chunker. Takes a Confluence page's plain-text body, walks it into token-counted
 // chunks with overlap so embedding-time context doesn't lose continuity at chunk boundaries.
 //
-// Locked behaviour (matching the frozen Python exactly):
+// Locked behaviour:
 //   * `<script>`, `<style>`, `<svg>` elements are dropped entirely before chunking.
 //   * Whitespace runs collapsed; HTML entity refs decoded once (CPython `html.unescape` analogue).
 //   * Code blocks (``` fenced) are atomic — never split inside.
@@ -39,8 +38,7 @@ export const CHUNK_TARGET_TOKENS = 600 as const;
 export const CHUNK_TARGET_TOKENS_MAX = 800 as const;
 export const CHUNK_TARGET_TOKENS_MIN = 400 as const;
 
-// Module-level encoder — initialised once (js-tiktoken bundles the cl100k_base BPE ranks). The
-// analogue of the Python module-level `_ENCODER = tiktoken.get_encoding("cl100k_base")`.
+// Module-level encoder — initialised once (js-tiktoken bundles the cl100k_base BPE ranks).
 const ENCODER = getEncoding("cl100k_base");
 
 // ─── Regexes (verbatim ports) ─────────────────────────────────────
@@ -48,7 +46,7 @@ const ENCODER = getEncoding("cl100k_base");
 // Tags whose contents are dropped wholesale before text extraction.
 const DROPPED_TAGS = ["script", "style", "svg"] as const;
 // The pattern is built from a hardcoded literal tag list (no user input); the RegExp constructor is
-// only needed for the named-backreference, 1:1 with the frozen Python `(?P<tag>...)(?P=tag)`.
+// only needed for the named-backreference (`(?<tag>...)\k<tag>`).
 // eslint-disable-next-line security/detect-non-literal-regexp -- hardcoded literal tag list, no user input
 const DROPPED_TAG_BLOCK_RE = new RegExp(
   `<(?<tag>${DROPPED_TAGS.join("|")})\\b[^>]*>.*?</\\k<tag>>`,
@@ -85,8 +83,6 @@ export type ChunkV1 = {
 /**
  * Strip Confluence storage-format HTML to plain text. Conservative: keep paragraph + heading
  * structure as double newlines so the chunker can split there; drop everything else.
- *
- * 1:1 with the frozen Python `html_to_text`.
  */
 export function htmlToText(bodyHtml: string): string {
   if (!bodyHtml) {
@@ -102,7 +98,7 @@ export function htmlToText(bodyHtml: string): string {
   return s.trim();
 }
 
-/** Token count via tiktoken cl100k_base. 1:1 with the frozen Python `count_tokens`. */
+/** Token count via tiktoken cl100k_base. */
 export function countTokens(text: string): number {
   if (!text) {
     return 0;
@@ -111,8 +107,7 @@ export function countTokens(text: string): number {
 }
 
 /**
- * Hex SHA-256 of the UTF-8 bytes of `text`. 1:1 with the frozen Python `_content_sha256`
- * (codemaster/activities/confluence_sync.py) — the per-chunk content hash the upsert path uses to
+ * Hex SHA-256 of the UTF-8 bytes of `text` — the per-chunk content hash the upsert path uses to
  * short-circuit re-embedding. Provided here as the pure primitive (the DB/embed wiring is out of
  * scope for this module). PURE: node:crypto `createHash` is a hash, not a random source, so it is not
  * banned by the clock/random gate.
@@ -127,7 +122,6 @@ export function contentSha256(text: string): string {
  * Each chunk's body is prefixed with `# <pageTitle>\n\n` so embedding similarity captures page-level
  * topic even for mid-page chunks. Code blocks (``` fenced) are atomic — never split inside.
  *
- * 1:1 with the frozen Python `chunk_sanitized_body`.
  */
 export function chunkSanitizedBody({
   body,

@@ -1,9 +1,6 @@
 /**
- * CODEOWNERS parser — 1:1 TS port of the frozen Python
- * `vendor/codemaster-py/codemaster/integrations/github/codeowners_parser.py`
- * (`parse_codeowners` + the `CodeOwnerRule` dataclass).
- *
- * Pure function. Parses GitHub's `CODEOWNERS` file format into rules of `(path_pattern, owner_logins,
+ * CODEOWNERS parser — pure function. Parses GitHub's `CODEOWNERS` file format into rules of
+ * `(path_pattern, owner_logins,
  * line_number)`.
  *
  * Spec: https://docs.github.com/en/repositories/managing-your-repositories-settings-and-features/customizing-your-repository/about-code-owners
@@ -23,9 +20,7 @@
  * handled by the suggested-reviewer router (which falls back to "no suggestion" on missing users).
  *
  * The `CodeOwnerRule` output shape is REUSED from `#backend/domain/repos/code_owners_repo.js` (the same
- * type the repo's `listRulesForRepository` returns and the `rank_suggested_reviewers` ranker consumes),
- * mirroring the frozen Python where `CodeOwnerRule` lives in this module and is imported by both the repo
- * and the ranker.
+ * type the repo's `listRulesForRepository` returns and the `rank_suggested_reviewers` ranker consumes).
  */
 
 import type { CodeOwnerRule } from "#backend/domain/repos/code_owners_repo.js";
@@ -34,14 +29,14 @@ export type { CodeOwnerRule };
 
 // Owner reference: must start with `@`. Captures user (`@name`) or team (`@org/team`). Permissive on the
 // right side because GitHub's username/team grammar allows letters, digits, hyphens, underscores, slashes,
-// dots. 1:1 with the Python `_OWNER_RE = re.compile(r"^@[A-Za-z0-9_./-]+$")`.
+// dots. Permissive on the right side to cover GitHub's username/team grammar.
 const OWNER_RE = /^@[A-Za-z0-9_./-]+$/;
 
 /**
  * Parse a CODEOWNERS file body. Returns rules in source-file order.
  *
  * Malformed lines (no owners, owners with invalid `@` form, fewer than 2 tokens) are silently dropped —
- * GitHub's own behaviour. 1:1 with the Python `parse_codeowners`.
+ * GitHub's own behaviour.
  */
 export function parseCodeowners(text: string): ReadonlyArray<CodeOwnerRule> {
   if (!text) {

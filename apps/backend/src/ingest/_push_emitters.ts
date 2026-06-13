@@ -1,13 +1,9 @@
-// PUSH-event outbox emitters — 1:1 port of the frozen Python
-// `_extract_push_default_branch_metadata` + `_maybe_emit_sync_code_owners` + `_maybe_emit_refresh_semantic_docs`
-// (vendor/codemaster-py/codemaster/ingest/github_webhook_persistence.py, ~L1430-1696).
+// PUSH-event outbox emitters — `_maybe_emit_sync_code_owners` + `_maybe_emit_refresh_semantic_docs`.
 //
-// Both emit on a `push` event to the repository's DEFAULT BRANCH (ref === refs/heads/<default_branch>),
-// UNCONDITIONALLY on the webhook side — the FF gate lives INSIDE the workflow/activity, not the emit, so
-// operators flip the flag without re-deploying ingest. Gated by the caller on `signature_valid` + skipped
-// on `deduped`. Each appends a `temporal_workflow_start` outbox row (via the non-review dispatch factory —
-// these are bootstrap-sink workflows with no review-run identity) carrying a TemporalWorkflowStartPayloadV1
-// envelope whose inner args[0] is the workflow input contract.
+// Both emit on a `push` to the repository's DEFAULT BRANCH (ref === refs/heads/<default_branch>),
+// UNCONDITIONALLY on the webhook side — the FF gate lives INSIDE the workflow/activity, not the emit,
+// so operators flip the flag without re-deploying ingest. Gated by the caller on `signature_valid` +
+// skipped on `deduped`. Each appends a `temporal_workflow_start` outbox row.
 
 import { type Kysely } from "kysely";
 
@@ -18,12 +14,12 @@ import {
 import { resolveInternalRepositoryId } from "#backend/ingest/_webhook_resolvers.js";
 import { resolveReviewTaskQueue } from "#backend/worker/temporal_config.js";
 
-// ─── constants (1:1 with the Python module-level Finals) ─────────────────────────────────────────────
+// ─── constants ───────────────────────────────────────────────────────────────────────────────────────
 
-/** Temporal type the SyncCodeOwners dispatch carries. RENAME vs Python `SyncCodeOwnersWorkflow`: the TS
- *  worker registers workflows under their camelCase exported function name (`syncCodeOwners`); a payload
- *  carrying the Python PascalCase string would dead-letter ("workflow type not registered"). Mirrors the
- *  R1 review-workflow-type rename in github_webhook_persistence.ts. */
+/** Temporal type the SyncCodeOwners dispatch carries. The TS worker registers workflows under their
+ *  camelCase exported function name (`syncCodeOwners`); a PascalCase payload would dead-letter
+ *  ("workflow type not registered"). See the R1 review-workflow-type rename in
+ *  github_webhook_persistence.ts. */
 const SYNC_CODE_OWNERS_WORKFLOW_TYPE = "syncCodeOwners";
 const SYNC_CODE_OWNERS_TASK_QUEUE = resolveReviewTaskQueue();
 const SYNC_CODE_OWNERS_PAYLOAD_SCHEMA_VERSION = 1;
@@ -37,7 +33,7 @@ const REFRESH_SEMANTIC_DOCS_WORKFLOW_TYPE = "refreshSemanticDocs";
 const REFRESH_SEMANTIC_DOCS_TASK_QUEUE = resolveReviewTaskQueue();
 const REFRESH_SEMANTIC_DOCS_PAYLOAD_SCHEMA_VERSION = 1;
 
-// ─── push-payload extractor (1:1 with `_extract_push_default_branch_metadata`) ───────────────────────
+// ─── push-payload extractor ──────────────────────────────────────────────────────────────────────────
 
 /** `(repoId, owner, repo, defaultBranch, headSha)` — non-null ONLY when the push targeted the repo's
  *  default branch. */

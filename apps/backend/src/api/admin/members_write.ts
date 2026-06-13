@@ -1,7 +1,5 @@
-// Members write repo — 1:1 port of the WRITE methods of postgres_members_repo.py
-// (insert_pending_change, apply_change, reject_change, _find_existing_pending_id) + get_pending_change.
-//
-// The two-person-approval flow: a pending role change is staged in core.role_grant_pending, then a SECOND
+// Members write repo — the two-person-approval flow: a pending role change is staged in
+// core.role_grant_pending, then a SECOND
 // user approves (CAS pending→applied + the core.role_grants write) or rejects (CAS pending→rejected).
 //
 // 1:1-DIVERGENCE (same as members_read.ts): apply_change's grant INSERT writes `granted_by_user_id` in the
@@ -255,7 +253,7 @@ export async function applyChange(
         WHERE subject_kind = 'user' AND subject_id = ${u.subject_id} AND scope = ${u.scope} ${installPredicate}
       `.execute(tx);
     }
-    // Team grants/revokes on core.role_grants are deferred to the team-scope follow-up (matches Python).
+    // Team grants/revokes on core.role_grants are deferred to the team-scope follow-up.
     return u;
   });
 }
@@ -283,11 +281,10 @@ export async function rejectChange(
 }
 
 // ─── Orchestration (request / approve / reject) + audit seam ────────────────────────────────────────
-// 1:1 with members.py's _request_role_change / _approve_role_change / _reject_role_change. Audit is an
-// OPTIONAL seam (undefined → no-op): the TS audit-emit pg-client wiring is dormant (FOLLOW-UP), so the
-// endpoints are structurally complete and audit can be threaded in one place later. Mirrors login.ts.
+// Audit is an OPTIONAL seam (undefined → no-op): the TS audit-emit pg-client wiring is dormant
+// (FOLLOW-UP), so the endpoints are structurally complete and audit can be threaded in one place later.
 
-/** Optional audit-emit callback. Shape mirrors the Python AuditEmitPort.emit kwargs. */
+/** Optional audit-emit callback. */
 export type MemberAuditEmitter = (e: {
   actorUserId: string;
   // string | null — platform-scope admin actions (e.g. integrations DELETE on the platform-shared

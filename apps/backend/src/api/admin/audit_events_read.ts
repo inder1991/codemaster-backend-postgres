@@ -1,4 +1,4 @@
-// Audit-events read — 1:1 port of codemaster/api/admin/audit_events.py + postgres_audit_events_repo.py.
+// Audit-events read — server-side filter + cursor pagination + decryption over audit.audit_events.
 //
 // Server-side filter + cursor pagination + decryption over audit.audit_events. Only user-actor rows surface
 // (actor_kind='user' AND actor_id IS NOT NULL). Cross-tenant is gated to super_admin/security_auditor; for

@@ -1,21 +1,15 @@
-// Per-IP login rate limiter — port of codemaster/api/auth/rate_limit.py (Sprint Y.2, 2026-05-11).
-//
-// Defends against credential spraying (many usernames from one source) — account-level lockout misses this
-// because each username only sees one failure.
+// Per-IP login rate limiter — defends against credential spraying (many usernames from one source);
+// account-level lockout misses this because each username only sees one failure.
 //
 // Two implementations of {@link LoginRateLimiterPort}:
-//   * {@link LoginRateLimiter} — the original in-process `Map<key, Date[]>` sliding window (1:1 with the
-//     Python). Test/dev fallback ONLY: it is defeated by a multi-replica admin-api (each pod sees fewer
-//     than threshold failures) and leaks keys for IPs that never retry.
-//   * {@link PostgresLoginRateLimiter} (W4.7 / EM5) — the PRODUCTION limiter the server wires: the counter
-//     lives in core.login_rate_limit_failures (migration 0045) shared across replicas, stale rows are GC'd
-//     globally on every recordFailure, and every method FAILS OPEN on a DB error (warn, never throw —
-//     a limiter outage must not 500 the login route; credential verification needs the same database, so
-//     spraying yields nothing while the limiter is degraded).
+//   * {@link LoginRateLimiter} — in-process `Map<key, Date[]>` sliding window. Test/dev fallback ONLY:
+//     defeated by a multi-replica admin-api and leaks keys for IPs that never retry.
+//   * {@link PostgresLoginRateLimiter} (W4.7 / EM5) — PRODUCTION: counter in
+//     core.login_rate_limit_failures shared across replicas, stale rows GC'd on every recordFailure,
+//     every method FAILS OPEN on a DB error (a limiter outage must not 500 the login route).
 //
-// Faithful divergence from the Python: no `threading.Lock`. Node's event loop runs each synchronous method
-// to completion without preemption, so the Map mutations are already atomic (mirrors the FakeClock note —
-// the lock guarded a concern that doesn't exist on a single-threaded runtime).
+// Note: no threading.Lock needed — Node's event loop runs each synchronous method to completion without
+// preemption, so Map mutations are already atomic.
 
 import { type Kysely, sql } from "kysely";
 

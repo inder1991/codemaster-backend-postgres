@@ -1,18 +1,13 @@
-// PR-metadata persistence (S3) — the webhook-side writer trio the review pipeline depends on. A faithful
-// port of the frozen Python `codemaster/ingest/_pr_persistence.py` + the `_maybe_persist_pr_v1` /
-// `_safe_persist_pr_v1` orchestration in `codemaster/ingest/github_webhook_persistence.py`.
+// PR-metadata persistence (S3) — the webhook-side writer trio the review pipeline depends on.
 //
 // WHY THIS EXISTS: `core.pr_files` (written by the workflow's enrich_pr_files activity) FK-references
-// `core.pull_requests(pr_id)`, which itself FK-references `core.gh_users(gh_user_id)` (the PR author,
-// NOT NULL). The Python persists this trio in the `pull_request` webhook handler — committed BEFORE the
-// review workflow runs — so the parent rows always exist by the time enrich runs. The TS port had the
-// tables + extractors + resolvers but no writer; without it, enrich_pr_files violates
-// `fk_pr_files_pr_id_pull_requests`. This closes that gap.
+// `core.pull_requests(pr_id)`, which FK-references `core.gh_users(gh_user_id)` (PR author, NOT NULL).
+// These parent rows must be committed BEFORE the review workflow runs, so enrich doesn't violate
+// `fk_pr_files_pr_id_pull_requests`.
 //
-// ORDERING (load-bearing, 1:1 with Python): gh_users (author) → pull_requests → pr_state_transitions.
-// FAIL-OPEN: a persistence fault is best-effort — it must never fail the webhook 204 or block the review
-// dispatch — so the orchestration runs inside a SAVEPOINT ({@link safePersistPr}) that rolls back ONLY the
-// PR writes, leaving the outer webhook transaction (audit + idempotency + run allocation + outbox) intact.
+// ORDERING (load-bearing): gh_users (author) → pull_requests → pr_state_transitions.
+// FAIL-OPEN: a persistence fault runs inside a SAVEPOINT ({@link safePersistPr}) that rolls back ONLY
+// the PR writes, leaving the outer transaction (audit + idempotency + run allocation + outbox) intact.
 
 import { type Kysely, sql } from "kysely";
 
@@ -23,8 +18,8 @@ import { type Clock } from "#platform/clock.js";
 /** PR lifecycle state — the `core.pull_requests.state` / `core.pr_state_transitions.*_state` vocabulary. */
 export type PrState = "open" | "closed" | "merged";
 
-/** PR webhook actions the state machine can derive a transition for (1:1 with the Python
- *  `derivable_actions` set). Any other action (labeled, assigned, …) is audit-only — no PR-row write. */
+/** PR webhook actions the state machine can derive a transition for. Any other action (labeled,
+ *  assigned, …) is audit-only — no PR-row write. */
 const DERIVABLE_ACTIONS: ReadonlySet<string> = new Set([
   "opened",
   "synchronize",

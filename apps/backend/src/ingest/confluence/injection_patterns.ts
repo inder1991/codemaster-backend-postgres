@@ -1,7 +1,5 @@
-// Lexical instruction-pattern detection for Confluence content — 1:1 port of the frozen Python
-// vendor/codemaster-py/codemaster/ingest/confluence/injection_patterns.py.
-//
-// Detects six pattern classes (semantic injection is OUT of this layer's scope — the structural
+// Lexical instruction-pattern detection for Confluence content. Detects six pattern classes
+// (semantic injection is OUT of this layer's scope — the structural
 // defense is the system prompt + reference-material framing downstream). PURE function: no I/O, no
 // clock, no random. Idempotent.
 //
@@ -66,7 +64,7 @@ const JAILBREAK_PHRASING: ReadonlyArray<RegExp> = [
 // zero-width chars (U+200B-U+200F), BOM (U+FEFF), soft hyphen (U+00AD), and the LRE/RLE/PDF/LRO/RLO
 // bidi override marks (U+202A-U+202E). Built from explicit `\u` escapes (rather than a literal
 // containing invisible code points) so the source stays readable and lint-clean; the `u` flag makes
-// the class operate on code points exactly as the frozen Python re.compile did. The class
+// the class operates on code points (Unicode mode). The class
 // intentionally detects the PRESENCE of any single invisible/bidi code point (including the
 // zero-width joiner) as an evasion signal; it never needs to combine them.
 /* eslint-disable no-misleading-character-class -- presence-detection class, never combining (1:1 port) */

@@ -1,4 +1,4 @@
-// Finding-feedback write — 1:1 port of finding_feedback.py PostgresFindingFeedbackRepo. Operators react
+// Finding-feedback write — operators react
 // to a review finding from the admin review-detail page. One transaction:
 //   1. tenancy + path-coherence check (the finding must belong to this installation AND to the PR the
 //      review_id maps to: review_findings → pull_request_reviews → repositories → pull_requests). → 404.

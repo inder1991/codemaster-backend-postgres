@@ -1,6 +1,4 @@
 // F-5b (bootstrap-state-coverage plan v5) — `cache.repository_repair_state` helpers.
-//
-// FAITHFUL 1:1 port of the frozen Python `vendor/codemaster-py/codemaster/ingest/_repair_state.py`.
 // Four helpers — one PK lookup + three mutations for the table's lifecycle:
 //
 //   * getStateForEnqueueDecision — producer's pre-enqueue gate; returns a 3-state RepairStateDecision
@@ -23,16 +21,14 @@ import { type Kysely, sql } from "kysely";
 type Executor = Kysely<unknown>;
 
 // Cooldown TTL (seconds): how long after a repair attempt until the producer can re-enqueue. Default 5
-// minutes; bounded 60-3600s for safety against operator misconfiguration. 1:1 with the Python
-// _DEFAULT_COOLDOWN_SECONDS / _MIN_COOLDOWN_SECONDS / _MAX_COOLDOWN_SECONDS.
+// minutes; bounded 60-3600s for safety against operator misconfiguration.
 const DEFAULT_COOLDOWN_SECONDS = 300;
 const MIN_COOLDOWN_SECONDS = 60;
 const MAX_COOLDOWN_SECONDS = 3600;
 
 /**
  * Read `CODEMASTER_REPAIR_COOLDOWN_SECONDS` from env; bound to [60, 3600]. Default 300s = 5 minutes.
- * 1:1 with the Python `_get_cooldown_seconds()` (a non-integer / unset value falls back to the default,
- * never throws).
+ * A non-integer / unset value falls back to the default, never throws.
  */
 function getCooldownSeconds(): number {
   const raw = process.env["CODEMASTER_REPAIR_COOLDOWN_SECONDS"];
@@ -48,8 +44,7 @@ function getCooldownSeconds(): number {
 }
 
 /**
- * 3-state enqueue-eligibility decision from a single PK lookup (1:1 with the Python `RepairStateDecision`
- * frozen dataclass). Producer-side branching:
+ * 3-state enqueue-eligibility decision from a single PK lookup. Producer-side branching:
  *
  *   * `allowEnqueue=true`  → enqueue repair workflow
  *   * `cooldownActive=true` → skip + emit cooldown_skips_total metric

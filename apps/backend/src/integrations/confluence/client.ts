@@ -1,13 +1,8 @@
 /**
- * ConfluenceClient — 1:1 port of
- * `vendor/codemaster-py/codemaster/integrations/confluence/client.py` (frozen Python, Sprint 13 /
- * S13.3.1a; later Sub-spec A T4 labels + status; F-42 Retry-After honoring).
+ * ConfluenceClient — read-only typed client over Node's NATIVE `fetch`. The byte-significant logic is
+ * the `_get_json` decision loop + the parsers.
  *
- * Read-only typed client over Node's NATIVE `fetch` (the GitHub clients in this repo mirror the same
- * no-new-dependency seam). The byte-significant logic — the parts a downstream consumer depends on —
- * is the `_get_json` decision loop + the parsers:
- *
- *   Locked failure-mode table (1:1 with the Python docstring):
+ *   Locked failure-mode table:
  *     - 401 Unauthorized      → {@link ConfluenceAuthError}     (fail-closed)
  *     - 403 Forbidden         → {@link ConfluenceAuthError}     (fail-closed)
  *     - 404 Not Found         → {@link ConfluenceNotFoundError} (fail-closed)
@@ -58,26 +53,26 @@ import {
   ConfluenceSpaceV1,
 } from "#contracts/confluence_wire.v1.js";
 
-// ─── Constants (1:1 with the frozen Python module constants) ──────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────────────────────
 
 /**
  * Backoff schedule for 429 + 5xx retries. Capped at 30s per call; total budget stays under the
- * activity timeout the ingest worker uses. (1:1 with `_RETRY_BACKOFF_SECONDS`.)
+ * activity timeout the ingest worker uses.
  */
 const RETRY_BACKOFF_SECONDS: ReadonlyArray<number> = [1.0, 2.0, 4.0, 8.0, 15.0, 30.0];
 
 /**
  * F-42: cap a server-supplied Retry-After at this many seconds. Atlassian Cloud has been observed
- * returning multi-minute values on sustained quota exhaustion. (1:1 with `_MAX_RETRY_AFTER_SECONDS`.)
+ * returning multi-minute values on sustained quota exhaustion.
  */
 const MAX_RETRY_AFTER_SECONDS = 600; // 10 minutes
 
 /** 5xx + connection-error retry budget (1:1 with `_RETRY_BUDGET_FOR_5XX`). */
 const RETRY_BUDGET_FOR_5XX = 3;
-/** 429 retry budget — the full backoff schedule (1:1 with `_RETRY_BUDGET_FOR_429`). */
+/** 429 retry budget — the full backoff schedule length. */
 const RETRY_BUDGET_FOR_429 = 6;
 
-// HTTP status thresholds (1:1 with the Python `_HTTP_*` finals).
+// HTTP status thresholds.
 const HTTP_OK_MIN = 200;
 const HTTP_REDIRECT_MIN = 300;
 const HTTP_UNAUTHORIZED = 401;
@@ -109,7 +104,7 @@ export function parseRetryAfterSeconds(headerValue: string | null, nowUtc: Date)
   return Math.max(0.0, delta);
 }
 
-// ─── Exceptions (1:1 with the Python error hierarchy) ───────────────────────────────────────────
+// ─── Exceptions ──────────────────────────────────────────────────────────────────────────────────
 
 /** Base class for all client-level Confluence errors. */
 export class ConfluenceClientError extends Error {
@@ -307,7 +302,7 @@ export class ConfluenceClient {
       .map((item) => String(item["name"]));
   }
 
-  // ─── Parsers (1:1 with the Python parsers) ─────────────────────────────────────────────────────
+  // ─── Parsers ─────────────────────────────────────────────────────────────────────────────────
 
   private parseSpace(row: Record<string, unknown>): ConfluenceSpaceV1 {
     try {
@@ -366,7 +361,7 @@ export class ConfluenceClient {
         .filter((item): item is Record<string, unknown> => isRecord(item) && Boolean(item["name"]))
         .map((item) => String(item["name"]));
 
-      // Normalize Confluence native status → the wire-layer values (1:1 with the Python status_map).
+      // Normalize Confluence native status → the wire-layer values.
       const rawStatus = typeof row["status"] === "string" ? row["status"] : "current";
       const statusMap: Record<string, string> = {
         current: "active",
@@ -473,8 +468,8 @@ export class ConfluenceClient {
   }
 
   /**
-   * The 1:1 port of Python `_get_json`. Drives the retry / rate-limit / error-taxonomy loop; returns the
-   * decoded JSON dict on 2xx or raises a typed error. SEPARATE backoff indices per error class (S15.D).
+   * Drives the retry / rate-limit / error-taxonomy loop; returns the decoded JSON dict on 2xx or raises
+   * a typed error. SEPARATE backoff indices per error class (S15.D).
    */
   private async getJson(path: string, params?: Record<string, string>): Promise<Record<string, unknown>> {
     const query = params !== undefined ? "?" + new URLSearchParams(params).toString() : "";
@@ -561,7 +556,7 @@ export class ConfluenceClient {
     }
   }
 
-  /** Assert the decoded body is a JSON object (1:1 with the Python `_parse_json` isinstance(dict) guard). */
+  /** Assert the decoded body is a JSON object; throws ConfluenceProtocolError if not. */
   private static parseJson(decoded: unknown): Record<string, unknown> {
     if (!isRecord(decoded)) {
       const kind = Array.isArray(decoded) ? "array" : typeof decoded;
@@ -585,7 +580,7 @@ function requireField(row: Record<string, unknown>, key: string): string {
   return String(row[key]);
 }
 
-/** Read `version.createdAt` when `version` is an object, else undefined (1:1 with the Python `.get` chain). */
+/** Read `version.createdAt` when `version` is an object, else undefined. */
 function versionCreatedAt(row: Record<string, unknown>): unknown {
   const version = row["version"];
   if (isRecord(version)) return version["createdAt"];

@@ -1,5 +1,4 @@
-// Cost-cap write/governance — 1:1 port of cost_caps.py (request/approve/reject helpers +
-// compute_applied_at) + postgres_cost_cap_repo.py write methods. Two-person approval against
+// Cost-cap write/governance — two-person approval against
 // core.cost_cap_pending_changes; approve mirrors the new cap to core.cost_cap_settings (by scope) or
 // core.cost_cap_overrides (upsert by installation_id) in the same transaction.
 //

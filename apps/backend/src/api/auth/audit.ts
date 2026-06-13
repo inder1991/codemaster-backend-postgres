@@ -1,8 +1,7 @@
-// Login audit emission — port of codemaster/api/auth/audit.py (W4.7 / EH7 closed the deferred
-// FOLLOW-UP-login-audit-emit-wiring).
+// Login audit emission (W4.7 / EH7).
 //
 // Emits `login.success` / `login.failure` rows to audit.audit_events via the canonical
-// emitAuditEvent helper. Payload shape (LOCKED, 1:1 with the Python):
+// emitAuditEvent helper. Payload shape (LOCKED):
 //   action      — "login.success" for outcome='ok', else "login.failure" (rate_limited included)
 //   actor_kind  — "user"; actor_id — the user UUID when known, null otherwise
 //   target_kind — "session"; target_id — null; before — null
@@ -28,7 +27,7 @@ import type { AuthSource } from "#backend/api/auth/session.js";
 export type LoginAuditOutcome = LoginOutcome | "rate_limited";
 
 /** SHA-256 hex of the client IP, truncated to 32 chars (128 bits — enough for ops correlation,
- *  compact, not reversible to the raw IP). 1:1 with the Python _hash_ip. */
+ *  compact, not reversible to the raw IP). */
 export function hashClientIp(clientIp: string): string {
   return createHash("sha256").update(clientIp, "utf-8").digest("hex").slice(0, 32);
 }

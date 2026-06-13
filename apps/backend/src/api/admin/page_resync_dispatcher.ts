@@ -1,11 +1,10 @@
-// Phase 4c W4c.2 review blocker #5 — the CONCRETE PageResyncDispatcherPort.
+// Phase 4c W4c.2 — the CONCRETE PageResyncDispatcherPort.
 //
-// Pre-fix the DELETE-approval route's dispatcher seam (confluence_pages_write.ts::
-// PageResyncDispatcherPort) was OPTIONAL and server.ts passed none — 1:1 with the frozen Python,
-// whose dispatcher was a recording stub — so approval revocation silently SKIPPED the resync and
-// the revoked page's default-tagged chunks waited for the next 6h confluence_ingest tick instead of
-// the spec §3.7 minutes-bound flush. (Retrieval was never wrong meanwhile: the LEFT JOIN
-// approval-drift safeguard excludes the chunks immediately; the resync is the on-disk cleanup.)
+// Pre-fix the DELETE-approval route's dispatcher seam was OPTIONAL and server.ts passed none, so
+// approval revocation silently SKIPPED the resync and the revoked page's chunks waited for the next
+// 6h confluence_ingest tick instead of the spec §3.7 minutes-bound flush. (Retrieval was never wrong
+// meanwhile: the LEFT JOIN approval-drift safeguard excludes the chunks immediately; the resync is
+// the on-disk cleanup.)
 //
 // This implementation is an OUTBOX PRODUCER, not a direct Temporal/job dispatch: it appends the
 // SAME `temporal_workflow_start` envelope shape every other non-review producer stamps

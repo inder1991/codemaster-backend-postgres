@@ -1,8 +1,6 @@
 /**
- * GitHubAppTokenProvider — 1:1 port of `codemaster/integrations/github/token_provider.py`
- * (frozen Python, Sprint 15 / S15.X-token-provider).
- *
- * The production `_TokenProvider` the worker wires into {@link GitHubApiClient}: an async
+ * GitHubAppTokenProvider — the production `_TokenProvider` the worker wires into
+ * {@link GitHubApiClient}: an async
  * `(installationId) => Promise<token>` source that wraps the Sprint-4 `app_jwt` +
  * `installation_token` primitives with the operational hardening required for a 5,000-engineer /
  * 60-org / 3,000-repo deployment:
@@ -60,7 +58,7 @@ import { KeyedMutex } from "#backend/integrations/github/installation_token.js";
 
 const TRACER = getTracer("codemaster.integrations.github.token_provider");
 
-// ─── Constants (1:1 with the frozen Python module constants) ──────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────────────────────
 
 /** GitHub REST API base. */
 export const GITHUB_BASE_URL = "https://api.github.com";
@@ -80,7 +78,7 @@ export const INITIAL_BACKOFF_SECONDS = 0.5;
 /** Vault KV-v2 path holding `app_id` + `private_key_pem`. */
 export const VAULT_KV_PATH = "codemaster/github/app";
 
-// Refresh-fraction validation bounds (1:1 with the Python `0.1 <= x <= 0.95`).
+// Refresh-fraction validation bounds (0.1 ≤ x ≤ 0.95).
 const REFRESH_FRACTION_MIN = 0.1;
 const REFRESH_FRACTION_MAX = 0.95;
 
@@ -123,7 +121,7 @@ const HTTP_CLIENT_ERROR_FLOOR = 400;
 const HTTP_SERVER_ERROR_FLOOR = 500;
 const HTTP_SERVER_ERROR_CEIL = 600;
 
-// ─── Errors (1:1 with the Python error hierarchy) ─────────────────────────────────────────────
+// ─── Errors ───────────────────────────────────────────────────────────────────────────────────
 
 /** Base class for token-provider failures. */
 export class TokenProviderError extends Error {

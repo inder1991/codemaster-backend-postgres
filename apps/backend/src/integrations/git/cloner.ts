@@ -1,8 +1,6 @@
 /**
- * GitSubprocessCloner — 1:1 port of `codemaster/integrations/git/cloner.py` (frozen Python,
- * Sprint 15 / S15.X-clone-activity-wiring).
- *
- * Shells out to `git clone --depth=1 --no-tags --filter=blob:none` then `git fetch + git checkout
+ * GitSubprocessCloner — shells out to `git clone --depth=1 --no-tags --filter=blob:none` then
+ * `git fetch + git checkout
  * <head_sha>` to land an exact commit in the workspace.
  *
  * Auth
@@ -16,8 +14,7 @@
  * The actual git execution is EXTERNAL and stubbed in tests. The deterministic parity surface is
  * command CONSTRUCTION: argv + env + cwd. Two seams make that observable and replay-safe:
  *   - {@link SpawnFn}: the subprocess factory (default `node:child_process.spawn`). Tests inject a
- *     recorder that captures argv/env/cwd and returns a fake process. This mirrors the Python test
- *     monkeypatching `asyncio.create_subprocess_exec`.
+ *     recorder that captures argv/env/cwd and returns a fake process.
  *   - The transport-timeout seam (`#platform/transport_timeout.ts::transportAbortSignal`) arms the
  *     60s git timeout and the 5s SIGKILL grace. Raw `setTimeout` / `AbortSignal.timeout` are banned
  *     by the `check_clock_random` gate outside the seam; routing through `transportAbortSignal` keeps
@@ -118,9 +115,8 @@ export class GitSubprocessCloner implements GitCloner {
   }): Promise<void> {
     // Defense-in-depth: validate inputs BEFORE the subprocess. `spawn` (argv form) doesn't use a
     // shell, but rejecting bad inputs early protects against future refactors.
-    // Message quoting mirrors Python's `{value!r}` (single quotes) so the wrapped CloneFailedError.reason
-    // is byte-identical to the frozen activity for every reachable value (sha/url carry no embedded
-    // quotes). NOT JSON.stringify (double quotes) — that would diverge from the source of truth.
+    // Single-quote wrapping (NOT JSON.stringify double quotes) matches the existing error message format
+    // for sha/url values.
     if (!HEAD_SHA_RE.test(headSha)) {
       throw new Error(`head_sha must be 7-64 hex chars; got '${headSha}'`);
     }
@@ -194,7 +190,7 @@ export class GitSubprocessCloner implements GitCloner {
         await fs.rm(askpassScript, { force: true });
         await fs.rmdir(askpassDir);
       } catch {
-        // missing_ok / non-empty-dir / permission — ignore (mirrors Python `except OSError: pass`).
+        // missing_ok / non-empty-dir / permission — ignore.
       }
     }
   }

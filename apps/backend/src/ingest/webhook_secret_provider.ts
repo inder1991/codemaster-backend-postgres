@@ -1,7 +1,5 @@
-// VaultWebhookSecretProvider — 1:1 port of
-// vendor/codemaster-py/codemaster/ingest/webhook_secret_provider.py.
-//
-// Reads the GitHub App webhook secret from Vault path `codemaster/github/app` key `webhook_secret` on
+// VaultWebhookSecretProvider — reads the GitHub App webhook secret from Vault path `codemaster/github/app`
+// key `webhook_secret` on
 // EVERY call (no in-process cache — the secret rotates rarely, HMAC verification is once per request, and
 // the Vault round-trip is sub-ms same-cluster; add a cache only if telemetry shows a hot path).
 

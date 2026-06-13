@@ -1,6 +1,5 @@
-// core.pull_request_reviews repository — upsertReview + flipCurrentRun (1:1 with the frozen Python
-// codemaster/ingest/_reviews_repository.py). Both take a Kysely executor; flipCurrentRun requires an open
-// Transaction (its FOR UPDATE lock is only effective inside one).
+// core.pull_request_reviews repository — upsertReview + flipCurrentRun. Both take a Kysely executor;
+// flipCurrentRun requires an open Transaction (its FOR UPDATE lock is only effective inside one).
 
 import { type Kysely, sql } from "kysely";
 
@@ -10,8 +9,7 @@ import { CrossInstallationViolation } from "#backend/workspace/errors.js";
 import { uuid4 } from "#platform/randomness.js";
 
 /** Raised when flipCurrentRun's optimistic `oldRunIdExpected` guard does not match the row's actual
- *  current_run_id — the linearizability fence (1:1 with the Python `CurrentRunMismatch`). The caller's
- *  transaction must roll back + re-resolve. */
+ *  current_run_id — the linearizability fence. The caller's transaction must roll back + re-resolve. */
 export class CurrentRunMismatch extends Error {
   public readonly reviewId: string;
   public readonly expected: string | null;

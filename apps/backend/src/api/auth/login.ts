@@ -1,6 +1,4 @@
-// Login dispatch — 1:1 port of codemaster/api/auth/login.py (Sprint 12 / S14.A).
-//
-// Three-stage dispatch: core.local_users → core.users → LDAP. The LOCKED precedence invariant: if a username
+// Login dispatch — three-stage: core.local_users → core.users → LDAP. The LOCKED precedence invariant: if a username
 // exists in a tier, that tier OWNS the auth — we do NOT fall through to a lower tier on password mismatch
 // (a super_admin whose corporate username also exists in LDAP must NEVER accidentally authenticate via LDAP).
 //
