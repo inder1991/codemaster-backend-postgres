@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/finding_lifecycle_inputs/v1.py (frozen Python — B.10 / ADR-0056).
+// Zod port of contracts/finding_lifecycle_inputs/v1.py (B.10 / ADR-0056).
 // Parity-validated in finding_lifecycle_inputs.v1.parity.test.ts.
 //
 // Three activity-input contracts for the finding-lifecycle setter activities

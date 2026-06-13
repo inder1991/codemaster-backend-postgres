@@ -3,7 +3,7 @@ import { z } from "zod";
 import { DiffChunkV1 } from "./diff_chunking.v1.js";
 import { ReviewFindingV1 } from "./review_findings.v1.js";
 
-// Zod port of contracts/carry_forward/v1.py::CarryForwardSelectionV1 (frozen Python).
+// Zod port of contracts/carry_forward/v1.py::CarryForwardSelectionV1.
 // Output of `select_carry_forward` (S8.4.1b): the carried-vs-to-review partition for an
 // incremental review push. Parity-validated in carry_forward.v1.parity.test.ts.
 //

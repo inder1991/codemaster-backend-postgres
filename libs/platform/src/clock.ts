@@ -1,5 +1,5 @@
 /**
- * Clock seam — 1:1 port of `codemaster/infra/clock.py` (frozen Python, Sprint 0 / Story S0.5b).
+ * Clock seam (codemaster/infra/clock.py, Sprint 0 / Story S0.5b).
  *
  * Production code MUST NOT call `Date.now()`, `new Date()` (zero-arg), `performance.now()`,
  * `process.hrtime(...)`, or `setTimeout` for time directly. Use the injected {@link Clock}

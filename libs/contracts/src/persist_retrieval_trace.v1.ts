@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/retrieval/persist_retrieval_trace/v1.py (frozen Python — Sub-spec B T13).
+// Zod port of contracts/retrieval/persist_retrieval_trace/v1.py (Sub-spec B T13).
 // Parity-validated in persist_retrieval_trace.v1.parity.test.ts.
 //
 // PersistRetrievalTraceInputV1 embeds RetrievalTraceV2 (contracts/retrieval/retrieval_trace/v2.py),

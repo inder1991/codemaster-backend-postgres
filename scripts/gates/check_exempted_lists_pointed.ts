@@ -1,4 +1,4 @@
-// Exempted-lists-pointed gate (ts-morph port of the frozen scripts/check_exempted_lists_pointed.py).
+// Exempted-lists-pointed gate.
 //
 // Self-referential infrastructure validation: every AST-gate `EXEMPTED` entry must reference a
 // follow-up story so an exemption can't sit forever and defeat the purpose of the gate.
@@ -10,13 +10,13 @@
 // value matches the story-id pattern (sprint-aligned `S\d+\.[A-Z]+\.\d+`, hotfix `S\d+\.X-<slug>`,
 // short-form `S\d+\.[A-Z]+`, or `PERMANENT-EXEMPTION-<slug>`).
 //
-// ERROR-mode (matches the frozen Python gate): any violation makes main() return 1. This is the
+// ERROR-mode: any violation makes main() return 1. This is the
 // rare-but-real ERROR-mode gate — it is NOT the WARN-mode GF-3 tenancy gate. Do NOT soften to WARN.
 import { Node, type ObjectLiteralElementLike, Project, type SourceFile } from "ts-morph";
 
 // Sprint-aligned IDs accept a single-letter area (`S16.A.1`, `S15.H`) or a multi-letter area code
 // (`S23.AR.7`); hotfix IDs (`S15.X-token-provider`); or `PERMANENT-EXEMPTION-*` for by-design
-// exemptions covered by sibling gates. Ported VERBATIM from the Python gate's _STORY_ID_RE.
+// exemptions covered by sibling gates.
 const STORY_ID_RE = /^(S\d+\.([A-Z]+\.\d+|X-[\w-]+|[A-Z]+)|PERMANENT-EXEMPTION-[\w-]+)$/;
 
 export type Violation = {
@@ -78,7 +78,7 @@ function readEntry(
 
 /**
  * Return undefined when the entry value carries a well-formed `follow_up_story`; otherwise a
- * description of the violation. Mirrors the Python gate's _validate_entry_value.
+ * description of the violation.
  */
 function validateEntryValue(value: Node | undefined): string | undefined {
   if (value === undefined || !Node.isObjectLiteralExpression(value)) {
@@ -121,5 +121,5 @@ export function main(): number {
   process.stderr.write(
     `[ERROR] exempted-lists-pointed gate: ${violations.length} violation(s)\n`,
   );
-  return 1; // ERROR-mode: block on drift (matches the frozen Python gate's behavior).
+  return 1; // ERROR-mode: block on drift.
 }

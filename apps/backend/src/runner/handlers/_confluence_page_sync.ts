@@ -196,7 +196,7 @@ export function buildConfluenceSyncActivities(o: {
 /**
  * Sync ONE Confluence page end-to-end — the 4-activity per-page chain, 1:1 with the per-page body of
  * confluenceIngestWorkflow's syncOneSpace AND the whole of triggerPageResyncWorkflow
- * (trigger_page_resync.workflow.ts steps 1-4 / the frozen Python TriggerPageResyncWorkflow.run):
+ * (trigger_page_resync.workflow.ts steps 1-4):
  *   1. fetch_page_body  — the page body from Confluence;
  *   2. sanitize_page    — HTML sanitation + injection-pattern detection;
  *   3. chunk_and_embed  — chunk + embed via the platform embedder (idempotency-cached);

@@ -6,8 +6,7 @@ import { PrMetaV1, WalkthroughV1 } from "./walkthrough.v1.js";
 // Typed single-arg input envelope for the `post_review_results` activity (CLAUDE.md invariant 11 —
 // exactly one positional Pydantic/Zod-model argument per Temporal activity; ADR-0047).
 //
-// The frozen Python `PostReviewActivity.post_review_results` (vendor/codemaster-py/codemaster/
-// activities/post_review_results.py) is a MULTI-positional activity (`walkthrough, aggregated, pr_meta,
+// `PostReviewActivity.post_review_results` is a MULTI-positional activity (`walkthrough, aggregated, pr_meta,
 // head_sha, walkthrough_md, owner, repo_name, pr_number, run_id, review_id, changed_line_ranges`),
 // pre-dating the ADR-0047 single-typed-input convention. The TS port introduces this envelope so the
 // activity dispatch is positional-arg-free at the Temporal seam — consistent with the other ported

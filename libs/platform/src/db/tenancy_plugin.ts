@@ -2,8 +2,7 @@
  * Tenancy isolation plugin — refuses cross-tenant data access by default (invariant #10,
  * "default deny everywhere").
  *
- * This is a BEHAVIORAL port of the frozen SQLAlchemy hook
- * `vendor/codemaster-py/codemaster/security/tenancy.py` onto Kysely (0.27.x). It is NOT a
+ * This is a BEHAVIORAL port of the frozen SQLAlchemy hook onto Kysely (0.27.x). It is NOT a
  * byte-for-byte port — SQLAlchemy fires a `do_orm_execute` event over compiled `Select`/`Update`/
  * `Delete` statements; Kysely exposes a {@link KyselyPlugin} seam whose `transformQuery` receives the
  * query's {@link OperationNode} AST before it is compiled. We hook there.
@@ -45,7 +44,7 @@
  *    bypass the AST walk entirely — that is the PR-time gate `check_tenant_scoped_raw_sql.ts`'s job,
  *    the analogue of the Python `text()` bypass covered by `check_tenant_scoped_raw_sql.py`.
  *
- * DEEP-AST HARDENING (#8) — this walker is now STRICTER than the frozen Python heuristic (a deliberate
+ * DEEP-AST HARDENING (#8) — this walker is now STRICTER than the Python heuristic (a deliberate
  * divergence: going beyond the parity baseline for tenant-isolation safety). It descends into nested
  * query bodies and refuses OR-defeated scopes that the Python `get_final_froms` + coarse substring
  * matcher accepted:
@@ -173,7 +172,7 @@ export function privilegedPath<A extends ReadonlyArray<unknown>, R>(
  *
  * Refuses to activate outside a {@link privilegedPath} frame — the analogue of the Python
  * `cross_tenant_audit_session()` raising `TenancyViolation` when called outside `@privileged_path`.
- * `reason` is required so security review can see why the escape was taken (mirrors the Python
+ * `reason` is required so security review can see why the escape was taken (matches the Python
  * `reason=` kwarg recorded in `session.info`).
  *
  * The flag is restored to its prior value on exit (supporting nested escapes), exactly as the

@@ -4,7 +4,7 @@ import { z } from "zod";
 // The page-approval row shape (create/read) is in ../page_approval.v1.ts (Sub-spec 0); this module adds
 // the per-space page-list envelope the admin UI renders.
 //
-// Field parity notes (1:1 with the Python BaseModel, ConfigDict(extra="forbid") → .strict()):
+// Field parity notes (ConfigDict(extra="forbid") → .strict()):
 //   - schema_version is a PLAIN `int = 1` → z.number().int().default(1).
 //   - approver_email / revoked_by: EmailStr | None → z.string().email().nullable().default(null).
 //   - last_modified_at / approved_at_utc / revoked_at are PLAIN `datetime` (no _require_tz) → the

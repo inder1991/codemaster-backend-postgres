@@ -3,10 +3,8 @@ import { z } from "zod";
 // Typed single-arg input envelope for the `enrich_pr_files_activity_v2` activity (CLAUDE.md
 // invariant 11 — exactly one positional Pydantic/Zod-model argument per Temporal activity; ADR-0047).
 //
-// The frozen Python `EnrichPrFilesActivityV2.enrich_pr_files_v2`
-// (vendor/codemaster-py/codemaster/activities/enrich_pr_files_v2.py) is a MULTI-positional activity,
-// dispatched by the workflow body (vendor/codemaster-py/codemaster/workflows/review_pull_request.py
-// ~L819) as:
+// `EnrichPrFilesActivityV2.enrich_pr_files_v2` is a MULTI-positional activity,
+// dispatched by the workflow body (~L819) as:
 //
 //     workflow.execute_activity(
 //         "enrich_pr_files_activity_v2",
@@ -29,7 +27,7 @@ import { z } from "zod";
 // adds. The Workflow phase (which wires the dispatch) constructs this envelope from the seven payload
 // fields above.
 //
-// Field shapes (read off the dispatch arg order + the frozen activity signature
+// Field shapes (read off the dispatch arg order + the activity signature
 // `enrich_pr_files_v2(installation_id_uuid, installation_id_int, repository_id, pr_id, owner, repo,
 // pr_number)`):
 //  - installation_id:        uuid.UUID  — the FK installation id (the `installation_id` column the

@@ -1,5 +1,4 @@
-// Unsafe-migration-pattern gate (port of the frozen Python gate
-// vendor/codemaster-py/scripts/check_unsafe_migration_pattern.py — BF-2 mitigation).
+// Unsafe-migration-pattern gate (BF-2 mitigation).
 //
 // The Python original AST-walks alembic version files (codemaster/migrations/versions/*.py),
 // concatenates every SQL string passed to op.execute(...) inside upgrade(), and regex-scans the
@@ -26,13 +25,11 @@
 // Adaptations for this repo (raw SQL migrations under migrations/*.sql, applied up-only by
 // node-pg-migrate; the Python repo's alembic chain is frozen under vendor/):
 //   * "extract op.execute() strings from upgrade()" becomes "strip SQL comments from the file":
-//     the whole .sql file IS the upgrade body. In the Python original, prose rationale lived in
-//     Python comments/docstrings the string-extraction never saw; here it lives in `--` / `/* */`
-//     comments (this repo's migrations carry dense rationale headers — 0042 alone discusses
-//     expand-contract in prose), so comment-stripping restores the original's only-executable-SQL
-//     match scope. Single-/double-/dollar-quoted payloads stay IN scope, exactly as Python matched
-//     everything inside the executed strings (a RAISE EXCEPTION literal mentioning DELETE FROM
-//     counts — same coarse semantics as the original).
+//     the whole .sql file IS the upgrade body. Prose rationale lives in `--` / `/* */` comments
+//     (this repo's migrations carry dense rationale headers — 0042 alone discusses expand-contract
+//     in prose), so comment-stripping confines the match to executable SQL only.
+//     Single-/double-/dollar-quoted payloads stay IN scope (a RAISE EXCEPTION literal mentioning
+//     DELETE FROM counts — same coarse semantics).
 //   * rule migration.parse is dropped: it fired on a Python SyntaxError in a version file; a raw
 //     SQL file has no parse precondition for a regex scan (Postgres itself is the syntax gate).
 //   * "no upgrade() body / no op.execute strings → skip" is subsumed: a SQL file with no matching
@@ -46,7 +43,7 @@
 // Output format per CLAUDE.md H-16/H-23:
 //   [SEVERITY] file=<path>:<line> rule=<rule-id> message="..." suggestion="..."
 //
-// Mode: ERROR (matches the Python original). Any non-exempted violation makes main() return 1.
+// Mode: ERROR. Any non-exempted violation makes main() return 1.
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -54,21 +51,18 @@ import { fileURLToPath } from "node:url";
 export const RULE_DELETE_AND_SET_NOT_NULL = "migration.unsafe.delete_and_set_not_null";
 export const RULE_SET_NOT_NULL_WITHOUT_NOT_VALID = "migration.unsafe.set_not_null_without_not_valid";
 
-/** Migrations exempted from the gate, keyed by file stem (e.g. "0042_background_jobs_state_and_indexes"),
- *  mirroring the Python gate's EXEMPTED dict (keyed by alembic version-file stem). Empty at landing:
- *  no existing migration (0001–0042) contains DELETE FROM or SET NOT NULL in executable SQL
- *  (full-corpus scan, comments included), so nothing needed grandfathering. The Python gate's single
- *  entry (2026-05-14_0074_outbox_run_id_not_null, PERMANENT-EXEMPTION-pre-bf2) grandfathers a
- *  migration in the FROZEN Python repo's own alembic chain — it has no counterpart under this repo's
- *  migrations/ and is NOT carried over. Shape matches _registry.ts ExemptedEntry so the meta-gates
+/** Migrations exempted from the gate, keyed by file stem (e.g. "0042_background_jobs_state_and_indexes").
+ *  Empty at landing: no existing migration (0001–0042) contains DELETE FROM or SET NOT NULL in
+ *  executable SQL (full-corpus scan, comments included), so nothing needed grandfathering. Shape
+ *  matches _registry.ts ExemptedEntry so the meta-gates
  *  (check_exempted_lists_pointed / check_exempted_rotation_age) walk this dict; every new entry
  *  requires a `follow_up_story` with a well-formed story id OR a PERMANENT-EXEMPTION-* tag. */
 export const EXEMPTED: Record<string, { reason: string; follow_up_story: string }> = {};
 
-// Detection regexes — ported VERBATIM from the Python gate (matched against the uppercased,
-// comment-stripped SQL, so the uppercase literals below are exhaustive). Presence-test and
-// table-extraction are SEPARATE regexes, exactly like the original: `DELETE FROM "Quoted"` still
-// trips the presence test but reports table `<unknown>` (extraction wants a [\w.]+ name).
+// Detection regexes — matched against the uppercased, comment-stripped SQL, so the uppercase
+// literals below are exhaustive. Presence-test and table-extraction are SEPARATE regexes:
+// `DELETE FROM "Quoted"` trips the presence test but reports table `<unknown>` (extraction wants a
+// [\w.]+ name).
 const DELETE_FROM_RE = /\bDELETE\s+FROM\s+/;
 const DELETE_FROM_TABLE_RE = /\bDELETE\s+FROM\s+([\w.]+)/;
 const SET_NOT_NULL_RE = /\bSET\s+NOT\s+NULL\b/;
@@ -95,8 +89,8 @@ export type Violation = Finding & {
  * not mis-stripping: `--` line comments, nested `/&#42; ... &#42;/` block comments (PostgreSQL
  * block comments nest), single-quoted strings (with `''` doubling), double-quoted identifiers, and
  * dollar-quoted strings (`$$...$$` / `$tag$...$tag$`). Quoted payloads are kept verbatim — they are
- * executable content and stay in match scope (faithful to the Python original, which scanned the
- * full op.execute() string). A `--` inside a string is NOT a comment; a `'` inside a comment does
+ * executable content and stay in match scope. A `--` inside a string is NOT a comment; a `'`
+ * inside a comment does
  * NOT open a string (this repo's rationale comments are full of quoted state names).
  */
 export function stripSqlComments(sql: string): string {
@@ -187,10 +181,9 @@ function lineOf(text: string, index: number): number {
 }
 
 /**
- * Pure detector: scan one migration's raw SQL for the two anti-patterns. Mirrors the body of the
- * Python gate's lint_file() after SQL extraction: uppercase the executable SQL, then presence-test
- * each pattern over the whole body (A and B can BOTH fire on the same migration, exactly like the
- * original — a DELETE + SET NOT NULL migration with no NOT VALID reports two violations).
+ * Pure detector: scan one migration's raw SQL for the two anti-patterns. Uppercase the executable
+ * SQL and presence-test each pattern over the whole body (A and B can BOTH fire on the same
+ * migration — a DELETE + SET NOT NULL migration with no NOT VALID reports two violations).
  */
 export function findUnsafeMigrationPatterns(sql: string): Array<Finding> {
   const combined = stripSqlComments(sql).toUpperCase();
@@ -238,8 +231,8 @@ export function findUnsafeMigrationPatterns(sql: string): Array<Finding> {
 }
 
 /**
- * Lint one migration file: EXEMPTED stems are skipped wholesale (the Python gate's grandfather
- * mechanism — `if stem in EXEMPTED: return []`), everything else runs the pattern detector.
+ * Lint one migration file: EXEMPTED stems are skipped wholesale; everything else runs the pattern
+ * detector.
  */
 export function lintMigrationFile(relPath: string, sql: string): Array<Violation> {
   const stem = path.posix.basename(relPath).replace(/\.sql$/i, "");
@@ -247,8 +240,7 @@ export function lintMigrationFile(relPath: string, sql: string): Array<Violation
   return findUnsafeMigrationPatterns(sql).map((f) => ({ file: relPath, ...f }));
 }
 
-/** migrations/ sits two levels above this file (scripts/gates/ -> repo root), independent of cwd —
- *  the TS analogue of the Python gate's `Path(__file__).resolve().parent.parent / ...`. */
+/** migrations/ sits two levels above this file (scripts/gates/ -> repo root), independent of cwd. */
 function migrationsDir(): string {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "migrations");
 }

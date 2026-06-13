@@ -1,7 +1,6 @@
 import { z } from "zod";
 
-// Zod port of the frozen Python dataclass `EmbeddingGenerationRow`
-// (vendor/codemaster-py/codemaster/embedder/generations_repo.py lines 24-54).
+// Zod port of the `EmbeddingGenerationRow` dataclass.
 //
 // DIVERGENCE — NO pyRef JSON parity: the Python source is a PLAIN
 // `@dataclass(frozen=True, slots=True)`, NOT a Pydantic v2 `BaseModel`. It has no
@@ -48,16 +47,16 @@ import { z } from "zod";
 //   chunks_failed           int                                  → z.number().int()
 //   last_error              str | None                           → .nullable()
 
-/** The state-machine vocabulary (1:1 with the Python `Literal[...]` on `state`). */
+/** The state-machine vocabulary (`state` enum). */
 export const EmbeddingGenerationState = z.enum(["backfilling", "ready", "active", "retired"]);
 export type EmbeddingGenerationState = z.infer<typeof EmbeddingGenerationState>;
 
-/** The retire-reason vocabulary (1:1 with the Python `Literal[...]` on `retire_reason`; spec v4 §5.0). */
+/** The retire-reason vocabulary (`retire_reason` enum; spec v4 §5.0). */
 export const RetireReason = z.enum(["cancelled", "demoted", "manual_retire"]);
 export type RetireReason = z.infer<typeof RetireReason>;
 
 /**
- * One row of `core.embedding_generations` (1:1 with the frozen Python `EmbeddingGenerationRow`).
+ * One row of `core.embedding_generations`.
  *
  * `.strict()` mirrors the frozen dataclass's fixed field set (`slots=True` forbids extra attrs at
  * the Python layer; `.strict()` is the Zod analogue — an unexpected key fails parse).

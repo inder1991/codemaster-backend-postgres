@@ -1,5 +1,4 @@
-// EXEMPTED rotation-age gate (ts-morph port of the frozen Python gate
-// scripts/check_exempted_rotation_age.py).
+// EXEMPTED rotation-age gate.
 //
 // Every EXEMPTED entry across the TS gate files (scripts/gates/*.ts, the analogue of the
 // Python `_GATE_FILES` registry) must MOVE within the staleness threshold (14 days, ~2 sprints
@@ -52,9 +51,8 @@ export type BlameOracle = (file: string, line: number) => number | null;
 /**
  * Extract every EXEMPTED dict-key entry from a single source file's AST.
  *
- * Mirrors the Python gate's `_collect_exempted_entries`: find `EXEMPTED` variable declarations
- * whose initializer is an object literal, then read each property's key, its `follow_up_story`
- * value, and the property's source line number.
+ * Find `EXEMPTED` variable declarations whose initializer is an object literal, then read each
+ * property's key, its `follow_up_story` value, and the property's source line number.
  */
 export function collectExemptedEntries(sf: SourceFile): Array<ExemptedEntryLocation> {
   const entries: Array<ExemptedEntryLocation> = [];
@@ -100,8 +98,7 @@ function readFollowUpStory(obj: ObjectLiteralExpression): string {
  * oracle-absent) are not flagged. Stale, non-permanent entries are returned as violations.
  *
  * The oracle is injected so this function is deterministic and testable against in-memory
- * snippets (no real git / wall-clock in unit tests) — mirroring how the Python test drove the
- * per-line-blame contract directly.
+ * snippets (no real git / wall-clock in unit tests).
  */
 export function findRotationViolations(project: Project, blame: BlameOracle): Array<Violation> {
   const out: Array<Violation> = [];

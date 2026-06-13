@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { OutputSafetySanitizationEventV1 } from "./review_chunk_response.v1.js";
 
-// Zod port of the walkthrough contract package (frozen Python). Parity-validated in
+// Zod port of the walkthrough contract package. Parity-validated in
 // walkthrough.v1.parity.test.ts.
 //
 // The package spans TWO Python modules (versioned together — pr_meta_v1 has no standalone

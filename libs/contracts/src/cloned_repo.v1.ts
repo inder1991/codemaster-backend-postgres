@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/cloned_repo/v1.py::ClonedRepoV1 (frozen Python).
+// Zod port of contracts/cloned_repo/v1.py::ClonedRepoV1.
 // Pydantic ConfigDict(extra="forbid", frozen=True) → .strict() (frozen is a TS-side concern, not wire).
 // NOTE: the file is v1.py but the contract's schema_version default is 2 (no Literal annotation,
 // so any int is accepted; the int default is mirrored with .default(2)).

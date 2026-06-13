@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/fix_prompt/v1.py::FixPromptV1 (frozen Python — the consolidated
+// Zod port of contracts/fix_prompt/v1.py::FixPromptV1 (the consolidated
 // "paste into Claude Code" fix-it artifact, output of generate_fix_prompt_activity).
 // Pydantic ConfigDict(extra="forbid", frozen=True) → .strict() (frozen is a TS-side concern, not wire).
 // Parity-validated in fix_prompt.v1.parity.test.ts.

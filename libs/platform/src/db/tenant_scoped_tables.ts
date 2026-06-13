@@ -10,17 +10,15 @@
  *   2. The PR-time raw-SQL gate (`scripts/gates/check_tenant_scoped_raw_sql.ts`) — which now
  *      re-exports {@link TENANT_SCOPED_TABLES} from here instead of holding a duplicate `Set`.
  *
- * The list was ported verbatim from the frozen Python gate
- * `vendor/codemaster-py/scripts/check_tenant_scoped_raw_sql.py` (migration-source-freeze, 46
- * schema-qualified tables that carry `installation_id`, or whose tenancy is enforced transitively).
- * Python is frozen; this list does not drift.
+ * The list was ported verbatim from `scripts/check_tenant_scoped_raw_sql.py` (migration-source-freeze,
+ * 46 schema-qualified tables that carry `installation_id`, or whose tenancy is enforced transitively).
  *
  * ── Nullable / scope-discriminated tenancy (LEGACY_NON_TENANT_SCOPED_EXEMPTIONS) ──
  *
  * A handful of tables appear in the broad registry above but DO NOT express tenancy through an
  * `installation_id` equality predicate. Their `installation_id` is either the primary key itself,
  * NULLABLE (NULL = a platform-shared / global row), or superseded by a `scope` discriminator column
- * ('platform' | 'installation'). The frozen Python `LEGACY_NON_TENANT_SCOPED_EXEMPTIONS` registry
+ * ('platform' | 'installation'). `LEGACY_NON_TENANT_SCOPED_EXEMPTIONS`
  * (`scripts/check_tenant_scoped_mixin.py`, per ADR-0019 + ADR-0029 + migration 0060) carries the
  * authoritative rationale, keyed by ORM class name. Here we translate it to the schema-qualified
  * table names the runtime plugin walks, so the plugin does not hard-refuse a legitimately
@@ -63,7 +61,7 @@ export const TENANT_SCOPED_TABLES: ReadonlySet<string> = new Set<string>([
   "core.learning_proposals",
   "core.learnings",
   "core.learnings_revisions",
-  // TS hardening divergence (ADR-0068) — NEW table absent from the frozen Python. The LLM-invocation
+  // TS hardening divergence (ADR-0068) — NEW table. The LLM-invocation
   // idempotency ledger carries installation_id NOT NULL; every query (insert + lookup) filters on it.
   "core.llm_invocation_ledger",
   "core.local_users",
@@ -105,7 +103,7 @@ export type TenantExemptionEntry = {
 
 /**
  * Schema-qualified tables the runtime tenancy plugin skips when checking for an `installation_id`
- * filter. Translated from the frozen Python `LEGACY_NON_TENANT_SCOPED_EXEMPTIONS` (class-name keyed)
+ * filter. Translated from `LEGACY_NON_TENANT_SCOPED_EXEMPTIONS` (class-name keyed)
  * to table-name keys. Tenancy for these rows is the PK itself, a NULLABLE column (NULL = global), or
  * a `scope` discriminator — none of which the `installation_id`-equality heuristic can model.
  */

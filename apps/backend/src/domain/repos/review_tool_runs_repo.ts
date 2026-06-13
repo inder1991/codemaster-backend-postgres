@@ -1,30 +1,21 @@
 /**
- * ReviewToolRunsRepo — 1:1 TypeScript/Kysely port of the frozen Python repo
- * `vendor/codemaster-py/codemaster/domain/repos/review_tool_runs_repo.py`
- * (`PostgresReviewToolRunsRepo`, Phase D Task D.7).
+ * ReviewToolRunsRepo — one row per `(run_id, tool_name)` over `core.review_tool_runs` (migration 0084,
+ * Phase D Task D.7), carrying the Tier-1 static-analysis tool's execution outcome.
  *
- * One row per `(run_id, tool_name)` over `core.review_tool_runs` (migration 0084), carrying the
- * Tier-1 static-analysis tool's execution outcome (sourced from
- * `contracts.tool_status.v1::ToolStatusV1`).
  *
- * Faithful to the Python source:
- *
- *  - **Single public method `insertToolRun`** — exactly the method set of the Python port
- *    (`insert_tool_run`). No SELECT path lives in this repo (the Python repo has none either); the
+ *  - **Single public method `insertToolRun`** — no SELECT path lives in this repo; the
  *    arbitration-apply caller writes, downstream observability reads via its own queries.
  *
  *  - **Idempotency via `ON CONFLICT (run_id, tool_name) DO NOTHING`.** The UNIQUE
  *    `(run_id, tool_name)` constraint (`uq_review_tool_runs_run_tool`) absorbs Temporal retries of
  *    the same `record_tool_runs` activity invocation — the same workflow replay re-firing the
- *    activity produces ZERO row drift. Mirrors the Python `ON CONFLICT (run_id, tool_name)
- *    DO NOTHING`.
+ *    activity produces ZERO row drift.
  *
- *  - **Tenancy.** `installation_id` is in the INSERT column/VALUES list directly, exactly as the
- *    Python SQL. INSERT carries no WHERE clause, so the {@link TenancyPlugin} (which gates only
- *    SELECT/UPDATE/DELETE — INSERT is out of scope, mirroring the Python `do_orm_execute` hook) does
- *    not fire on the write; the plugin is nonetheless installed centrally by {@link tenantKysely} on
- *    the shared-pool Kysely this repo is handed per the data-layer convention, so any future
- *    SELECT/UPDATE/DELETE added here is gated automatically.
+ *  - **Tenancy.** `installation_id` is in the INSERT column/VALUES list directly. INSERT carries no
+ *    WHERE clause, so the {@link TenancyPlugin} (which gates only SELECT/UPDATE/DELETE) does not fire
+ *    on the write; the plugin is nonetheless installed centrally by {@link tenantKysely} on the
+ *    shared-pool Kysely this repo is handed, so any future SELECT/UPDATE/DELETE added here is gated
+ *    automatically.
  *
  * ADR-0062 (Postgres connection-pool lifecycle): this repo NO LONGER owns a `pg.Pool`, constructs a
  * `new Kysely(...)`, or memoizes either. It is handed a `Kysely<ReviewToolRunsDB>` over the
@@ -76,14 +67,12 @@ type ReviewToolRunsDB = {
   "core.review_tool_runs": ReviewToolRunsTable;
 };
 
-// ── Public input shape (mirrors the Python keyword-only signature) ──
+// ── Public input shape ──
 
 /**
- * Arguments to {@link ReviewToolRunsRepo.insertToolRun}, mirroring the Python `insert_tool_run`
- * keyword-only signature 1:1. `installationId` / `runId` / `reviewId` are UUID strings (the
- * TypeScript analogue of `uuid.UUID`). `startedAt` is a required instant; `finishedAt` is
- * required-but-nullable (`datetime | None`). Integer fields are `number` (the table columns are
- * `integer`).
+ * Arguments to {@link ReviewToolRunsRepo.insertToolRun}. `installationId` / `runId` / `reviewId` are
+ * UUID strings. `startedAt` is a required instant; `finishedAt` is required-but-nullable. Integer
+ * fields are `number` (the table columns are `integer`).
  */
 export type InsertToolRunInput = {
   installationId: string;
@@ -101,7 +90,7 @@ export type InsertToolRunInput = {
   errorMessage: string | null;
 };
 
-/** Repo port consumed by the Phase D arbitration-apply path (analogue of `ReviewToolRunsRepoPort`). */
+/** Repo port consumed by the Phase D arbitration-apply path. */
 export type ReviewToolRunsRepoPort = {
   /**
    * Insert one `core.review_tool_runs` row. Idempotent via `ON CONFLICT (run_id, tool_name)
@@ -140,8 +129,8 @@ export class ReviewToolRunsRepo implements ReviewToolRunsRepoPort {
   }
 
   async insertToolRun(input: InsertToolRunInput): Promise<void> {
-    // 1:1 with the Python INSERT: same 13 columns in the same order, ON CONFLICT (run_id, tool_name)
-    // DO NOTHING. installation_id is in the VALUES list (tenancy satisfied at the literal-SQL level).
+    // ON CONFLICT (run_id, tool_name) DO NOTHING — 13 columns; installation_id is in the VALUES list
+    // (tenancy satisfied at the literal-SQL level).
     await this.#db
       .insertInto("core.review_tool_runs")
       .values({

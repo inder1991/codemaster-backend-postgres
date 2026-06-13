@@ -1,6 +1,5 @@
-// EmbedderGenerationService — 1:1 TypeScript port of vendor/codemaster-py/codemaster/embedder/service.py.
-//
-// Sole owner of embedder lifecycle transitions (spec §5 + v4 §5.0). Every admin write endpoint, workflow,
+// EmbedderGenerationService — sole owner of embedder lifecycle transitions (spec §5 + v4 §5.0).
+// Every admin write endpoint, workflow,
 // and activity calls this service rather than mutating embedding_generations / embedder_runtime_state
 // directly. Preconditions are validated HERE; the repos (PostgresEmbeddingGenerationsRepo /
 // PostgresEmbedderRuntimeStateRepo) perform pure I/O whose SQL satisfies the on-disk biconditional CHECKs.
@@ -19,7 +18,7 @@ import type { PostgresEmbeddingGenerationsRepo } from "#backend/domain/repos/emb
 import type { PostgresEmbedderRuntimeStateRepo } from "#backend/domain/repos/embedder_runtime_state_repo.js";
 import type { EmbeddingGenerationRowV1 } from "#contracts/embedding_generation.v1.js";
 
-// ─── Errors — 1:1 with the Python service exceptions ─────────────────────────────────────────────────
+// ─── Errors ───────────────────────────────────────────────────────────────────────────────────────────
 export class GenerationServiceError extends Error {}
 
 export class PendingGenerationInFlightError extends GenerationServiceError {

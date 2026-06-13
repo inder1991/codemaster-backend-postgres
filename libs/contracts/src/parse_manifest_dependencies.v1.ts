@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { ManifestSnapshot } from "./pr_context.v1.js";
 
-// Zod port of contracts/parse_manifest_dependencies/v1.py (frozen Python). Parity-validated in
+// Zod port of contracts/parse_manifest_dependencies/v1.py. Parity-validated in
 // parse_manifest_dependencies.v1.parity.test.ts.
 //
 // `parse_manifest_dependencies_activity` I/O contracts (FOLLOW-UP-manifest-dependency-parsing v1).

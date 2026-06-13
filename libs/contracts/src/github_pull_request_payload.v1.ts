@@ -5,7 +5,7 @@ import { z } from "zod";
 // against it before any internal id resolution. All Python models use `ConfigDict(extra="ignore")` →
 // Zod default `.strip()` (NO `.strict()`) — GitHub adds fields freely and we drop the ones we don't model.
 //
-// Parity note: field constraints are transcribed verbatim from the frozen Python (read 2026-06-06). The
+// Parity note: field constraints are validated against the Python source (read 2026-06-06). The
 // `pull_request.title` cap here is 10_000 (the GitHub contract); the review payload's 500-char
 // `pr_title` truncation happens later in extractPrMetadata, not here.
 
@@ -32,7 +32,7 @@ export type GitHubRepositoryRefV1 = z.infer<typeof GitHubRepositoryRefV1>;
 
 /**
  * A `head` / `base` commit ref. `sha` accepts SHA-1 (40) or SHA-256 (64), hex-only (GitHub's SHA-256
- * migration forward-compat). KNOWN LATENT GAP, shared verbatim with the frozen Python:
+ * migration forward-compat). KNOWN LATENT GAP (also present in the Python contract):
  * ReviewPullRequestPayloadV1.head_sha is exactly-40, so a 64-char SHA-256 head_sha would pass intake here
  * but dead-letter at the v2 workflow boundary. GitHub sends 40-char SHA-1 today; when the SHA-256
  * migration lands, widen the v2 head_sha + this bound in lockstep (on both the TS + Python contracts).
@@ -62,7 +62,7 @@ export type GitHubRepositoryV1 = z.infer<typeof GitHubRepositoryV1>;
 export const GitHubPullRequestRefV1 = z.object({
   number: z.number().int().gte(1),
   title: z.string().max(10_000).default(""),
-  // 1:1 with the Python `field_validator(body, mode="before")` None → "" + default "".
+  // Matches Python `field_validator(body, mode="before")` None → "" + default "".
   body: z.preprocess((v) => (v == null ? "" : v), z.string().default("")),
   state: z.enum(["open", "closed"]).default("open"),
   draft: z.boolean().default(false),

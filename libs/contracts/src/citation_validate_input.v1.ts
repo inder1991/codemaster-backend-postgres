@@ -3,9 +3,7 @@ import { z } from "zod";
 import { PolicyCitationContextV1 } from "./policy_citation.v1.js";
 import { ReviewFindingV1 } from "./review_findings.v1.js";
 
-// citation_validate_input.v1 — the typed single-positional envelope for the `citationValidate` activity
-// (the Temporal-activity port of the frozen Python `CitationValidateActivity.citation_validate`,
-// vendor/codemaster-py/codemaster/activities/citation_validate_activity.py).
+// citation_validate_input.v1 — the typed single-positional envelope for the `citationValidate` activity.
 //
 // ── Why this is an ACTIVITY (the sandbox boundary) ──
 // CitationValidator._repo_path_exists() calls pathlib.Path.resolve/.exists/.is_file — filesystem
@@ -15,7 +13,7 @@ import { ReviewFindingV1 } from "./review_findings.v1.js";
 // activity instead of touching the workspace filesystem inline.
 //
 // ── NEW typed-input envelope introduced DURING the port (CLAUDE.md invariant 11 / ADR-0047) ──
-// The frozen Python `CitationValidateActivity.citation_validate` takes FOUR positional arguments
+// `CitationValidateActivity.citation_validate` takes FOUR positional arguments
 // (`workspace_path: str`, `findings: tuple[ReviewFindingV1, ...]`,
 // `knowledge_chunk_ids: frozenset[str] | None`,
 // `policy_citation: PolicyCitationContextV1 | dict | None = None`) — Temporal activities are positional,
@@ -24,7 +22,7 @@ import { ReviewFindingV1 } from "./review_findings.v1.js";
 // dedup_findings.v1 / static_analysis_input.v1 / aggregate_findings.v1 envelopes that closed the other
 // known multi-positional dispatches). There is therefore NO Python contract for the ENVELOPE itself to
 // byte-diff against; its parity coverage is round-trip + validation only. The validator CORE behaviour
-// (surviving/dropped partition) IS byte-diffed against the frozen Python in the parity test.
+// (surviving/dropped partition) IS byte-diffed against the Python impl in the parity test.
 //
 // Field mapping (Python positional → envelope field):
 //  - `workspace_path: str` → `workspace_path: z.string()`. The Python wraps it in `Path(workspace_path)`;

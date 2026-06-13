@@ -2,9 +2,7 @@ import { z } from "zod";
 
 import { ReviewFindingV1 } from "./review_findings.v1.js";
 
-// dedup_findings.v1 — the typed envelopes for the `dedup_findings` activity (the Temporal-activity port
-// of the frozen Python `dedup_linter_with_llm`,
-// vendor/codemaster-py/codemaster/analysis/dedup_with_llm.py).
+// dedup_findings.v1 — the typed envelopes for the `dedup_findings` activity.
 //
 // ── Why this is an ACTIVITY (not a workflow-body helper) ──
 // `dedup_linter_with_llm` combines linter + LLM findings and dedupes them via the existing
@@ -13,13 +11,13 @@ import { ReviewFindingV1 } from "./review_findings.v1.js";
 // ADR-0065/0066 anything that networks MUST be a Temporal activity, never inline in the V8 workflow
 // sandbox. So this is dispatched as a 1-arg typed-envelope activity that holds the real EmbeddingsPort.
 //
-// In the frozen Python the WORKFLOW BODY calls `orchestrate_review_pipeline(embedder=None, ...)`
+// In Python the WORKFLOW BODY calls `orchestrate_review_pipeline(embedder=None, ...)`
 // (review_pull_request.py:3385 — "bound-method activity has its own embedder"), so the workflow-side
 // `dedup_linter_with_llm` ran the fail-open exact-only path; the real embedder lived in the activity
 // runtime. The TS port keeps the SAME boundary: the embedder lives in the activity, off the sandbox.
 //
 // ── NEW typed-input envelope introduced DURING the port ──
-// The frozen Python `dedup_linter_with_llm` takes THREE keyword arguments
+// `dedup_linter_with_llm` takes THREE keyword arguments
 // (`linter_findings: tuple[ReviewFindingV1, ...]`, `llm_findings: tuple[ReviewFindingV1, ...]`,
 // `embedder: EmbeddingsPort`) and is NOT itself an `@activity.defn` (it is called inline in the
 // orchestrator). Making it an activity requires a single positional Pydantic-style envelope
@@ -55,12 +53,12 @@ export const DedupFindingsInputV1 = z
   .strict();
 export type DedupFindingsInputV1 = z.infer<typeof DedupFindingsInputV1>;
 
-// DedupedFindingsV1 — the activity output. The frozen Python `dedup_linter_with_llm` returns a bare
+// DedupedFindingsV1 — the activity output. `dedup_linter_with_llm` returns a bare
 // `tuple[ReviewFindingV1, ...]` and LOGS the semantic-skip degradation internally (a WARN line). An
 // activity must return a single typed envelope, so the port wraps the findings tuple AND surfaces the
 // semantic-skip flag as an INSPECTABLE field instead of only logging it — mirroring how the sibling
 // `AggregatedFindingsV1.dedupe_stats.semantic_skipped` exposes the same fail-open signal. The `findings`
-// list + ORDER is the parity-significant payload (byte-diffed against the frozen Python tuple).
+// list + ORDER is the parity-significant payload (byte-diffed against the Python tuple).
 //
 //  - `findings: tuple[ReviewFindingV1, ...]` → z.array(ReviewFindingV1).default([]) (the Python return).
 //  - `semantic_skipped: bool` → z.boolean().default(false). True iff the embedder failed (or returned

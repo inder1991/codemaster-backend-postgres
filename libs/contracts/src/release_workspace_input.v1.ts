@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of codemaster/activities/_workspace_release.py::ReleaseWorkspaceInput (frozen Python).
+// Zod port of codemaster/activities/_workspace_release.py::ReleaseWorkspaceInput.
 // Parity-validated in release_workspace_input.v1.parity.test.ts.
 //
 // Single typed positional input for the workspace-release activity (CLAUDE.md invariant 11 — single

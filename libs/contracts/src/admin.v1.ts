@@ -268,7 +268,7 @@ export const AddConfluenceSpaceRequestV1 = z
 export type AddConfluenceSpaceRequestV1 = z.infer<typeof AddConfluenceSpaceRequestV1>;
 
 // ─── Platform credentials (Vault KV-backed: confluence + embedder.qwen) ───────────────────────────
-// 1:1 port of contracts/admin/platform_credentials/v1.py. Secrets NEVER appear in any shape — GET
+// Platform credentials (contracts/admin/platform_credentials/v1.py). Secrets NEVER appear in any shape — GET
 // surfaces token_present:bool only.
 
 const PLATFORM_CREDENTIAL_KEY = z.enum(["confluence", "embedder.qwen"]);
@@ -383,8 +383,8 @@ export const NotificationRulesPageV1 = z
   .strict();
 export type NotificationRulesPageV1 = z.infer<typeof NotificationRulesPageV1>;
 
-// Cron validation for the WRITE request contracts (mirrors the Python `_cron_valid` field_validator, which
-// uses croniter). 1:1-DIVERGENCE: this is a STRUCTURAL validator (standard 5/6-field grammar + @macros),
+// Cron validation for the WRITE request contracts (mirrors `_cron_valid` field_validator semantics, which
+// uses croniter). DIVERGENCE: this is a STRUCTURAL validator (standard 5/6-field grammar + @macros),
 // not byte-identical to croniter — it rejects malformed input at 422 but may not match croniter on
 // pathological-yet-valid expressions (real notification crons are standard). Swap in a cron-parser dep
 // here if exact croniter parity is ever required.
@@ -484,7 +484,7 @@ export const LlmModelListV1 = z
 export type LlmModelListV1 = z.infer<typeof LlmModelListV1>;
 
 /** One purpose→model assignment in GET /api/admin/llm-purpose-routing.
- *  FAITHFUL-PORT: the enum mirrors the Python contract's 7 values; the DB CHECK also admits 'fix_prompt'
+ *  The enum carries 7 values (see Python contract); the DB CHECK also admits 'fix_prompt'
  *  (8th) — a row with that value would fail validation identically to the Python (parity preserved). */
 export const LlmPurposeModelV1 = z
   .object({
@@ -547,7 +547,7 @@ export const LlmProviderConfigV1 = z
   .strict();
 export type LlmProviderConfigV1 = z.infer<typeof LlmProviderConfigV1>;
 
-/** AWS region shape (Bedrock). 1:1 with the Python region Field pattern. */
+/** AWS region shape (Bedrock). */
 const LLM_REGION_RE = /^[a-z]{2}-[a-z]+-\d+$/;
 
 /**
@@ -1184,7 +1184,7 @@ export const RetrievalTraceListPageV1 = z
 export type RetrievalTraceListPageV1 = z.infer<typeof RetrievalTraceListPageV1>;
 
 // ─── Retrieval aggregates (GET /api/admin/retrieval-aggregates/{reviews,pull-requests}) ──────────────
-// 1:1 with contracts/admin/retrieval_aggregate/v1.py. metadata_as_of comes from
+// contracts/admin/retrieval_aggregate/v1.py. metadata_as_of comes from
 // `CURRENT_TIMESTAMP AT TIME ZONE 'UTC'` (a NAIVE timestamp string, no offset) so its datetime() guard
 // permits both offset-bearing and local (offset-less) forms. captured-at fields are timestamptz → offset.
 

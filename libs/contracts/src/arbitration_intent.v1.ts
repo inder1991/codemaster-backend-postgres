@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/arbitration_intent/v1.py::ArbitrationIntentV1 (frozen Python).
+// Zod port of contracts/arbitration_intent/v1.py::ArbitrationIntentV1.
 // Pydantic ConfigDict(extra="forbid", frozen=True) → .strict() (frozen is a TS-side concern, not wire).
 // Parity-validated in arbitration_intent.v1.parity.test.ts.
 //

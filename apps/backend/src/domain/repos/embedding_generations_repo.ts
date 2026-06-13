@@ -1,13 +1,10 @@
 /**
- * PostgresEmbeddingGenerationsRepo — 1:1 TypeScript port of the frozen Python
- * `vendor/codemaster-py/codemaster/embedder/generations_repo.py`.
- *
- * Pure I/O on `core.embedding_generations` (+ counts on `core.chunk_embeddings` /
+ * PostgresEmbeddingGenerationsRepo — pure I/O on `core.embedding_generations` (+ counts on `core.chunk_embeddings` /
  * `core.confluence_chunks` / `core.knowledge_chunks`). State-machine VALIDATION lives in the
  * EmbedderGenerationService (not ported here); this repo provides the raw read/write surface plus the
  * atomic state transitions whose SQL must satisfy the on-disk biconditional CHECKs.
  *
- * The load-bearing correctness properties (ported byte-faithfully from the Python):
+ * The load-bearing correctness properties:
  *   - insertNew uses the bigint SEQUENCE default (generation_id allocated by the DB) + RETURNING.
  *   - Every transition writes `state` AND its paired timestamp(s) ATOMICALLY so the on-disk
  *     `embedding_generations_state_biconditional` CHECK holds. A transition that set `state` without its
@@ -24,8 +21,7 @@
  *
  * ADR-0062 (Postgres connection-pool lifecycle): this repo owns NO pool/engine cache. It is handed a
  * `Kysely<unknown>` over the process-wide single pool (via {@link tenantKysely}); transitions run inside
- * `db.transaction()` so the two-statement transitionToActive is atomic (mirroring the Python
- * `async with session.begin()`).
+ * `db.transaction()` so the two-statement transitionToActive is atomic.
  */
 
 import { type Kysely, sql, type Transaction } from "kysely";
@@ -35,7 +31,7 @@ import type {
   RetireReason,
 } from "#contracts/embedding_generation.v1.js";
 
-// The full column projection (1:1 with the Python `_GEN_COLUMNS`), in the dataclass field order.
+// The full column projection, in the dataclass field order.
 const GEN_COLUMNS = sql`
   generation_id, state, generation_label, generation_reason,
   provider_name, provider_version, model_name, embedding_dimension,
@@ -67,7 +63,7 @@ type RawGenRow = {
   backfill_completed_at: Date | null;
   validation_started_at: Date | null;
   validation_completed_at: Date | null;
-  // pg parses a JSONB column to an already-deserialized object/array (mirrors asyncpg in the Python).
+  // pg parses a JSONB column to an already-deserialized object/array.
   validation_report_json: unknown;
   validation_passed: boolean | null;
   activated_at: Date | null;
@@ -82,12 +78,11 @@ type RawGenRow = {
 };
 
 /**
- * Map a raw DB row to the typed contract row (1:1 with the Python `_row_to_dataclass`).
+ * Map a raw DB row to the typed contract row.
  *
- * The `validation_report_json` branch mirrors the Python exactly: pg (like asyncpg) deserializes a JSONB
- * column to a Python `dict`/`list` (here: a JS object/array), so we re-encode to canonical JSON TEXT via
- * `JSON.stringify`; the legacy code path where the driver returns the raw text payload is preserved via
- * the `String(...)` fallback.
+ * The `validation_report_json` branch: pg deserializes a JSONB column to a JS object/array, so we
+ * re-encode to canonical JSON TEXT via `JSON.stringify`; the legacy code path where the driver returns
+ * the raw text payload is preserved via the `String(...)` fallback.
  */
 function rowToContract(m: RawGenRow): EmbeddingGenerationRowV1 {
   const report = m.validation_report_json;
@@ -141,13 +136,12 @@ export class PostgresEmbeddingGenerationsRepo {
   }
 
   /**
-   * Insert a fresh generation in state 'backfilling' (1:1 with the Python `insert_new`).
+   * Insert a fresh generation in state 'backfilling'.
    *
    * generation_id is allocated by the bigint SEQUENCE (the column DEFAULT); `backfill_started_at = now()`
    * satisfies the backfilling biconditional. RETURNING projects the full row.
    *
-   * Defaults match the Python keyword defaults: chunker/preprocessing/normalization version "1",
-   * provider_name "qwen", provider_version null.
+   * Defaults: chunker/preprocessing/normalization version "1", provider_name "qwen", provider_version null.
    */
   public async insertNew(args: {
     modelName: string;
@@ -195,7 +189,7 @@ export class PostgresEmbeddingGenerationsRepo {
     });
   }
 
-  /** Fetch one generation by id, or null if absent (1:1 with the Python `get`). */
+  /** Fetch one generation by id, or null if absent. */
   public async get(generationId: number): Promise<EmbeddingGenerationRowV1 | null> {
     // tenant:exempt reason=embedder-platform-wide follow_up=PERMANENT-EXEMPTION-embedder
     const result = await sql<RawGenRow>`
@@ -205,7 +199,7 @@ export class PostgresEmbeddingGenerationsRepo {
     return row === undefined ? null : rowToContract(row);
   }
 
-  /** The N most-recent generations, newest-first (1:1 with the Python `list_recent`). */
+  /** The N most-recent generations, newest-first. */
   public async listRecent(limit = 20): Promise<ReadonlyArray<EmbeddingGenerationRowV1>> {
     // tenant:exempt reason=embedder-platform-wide follow_up=PERMANENT-EXEMPTION-embedder
     const result = await sql<RawGenRow>`
@@ -216,7 +210,7 @@ export class PostgresEmbeddingGenerationsRepo {
   }
 
   /**
-   * Update backfill progress counters (1:1 with the Python `update_backfill_progress`). When
+   * Update backfill progress counters. When
    * `totalChunks` is supplied it is updated too; otherwise it is left untouched.
    */
   public async updateBackfillProgress(args: {
@@ -249,8 +243,8 @@ export class PostgresEmbeddingGenerationsRepo {
   }
 
   /**
-   * backfilling → ready (1:1 with the Python `transition_to_ready`). Sets `backfill_completed_at = now()`
-   * so the ready biconditional holds; only fires when the row is currently 'backfilling'.
+   * backfilling → ready. Sets `backfill_completed_at = now()` so the ready biconditional holds;
+   * only fires when the row is currently 'backfilling'.
    */
   public async transitionToReady(generationId: number): Promise<void> {
     await this.db.transaction().execute(async (txTyped) => {
@@ -265,8 +259,7 @@ export class PostgresEmbeddingGenerationsRepo {
   }
 
   /**
-   * Promote `generationId` to 'active', enforcing the SINGLE-ACTIVE invariant (1:1 with the Python
-   * `transition_to_active`).
+   * Promote `generationId` to 'active', enforcing the SINGLE-ACTIVE invariant.
    *
    * Two statements in ONE transaction:
    *   1. Demote ANY currently-active generation (other than the target) to 'ready': clear activated_at,
@@ -298,8 +291,8 @@ export class PostgresEmbeddingGenerationsRepo {
   }
 
   /**
-   * backfilling|ready → retired (1:1 with the Python `transition_to_retired`). Sets retired_at = now()
-   * and retire_reason (the retire_reason biconditional holds). Only fires on 'backfilling'/'ready'.
+   * backfilling|ready → retired. Sets retired_at = now() and retire_reason (the retire_reason
+   * biconditional holds). Only fires on 'backfilling'/'ready'.
    */
   public async transitionToRetired(
     generationId: number,
@@ -317,8 +310,8 @@ export class PostgresEmbeddingGenerationsRepo {
   }
 
   /**
-   * Record a validation run (1:1 with the Python `record_validation`). Stamps validation_started_at
-   * (only if NULL), validation_completed_at = now(), the report (CAST to jsonb), and the pass flag.
+   * Record a validation run. Stamps validation_started_at (only if NULL),
+   * validation_completed_at = now(), the report (CAST to jsonb), and the pass flag.
    */
   public async recordValidation(args: {
     generationId: number;
@@ -339,7 +332,7 @@ export class PostgresEmbeddingGenerationsRepo {
     });
   }
 
-  /** Stamp gc_started_at = now() (1:1 with the Python `record_gc_started`). */
+  /** Stamp gc_started_at = now(). */
   public async recordGcStarted(generationId: number): Promise<void> {
     await this.db.transaction().execute(async (txTyped) => {
       const tx = txTyped as unknown as Transaction<unknown>;
@@ -350,7 +343,7 @@ export class PostgresEmbeddingGenerationsRepo {
     });
   }
 
-  /** Stamp gc_completed_at = now() (1:1 with the Python `record_gc_completed`). */
+  /** Stamp gc_completed_at = now(). */
   public async recordGcCompleted(generationId: number): Promise<void> {
     await this.db.transaction().execute(async (txTyped) => {
       const tx = txTyped as unknown as Transaction<unknown>;
@@ -362,8 +355,7 @@ export class PostgresEmbeddingGenerationsRepo {
   }
 
   /**
-   * Record the last error, truncated to 8192 chars (1:1 with the Python `record_error`, where
-   * `error_msg[:8192]` bounds the column write).
+   * Record the last error, truncated to 8192 chars (`error_msg[:8192]` bounds the column write).
    */
   public async recordError(args: { generationId: number; errorMsg: string }): Promise<void> {
     const truncated = args.errorMsg.slice(0, 8192);
@@ -377,8 +369,7 @@ export class PostgresEmbeddingGenerationsRepo {
   }
 
   /**
-   * Count canonical (live) chunks across the two corpora (1:1 with the Python `count_canonical_chunks`).
-   * Filters per the canonical-chunks-schema memory:
+   * Count canonical (live) chunks across the two corpora. Filters per the canonical-chunks-schema memory:
    *   confluence_chunks: deleted_at IS NULL AND superseded_at IS NULL
    *   knowledge_chunks:  doc_status = 'active'
    */
@@ -401,7 +392,7 @@ export class PostgresEmbeddingGenerationsRepo {
     };
   }
 
-  /** Count chunk_embeddings rows under a generation (1:1 with the Python `count_chunk_embeddings`). */
+  /** Count chunk_embeddings rows under a generation. */
   public async countChunkEmbeddings(generationId: number): Promise<number> {
     // tenant:exempt reason=embedder-platform-wide follow_up=PERMANENT-EXEMPTION-embedder
     const result = await sql<{ count: string | number }>`
@@ -411,7 +402,7 @@ export class PostgresEmbeddingGenerationsRepo {
   }
 
   /**
-   * v4 §8 Phase B coverage gate (1:1 with the Python `count_coverage_gap`): count canonical chunks with
+   * v4 §8 Phase B coverage gate: count canonical chunks with
    * NO chunk_embeddings row under `activeGeneration`. Returns [confluence_missing, knowledge_missing];
    * both should be 0 before flipping retrieval_mode to 'generation_only'.
    */

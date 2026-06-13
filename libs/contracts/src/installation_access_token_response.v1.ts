@@ -1,7 +1,7 @@
 import { z } from "zod";
 
-// Zod port of the `InstallationAccessTokenResponseV1` Pydantic model defined in the frozen Python
-// module `contracts/integrations/github_app/v1.py` (Sprint 15 / S15.X-token-provider). This is the
+// Zod port of the `InstallationAccessTokenResponseV1` Pydantic model
+// (contracts/integrations/github_app/v1.py, Sprint 15 / S15.X-token-provider). This is the
 // RESPONSE envelope for GitHub's `POST /app/installations/{id}/access_tokens` endpoint — the full
 // shape GitHub sends, including `permissions` + `repository_selection` we validate on the wire but
 // don't currently cache. (The CACHE envelope — just token + expires_at — is `installation_token.v1`.)

@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { ManifestSnapshot } from "./pr_context.v1.js";
 
-// Zod port of contracts/fetch_manifest_snapshots/v1.py (frozen Python). Parity-validated in
+// Zod port of contracts/fetch_manifest_snapshots/v1.py. Parity-validated in
 // fetch_manifest_snapshots.v1.parity.test.ts.
 //
 // SHA-scoped (NOT pr_number-scoped) I/O contracts for `fetch_manifest_snapshots_activity`.

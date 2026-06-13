@@ -1,9 +1,5 @@
 /**
- * PostgresCodeOwnersRepo — 1:1 TS port of the frozen
- * `vendor/codemaster-py/codemaster/domain/repos/code_owners_repo.py`
- * (`PostgresCodeOwnersRepo`).
- *
- * Async repo over `core.code_owners`. Two public operations, ported method-for-method:
+ * PostgresCodeOwnersRepo — async repo over `core.code_owners`. Two public operations:
  *
  *  - {@link PostgresCodeOwnersRepo.upsertRules} — bulk INSERT with
  *    `ON CONFLICT (repository_id, path_pattern, source_file_sha) DO NOTHING`.
@@ -19,8 +15,7 @@
  * explicit `installation_id`; the single read filters `WHERE installation_id = :iid`. The
  * repo's {@link Kysely} instance installs the `TenancyPlugin` (centrally, via {@link tenantKysely})
  * for defense-in-depth on any future builder-shaped query (raw `sql\`\`` templates bypass the AST
- * walk by design — the tenancy is carried explicitly in the WHERE here, mirroring the frozen Python
- * `text()` SQL).
+ * walk by design — the tenancy is carried explicitly in the WHERE here).
  *
  * Schema (confirmed live against the disposable PG, `\d core.code_owners`):
  *   code_owner_id   uuid        PK, default gen_random_uuid()
@@ -49,10 +44,8 @@ import type { CodeOwnerRuleV1 } from "#contracts/code_owner_rule.v1.js";
 import { tenantKysely } from "#platform/db/database.js";
 
 /**
- * The parser's rule shape — TS port of
- * `vendor/codemaster-py/codemaster/integrations/github/codeowners_parser.py::CodeOwnerRule`.
- *
- * `listRulesForRepository` returns this (not the wire envelope {@link CodeOwnerRuleV1}) because
+ * The parser's rule shape returned by `listRulesForRepository` (not the wire envelope
+ * {@link CodeOwnerRuleV1}) because
  * the downstream `rank_suggested_reviewers` pure function expects it. `line_number` is the
  * 1-indexed source-file line for diagnostics; the DB persists by-rule (not by-line), so the
  * read path sets it to 0 exactly as the Python source does.
@@ -113,9 +106,8 @@ export class PostgresCodeOwnersRepo {
    * no-ops). When the source file's SHA matches an already-persisted batch, every row
    * no-ops and the return value is 0. Empty `rules` returns 0 without touching the DB.
    *
-   * 1:1 with `code_owners_repo.py::upsert_rules`: one transaction per call,
-   * caller-independent; `synced_at` is set to `now()` by the DB (server clock — no client
-   * wall-clock involved).
+   * One transaction per call, caller-independent; `synced_at` is set to `now()` by the DB (server
+   * clock — no client wall-clock involved).
    */
   async upsertRules(args: {
     installationId: string;
@@ -156,8 +148,7 @@ export class PostgresCodeOwnersRepo {
   }
 
   /**
-   * Return every CURRENT CODEOWNERS rule for one repository (1:1 with
-   * `code_owners_repo.py::list_rules_for_repository`).
+   * Return every CURRENT CODEOWNERS rule for one repository.
    *
    * Tenancy-isolated by `installation_id`. Source-file-SHA dedup: the table can hold
    * multiple rows for the same `(repository_id, path_pattern)` across SHAs (the UNIQUE

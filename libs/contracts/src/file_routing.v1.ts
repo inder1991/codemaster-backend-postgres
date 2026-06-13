@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { FileClassificationV1 } from "./file_classification.v1.js";
 
-// Zod port of contracts/file_routing/v1.py::FileRoutingV1 (frozen Python).
+// Zod port of contracts/file_routing/v1.py::FileRoutingV1.
 // Pydantic ConfigDict(extra="forbid", frozen=True) → .strict() (frozen is a TS-side concern, not wire).
 // Parity-validated in file_routing.v1.parity.test.ts.
 //

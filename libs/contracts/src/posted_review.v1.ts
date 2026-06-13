@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { DroppedClassificationV1 } from "./dropped_classification.v1.js";
 
-// Zod port of contracts/posted_review/v1.py (frozen Python). Parity-validated in
+// Zod port of contracts/posted_review/v1.py. Parity-validated in
 // posted_review.v1.parity.test.ts.
 //
 // Source models / enums / constants ported (every public one):

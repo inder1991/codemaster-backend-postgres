@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/secret_detection/v1.py::SecretFindingV1 (frozen Python).
+// Zod port of contracts/secret_detection/v1.py::SecretFindingV1.
 // Pydantic ConfigDict(extra="forbid", frozen=True) → .strict() (frozen is a TS-side concern, not
 // wire). Parity-validated in secret_detection.v1.parity.test.ts.
 //

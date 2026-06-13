@@ -1,5 +1,4 @@
-// Workflow silent-degradation gate (ts-morph port of the frozen Python gate
-// vendor/codemaster-py/scripts/check_workflow_silent_degradation.py).
+// Workflow silent-degradation gate.
 //
 // Refuses `try { ... } catch { ... }` sites in workflow/pipeline/runner code that swallow a failure
 // SILENTLY — neither propagating it, nor logging it, nor recording it. The smoke-#5..#8
@@ -13,13 +12,12 @@
 // COMPLIANCE PATHS — a catch clause is compliant when ANY of these holds:
 //
 //   1. The TRY body uses `stageOutcome` at ANY nesting depth (bare `stageOutcome(...)` or property
-//      `x.stageOutcome(...)`). 1:1 with the Python rule 1 (`stage_outcome` Name/Attribute call,
-//      "transitively — at any nesting depth"; includes the raiseAfterLog=true outer-catch pattern).
+//      `x.stageOutcome(...)`; includes the raiseAfterLog=true outer-catch pattern).
 //      Helpers that themselves wrap stageOutcome are out of scope for v1 — only the bare name is
-//      matched (same v1 boundary as the Python).
+//      matched.
 //
-//   2. The CATCH block contains a TOP-LEVEL `throw` statement. 1:1 with the Python rule 2: the gate
-//      is STRICT on top-level — a conditional re-throw (`if (fatal) throw e;`) does NOT count; the
+//   2. The CATCH block contains a TOP-LEVEL `throw` statement. The gate is STRICT on top-level —
+//      a conditional re-throw (`if (fatal) throw e;`) does NOT count; the
 //      swallow path through the false branch is still a silent degradation.
 //
 //   3. The CATCH block LOGS the failure at warning+ severity or RECORDS it (TS-surface extension —
@@ -52,11 +50,11 @@
 //      Both reason= and follow_up= are mandatory. Prefer the marker for one-offs.
 //
 //   7. The site is in EXEMPTED (key `<repo-relative-path>::<try-line>`, the try statement being the
-//      structural anchor — 1:1 with the Python key shape). Every entry MUST carry a
+//      structural anchor). Every entry MUST carry a
 //      follow_up_story per S23.AR.17 P-2 rotation discipline; the meta-gates
 //      (check_exempted_lists_pointed / check_exempted_rotation_age) walk this registry.
 //
-// DELTAS from the frozen Python gate (each widens compliance, never narrows it):
+// DELTAS from the original gate spec (each widens compliance, never narrows it):
 //   * Python matched only `except Exception` / bare `except:`; a TS catch is ALWAYS untyped
 //     (catches everything), so every catch clause is in scope — the typed-handler carve-out has no
 //     TS analogue.
@@ -71,7 +69,7 @@
 //     only; the method-call shape has no analogue there). Same v1 boundary discipline as the
 //     Python's helper-wrapper carve-out.
 //
-// SCOPE — the TS equivalent of the Python's `codemaster/workflows/*.py`:
+// SCOPE:
 //     apps/backend/src/workflows/**       (Temporal workflow bodies)
 //     apps/backend/src/review/pipeline/** (the workflow-body pipeline the workflows drive)
 //     apps/backend/src/runner/**          (the de-temporal runner loops + handlers — the in-process
@@ -105,10 +103,7 @@ export type ExemptedEntry = {
 // ── EXEMPTED registry ────────────────────────────────────────────────────────────────────────────
 //
 // Key shape: "<repo-relative path>::<line_no>" — line is the line of the `try` statement (the
-// structural anchor of the pattern, and the line the gate reports on violations). 1:1 with the
-// Python registry's key shape. Day-one state (2026-06-11 port): 8 entries, every one a judged
-// by-design pattern (fail-open contracts, output-contract recording, logging-layer defense, the
-// retry primitive) — the TS analogues of the Python's PERMANENT-EXEMPTION families. Line drift on
+// structural anchor of the pattern, and the line the gate reports on violations). Line drift on
 // any of these files moves the key; the real-repo smoke in
 // test/gates/check_workflow_silent_degradation.test.ts pins raw-violations == registry keys so a
 // drifted entry fails loud instead of silently un-exempting.
@@ -247,7 +242,7 @@ function tryBlockUsesStageOutcome(tryBlock: Block): boolean {
 }
 
 /** Rule 2: a `throw` as a DIRECT child statement of the catch block. Strict on top-level — a
- *  conditional re-throw leaves the false branch silent and does NOT count (1:1 with the Python). */
+ *  conditional re-throw leaves the false branch silent and does NOT count. */
 function catchHasTopLevelThrow(catchBlock: Block): boolean {
   return catchBlock.getStatements().some((s) => Node.isThrowStatement(s));
 }
@@ -321,7 +316,7 @@ export function main(): number {
   const violations = findSilentDegradationViolations(project);
 
   if (violations.length === 0) {
-    // Count the scanned surface for operator-visible signal — mirrors the Python gate's [OK] line.
+    // Count the scanned surface for operator-visible signal.
     let files = 0;
     let catchSites = 0;
     for (const sf of project.getSourceFiles()) {

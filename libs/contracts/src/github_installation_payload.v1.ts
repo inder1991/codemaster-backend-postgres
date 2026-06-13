@@ -3,7 +3,7 @@ import { z } from "zod";
 import { GitHubAccountV1, GitHubInstallationV1 } from "./github_pull_request_payload.v1.js";
 
 // Zod port of the `installation` + `installation_repositories` webhook event contracts in
-// contracts/integrations/github_payloads/v1.py (frozen Python, read 2026-06-07). These are the
+// contracts/integrations/github_payloads/v1.py (read 2026-06-07). These are the
 // TRUST-TIER boundary contracts: the raw webhook body is validated against them before any internal
 // id resolution / outbox enqueue.
 //
@@ -21,8 +21,8 @@ import { GitHubAccountV1, GitHubInstallationV1 } from "./github_pull_request_pay
 /**
  * GitHub's `repository` object (subset).
  *
- * 1:1 with the frozen Python `GitHubRepositoryV1` (v1.py:98-112): id (int), full_name (1..200),
- * default_branch (default "main"), archived (default false), owner (GitHubAccountV1, required).
+ * Fields: id (int), full_name (1..200), default_branch (default "main"), archived (default false),
+ * owner (GitHubAccountV1, required).
  * `owner.login` feeds the v2 outbox enrichment / PR-backfill installation-account synthesis.
  */
 export const GitHubRepositoryV1 = z.object({
@@ -37,8 +37,7 @@ export type GitHubRepositoryV1 = z.infer<typeof GitHubRepositoryV1>;
 /**
  * `installation` event payload — created / deleted / suspended / unsuspended.
  *
- * 1:1 with the frozen Python `GitHubInstallationPayloadV1` (v1.py:43-51). `ConfigDict(extra="ignore")`
- * → default `.strip()` (NO `.strict()`). The producer normalizes the GitHub webhook actions
+ * `ConfigDict(extra="ignore")` → default `.strip()` (NO `.strict()`). The producer normalizes the GitHub webhook actions
  * "suspend" → "suspended" / "unsuspend" → "unsuspended" BEFORE validation, so the action enum here is
  * the already-normalized 4-value vocabulary (no "updated"; that lives only on the RESULT contract).
  */
@@ -53,7 +52,6 @@ export type GitHubInstallationPayloadV1 = z.infer<typeof GitHubInstallationPaylo
 /**
  * `installation_repositories` event payload — added / removed.
  *
- * 1:1 with the frozen Python `GitHubInstallationRepositoriesPayloadV1` (v1.py:115-125).
  * `ConfigDict(extra="ignore")` → default `.strip()`. The two repo arrays default to `[]`
  * (`Field(default_factory=list)`); the activity reads repo.id / full_name / default_branch / archived
  * (owner is carried but unused on this path).

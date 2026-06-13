@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/tool_status/v1.py::ToolStatusV1 (frozen Python).
+// Zod port of contracts/tool_status/v1.py::ToolStatusV1.
 // Pydantic ConfigDict(extra="forbid", frozen=True) → .strict() (frozen is a TS-side concern, not wire).
 // Parity-validated in tool_status.v1.parity.test.ts.
 //

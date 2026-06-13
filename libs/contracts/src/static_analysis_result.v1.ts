@@ -4,7 +4,7 @@ import { AnalysisFindingV1 } from "./analysis_findings.v1.js";
 import { ReviewFindingV1 } from "./review_findings.v1.js";
 import { ToolStatusV1 } from "./tool_status.v1.js";
 
-// Zod port of contracts/static_analysis_result/v1.py::StaticAnalysisResultV1 (frozen Python).
+// Zod port of contracts/static_analysis_result/v1.py::StaticAnalysisResultV1.
 // Pydantic ConfigDict(extra="forbid", frozen=True) → .strict() (frozen is a TS-side concern, not wire).
 // Parity-validated in static_analysis_result.v1.parity.test.ts.
 //

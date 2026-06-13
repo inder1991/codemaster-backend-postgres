@@ -1,8 +1,6 @@
 import { z } from "zod";
 
-// Zod port of the inline activity-result model in
-// vendor/codemaster-py/codemaster/review/fix_prompt_theme_activity.py::FixPromptActivityResultV1
-// (frozen Python). Parity-validated in fix_prompt_activity_result.v1.parity.test.ts.
+// Zod port of FixPromptActivityResultV1. Parity-validated in fix_prompt_activity_result.v1.parity.test.ts.
 //
 // FixPromptActivityResultV1 is the return shape of `generate_fix_prompt_activity` — a small status
 // envelope the workflow body reads (did we generate a prompt? in which mode? did the advisory PR comment

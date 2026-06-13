@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/code_owner_rule/v1.py::CodeOwnerRuleV1 (frozen Python).
+// Zod port of contracts/code_owner_rule/v1.py::CodeOwnerRuleV1.
 // Pydantic ConfigDict(extra="forbid", frozen=True) → .strict() (frozen is a TS-side concern, not wire).
 // Parity-validated in code_owner_rule.v1.parity.test.ts.
 //
@@ -20,7 +20,7 @@ import { z } from "zod";
 //    ISO-8601 string on the wire (a non-null datetime equality-diff is harness-asymmetric — see the
 //    parity test's accept-only case, mirroring pr_file.v1's created_at handling).
 
-// Mirrors the Python `source_file_sha` Field(pattern=...) — a 40-char lowercase-hex Git blob SHA-1.
+// `source_file_sha` pattern — a 40-char lowercase-hex Git blob SHA-1.
 export const SOURCE_FILE_SHA_PATTERN = /^[a-f0-9]{40}$/;
 
 export const CodeOwnerRuleV1 = z

@@ -1,29 +1,22 @@
 /**
- * ArbitrationRejectionsRepo — 1:1 TypeScript/Kysely port of the frozen Python repo
- * `vendor/codemaster-py/codemaster/domain/repos/arbitration_rejections_repo.py`
- * (`PostgresArbitrationRejectionsRepo`, 2026-05-19 Phase D observability-gap fix).
+ * ArbitrationRejectionsRepo — one row per {@link RejectedIntent} emitted by the arbitration layer,
+ * over `core.arbitration_rejections` (2026-05-19 Phase D observability-gap fix).
+ * (migration 0086). Closes the observability gap surfaced by smoke-#18 — before this the rejection
+ * signal was computed and thrown away.
  *
- * One row per {@link RejectedIntent} emitted by the arbitration layer, over `core.arbitration_rejections`
- * (migration 0086). Closes the observability gap surfaced by smoke-#18 — before this the rejection signal
- * was computed and thrown away.
- *
- * Faithful to the Python source:
- *
- *  - **Single public method `insertRejection`** — exactly the method set of the Python port
- *    (`insert_rejection`).
+ *  - **Single public method `insertRejection`**.
  *
  *  - **Idempotency via `ON CONFLICT (run_id, target_finding_id, reason_rejected) DO NOTHING`.** The UNIQUE
  *    `(run_id, target_finding_id, reason_rejected)` constraint (`uq_arbitration_rejections_run_target_reason`)
  *    absorbs Temporal retries of the same `apply_arbitration` activity invocation — the same workflow replay
  *    re-firing the activity produces ZERO row drift.
  *
- *  - **Tenancy.** `installation_id` is in the INSERT column/VALUES list directly, exactly as the Python SQL.
- *    INSERT carries no WHERE clause, so the {@link TenancyPlugin} (which gates only SELECT/UPDATE/DELETE) does
- *    not fire on the write; the plugin is nonetheless installed centrally by {@link tenantKysely}.
+ *  - **Tenancy.** `installation_id` is in the INSERT column/VALUES list directly. INSERT carries no
+ *    WHERE clause, so the {@link TenancyPlugin} (which gates only SELECT/UPDATE/DELETE) does not fire
+ *    on the write; the plugin is nonetheless installed centrally by {@link tenantKysely}.
  *
- *  - **`intent_confidence` is bound as the canonical-decimal STRING** (or null) the arbitration layer carries
- *    — the `numeric` column ingests the string losslessly (no float round-trip), mirroring the Python
- *    `Decimal | None` bind.
+ *  - **`intent_confidence` is bound as the canonical-decimal STRING** (or null) the arbitration layer
+ *    carries — the `numeric` column ingests the string losslessly (no float round-trip).
  *
  * ADR-0062 (Postgres connection-pool lifecycle): this repo owns NO `pg.Pool`, constructs no `new Kysely(...)`,
  * memoizes neither. It is handed a `Kysely<ArbitrationRejectionsDB>` over the process-wide single pool from
@@ -62,12 +55,12 @@ type ArbitrationRejectionsDB = {
   "core.arbitration_rejections": ArbitrationRejectionsTable;
 };
 
-// ── Public input shape (mirrors the Python keyword-only signature) ──
+// ── Public input shape ──
 
 /**
- * Arguments to {@link ArbitrationRejectionsRepo.insertRejection}, mirroring the Python `insert_rejection`
- * keyword-only signature 1:1. `intentConfidence` is the canonical-decimal string (or null) — NOT a number,
- * to preserve the Decimal's textual form into the `numeric` column.
+ * Arguments to {@link ArbitrationRejectionsRepo.insertRejection}. `intentConfidence` is the
+ * canonical-decimal string (or null) — NOT a number, to preserve the Decimal's textual form into the
+ * `numeric` column.
  */
 export type InsertRejectionInput = {
   installationId: string;
@@ -81,7 +74,7 @@ export type InsertRejectionInput = {
   suppressionPromptVersion: string | null;
 };
 
-/** Repo port consumed by the Phase D arbitration-apply path (analogue of `ArbitrationRejectionsRepoPort`). */
+/** Repo port consumed by the Phase D arbitration-apply path. */
 export type ArbitrationRejectionsRepoPort = {
   /**
    * Insert one `core.arbitration_rejections` row. Idempotent via `ON CONFLICT (run_id, target_finding_id,
@@ -119,8 +112,8 @@ export class ArbitrationRejectionsRepo implements ArbitrationRejectionsRepoPort 
   }
 
   async insertRejection(input: InsertRejectionInput): Promise<void> {
-    // 1:1 with the Python INSERT: same 9 columns, ON CONFLICT (run_id, target_finding_id, reason_rejected)
-    // DO NOTHING. installation_id is in the VALUES list (tenancy satisfied at the literal-SQL level).
+    // ON CONFLICT (run_id, target_finding_id, reason_rejected) DO NOTHING — 9 columns;
+    // installation_id is in the VALUES list (tenancy satisfied at the literal-SQL level).
     await this.#db
       .insertInto("core.arbitration_rejections")
       .values({

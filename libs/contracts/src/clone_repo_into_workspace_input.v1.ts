@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { WorkspaceHandle } from "./workspace_handle.v1.js";
 
-// Zod port of codemaster/activities/_workspace_clone.py::CloneRepoIntoWorkspaceInput (frozen Python).
+// Zod port of codemaster/activities/_workspace_clone.py::CloneRepoIntoWorkspaceInput.
 // Parity-validated in clone_repo_into_workspace_input.v1.parity.test.ts.
 //
 // Single typed positional input for the workspace-aware clone activity (Phase 6 Task 18).
@@ -27,7 +27,7 @@ export const CloneRepoIntoWorkspaceInput = z
     // ALONE among the GitHub activity inputs: the clone is dispatched UNCONDITIONALLY on the spine and the
     // workflow payload's github_installation_id is itself nullable — so the contract accepts null and the
     // clone ACTIVITY fail-closes (CloneFailedError) on a null id rather than the contract rejecting it.
-    // TS-only field, absent in the frozen Python CloneRepoIntoWorkspaceInput; the parity test strips it.
+    // TS-only field; the parity test strips it.
     github_installation_id: z.number().int().gte(0).nullable().default(null),
     changed_paths: z.array(z.string()),
     pr_number: z.number().int().nullable().default(null),

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/guideline_files/v1.py (frozen Python). Parity-validated in
+// Zod port of contracts/guideline_files/v1.py. Parity-validated in
 // guideline_files.v1.parity.test.ts.
 //
 // Source models / enums / constants ported (every public one):

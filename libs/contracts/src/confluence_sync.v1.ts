@@ -3,7 +3,7 @@ import { z } from "zod";
 import { DefaultApprovalV1 } from "./page_approval.v1.js";
 import { SanitizedPageV1 } from "./sanitized_page.v1.js";
 
-// Zod port of contracts/confluence_sync/v1.py (frozen Python — Sub-spec A T11 + T12). Parity-validated
+// Zod port of contracts/confluence_sync/v1.py (Sub-spec A T11 + T12). Parity-validated
 // in confluence_sync.v1.parity.test.ts. Every model carries the dunder marker
 // `__contract_internal__ = True` (a class attribute, NOT a model field) so it never appears in
 // model_dump(mode="json") — nothing to port on the wire.

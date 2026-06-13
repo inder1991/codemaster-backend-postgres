@@ -1,9 +1,6 @@
 /**
- * Repo for `core.fix_prompts` (fix-prompt feature) — a 1:1 Kysely port of the frozen Python
- * `vendor/codemaster-py/codemaster/domain/repos/fix_prompt_repo.py::FixPromptRepo`.
- *
- * Idempotent upsert keyed by `review_id` (replay/retry-safe) + tenancy-scoped read. Mirrors the
- * Python repo method-for-method:
+ * Repo for `core.fix_prompts` (fix-prompt feature). Idempotent upsert keyed by `review_id`
+ * (replay/retry-safe) + tenancy-scoped read. Methods:
  *   - persist(record, { installationId })        → INSERT … ON CONFLICT (review_id) DO UPDATE …
  *   - getByReviewId(reviewId, { installationId }) → SELECT … WHERE review_id = :r AND installation_id = :i
  *

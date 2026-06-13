@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of the RETURN contracts of the two reconcile activities (frozen Python, read 2026-06-07):
+// Zod port of the RETURN contracts of the two reconcile activities (read 2026-06-07):
 //  - ReconcileInstallationResultV1  — codemaster/activities/reconcile_installation.py:40-46
 //  - ReconcileRepositoriesResultV1  — codemaster/activities/reconcile_repositories.py:30-35
 // Both use `ConfigDict(extra="forbid")` → `.strict()`.
@@ -11,7 +11,7 @@ import { z } from "zod";
 /**
  * Return contract of `reconcile_installation_activity`.
  *
- * 1:1 with the frozen Python (reconcile_installation.py:40-46, `ConfigDict(extra="forbid")` → .strict()):
+ * Pydantic model (reconcile_installation.py:40-46, `ConfigDict(extra="forbid")` → .strict()):
  *  - schema_version: int = 1                → z.number().int().default(1)
  *  - action: Literal[5 values]              → z.enum([...])  (NOTE the RESULT enum carries "updated",
  *      which the INPUT GitHubInstallationPayloadV1.action does NOT — the activity maps a re-applied
@@ -19,7 +19,7 @@ import { z } from "zod";
  *  - installation_id: uuid.UUID             → z.string().uuid()  (UUID lowercased on model_dump json)
  *  - user_id: uuid.UUID | None              → z.string().uuid().nullable()
  *
- * PARITY NOTE (divergence from the task's "default null" instruction): the frozen Python field
+ * PARITY NOTE (divergence from the task's "default null" instruction): the Python field
  * `user_id: uuid.UUID | None` has NO default assignment → it is REQUIRED-but-nullable in Pydantic v2
  * (the key must be present; the value may be None). Faithful 1:1 keeps it required (no `.default(null)`);
  * the activity always passes `user_id=...` so the key is always present in practice.
@@ -37,7 +37,7 @@ export type ReconcileInstallationResultV1 = z.infer<typeof ReconcileInstallation
 /**
  * Return contract of `reconcile_repositories_activity`.
  *
- * 1:1 with the frozen Python (reconcile_repositories.py:30-35, `ConfigDict(extra="forbid")` → .strict()):
+ * Pydantic model (reconcile_repositories.py:30-35, `ConfigDict(extra="forbid")` → .strict()):
  *  - schema_version: int = 1   → z.number().int().default(1)
  *  - added: int                → z.number().int()  (REQUIRED, no default — the activity always passes it)
  *  - removed: int              → z.number().int()  (REQUIRED, no default)

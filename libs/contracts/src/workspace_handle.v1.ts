@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of codemaster/workspace/_handle.py::WorkspaceHandle (frozen Python).
+// Zod port of codemaster/workspace/_handle.py::WorkspaceHandle.
 // Parity-validated in workspace_handle.v1.parity.test.ts.
 //
 // Pydantic ConfigDict(frozen=True, extra="forbid") → .strict() (frozen is a TS-side immutability

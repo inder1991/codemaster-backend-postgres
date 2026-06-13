@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { z } from "zod";
 
-// Zod port of contracts/diff_chunking/v1.py::DiffChunkV1 (frozen Python).
+// Zod port of contracts/diff_chunking/v1.py::DiffChunkV1.
 // Pydantic ConfigDict(extra="forbid", frozen=True) → .strict() (frozen is a TS-side concern, not wire).
 // Parity-validated in diff_chunking.v1.parity.test.ts.
 
@@ -76,7 +76,7 @@ function uuid5(namespace: string, name: string): string {
  * Returns UUIDv5 of (path, start_line, end_line, sha256(body)) namespaced under
  * CHUNK_ID_NAMESPACE. Same inputs → same id across runs → replay-safe. The body is
  * sha256-hashed first so the UUIDv5 name stays bounded for tens-of-KB chunk bodies.
- * Cross-language value-parity with the frozen Python helper is asserted in the parity test.
+ * Cross-language value-parity is asserted in the parity test.
  */
 export function computeChunkId(args: {
   path: string;

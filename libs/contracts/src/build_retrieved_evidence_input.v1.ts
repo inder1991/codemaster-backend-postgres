@@ -7,12 +7,11 @@ import { PRTopologyEntryV1 } from "./pr_topology.v1.js";
 import { ToolStatusV1 } from "./tool_status.v1.js";
 
 // build_retrieved_evidence_input.v1 — the typed single-positional envelope for the
-// `buildRetrievedEvidence` activity (the Temporal-activity port of the frozen Python
-// `codemaster/review/evidence_producer.py::build_retrieved_evidence`, the v10 provenance-backed
-// evidence manifest producer).
+// `buildRetrievedEvidence` activity (port of `codemaster/review/evidence_producer.py::build_retrieved_evidence`,
+// the v10 provenance-backed evidence manifest producer).
 //
 // ── Why this is an ACTIVITY (the sandbox boundary) ──
-// The frozen Python `build_retrieved_evidence` is called INLINE in the workflow body
+// `build_retrieved_evidence` is called INLINE in the workflow body
 // (review_pull_request.py:1813) because Python's `mint_evidence_id` is pure stdlib hashlib/uuid —
 // permitted in the Python Temporal sandbox. The TS port CANNOT do that: the ported `mintEvidenceId`
 // (retrieved_evidence.v1.ts) mints via `node:crypto.createHash("sha1"/"sha256")`, and `node:crypto`
@@ -29,14 +28,14 @@ import { ToolStatusV1 } from "./tool_status.v1.js";
 // the determinism property also holds independent of caching).
 //
 // ── NEW typed-input envelope introduced DURING the port (CLAUDE.md invariant 11 / ADR-0047) ──
-// The frozen Python `build_retrieved_evidence` takes FIVE keyword arguments (`chunk`,
+// `build_retrieved_evidence` takes FIVE keyword arguments (`chunk`,
 // `retrieved_knowledge`, `tier1_findings`, `tool_statuses`, `pr_topology_manifest`) plus `max_entries`.
 // Temporal activities are single-positional, so the TS port COLLAPSES those into this one envelope
 // (consistent with the sibling citation_validate_input.v1 / static_analysis_input.v1 /
 // dedup_findings.v1 envelopes that closed the other multi-positional dispatches). There is therefore
 // NO Python Pydantic counterpart for the ENVELOPE itself to byte-diff against; its parity coverage is
 // round-trip + validation only. The producer CORE behaviour (the emitted RetrievedEvidenceV1 tuple —
-// same entries, same ev_ids, same priority-cap drop order) IS byte-diffed against the frozen Python in
+// same entries, same ev_ids, same priority-cap drop order) IS byte-diffed against the Python impl in
 // the parity test.
 //
 // Field mapping (Python keyword → envelope field):

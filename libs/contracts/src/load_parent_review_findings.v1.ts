@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { ReviewFindingV1 } from "./review_findings.v1.js";
 
-// Contract for the carry-forward parent-findings loader (#6 — ENHANCEMENT beyond the frozen Python,
+// Contract for the carry-forward parent-findings loader (#6 — ENHANCEMENT beyond the Python side,
 // which passed parent_findings=() / parent_review_id=None at the orchestrate() call). The deep-dive
 // (2026-06-06) established that NO schema migration is needed: review_finding_id is content-addressed
 // (uuid5 of pr_id|file|lines|severity|title) + ON CONFLICT DO NOTHING, so core.review_findings already

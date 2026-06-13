@@ -1,6 +1,6 @@
-// Field-encryption key loader — 1:1 port of codemaster/security/key_loader.py
-// (the FOLLOW-UP-audit-vault-key-loader the audit codec named). Reads the local-AES keyset from Vault and
-// builds a KeyRegistry the email codec + audit codec + repos share at pod startup.
+// Field-encryption key loader (the FOLLOW-UP-audit-vault-key-loader the audit codec named). Reads
+// the local-AES keyset from Vault and builds a KeyRegistry the email codec + audit codec + repos
+// share at pod startup.
 //
 // Vault payload shape (seeded at `secret/codemaster/field-encryption/keys`):
 //
@@ -30,8 +30,8 @@ export class FieldKeyLoaderError extends Error {
   }
 }
 
-/** Parse the Vault keyset payload into (currentVersion, version→key bytes). Mirrors parse_keyset_payload:
- *  validates the field shapes, strict-base64-decodes each key, and enforces the 32-byte AES-256 size. */
+/** Parse the Vault keyset payload into (currentVersion, version→key bytes): validates the field
+ *  shapes, strict-base64-decodes each key, and enforces the 32-byte AES-256 size. */
 export function parseKeysetPayload(payload: Record<string, unknown>): {
   currentVersion: string;
   keys: Map<string, Uint8Array>;

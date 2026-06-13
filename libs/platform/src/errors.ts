@@ -1,6 +1,6 @@
 /**
- * Exception-formatting helper — 1:1 port of `codemaster/infra/errors.py`
- * (`format_exception` + `_format_one`, frozen Python, Sprint 16 / NOW.3).
+ * Exception-formatting helper — port of `codemaster/infra/errors.py`
+ * (`format_exception` + `_format_one`, Sprint 16 / NOW.3).
  *
  * The empty-error-message anti-pattern
  * ====================================
@@ -43,7 +43,7 @@ export function formatException(err: unknown, opts?: { includeCause?: boolean })
   return `${head} [caused by ${formatOne(cause)}]`;
 }
 
-/** Format a single value (no chain walk). 1:1 with the Python `_format_one`. */
+/** Format a single value (no chain walk). Matches the Python `_format_one`. */
 function formatOne(err: unknown): string {
   const typeName = typeNameOf(err);
   let message: string;

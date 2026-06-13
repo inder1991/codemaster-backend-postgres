@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { ReviewFindingV1 } from "./review_findings.v1.js";
 
-// Zod port of contracts/aggregated_findings/v1.py (frozen Python). Parity-validated in
+// Zod port of contracts/aggregated_findings/v1.py. Parity-validated in
 // aggregated_findings.v1.parity.test.ts.
 //
 // Output of the `aggregate_findings` activity: the already-deduped, ranked, and capped findings

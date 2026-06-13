@@ -1,9 +1,6 @@
 /**
- * PostgresConfluenceChunksRepo — 1:1 TypeScript port of the frozen Python data-layer repo
- * `vendor/codemaster-py/codemaster/domain/repos/confluence_chunks_repo.py` (Sub-spec A T11) plus the
- * `reconcile_deletions` soft-delete SQL the Python keeps in the activity layer
- * (`codemaster/activities/confluence_sync.py::reconcile_deletions`, ported here so the data-layer port
- * is self-contained — see the agent report's divergence note).
+ * PostgresConfluenceChunksRepo — single-pass upsert over `core.confluence_chunks` (Sub-spec A T11)
+ * plus `reconcile_deletions` soft-delete (brought into the data layer for self-containment).
  *
  * Single-pass upsert that handles all the schema columns Sub-spec 0 + A added. Called by the
  * upsert_chunks activity AFTER it has applied hard limits and resolved default_approval lookups.
@@ -13,7 +10,7 @@
  *   P0-4 — findExistingChunkEmbedding lets the activity skip Bedrock on retry when (chunk_id,
  *          content_sha256) already has a stored vector (avoids double-billing).
  *
- * Methods (1:1 with the Python module):
+ * Methods:
  *   - makeChunkId               — deterministic uuid5(NAMESPACE_URL, "confluence/<space>/<page>@<ver>#<idx>").
  *   - upsertChunks              — natural-key UPSERT writing all columns; quarantine + default_approval
  *                                 gating; optional dual-write to core.chunk_embeddings.
@@ -21,10 +18,10 @@
  *   - reconcileDeletions        — soft-delete (deleted_at = now()) chunks for pages absent from the
  *                                 live set of a sync pass.
  *
- * Tenancy: the confluence tables are PLATFORM-WIDE — `installation_id` was dropped in Python migration
+ * Tenancy: the confluence tables are PLATFORM-WIDE — `installation_id` was dropped in migration
  * 0063 (the TS baseline `core.confluence_chunks` carries no `installation_id`), so they are NOT in
  * `TENANT_SCOPED_TABLES` and the raw-SQL tenancy gate does not fire on them. The inline
- * `// tenant:exempt` markers mirror the frozen Python source for documentation parity.
+ * `// tenant:exempt` markers document the platform-wide intent.
  *
  * ADR-0062 (Postgres connection-pool lifecycle): this repo owns NO pool/engine cache. It is handed a
  * `Kysely<unknown>` over the process-wide single pool (via {@link tenantKysely}) and a {@link Clock} by
@@ -42,14 +39,13 @@ import { canonicalize } from "../../retrieval/label_taxonomy.js";
 
 // ─── uuid5 namespace (deterministic; NOT randomness — outside the clock/random gate's scope) ─────
 //
-// 1:1 with the Python `uuid.uuid5(NAMESPACE_URL, name)`; the SHA-1 minter is the shared
-// `#platform/randomness.js::uuid5` seam (deterministic hashing only — byte-for-byte Python parity).
+// The SHA-1 minter is the shared `#platform/randomness.js::uuid5` seam (deterministic hashing only).
 
-/** RFC 4122 URL namespace (Python `uuid.NAMESPACE_URL`). */
+/** RFC 4122 URL namespace. */
 const NAMESPACE_URL = "6ba7b811-9dad-11d1-80b4-00c04fd430c8";
 
 /**
- * Deterministic chunk_id for idempotency across Temporal replays (1:1 with the Python `make_chunk_id`).
+ * Deterministic chunk_id for idempotency across Temporal replays.
  *
  * F-36 (P1): `version` is part of the seed, so chunks at versions 5 and 6 of the same page produce
  * DIFFERENT chunk_ids (a fresh row per version bump). The seed is:
@@ -67,9 +63,9 @@ export function makeChunkId(args: {
   );
 }
 
-// ─── Input row (1:1 with the Python frozen dataclass UpsertChunkRow) ─────────────────────────────
+// ─── Input row ───────────────────────────────────────────────────────────────────────────────────
 
-/** One row the repo is asked to insert or update (1:1 with the Python `UpsertChunkRow`). */
+/** One row the repo is asked to insert or update. */
 export type UpsertChunkRow = {
   readonly chunkId: string;
   readonly spaceKey: string;
@@ -93,9 +89,8 @@ export type UpsertChunkRow = {
 };
 
 /**
- * Format an embedding as the pgvector text literal `"[f1,f2,...]"` (1:1 with the Python
- * `"[" + ",".join(str(x) ...) + "]"`). pg cannot encode a raw array for the `vector` column, so we bind
- * this text + CAST AS vector in the SQL.
+ * Format an embedding as the pgvector text literal `"[f1,f2,...]"`. pg cannot encode a raw array for
+ * the `vector` column, so we bind this text + CAST AS vector in the SQL.
  */
 function toPgVectorLiteral(vec: ReadonlyArray<number>): string {
   return `[${vec.map((x) => String(x)).join(",")}]`;
@@ -114,8 +109,8 @@ export class PostgresConfluenceChunksRepo {
   }
 
   /**
-   * Upsert chunks with canonicalized labels + quarantine + default approval (1:1 with the Python
-   * `upsert_chunks`). Returns the number of rows upserted.
+   * Upsert chunks with canonicalized labels + quarantine + default approval. Returns the number of
+   * rows upserted.
    *
    * Audit fixes preserved:
    *   - P1-1: stale_at = NULL on every active write (clears any prior stale mark).
@@ -127,7 +122,7 @@ export class PostgresConfluenceChunksRepo {
    * the supplied generation. When EITHER is undefined/null, dual-write is skipped (legacy column only).
    *
    * The whole batch (legacy writes + optional dual-writes) runs in ONE transaction so a partial failure
-   * rolls both back — mirroring the Python caller-owned `await session.commit()` atomicity.
+   * rolls both back atomically.
    */
   public async upsertChunks(
     rows: ReadonlyArray<UpsertChunkRow>,
@@ -138,7 +133,7 @@ export class PostgresConfluenceChunksRepo {
     const dualWrite = activeGeneration !== null && activeModelName !== null;
 
     // Validate + pre-compute every row BEFORE opening the transaction so a default-approval violation
-    // throws without leaving a half-open transaction (mirrors the Python loop raising mid-iteration).
+    // throws without leaving a half-open transaction.
     type Prepared = {
       row: UpsertChunkRow;
       labels: Array<string>;
@@ -231,8 +226,7 @@ export class PostgresConfluenceChunksRepo {
   }
 
   /**
-   * Audit P0-4 — idempotency check before Bedrock embed (1:1 with the Python
-   * `find_existing_chunk_embedding`).
+   * Audit P0-4 — idempotency check before Bedrock embed.
    *
    * Returns the stored embedding tuple if a chunk with this (chunk_id, content_sha256) exists and is not
    * soft-deleted, enabling the chunk_and_embed activity to skip the Bedrock call on a Temporal retry.
@@ -269,8 +263,8 @@ export class PostgresConfluenceChunksRepo {
   }
 
   /**
-   * Soft-delete chunks for pages that disappeared from the live space (1:1 with the Python
-   * `reconcile_deletions_activity` SQL). Pages observed during this sync pass are safe; any page NOT in
+   * Soft-delete chunks for pages that disappeared from the live space. Pages observed during this sync
+   * pass are safe; any page NOT in
    * `livePageIds` gets its chunks marked `deleted_at = now()`. Returns the number of rows soft-deleted.
    *
    * Already-soft-deleted rows (`deleted_at IS NOT NULL`) are skipped, so a re-run over the same live set

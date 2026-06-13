@@ -3,7 +3,7 @@ import { z } from "zod";
 /**
  * Return contract of `mutex_janitor_activity`.
  *
- * 1:1 with the frozen Python (codemaster/activities/mutex_janitor.py:32-37,
+ * Pydantic model (codemaster/activities/mutex_janitor.py:32-37,
  * `ConfigDict(extra="forbid")` → `.strict()`):
  *  - schema_version: int = 1   → z.number().int().default(1)
  *  - scanned: int              → z.number().int()  (REQUIRED, no default, NO ge= — the activity always

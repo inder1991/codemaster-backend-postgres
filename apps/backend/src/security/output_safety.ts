@@ -1,9 +1,8 @@
-// OutputSafetyValidator — 1:1 port of codemaster/security/output_safety.py.
-//
-// Validates LLM-emitted comments before they leave the model client. Five checks (all always run, so
-// the decision carries every fired reason): length, privileged-tag, secret (delegates to the ported
-// detectSecrets), tool-call shape, and internal_claim_uncited (validate_finding only). The validator
-// does NOT modify text — it returns a go/no-go OutputSafetyDecisionV1 and the caller decides.
+// OutputSafetyValidator — validates LLM-emitted comments before they leave the model client. Five
+// checks (all always run, so the decision carries every fired reason): length, privileged-tag,
+// secret (delegates to detectSecrets), tool-call shape, and internal_claim_uncited
+// (validate_finding only). The validator does NOT modify text — it returns a go/no-go
+// OutputSafetyDecisionV1 and the caller decides.
 
 import { type SecretFindingV1 } from "#contracts/secret_detection.v1.js";
 import {
@@ -26,10 +25,8 @@ const FORBIDDEN_TAG_FRAGMENTS: ReadonlyArray<string> = [
   "<untrusted",
 ];
 
-// Tool-call shapes the model is forbidden from emitting. The pattern SOURCE strings are kept verbatim
-// from the Python `re.compile(...)` args so both the match AND the `detail` diagnostic (which embeds
-// Python's `pattern.pattern` repr) are byte-identical. JS `\s`/`\b` differ from Python only on exotic
-// unicode whitespace / word boundaries, which do not occur around these ASCII JSON tokens.
+// Tool-call shapes the model is forbidden from emitting. JS `\s`/`\b` differ from Python only on
+// exotic unicode whitespace / word boundaries, which do not occur around these ASCII JSON tokens.
 const FORBIDDEN_TOOL_CALL_PATTERN_SOURCES: ReadonlyArray<string> = [
   "<tool_use\\b",
   '"type"\\s*:\\s*"tool_use"',
@@ -166,7 +163,7 @@ export class OutputSafetyValidator {
     if (reasons.length > 0) {
       const detail = details.filter((d) => d).join("; ").slice(0, 512);
       // base.findings is empty when base allowed (validate's contract), so this is a no-op for
-      // citation-only blocks — mirrors the Python comment.
+      // citation-only blocks.
       return { schema_version: 1, decision: "block", reasons, detail, findings: base.findings };
     }
     return { schema_version: 1, decision: "allow", reasons: [], detail: "", findings: [] };

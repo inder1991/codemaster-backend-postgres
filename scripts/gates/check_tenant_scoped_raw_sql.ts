@@ -1,4 +1,4 @@
-// Tenancy raw-SQL gate (ts-morph port of the frozen scripts/check_tenant_scoped_raw_sql.py).
+// Tenancy raw-SQL gate.
 //
 // Walks every `sql`...`` tagged template (Kysely raw SQL — the TS equivalent of SQLAlchemy
 // `session.execute(text(...))`). For each FROM/JOIN/INTO/UPDATE reference to a TENANT_SCOPED table,
@@ -7,9 +7,9 @@
 //   (b) the enclosing method/class carries an `@privileged_path` decorator, OR
 //   (c) a same-line or preceding-line `// tenant:exempt reason=<...> follow_up=<...>` marker.
 //
-// Scope: PRODUCTION source only — `{libs,apps}/<pkg>/src/**` excluding `*.test.ts` — matching the
-// frozen Python gate's `codemaster/` (production-only) scope and the sibling check_clock_random gate.
-// Integration-test teardown legitimately deletes across tenants (it owns its fixture rows), so test/
+// Scope: PRODUCTION source only — `{libs,apps}/<pkg>/src/**` excluding `*.test.ts`. Matches the
+// sibling check_clock_random gate scope. Integration-test teardown legitimately deletes across
+// tenants (it owns its fixture rows), so test/
 // (and tools/, scripts/, migrations/) are NOT scanned.
 //
 // ## ERROR-mode (W4.2 / RH1 opened it; W4.7 finished it — FOLLOW-UP-gf3-error-mode fully CLOSED)
@@ -38,8 +38,8 @@ export type Violation = {
   table: string;
 }
 
-/** Production source only: `{libs,apps}/<pkg>/src/**`, excluding tests. Mirrors the frozen Python
- *  gate's production-only (`codemaster/`) scope — test/tooling teardown legitimately crosses tenants. */
+/** Production source only: `{libs,apps}/<pkg>/src/**`, excluding tests. Test/tooling teardown
+ *  legitimately crosses tenants. */
 export function isProductionSource(absPath: string): boolean {
   const posix = absPath.split("\\").join("/");
   if (posix.endsWith(".test.ts")) return false;

@@ -1,6 +1,5 @@
 /**
- * ADR-0033 — in-memory key version registry. 1:1 TS port of
- * vendor/codemaster-py/codemaster/security/key_registry.py.
+ * ADR-0033 — in-memory key version registry.
  *
  * Holds the field-encryption key versions populated at pod startup (by the key loader, ported
  * separately) and consumed by the AES-256-GCM crypto layer in `./aes_gcm_aad.ts`. The registry is
@@ -8,11 +7,11 @@
  *
  * Reads return immutable snapshots so callers can't mutate registry state by accident.
  *
- * 1:1-DIVERGENCE (threading): the Python original guards reads/writes with a `threading.Lock`
- * because CPython runs the crypto layer across worker threads. Node is single-threaded for JS
- * execution (no shared-memory data races on a plain class field), so no lock is needed and none is
- * ported. The immutable-snapshot semantics — frozen key map, current()/get() returning copies of
- * scalar state — are preserved.
+ * DIVERGENCE (threading): Python guards reads/writes with a `threading.Lock` because CPython runs
+ * the crypto layer across worker threads. Node is single-threaded for JS execution (no shared-memory
+ * data races on a plain class field), so no lock is needed and none is ported. The
+ * immutable-snapshot semantics — frozen key map, current()/get() returning copies of scalar state —
+ * are preserved.
  */
 
 const AES_256_KEY_BYTES = 32;

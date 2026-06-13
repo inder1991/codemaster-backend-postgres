@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/llm_routing/v1.py (frozen Python).
+// Zod port of contracts/llm_routing/v1.py.
 //
 // ADR-0060 A: the ModelRouter / bedrock_routing_policy mechanism was retired (model selection moved
 // to purpose→model via core.llm_purpose_model). The KNOWN_MODELS allow-list, SizeRule,

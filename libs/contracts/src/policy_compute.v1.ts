@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { ResolvedGuidanceBundleV1 } from "./resolved_guidance.v1.js";
 
-// Zod port of contracts/policy_compute/v1.py (frozen Python, Sprint 25 / A-5-followup-2).
+// Zod port of contracts/policy_compute/v1.py (Sprint 25 / A-5-followup-2).
 // Pydantic ConfigDict(extra="forbid", frozen=True) → .strict() (frozen is a TS-side concern, not wire).
 // Parity-validated in policy_compute.v1.parity.test.ts.
 //

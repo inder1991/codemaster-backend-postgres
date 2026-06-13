@@ -1,8 +1,7 @@
-// Byte-exact port of codemaster's prompt-injection input-wrapping subsystem
-// (vendor/codemaster-py/codemaster/security/injection_defense.py — Sprint 7 / S7.4.1).
+// SECURITY-CRITICAL prompt-injection input-wrapping subsystem (Sprint 7 / S7.4.1).
 //
-// SECURITY-CRITICAL: untrusted PR/diff/manifest content is sanitized + wrapped here before it
-// reaches any LLM prompt. ANY divergence from the frozen Python is a finding. Two primitives:
+// Untrusted PR/diff/manifest content is sanitized + wrapped here before it reaches any LLM
+// prompt. Two primitives:
 //
 //   1. `stripPrivilegedTags(content)` — html.unescape the content (so `&lt;diff&gt;` is caught
 //      alongside the literal `<diff>`), then drop any opening/closing privileged tag markers in
@@ -15,7 +14,7 @@
 import { htmlUnescape } from "./html_unescape.js";
 
 // Tags the system-prompt template treats as privileged. Any of these appearing in untrusted
-// content MUST be stripped before wrapping. Order + membership mirror the frozen Python tuple.
+// content MUST be stripped before wrapping.
 export const STRIPPED_TAGS: ReadonlyArray<string> = [
   "diff",
   "trusted",
@@ -41,8 +40,8 @@ export const CLOSE_TRUSTED_SUFFIX = '</diff trust="untrusted">';
 export const OPEN_MANIFEST_PREFIX = '<manifest trust="untrusted">';
 export const CLOSE_MANIFEST_SUFFIX = '</manifest trust="untrusted">';
 
-// Escape a tag name for safe regex-literal embedding (mirrors Python `re.escape`; all STRIPPED_TAGS
-// are `[a-z_]+` so this is a no-op in practice, but kept for faithful porting of the construction).
+// Escape a tag name for safe regex-literal embedding (all STRIPPED_TAGS are `[a-z_]+` so this is a
+// no-op in practice, but kept for construction parity).
 function reEscape(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -58,8 +57,8 @@ function reEscape(s: string): string {
 function buildTagStripper(): RegExp {
   const nameAlt = STRIPPED_TAGS.map(reEscape).join("|");
   const pattern = `</?\\s*(?:${nameAlt})\\b[^<>]*/?\\s*>`;
-  // Pattern built from a fixed, code-defined STRIPPED_TAGS allowlist (no user input); mirrors the
-  // frozen Python construction. detect-non-literal-regexp must be silenced on the construction line:
+  // Pattern built from a fixed, code-defined STRIPPED_TAGS allowlist (no user input).
+  // detect-non-literal-regexp must be silenced on the construction line:
   // eslint-disable-next-line security/detect-non-literal-regexp
   return new RegExp(pattern, "gi");
 }

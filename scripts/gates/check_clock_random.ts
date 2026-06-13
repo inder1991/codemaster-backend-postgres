@@ -1,5 +1,4 @@
-// Clock/Random seam gate (ts-morph port of the frozen Python gate vendor/codemaster-py/scripts/
-// no_wall_clock.py).
+// Clock/Random seam gate.
 //
 // Per CLAUDE.md "Clock and Random Protocols": production code MUST use the injected Clock / Random
 // seams (libs/platform/src/clock.ts + libs/platform/src/randomness.ts), never the raw platform
@@ -13,8 +12,7 @@
 // claiming enforcement — that policy-vs-gate gap is now closed.
 //
 // AST-based (not regex): we walk CallExpression / NewExpression nodes, so a banned token appearing
-// inside a comment or string literal does NOT false-match — the structural improvement over the
-// Python regex gate this ports.
+// inside a comment or string literal does NOT false-match.
 //
 // Scope: PRODUCTION source only — `libs/*/src/**/*.ts` and `apps/*/src/**/*.ts` excluding
 // `*.test.ts`. scripts/, test/, tools/, migrations/, vendor/ are NOT scanned: those legitimately use

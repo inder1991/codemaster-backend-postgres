@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/repair_installation_repositories/payload_v1.py (frozen Python).
+// Zod port of contracts/repair_installation_repositories/payload_v1.py.
 // NON-STANDARD layout: the contract lives in a versioned FILE `payload_v1.py` (not a v1/ dir),
 // so its Python module is `contracts.repair_installation_repositories.payload_v1`.
 // Parity-validated in repair_installation_repositories.v1.parity.test.ts.
@@ -17,7 +17,7 @@ import { z } from "zod";
 
 // trigger_source = Literal["pr_webhook", "admin_manual", "installation_created"]
 //
-// + "drift_sweep" — DELIBERATE TS-side widening over the frozen Python literal set (W3.6 / RH12):
+// + "drift_sweep" — DELIBERATE TS-side widening over the Python literal set (W3.6 / RH12):
 // the periodic installation drift-reconcile cron (installation_drift_reconcile.activity.ts) pushes
 // active installations through the SAME maybeEnqueueRepair dispatcher, and its repairs must be
 // distinguishable on the bounded trigger_source metric label (a sweep storm looks different from a
@@ -49,7 +49,7 @@ export type RepairInstallationRepositoriesPayloadV1 = z.infer<
 // (ConfigDict(extra="forbid") → .strict()). Lives here next to the request payload it pairs with
 // (the repair workflow's input → output) so the repair contract surface is one module.
 //
-// Field notes (1:1 with frozen Python):
+// Field notes:
 //  - schema_version: Literal[1] = 1   → z.literal(1).default(1)
 //  - newly_created: int = 0           → z.number().int().default(0)  (rows where upsert `before` was empty)
 //  - refreshed: int = 0               → z.number().int().default(0)  (rows that already existed)

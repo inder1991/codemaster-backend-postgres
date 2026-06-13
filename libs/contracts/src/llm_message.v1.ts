@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of vendor/codemaster-py/codemaster/integrations/llm/client.py::LlmMessage (frozen Python).
+// Zod port of LlmMessage.
 // Parity-validated in test/contracts/llm_message.v1.parity.test.ts.
 //
 // LlmMessage is the role-tagged message envelope handed to the SDK (`messages=[m.model_dump() for m

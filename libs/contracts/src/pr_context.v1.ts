@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/retrieval/pr_context/v1.py (frozen Python). Parity-validated in
+// Zod port of contracts/retrieval/pr_context/v1.py. Parity-validated in
 // pr_context.v1.parity.test.ts.
 //
 // `PRContext` is the single typed boundary into the detector pipeline (ADR-0047). The module is

@@ -2,9 +2,8 @@ import { z } from "zod";
 
 import { ToolStatusV1 } from "./tool_status.v1.js";
 
-// Zod port of the `RecordToolRunsInput` envelope defined inline in the frozen Python activity module
-// `vendor/codemaster-py/codemaster/review/arbitration_apply_activity.py`. Parity-validated in
-// record_tool_runs_input.v1.parity.test.ts (the oracle imports the class from that Python module).
+// Zod port of the `RecordToolRunsInput` envelope defined inline in the Python activity module.
+// Parity-validated in record_tool_runs_input.v1.parity.test.ts.
 //
 // Typed envelope for `record_tool_runs_activity` (CLAUDE.md invariant 11 — one positional Pydantic
 // input per Temporal activity). Pydantic `ConfigDict(extra="forbid", frozen=True)` → .strict() (frozen

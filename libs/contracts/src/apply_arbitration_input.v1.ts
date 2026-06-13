@@ -4,9 +4,8 @@ import { AnalysisFindingV1 } from "./analysis_findings.v1.js";
 import { ArbitrationIntentV1 } from "./arbitration_intent.v1.js";
 import { ReviewFindingV1 } from "./review_findings.v1.js";
 
-// Zod port of the `ApplyArbitrationInput` envelope defined inline in the frozen Python activity module
-// `vendor/codemaster-py/codemaster/review/arbitration_apply_activity.py`. Parity-validated in
-// apply_arbitration_input.v1.parity.test.ts (the oracle imports the class from that Python module).
+// Zod port of the `ApplyArbitrationInput` envelope.
+// Parity-validated in apply_arbitration_input.v1.parity.test.ts.
 //
 // Typed envelope for `apply_arbitration_activity` (CLAUDE.md invariant 11 — one positional Pydantic
 // input per Temporal activity). Pydantic `ConfigDict(extra="forbid", frozen=True)` → .strict() (frozen
@@ -17,7 +16,7 @@ import { ReviewFindingV1 } from "./review_findings.v1.js";
 //
 // Temporal serializes activity inputs through the default JSON payload converter, which restricts dict
 // keys to JSON primitives. A `dict[UUID, UUID]` annotation raises `TypeError: keys must be str, int,
-// float, bool or None, not UUID` at dispatch (smoke #10, 2026-05-17). The frozen Python therefore types
+// float, bool or None, not UUID` at dispatch (smoke #10, 2026-05-17). The Python side therefore types
 // `tier2_review_finding_id_by_arbitration_id` as `dict[str, uuid.UUID]` — the keys are already STRINGS
 // (the arbitration-intent UUID stringified), JSON-safe by construction; the activity reconstructs the
 // `uuid.UUID(k)` map inside the Node/activity runtime, NOT at the wire boundary. We mirror that exact

@@ -1,7 +1,6 @@
 import { z } from "zod";
 
-// Minimal Zod port of the BlobRef portion of
-// vendor/codemaster-py/codemaster/adapters/blobstore_port.py::BlobRef (frozen Python).
+// Minimal Zod port of BlobRef.
 //
 // BlobRef is an opaque handle to a stored blob — "pass these around; never bytes". It is the
 // `payload_blob_ref` field of LlmInvokeResultV1, so the LLM-invoke contract needs it ported. Only the

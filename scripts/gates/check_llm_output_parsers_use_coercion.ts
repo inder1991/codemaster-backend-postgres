@@ -1,16 +1,13 @@
-// LLM-output-parser coercion gate (ts-morph port of the frozen Python gate
-// vendor/codemaster-py/scripts/check_llm_output_parsers_use_coercion.py).
+// LLM-output-parser coercion gate.
 //
 // For every `<Contract>.parse(<payload>)` / `<Contract>.safeParse(<payload>)` call in production
 // source where `<Contract>` is a registered LLM-output contract, the gate requires a preceding
 // (strictly earlier line) `coerceForContract(<payload>, <Contract>, ...)` binding in the SAME
 // function body. Closes the loophole the 2026-05-17 LLM-output resilience plan documents: LLM-output
 // drift on string-length constraints must NEVER crash the parser; the platform-mandated boundary is
-// the `coerceForContract` helper (apps/backend/src/llm/contract_coercion.ts — the 1:1 port of the
-// Python `coerce_for_contract`, same payload-then-schema positional shape).
+// the `coerceForContract` helper (apps/backend/src/llm/contract_coercion.ts).
 //
-// REGISTERED LLM-OUTPUT CONTRACTS — ported VERBATIM from the Python gate's LLM_OUTPUT_CONTRACTS
-// frozenset (the gate's durable artifact). Future contracts that come from LLM output (any new
+// REGISTERED LLM-OUTPUT CONTRACTS — the gate's durable artifact. Future contracts that come from LLM output (any new
 // tool_use parser) add their schema's exported name here; the gate then forces every new parser to
 // route through coercion. Removal must be ADR-justified. NON-LLM contracts are NOT subject to this
 // gate: webhook / DB-loaded contracts hard-fail on shape mismatch by design (different threat model
@@ -39,7 +36,7 @@
 //     conservatively rejected, exactly like the Python's non-Name first-positional rule: the gate
 //     cannot reason about such payloads, and real LLM-output parsers always bind the payload to a
 //     name first. By-design revalidation sites land in EXEMPTED instead (see below).
-//  5. Function-body scoping mirrors the Python walker: a coerce binding in an OUTER function does
+//  5. Function-body scoping: a coerce binding in an OUTER function does
 //     NOT cover a parse call in a NESTED function (nested functions get their own context). Python
 //     lambdas are transparent to the walker (`visit_Lambda` → `generic_visit`); the TS analogue is
 //     the concise-body arrow (expression body) — transparent. Block-body arrows are full nested
@@ -55,12 +52,12 @@
 // `PERMANENT-EXEMPTION-activity-result-revalidation` entries. The exempted-lists-pointed and
 // rotation-age meta-gates walk this object automatically (they scan every top-level `EXEMPTED`).
 //
-// Mode: ERROR (matches the frozen Python gate). Any unexempted bypass returns 1.
+// Mode: ERROR. Any unexempted bypass returns 1.
 import * as path from "node:path";
 
 import { type CallExpression, Node, Project, type SourceFile, SyntaxKind } from "ts-morph";
 
-// ── Registered LLM-output contracts (ported VERBATIM from the Python frozenset) ──────────────────
+// ── Registered LLM-output contracts ──────────────────────────────────────────────────────────────
 export const LLM_OUTPUT_CONTRACTS: ReadonlySet<string> = new Set([
   "WalkthroughV1",
   "ReviewFindingV1",
@@ -69,7 +66,7 @@ export const LLM_OUTPUT_CONTRACTS: ReadonlySet<string> = new Set([
   // inherits coverage automatically. (The live TS site — review_activity.ts envelope assembly — is
   // the constructor idiom and not gated; see adaptation 3.)
   "ReviewChunkResponseV1",
-  // Phase D deferred (per the Python plan audit, 2026-05-17). Listed so any parser lands with
+  // Phase D deferred (2026-05-17). Listed so any parser lands with
   // coerce coverage on day one — the TS tool_schema.ts intent branch already complies.
   "ArbitrationIntentV1",
 ]);
@@ -101,7 +98,7 @@ export type ExemptedEntry = {
 };
 
 export const EXEMPTED: Record<string, ExemptedEntry> = {
-  "apps/backend/src/domain/repos/review_walkthroughs_repo.ts::132": {
+  "apps/backend/src/domain/repos/review_walkthroughs_repo.ts::125": {
     symbol: "ReviewWalkthroughsRepo.upsert",
     follow_up_story: "PERMANENT-EXEMPTION-db-roundtrip-revalidation",
     reason:
@@ -110,7 +107,7 @@ export const EXEMPTED: Record<string, ExemptedEntry> = {
       "validation at all). The payload was coerced + validated by parseWalkthrough " +
       "(walkthrough_schema.ts) when first parsed from LLM output; coerce here would be a no-op.",
   },
-  "apps/backend/src/domain/repos/review_walkthroughs_repo.ts::170": {
+  "apps/backend/src/domain/repos/review_walkthroughs_repo.ts::162": {
     symbol: "ReviewWalkthroughsRepo.get",
     follow_up_story: "PERMANENT-EXEMPTION-db-roundtrip-revalidation",
     reason:
@@ -121,7 +118,7 @@ export const EXEMPTED: Record<string, ExemptedEntry> = {
   },
 };
 
-/** One LLM-output-parser bypass finding (mirrors the Python `Violation` dataclass). */
+/** One LLM-output-parser bypass finding. */
 export type Violation = {
   /** Repo-relative POSIX path of the offending file. */
   file: string;
@@ -354,7 +351,7 @@ export function main(): number {
   process.stderr.write(
     `[ERROR] llm-output-parsers-use-coercion(ts): ${violations.length} violation(s)\n`,
   );
-  return 1; // ERROR-mode: block on any uncoerced LLM-output parse (matches the frozen Python gate).
+  return 1; // ERROR-mode: block on any uncoerced LLM-output parse.
 }
 
 // CLI shim: run main() when invoked directly (`npx tsx scripts/gates/check_llm_output_parsers_use_coercion.ts`).

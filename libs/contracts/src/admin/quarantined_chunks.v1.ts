@@ -3,7 +3,7 @@ import { z } from "zod";
 // Zod port of contracts/admin/quarantined_chunks/v1.py — read-only list of quarantined chunks per space.
 // Quarantine state is managed by the sync pipeline; operators triage by editing the Confluence page.
 //
-// Field parity notes (1:1 with the Python BaseModel, ConfigDict(extra="forbid") → .strict()):
+// Field parity notes (ConfigDict(extra="forbid") → .strict()):
 //   - schema_version is a PLAIN `int = 1` → z.number().int().default(1).
 //   - chunk_id: uuid.UUID → z.string().uuid().
 //   - last_modified_at is PLAIN `datetime` → offset+local-permissive guard.

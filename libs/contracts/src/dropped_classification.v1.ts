@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/dropped_classification/v1.py (frozen Python). Parity-validated in
+// Zod port of contracts/dropped_classification/v1.py. Parity-validated in
 // dropped_classification.v1.parity.test.ts.
 //
 // Source models / fields ported (every public one):

@@ -5,8 +5,8 @@
  * This is the engine that makes {@link SeededRandom} bit-for-bit identical to CPython's
  * `random.Random(seed)`: same `init_by_array` seeding, same `genrand_uint32` tempering, same
  * `genrand_res53` 53-bit double construction, and the same `_randbelow_with_getrandbits`
- * rejection sampling. The frozen Python `codemaster/adapters/embeddings_port.py` builds
- * deterministic vectors via `SeededRandom(seed=N).uniform(-1, 1)`, so any drift here would
+ * rejection sampling. `codemaster/adapters/embeddings_port.py` builds deterministic vectors via
+ * `SeededRandom(seed=N).uniform(-1, 1)`, so any drift here would
  * silently corrupt those vectors — hence the cross-impl parity harness that pins it.
  *
  * State discipline: `mt` is a `Uint32Array(624)` and every write is masked back to uint32 via

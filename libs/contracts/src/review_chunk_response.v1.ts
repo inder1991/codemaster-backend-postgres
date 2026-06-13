@@ -3,7 +3,7 @@ import { z } from "zod";
 import { ArbitrationIntentV1 } from "./arbitration_intent.v1.js";
 import { ReviewFindingV1 } from "./review_findings.v1.js";
 
-// Zod port of contracts/review_chunk_response/v1.py::ReviewChunkResponseV1 (frozen Python) plus its
+// Zod port of contracts/review_chunk_response/v1.py::ReviewChunkResponseV1 plus its
 // sibling module contracts/review_chunk_response/sanitization_event_v1.py::OutputSafetySanitizationEventV1.
 // Parity-validated in review_chunk_response.v1.parity.test.ts.
 //

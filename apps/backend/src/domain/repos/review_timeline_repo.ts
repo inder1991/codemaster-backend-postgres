@@ -8,8 +8,7 @@
 //   - core.outbox PK is `id` (not `outbox_id`); the workflow handle lives in `run_id` (uuid). state ∈
 //     {pending,dispatched,dead} (the live CHECK), surfaced verbatim into OutboxRowV1.state.
 //   - telemetry.llm_calls has NO `delivery_id` column (only request_id / installation_id / created_at),
-//     so there is no by-delivery join to issue. getBedrock returns [] — faithful to the frozen Python
-//     `_InMemoryReviewTimelineRepo.get_bedrock_calls` which returned () (the PostgresReviewTimelineRepo
+//     so there is no by-delivery join to issue. getBedrock returns [] (the PostgresReviewTimelineRepo
 //     adapter was never authored). Production wiring is a tracked follow-up
 //     (FOLLOW-UP-review-timeline-bedrock-by-delivery): it needs a delivery_id↔llm_call linkage column
 //     that does not yet exist on telemetry.llm_calls.
@@ -88,7 +87,7 @@ export class ReviewTimelineRepo {
   public async getBedrock(deliveryId: string): Promise<Array<LlmCallV1>> {
     void deliveryId; // no delivery_id linkage column on telemetry.llm_calls yet (see header note).
     // telemetry.llm_calls has no delivery_id linkage column yet, so there is no by-delivery query to
-    // issue. Faithful to the frozen Python shim (returned ()). Production wiring is a tracked follow-up
+    // issue. Production wiring is a tracked follow-up
     // (FOLLOW-UP-review-timeline-bedrock-by-delivery). Returns [] — the route renders bedrock_calls: [].
     return [];
   }

@@ -2,10 +2,10 @@ import { z } from "zod";
 
 import { ConfluencePageV1 } from "./confluence_sync.v1.js";
 
-// Zod port of contracts/integrations/confluence/v1.py (frozen Python — Sprint 13 / S13.3.1a). These
+// Zod port of contracts/integrations/confluence/v1.py (Sprint 13 / S13.3.1a). These
 // are the WIRE shapes the read-only Confluence REST client (apps/backend/src/integrations/confluence/
-// client.ts) returns. Parity-validated in confluence_wire.v1.parity.test.ts against the frozen Python
-// (pyRef oracle, module `contracts.integrations.confluence.v1`).
+// client.ts) returns. Parity-validated in confluence_wire.v1.parity.test.ts against the Python
+// oracle (module `contracts.integrations.confluence.v1`).
 //
 // Every Python model carries the dunder marker `__contract_internal__ = True` (a class attribute, NOT
 // a model field) so it never appears in model_dump(mode="json") — nothing to port on the wire. Every
@@ -13,20 +13,20 @@ import { ConfluencePageV1 } from "./confluence_sync.v1.js";
 // `int` (default 1) — NOT a Literal — so a future schema_version bump is not false-rejected:
 // z.number().int().default(1).
 //
-// REUSE NOTE (ConfluencePage): the frozen Python module ALSO defines `ConfluencePage` (schema v2,
+// REUSE NOTE (ConfluencePage): the Python module ALSO defines `ConfluencePage` (schema v2,
 // labels + status). That shape is byte-identical to the already-ported `ConfluencePageV1` in
 // confluence_sync.v1.ts (the sync contracts inline the SAME `contracts.integrations.confluence.v1.
 // ConfluencePage`). So we re-export `ConfluencePageV1` here rather than redefine it — the client's
 // `get_page` returns this shape. The confluence_sync.v1.parity.test.ts already proves it byte-equal
-// to the frozen Python `ConfluencePage`.
+// to the Python `ConfluencePage`.
 //
-// DATETIME NOTE (last_modified_at): the frozen Python `ConfluenceSpace` has NO datetime; the page
+// DATETIME NOTE (last_modified_at): the Python `ConfluenceSpace` has NO datetime; the page
 // SUMMARY + PAGE carry `last_modified_at: datetime` as a PLAIN Pydantic datetime (no _require_tz) —
 // the client's `_parse_dt` does `datetime.fromisoformat(raw)` which accepts BOTH a `Z` suffix and an
 // explicit offset (and a naive value). So z.string().datetime({ offset: true, local: true }) mirrors
 // the accept set — same as ConfluencePageV1.last_modified_at in confluence_sync.v1.ts.
 
-// Re-export the wire page shape (identical to the frozen Python `ConfluencePage`).
+// Re-export the wire page shape (identical to the Python `ConfluencePage`).
 export { ConfluencePageV1 };
 
 // ─── ConfluenceSpace ──────────────────────────────────────────────────────────────────────────

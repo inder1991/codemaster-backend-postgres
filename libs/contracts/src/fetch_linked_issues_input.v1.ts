@@ -1,8 +1,8 @@
 import { z } from "zod";
 
 // NEW typed-input envelope introduced DURING the Python→TS port — there is NO Python Pydantic
-// counterpart to diff against. The frozen Python `FetchLinkedIssuesActivity.fetch_linked_issues`
-// (vendor/codemaster-py/codemaster/activities/fetch_linked_issues.py) dispatches with SIX positional
+// counterpart to diff against. `FetchLinkedIssuesActivity.fetch_linked_issues`
+// dispatches with SIX positional
 // arguments —
 //   (installation_id_uuid, installation_id_int, repository_id, pr_id, owner, repo)
 // — which violates CLAUDE.md invariant 11 / ADR-0047 ("every Temporal activity takes EXACTLY ONE

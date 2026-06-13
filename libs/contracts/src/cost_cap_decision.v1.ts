@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of codemaster/cost/enforcer.py::CostCapDecision (frozen Python, Sprint 0 / S0.2).
+// Zod port of codemaster/cost/enforcer.py::CostCapDecision (Sprint 0 / S0.2).
 //
 // Pydantic source:
 //   class CostCapDecision(BaseModel):

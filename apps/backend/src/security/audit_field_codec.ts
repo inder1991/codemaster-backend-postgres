@@ -1,20 +1,15 @@
 /**
  * Audit field-encryption codec — the AES-256-GCM, per-column-AAD bind/result boundary for the
- * `audit.audit_events.before` / `.after` bytea columns. TS port of the wiring in
- * vendor/codemaster-py/codemaster/audit/emit.py (`_ENCRYPTED_BEFORE` / `_ENCRYPTED_AFTER`, both
- * `EncryptedJSONByteaWithAAD` instances) plus the relevant bind/result behaviour of
- * vendor/codemaster-py/codemaster/security/field_encryption.py::EncryptedJSONByteaWithAAD.
+ * `audit.audit_events.before` / `.after` bytea columns (`_ENCRYPTED_BEFORE` / `_ENCRYPTED_AFTER`,
+ * both `EncryptedJSONByteaWithAAD` instances).
  *
  * ## What it does (ADR-0033)
  *
  * On write: serialize a JSON-able value to canonical UTF-8 JSON (sort_keys + compact separators +
- * ensure_ascii — byte-identical to Python `json.dumps(value, sort_keys=True, separators=(",", ":"))`),
- * encrypt it with the ported {@link encryptField} crypto layer binding the per-column AAD, and return
- * the resulting `kms2:vN:<base64>` envelope as ASCII bytes (the bytea-column shape — Python returns
- * `envelope.encode("ascii")` from `process_bind_param`). On read: decode the bytea back to the ASCII
- * envelope string, decrypt under the same AAD, and JSON-parse. `null` round-trips to DB-NULL on both
- * sides (mirrors the Python `if value is None: return None` short-circuit + the `before is not None`
- * guard in `emit.py`).
+ * ensure_ascii), encrypt it with the {@link encryptField} crypto layer binding the per-column AAD,
+ * and return the resulting `kms2:vN:<base64>` envelope as ASCII bytes (the bytea-column shape). On
+ * read: decode the bytea back to the ASCII envelope string, decrypt under the same AAD, and
+ * JSON-parse. `null` round-trips to DB-NULL on both sides.
  *
  * The AAD binding is the column-isolation security property: a ciphertext written for the `before`
  * column does NOT decrypt under the `after` AAD (or vice versa), so an attacker with DB write access
@@ -49,14 +44,13 @@ import {
 import { KeyRegistry, makeKeySet } from "#platform/crypto/key_registry.js";
 
 /**
- * Per-column AAD constants — the canonical `"<schema>.<table>.<column>"` ASCII bytes. Byte-identical to
- * Python's `_AUDIT_BEFORE_AAD = b"audit.audit_events.before"` / `_AUDIT_AFTER_AAD = b"audit.audit_events.after"`
- * in `codemaster/audit/emit.py`, so columns encrypted by either implementation are cross-readable.
+ * Per-column AAD constants — the canonical `"<schema>.<table>.<column>"` ASCII bytes
+ * (`_AUDIT_BEFORE_AAD` / `_AUDIT_AFTER_AAD`), ensuring cross-implementation column isolation.
  */
 export const AUDIT_BEFORE_AAD: Uint8Array = new TextEncoder().encode("audit.audit_events.before");
 export const AUDIT_AFTER_AAD: Uint8Array = new TextEncoder().encode("audit.audit_events.after");
 /** AAD for core.feedback_events.raw_payload — the finding-feedback write encrypts its {verb, user_id}
- *  JSON under this column AAD (1:1 with finding_feedback.py `_RAW_PAYLOAD_AAD`). */
+ *  JSON under this column AAD. */
 export const FEEDBACK_RAW_PAYLOAD_AAD: Uint8Array = new TextEncoder().encode(
   "core.feedback_events.raw_payload",
 );
@@ -129,12 +123,9 @@ export function loadAuditKeysFromEnvForDev(): void {
 }
 
 /**
- * Canonical JSON encoding — byte-identical to Python `json.dumps(value, sort_keys=True,
- * separators=(",", ":"))`, INCLUDING `ensure_ascii=True` (the default): every non-ASCII code point is
- * emitted as a `\uXXXX` escape (non-BMP as a UTF-16 surrogate pair). This matters for the
- * security-critical cross-impl property — the encrypted PLAINTEXT must be byte-equal between the Python
- * and TS codecs so a row written by one decrypts to the same JSON in the other. `JSON.stringify` alone
- * does NOT escape non-ASCII, so we post-process its output.
+ * Canonical JSON encoding with `sort_keys=True`, compact separators, and `ensure_ascii=True`: every
+ * non-ASCII code point is emitted as a `\uXXXX` escape (non-BMP as a UTF-16 surrogate pair).
+ * `JSON.stringify` alone does NOT escape non-ASCII, so we post-process its output.
  */
 export function canonicalAuditJson(value: unknown): string {
   return escapeNonAscii(JSON.stringify(sortKeysDeep(value)));

@@ -3,8 +3,8 @@ import { z } from "zod";
 /**
  * Return contract of the `run_pg_partman_maintenance` activity.
  *
- * 1:1 with the frozen Python `PartitionMaintenanceResultV1`
- * (codemaster/workflows/partition_maintenance.py:23-30). NOTE the model is DEFINED in the WORKFLOW module
+ * `PartitionMaintenanceResultV1` (codemaster/workflows/partition_maintenance.py:23-30).
+ * NOTE the model is DEFINED in the WORKFLOW module
  * (the activity imports it from there); the parity oracle therefore resolves it under
  * `codemaster.workflows.partition_maintenance`. `ConfigDict(extra="forbid")` → `.strict()`:
  *  - schema_version: int = 1        → z.number().int().default(1)  (a PLAIN int default, NOT a Literal —

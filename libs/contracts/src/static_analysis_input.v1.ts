@@ -4,9 +4,8 @@ import { ChangedLineRange } from "./chunk_and_redact.v1.js";
 import { PrMetaV1 } from "./walkthrough.v1.js";
 
 // NEW typed-input envelope introduced DURING the Python→TS port — there is NO Python Pydantic
-// counterpart for the ENVELOPE itself to byte-diff against. The frozen Python `static_analysis_activity`
-// (vendor/codemaster-py/codemaster/activities/static_analysis.py, dispatched at
-// review_pull_request.py:1431-1448) takes FOUR positional arguments —
+// counterpart for the ENVELOPE itself to byte-diff against. `static_analysis_activity`
+// takes FOUR positional arguments —
 //   `(workspace_path: str,
 //     files: tuple[str, ...],
 //     changed_line_ranges: dict[str, tuple[tuple[int, int], ...]],
@@ -19,7 +18,7 @@ import { PrMetaV1 } from "./walkthrough.v1.js";
 //
 // Because there is no Python contract for the envelope, its parity coverage is round-trip / validation
 // only (accepts a valid payload; `.strict()` rejects unknown keys). The NESTED `pr_meta` field IS a real
-// ported contract (PrMetaV1), so its nested shape is byte-diffed against the frozen Python PrMetaV1 in
+// ported contract (PrMetaV1), so its nested shape is byte-diffed against PrMetaV1 in
 // the parity test — the orchestrator hands the activity `pr_meta_arg.model_dump(mode="json")`.
 //
 // Field mapping (Python positional → envelope field):

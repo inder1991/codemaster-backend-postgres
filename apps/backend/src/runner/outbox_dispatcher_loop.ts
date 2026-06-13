@@ -56,8 +56,8 @@ import { cancellableSleep } from "./clock_async.js";
  *  substitute a recording dispatchRow). markPermanentlyFailed (RC7) is LOOP-ONLY — the Temporal
  *  workflow proxies just the first 4 (its generic catch predates the taxonomy and retires with it
  *  in Phase 4). dispatchRow's `extras` (W1.9e) is equally LOOP-ONLY: the OUTBOX ROW's delivery_id,
- *  threaded OUTSIDE the parity-locked DispatchRowInputV1 wire shape (the frozen Python model has
- *  no delivery_id field) so the sinks can run the destination-side identity cross-check. */
+ *  threaded OUTSIDE the parity-locked DispatchRowInputV1 wire shape (no delivery_id field in the
+ *  contract) so the sinks can run the destination-side identity cross-check. */
 export type OutboxActivityFns = {
   claimPendingRows(input: ClaimPendingRowsInputV1): Promise<Array<OutboxRow>>;
   dispatchRow(input: DispatchRowInputV1, extras?: { deliveryId?: string | null }): Promise<void>;

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { z } from "zod";
 
-// Zod port of contracts/retrieved_evidence/v1.py (frozen Python — v10 provenance-backed evidence).
+// Zod port of contracts/retrieved_evidence/v1.py (v10 provenance-backed evidence).
 // Parity-validated in retrieved_evidence.v1.parity.test.ts.
 //
 // RetrievedEvidenceV1 is one piece of evidence the orchestration layer made available to a chunk

@@ -210,8 +210,8 @@ type ConfluenceSpaceStats = {
 
 /**
  * Sync one Confluence space end-to-end; return per-space stats. 1:1 with the workflow body's
- * `syncOneSpace` (confluence_ingest.workflow.ts) / the frozen Python `_sync_one_space` — the SAME
- * activity sequence over the SAME holder methods, dispatched in-process instead of via proxies.
+ * `syncOneSpace` (confluence_ingest.workflow.ts) — the SAME activity sequence over the SAME holder
+ * methods, dispatched in-process instead of via proxies.
  */
 async function syncOneConfluenceSpace(
   acts: ConfluenceSyncActivities,
@@ -365,7 +365,7 @@ export function registerCronHandlers(registry: HandlerRegistry, deps: CronHandle
   // W3b.2: the 2 daily crons. MarkStaleChunksActivity is a CLASS (bound-method holder) — construct
   // it ONCE at registration over the same optional dsn override, exactly as build_activities.ts does
   // for the Temporal worker (`new MarkStaleChunksActivity({ dsn })` + `.markStaleChunks.bind(...)`);
-  // neither daily activity takes a clock (both stamp via the DB `now()`, 1:1 with the frozen Python).
+  // neither daily activity takes a clock (both stamp via the DB `now()`).
   const markStaleChunksActivity = new MarkStaleChunksActivity(
     deps.dsn !== undefined ? { dsn: deps.dsn } : {},
   );
@@ -573,8 +573,8 @@ export function registerCronHandlers(registry: HandlerRegistry, deps: CronHandle
   });
 
   // W3e.2: confluence_ingest — the every-6h per-space × per-page NESTED FAN-OUT the Temporal
-  // confluenceIngestWorkflow body composes (confluence_ingest.workflow.ts / the frozen Python
-  // ConfluenceIngestWorkflow.run): list_active_spaces → per space (syncOneConfluenceSpace) → per page
+  // confluenceIngestWorkflow body composes (confluence_ingest.workflow.ts):
+  // list_active_spaces → per space (syncOneConfluenceSpace) → per page
   // (fetch_body → sanitize → chunk_and_embed → upsert) → reconcile_deletions. This re-implements the
   // workflow BODY (the orchestration) as a handler; the 7 confluence activities are REUSED, not
   // rewritten. BOTH fail-open layers are preserved EXACTLY:
@@ -671,8 +671,7 @@ export function registerCronHandlers(registry: HandlerRegistry, deps: CronHandle
     }
 
     // The workflow body's RefreshConfluenceOutputV1 result fields, as the log tally (the platform
-    // persists job OUTCOME, not results — pages_failed stays per-space-internal, 1:1 with the Python
-    // never returning it).
+    // persists job OUTCOME, not results — pages_failed stays per-space-internal).
     console.info(
       `confluence_ingest swept: pages_processed=${pagesProcessed} chunks_upserted=${chunksUpserted} ` +
         `chunks_rejected_no_approval=${chunksRejectedNoApproval} ` +
