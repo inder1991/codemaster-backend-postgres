@@ -1,13 +1,8 @@
 // degradation — uniform stage-outcome reporting for the workflow body's degradation paths.
 //
-// 1:1 PORT of the swallow/re-raise semantics in the frozen Python
-// vendor/codemaster-py/codemaster/workflows/stage_outcome.py, plus the STAGE_NAMES registry from
-// vendor/codemaster-py/codemaster/observability/pipeline_metrics.py.
-//
-// The Python is an async context manager (`async with stage_outcome(...) as handle: ...`). TS has no
-// `async with`, so the established TS shape is an async WRAPPER that takes the stage body as a callback —
-// `await stageOutcome(stage, opts, async () => { ... })`. The handle's note()/skipOutcome() are exposed
-// to the body via the callback's single argument.
+// TS has no `async with`, so the established TS shape is an async WRAPPER that takes the stage body as a
+// callback — `await stageOutcome(stage, opts, async () => { ... })`. The handle's note()/skipOutcome() are
+// exposed to the body via the callback's single argument.
 //
 // SEMANTICS PRESERVED EXACTLY:
 //   * Swallow-by-default: on a caught Error, log + emit record_stage(error) + append `<stage>_failed`
@@ -32,7 +27,7 @@ import { type Counter, getMeter } from "#platform/observability/metrics.js";
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // STAGE_NAMES — the locked stage-name set. Transcription of pipeline_metrics.py::STAGE_NAMES, PLUS the
 // TS-enhancement stages at the bottom (the #4 manifest fetch/parse wiring + the #6 carry-forward loader)
-// which exceed the frozen Python and so are not in its frozenset.
+// which are not in the upstream frozenset.
 // Adding a stage here is a deliberate contract change and must be paired with a workflow-body call site.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 export const STAGE_NAMES = new Set<string>([
@@ -93,7 +88,7 @@ const TRACEBACK_TRUNCATE = 8192;
 const ERROR_MSG_TRUNCATE = 2048;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-// record_stage — the REAL replay-safe per-stage counter (1:1 with pipeline_metrics.record_stage).
+// record_stage — the REAL replay-safe per-stage counter.
 //
 // Emits `codemaster_review_stage_total{stage, outcome}` via the Temporal workflow `metricMeter` (sandbox +
 // replay-safe). Name copied VERBATIM from the Python `COUNTER_NAME` so the deferred name-parity gate +
@@ -103,8 +98,7 @@ const ERROR_MSG_TRUNCATE = 2048;
 // unknown-stage counter) is irrelevant here because stageOutcome validates the stage name up-front and never
 // reaches record_stage with an unknown stage.
 //
-// The instrument is created PER-EMIT inside `recordStage` (1:1 with the Python `meter.create_counter(...)`
-// per call) — NOT cached at module scope. Temporal's `metricMeter` can only be touched while a workflow
+// The instrument is created PER-EMIT inside `recordStage` — NOT cached at module scope. Temporal's `metricMeter` can only be touched while a workflow
 // context is active; touching it outside one throws `IllegalStateError`. So `recordStage` GUARDS on
 // `inWorkflowContext()` and no-ops outside a workflow — this is faithful to the Python (whose
 // `workflow.metric_meter()` likewise requires a workflow loop) AND lets the orchestrator/posting unit tests

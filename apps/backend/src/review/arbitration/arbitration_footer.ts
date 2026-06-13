@@ -1,5 +1,4 @@
-// Arbitration walkthrough footer — 1:1 port of the frozen Python
-// vendor/codemaster-py/codemaster/review/arbitration_footer.py (Phase D Task D.8).
+// Arbitration walkthrough footer — Phase D Task D.8.
 //
 // Pure-function renderer that turns an {@link ArbitrationResultV1} and the Tier-1 {@link ToolStatusV1} tuple
 // into a markdown block appended to the post-review walkthrough body. Output shape (markdown, both sections
@@ -37,7 +36,7 @@
 import type { ArbitrationResultV1 } from "#contracts/arbitration_result.v1.js";
 import type { ToolStatusV1 } from "#contracts/tool_status.v1.js";
 
-/** Per-state count of non-NONE decisions, or "" for empty input. 1:1 with `_render_suppressed_section`. */
+/** Per-state count of non-NONE decisions, or "" for empty input. */
 function renderSuppressedSection(result: ArbitrationResultV1): string {
   const suppressed = result.decisions.filter((d) => d.suppression_state !== "NONE");
   if (suppressed.length === 0) {
@@ -60,7 +59,7 @@ function renderSuppressedSection(result: ArbitrationResultV1): string {
   return lines.join("\n");
 }
 
-/** Per-tool non-completed status line, or "" for empty input. 1:1 with `_render_tool_degradation_section`. */
+/** Per-tool non-completed status line, or "" for empty input. */
 function renderToolDegradationSection(toolStatuses: ReadonlyArray<ToolStatusV1>): string {
   const degraded = toolStatuses.filter((s) => s.status !== "completed");
   if (degraded.length === 0) {
@@ -84,7 +83,7 @@ function renderToolDegradationSection(toolStatuses: ReadonlyArray<ToolStatusV1>)
 }
 
 /**
- * Render the optional arbitration footer. 1:1 with the Python `render_arbitration_footer_md`.
+ * Render the optional arbitration footer.
  *
  * @returns the empty string when both sections are empty (no suppressed findings, all tools completed);
  *   otherwise a horizontal-rule-separated markdown block ready for direct concatenation onto the walkthrough

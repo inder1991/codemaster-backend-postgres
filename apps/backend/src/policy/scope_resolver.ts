@@ -1,4 +1,4 @@
-// scope_resolver — 1:1 port of the frozen Python codemaster/policy/scope_resolver.py (Sprint 25 / A-3).
+// scope_resolver — guidance resolution by changed-file ancestry (Sprint 25 / A-3).
 //
 // Pure function `resolveGuidance({ changedPath, extractedRules })` returns the rules that apply to a
 // changed file path, deduped by `normalized_hash` and sorted by precedence. Deterministic: same inputs
@@ -15,16 +15,11 @@
 //      `rule.rule_id` alphabetical.
 //   5. Build a human-readable explanation per rule.
 //
-// Parity-significant ordering details (byte-significant):
-//   - `min(sources, key=_canonical_sort_key)` returns the FIRST element on a tie (Python `min` is
-//     stable / first-wins). `argMinStable` reproduces this — it never replaces the incumbent on an
-//     equal key, so first-encountered wins ties identically.
-//   - `by_hash` is a dict preserving INSERTION order (Python 3.7+); JS `Map` preserves insertion order
-//     too, so dedup-group iteration order matches. `setdefault(...).append(r)` keeps each group's
-//     sources in first-encountered order.
-//   - `list.sort` is STABLE in both Python and JS (TimSort / spec-mandated stable sort), so equal
-//     precedence-keys preserve their pre-sort (dedup-group-insertion) order.
-//   - Tuple comparison in the sort keys is reproduced by a lexicographic comparator over the 3 fields.
+// Ordering invariants (load-bearing for determinism):
+//   - `argMinStable` never replaces the incumbent on an equal key — first-encountered wins ties.
+//   - JS `Map` preserves insertion order, so dedup-group iteration order is stable.
+//   - `.sort` is spec-mandated stable, so equal precedence-keys preserve dedup-group-insertion order.
+//   - Sort keys are compared lexicographically over 3 fields (mirrors tuple comparison).
 
 import {
   DedupedRuleV1,
@@ -34,9 +29,9 @@ import {
 import { type ExtractedRuleV1 } from "#contracts/extracted_rules.v1.js";
 
 /**
- * Port of `_walk_ancestors` — the set of ancestor directory paths a rule's `scope_dir` must match for
- * the rule to apply. "src/backend/api/refund.py" → {"", "src", "src/backend", "src/backend/api"}. Empty
- * string = repo root (matches any file).
+ * The set of ancestor directory paths a rule's `scope_dir` must match for the rule to apply.
+ * "src/backend/api/refund.py" → {"", "src", "src/backend", "src/backend/api"}. Empty string = repo
+ * root (matches any file).
  */
 function walkAncestors(changedPath: string): ReadonlySet<string> {
   const parts = changedPath.split("/").slice(0, -1); // drop the file basename
@@ -50,7 +45,7 @@ function walkAncestors(changedPath: string): ReadonlySet<string> {
 }
 
 /**
- * Port of `_canonical_sort_key` — canonical-selection key within a dedup group (lower is better):
+ * Canonical-selection key within a dedup group (lower is better):
  *   1. -priority (highest priority wins)
  *   2. -len(scope_dir) (nearest-ancestor wins on tie)
  *   3. rule_id (alphabetical first-encountered tiebreak)
@@ -60,7 +55,7 @@ function canonicalSortKey(rule: ExtractedRuleV1): readonly [number, number, stri
 }
 
 /**
- * Port of `_precedence_sort_key` — final precedence ordering of deduped rules (lower is better):
+ * Final precedence ordering of deduped rules (lower is better):
  *   1. -len(scope_dir) (nearest-ancestor primary)
  *   2. -priority (priority secondary)
  *   3. rule_id (alphabetical tertiary tie-break)
@@ -70,7 +65,7 @@ function precedenceSortKey(deduped: DedupedRuleV1): readonly [number, number, st
   return [-rule.scope_dir.length, -rule.priority, rule.rule_id];
 }
 
-/** Lexicographic compare of two (int, int, str) sort-key tuples — the Python tuple `<` ordering. */
+/** Lexicographic compare of two (int, int, str) sort-key tuples. */
 function compareKey(
   a: readonly [number, number, string],
   b: readonly [number, number, string],
@@ -83,9 +78,9 @@ function compareKey(
 }
 
 /**
- * Stable arg-min: return the element with the lexicographically-smallest key, FIRST-WINS on ties (Python
- * `min(iterable, key=...)` returns the first item on equal keys). The incumbent is only replaced when a
- * STRICTLY smaller key is seen, preserving first-encountered ordering on ties.
+ * Stable arg-min: return the element with the lexicographically-smallest key, FIRST-WINS on ties.
+ * The incumbent is only replaced when a STRICTLY smaller key is seen, preserving first-encountered
+ * ordering on ties.
  */
 function argMinStable(rules: ReadonlyArray<ExtractedRuleV1>): ExtractedRuleV1 {
   let best = rules[0]!;
@@ -101,7 +96,7 @@ function argMinStable(rules: ReadonlyArray<ExtractedRuleV1>): ExtractedRuleV1 {
   return best;
 }
 
-/** Port of `_explain` — human-readable explanation for one applied rule. */
+/** Human-readable explanation for one applied rule. */
 function explain(deduped: DedupedRuleV1, changedPath: string): string {
   const rule = deduped.rule;
   const scopeLabel = rule.scope_dir || "root";
@@ -125,8 +120,8 @@ function explain(deduped: DedupedRuleV1, changedPath: string): string {
 }
 
 /**
- * 1:1 port of the frozen Python `resolve_guidance`. Return the rules applicable to `changedPath`,
- * deduplicated by `normalized_hash` and sorted by precedence. Pure / deterministic across runs.
+ * Return the rules applicable to `changedPath`, deduplicated by `normalized_hash` and sorted by
+ * precedence. Pure / deterministic across runs.
  */
 export function resolveGuidance(args: {
   changedPath: string;

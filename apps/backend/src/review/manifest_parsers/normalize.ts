@@ -1,5 +1,4 @@
-// ADR-0058 — 8-step canonical dependency-name normalization. 1:1 TS port of the frozen Python
-//   vendor/codemaster-py/codemaster/review/manifest_parsers/_normalize.py.
+// ADR-0058 — 8-step canonical dependency-name normalization.
 //
 // Pure function. NO I/O. NO state. The rules are LOCKED in ADR-0058; drift requires amending the ADR.
 // Returns the canonical name (string) on success, or a {@link NormalizationRejection} on any rejection.

@@ -1,13 +1,13 @@
-// `parseToolUse` + ReviewFindingParseError — 1:1 port of the parser half of the frozen Python
-// vendor/codemaster-py/codemaster/review/tool_schema.py (the JSON-schema constants + the tool NAMES
-// live in #backend/llm/review_prompt.js and are IMPORTED here, not redefined).
+// `parseToolUse` + ReviewFindingParseError — the parser for Anthropic `tool_use` response blocks.
+// The JSON-schema constants + tool NAMES live in #backend/llm/review_prompt.js (imported here, not
+// redefined).
 //
-// The parser turns Anthropic `tool_use` response blocks back into typed envelopes — `ReviewFindingV1`
-// (Form A, `report_finding`) and `ArbitrationIntentV1` (Form B, `report_arbitration_intent`). It is the
-// deterministic inv-14/15 enforcement seam's first stage: blocks → (findings, intents). PURE — no clock,
-// no random, no DB, no I/O.
+// The parser turns `tool_use` blocks into typed envelopes — `ReviewFindingV1` (Form A,
+// `report_finding`) and `ArbitrationIntentV1` (Form B, `report_arbitration_intent`). It is the
+// deterministic inv-14/15 enforcement seam's first stage: blocks → (findings, intents). PURE — no
+// clock, no random, no DB, no I/O.
 //
-// Parser policy (mirrors the Python docstring + branch logic EXACTLY):
+// Parser policy:
 //   * Non-`tool_use` blocks (text / images / etc.) are ignored.
 //   * `tool_use` blocks with an UNKNOWN `name` are ignored (forward-compat — future tools can ship
 //     without breaking the parser).
@@ -15,16 +15,16 @@
 //     block's `id`. The caller (chunk_response_parser.ts::parseWithSkipMalformed) catches per-block,
 //     logs, and skips the one bad block — keeping the rest.
 //   * Malformed `report_arbitration_intent` blocks are SILENTLY skipped (defensive posture for the new
-//     Form-B channel — LLM drift on the new tool must not take down the pipeline). A structured WARN is
-//     logged so operators can detect emission drift, mirroring the Python `_LOG.warning(...)`.
+//     Form-B channel — LLM drift on the new tool must not take down the pipeline). A structured WARN
+//     is logged so operators can detect emission drift.
 //
-// MALFORMED-detection triggers for `report_finding` (read precisely against the Python):
+// MALFORMED-detection triggers for `report_finding`:
 //   1. `input` is missing or NOT a plain object → raise (reason "tool_use.input is missing or not an
-//      object"). Mirrors the Python `not isinstance(payload, dict)` guard.
+//      object").
 //   2. coercion + contract validation failure (Zod parse throws) → raise (reason = the parse error
-//      message). Mirrors the Python `except ValidationError`.
-// Coercion goes through the shared #backend/llm/contract_coercion.js::coerceForContract (the same
-// LLM-output string-length coercion the Python `coerce_for_contract` applies BEFORE `model_validate`).
+//      message).
+// Coercion goes through #backend/llm/contract_coercion.js::coerceForContract (string-length coercion
+// before contract validation).
 
 import { coerceForContract } from "#backend/llm/contract_coercion.js";
 import { ARBITRATION_INTENT_TOOL_NAME, REVIEW_TOOL_NAME } from "#backend/llm/review_prompt.js";
@@ -34,9 +34,8 @@ import { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
 
 /**
  * Raised when a `report_finding` tool block cannot be validated. Carries the originating `blockId` so
- * the caller can log a precise marker without retaining the payload itself. 1:1 with the Python
- * `ReviewFindingParseError(*, block_id, reason)` — `name` is set for instanceof-free discrimination and
- * the message mirrors the Python `f"block {block_id}: {reason}"`.
+ * the caller can log a precise marker without retaining the payload itself. `name` is set for
+ * instanceof-free discrimination; message format: `"block {blockId}: {reason}"`.
  */
 export class ReviewFindingParseError extends Error {
   public readonly blockId: string;
@@ -50,7 +49,7 @@ export class ReviewFindingParseError extends Error {
   }
 }
 
-/** True iff `value` is a plain (non-array, non-null) object — the Python `isinstance(value, dict)`. */
+/** True iff `value` is a plain (non-array, non-null) object. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -63,11 +62,11 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * Non-tool-use blocks and tool-use blocks with unknown names are silently ignored. Per-block
  * malformed-skip semantics differ by type: `report_finding` RAISES {@link ReviewFindingParseError} (the
  * caller catches + skips); `report_arbitration_intent` silently skips (defensive Form-B posture). Returns
- * a `[ReviewFindingV1[], ArbitrationIntentV1[]]` tuple (the Python `(findings, intents)` contract).
+ * a `[ReviewFindingV1[], ArbitrationIntentV1[]]` tuple.
  *
  * `onArbitrationSkip` is an OPTIONAL hook invoked once per silently-skipped malformed arbitration block
- * (default: no-op). It carries the structured fields the Python `_LOG.warning(...)` emits so the caller
- * can wire logging without this pure parser reaching for a logger seam.
+ * (default: no-op). It carries the structured fields a warning log would emit, so the caller can wire
+ * logging without this pure parser reaching for a logger seam.
  */
 export function parseToolUse(
   blocks: ReadonlyArray<Record<string, unknown>>,
@@ -82,22 +81,20 @@ export function parseToolUse(
   const intents: Array<ArbitrationIntentV1> = [];
 
   for (const block of blocks) {
-    // Python: `if not isinstance(block, dict): continue`. Non-object blocks are skipped.
+    // Non-object blocks are skipped.
     if (!isPlainObject(block)) {
       continue;
     }
-    // Python: `if block.get("type") != "tool_use": continue`.
     if (block["type"] !== "tool_use") {
       continue;
     }
     const name = block["name"];
-    // Python: `block_id = str(block.get("id", "<no-id>"))`.
     const rawId = block["id"];
     const blockId = rawId === undefined ? "<no-id>" : String(rawId);
     const payload = block["input"];
 
     if (name === REVIEW_TOOL_NAME) {
-      // Trigger 1: missing / non-object input → raise (the Python `not isinstance(payload, dict)` guard).
+      // Trigger 1: missing / non-object input → raise.
       if (!isPlainObject(payload)) {
         throw new ReviewFindingParseError({
           blockId,
@@ -121,8 +118,8 @@ export function parseToolUse(
         intents.push(ArbitrationIntentV1.parse(coercedIntent));
       } catch (exc) {
         // Defensive skip on malformed intent — surface a structured WARN so operators can detect LLM
-        // emission drift (e.g. confidence > 3 decimal places, action casing). Mirrors the Python
-        // `_LOG.warning(...)`; emission is delegated to the optional hook to keep the parser pure.
+        // emission drift (e.g. confidence > 3 decimal places, action casing). Emission is delegated
+        // to the optional hook to keep the parser pure.
         onArbitrationSkip?.({
           blockId,
           errorClass: exc instanceof Error ? exc.name : "Error",

@@ -1,9 +1,9 @@
 // posting — the Step-9 post-review sub-functions (finding 8), extracted from the orchestrator so the
 // post stage's render → dispatch → capture → on-failure-skip-dispatch concerns live in one unit-testable
-// module. 1:1 port of the frozen Python workflow body's `_post_review` closure
-// (vendor/codemaster-py/codemaster/workflows/review_pull_request.py:2342-2840) — the parts that run AROUND
-// the `post_review_results` activity dispatch: the walkthrough markdown render (+ arbitration footer fold),
-// the PostedReviewV1 → `_PostReviewCapture` population, the publication-outcome stage-outcome mapping, and
+// module. Port of the `_post_review` closure (review_pull_request.py:2342-2840) — the parts that run
+// AROUND the `post_review_results` activity dispatch: the walkthrough markdown render (+ arbitration footer
+// fold), the PostedReviewV1 → `_PostReviewCapture` population, the publication-outcome stage-outcome
+// mapping, and
 // the H-2 dropped-state failure path (extract dropped-state details from the ActivityError, map
 // dropped indices → rfids, dispatch record_delivery_skipped INLINE, then re-raise).
 //

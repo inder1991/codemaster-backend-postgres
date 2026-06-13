@@ -1,39 +1,33 @@
 /**
- * Suggested-reviewers walkthrough section — 1:1 TS port of the frozen Python
- * `codemaster/llm/walkthrough_sections/suggested_reviewers.py` (Sprint 22 / S22.DM.15).
+ * Suggested-reviewers walkthrough section (Sprint 22 / S22.DM.15).
  *
  * Pure ranker. Inputs: the PR's changed files + the parsed CODEOWNERS rules ({@link CodeOwnerRule}).
  * Output: the top-N GitHub login strings (markdown-escaped, leading `@` stripped), ranked by
  * file-match-count DESC then login alpha-ASC.
  *
- * Algorithm (ported exactly):
+ * Algorithm:
  *   1. For each PR file, find ALL matching CODEOWNERS rules.
  *   2. Per matched rule, attribute one file-match to each listed `owner_login`.
  *   3. Rank by count DESC, ties broken by alpha-sorted login; take top-N (default 3).
  *   4. Strip the leading `@` + markdown-escape (the walkthrough body is GitHub markdown).
- *
- * Both the activity-consumed ranker (`rank_suggested_reviewers`) AND the walkthrough-rendering
- * formatter (`format_suggested_reviewers_md`) are ported here, 1:1 with the frozen Python.
  */
 
 import type { CodeOwnerRule } from "#backend/domain/repos/code_owners_repo.js";
 
 /**
- * Markdown special characters escaped when a CODEOWNERS login survives parsing. Mirrors the Python
- * `_MARKDOWN_ESCAPE_TABLE` exactly: backslash, italic/bold, code, brackets, parens, pipe, angle
- * brackets, hash. Hyphen / dot / slash are valid login chars and are NOT escaped (they don't trigger
- * markdown rendering inline).
+ * Markdown special characters escaped when a CODEOWNERS login survives parsing: backslash,
+ * italic/bold, code, brackets, parens, pipe, angle brackets, hash. Hyphen / dot / slash are valid
+ * login chars and are NOT escaped (they don't trigger markdown rendering inline).
  */
 const MARKDOWN_ESCAPE_TABLE = new Set("\\`*_{}[]()|<>#".split(""));
 
-/** Default top-N reviewer count, 1:1 with the Python `DEFAULT_TOP_N`. */
+/** Default top-N reviewer count. */
 export const DEFAULT_TOP_N = 3;
 
 /**
- * Translate a Python `fnmatch` glob to a RegExp source, 1:1 with CPython's `fnmatch.translate`
- * semantics for the metacharacters CODEOWNERS uses: `*` → `.*` (CROSS-segment — fnmatch does not stop
- * at `/`), `?` → `.`, `[seq]` → a character class (with `!` → `^` negation), everything else escaped
- * literally. The result is anchored at both ends (CPython wraps it in `(?s:...)\Z`).
+ * Translate a fnmatch glob to a RegExp source for CODEOWNERS patterns: `*` → `.*` (CROSS-segment —
+ * does not stop at `/`), `?` → `.`, `[seq]` → a character class (with `!` → `^` negation), everything
+ * else escaped literally. The result is anchored at both ends.
  */
 function fnmatchTranslate(pat: string): string {
   let res = "";
@@ -60,7 +54,7 @@ function fnmatchTranslate(pat: string): string {
           stuff = stuff.replace(/\\/g, "\\\\");
         } else {
           // Preserve ranges; escape backslashes within. (CODEOWNERS glob ranges are vanishingly rare;
-          // this branch mirrors CPython's range-preserving path for fidelity.)
+          // this branch preserves ranges for fidelity.)
           stuff = stuff.replace(/\\/g, "\\\\");
         }
         i = j + 1;
@@ -85,11 +79,10 @@ function escapeRegexLiteral(ch: string): string {
 }
 
 /**
- * gitignore-style glob match for CODEOWNERS patterns, 1:1 with the Python `_matches_codeowners_glob`.
- * Normalises the leading-slash root anchor (fnmatch ignores it), converts a trailing `/` (directory
- * pattern) to `prefix/**`, collapses `**` → `*` (fnmatch is already cross-segment so the doubled star
- * is a no-op), then runs the fnmatch translation. The `s` flag makes `.` match newlines (CPython's
- * `(?s:...)`), harmless for path strings.
+ * gitignore-style glob match for CODEOWNERS patterns. Normalises the leading-slash root anchor
+ * (fnmatch ignores it), converts a trailing `/` (directory pattern) to `prefix/**`, collapses
+ * `**` → `*` (already cross-segment so the doubled star is a no-op), then runs the fnmatch
+ * translation. The `s` flag makes `.` match newlines, harmless for path strings.
  */
 function matchesCodeownersGlob(args: { pattern: string; filePath: string }): boolean {
   const { pattern, filePath } = args;
@@ -108,8 +101,8 @@ function matchesCodeownersGlob(args: { pattern: string; filePath: string }): boo
 }
 
 /**
- * Strip the leading `@` for display + escape any markdown special chars, 1:1 with the Python
- * `_markdown_escape_login`. The parser's regex pre-validates the login shape; this is defence-in-depth.
+ * Strip the leading `@` for display + escape any markdown special chars. The parser's regex
+ * pre-validates the login shape; this is defence-in-depth.
  */
 function markdownEscapeLogin(login: string): string {
   const bare = login.replace(/^@+/, "");
@@ -121,10 +114,8 @@ function markdownEscapeLogin(login: string): string {
 }
 
 /**
- * Return the top-N reviewer logins (markdown-escaped, no `@`), 1:1 with `rank_suggested_reviewers`.
- *
- * Empty array when there's no CODEOWNERS coverage of the PR files. The walkthrough renderer omits the
- * section header when this returns empty.
+ * Return the top-N reviewer logins (markdown-escaped, no `@`). Empty array when there's no CODEOWNERS
+ * coverage of the PR files. The walkthrough renderer omits the section header when this returns empty.
  */
 export function rankSuggestedReviewers(args: {
   prFiles: ReadonlyArray<string>;
@@ -154,15 +145,15 @@ export function rankSuggestedReviewers(args: {
     return [];
   }
 
-  // Sort by count DESC, login alpha ASC. 1:1 with the Python `key=lambda kv: (-kv[1], kv[0])`.
+  // Sort by count DESC, login alpha ASC.
   const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return ranked.slice(0, topN).map(([login]) => markdownEscapeLogin(login));
 }
 
 /**
- * Render the suggested-reviewers walkthrough section (1:1 with `format_suggested_reviewers_md`). Returns
- * "" for an empty list so the caller never emits an orphan header. Each line: `- @<reviewer>` (the
- * reviewer strings are already markdown-escaped + `@`-stripped by {@link rankSuggestedReviewers}).
+ * Render the suggested-reviewers walkthrough section. Returns "" for an empty list so the caller
+ * never emits an orphan header. Each line: `- @<reviewer>` (the reviewer strings are already
+ * markdown-escaped + `@`-stripped by {@link rankSuggestedReviewers}).
  */
 export function formatSuggestedReviewersMd(reviewers: ReadonlyArray<string>): string {
   if (reviewers.length === 0) {

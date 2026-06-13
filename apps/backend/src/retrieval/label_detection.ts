@@ -1,7 +1,4 @@
-// label_detection — port of the frozen Python
-//   vendor/codemaster-py/codemaster/retrieval/label_detection.py::detect_labels (Sub-spec B T6).
-//
-// Two-stage detection-pipeline orchestrator (spec §3.5 lines 369-386): classifiers populate
+// label_detection — two-stage detection-pipeline orchestrator (Sub-spec B T6, spec §3.5 lines 369-386): classifiers populate
 // FileClassification on every ChangedFile, then detectors run in any order and union their emissions.
 //
 // `DETECTION_PIPELINE_VERSION` is persisted in each retrieval trace (§3.10) so "retrieval changed
@@ -31,7 +28,7 @@ export const DEFAULT_DETECTORS: ReadonlyArray<LabelDetector> = [
 ];
 
 /**
- * Run the two-stage detection pipeline over `ctx` (1:1 with the Python `detect_labels`).
+ * Run the two-stage detection pipeline over `ctx`.
  *
  * Returns `[unionOfEmissions, perDetectorEmissions]` where the union ALWAYS contains `"default"`
  * (spec §3.5 line 379). The per-detector breakdown is keyed by `detector.name` so callers can persist

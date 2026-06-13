@@ -1,17 +1,12 @@
-// EmbeddingsPort — port of the frozen Python
-// vendor/codemaster-py/codemaster/adapters/embeddings_port.py (Sprint 10 retrieval pipeline).
-//
-// codemaster is a CONSUMER of an embedding service (platform-team Qwen3 over HTTP, or any
-// OpenAI-Embeddings-compatible provider). This module defines the NARROW interface the retrieval +
-// aggregation layers depend on, plus the typed-error taxonomy that lets callers choose between
-// graceful degradation (fall back to lexical-only / skip the semantic merge) and hard failure.
+// EmbeddingsPort — narrow interface the retrieval + aggregation layers depend on (Sprint 10 retrieval
+// pipeline). codemaster is a CONSUMER of an embedding service (platform-team Qwen3 over HTTP, or any
+// OpenAI-Embeddings-compatible provider). The typed-error taxonomy lets callers choose between graceful
+// degradation (fall back to lexical-only / skip the semantic merge) and hard failure.
 //
 // ── ADAPTER-LOCAL contracts (NOT #contracts schema-version models) ──
-// EmbedRequest / EmbedResult are the Python `__contract_internal__ = True` shapes — adapter-private
-// wire types, never persisted, never carried across a Temporal activity boundary as a versioned
-// contract. They live HERE in apps/backend (not in libs/contracts) by the same rule the Python uses:
-// `__contract_internal__` excludes them from the schema-version registry. They are validated
-// structurally at the HTTP boundary (the consumer/adapter narrow the JSON), not via a Pydantic model.
+// EmbedRequest / EmbedResult are adapter-private wire types, never persisted, never carried across a
+// Temporal activity boundary as a versioned contract. They live HERE in apps/backend (not in
+// libs/contracts) and are validated structurally at the HTTP boundary.
 //
 // ── EmbeddingsPort is a TYPE (structural), not a class ──
 // Production impls: QwenEmbeddingsConsumer (integrations/qwen/consumer.ts) and
@@ -33,17 +28,16 @@ import { transportAbortSignal } from "#platform/transport_timeout.js";
 // ─── Adapter-local wire contracts ──────────────────────────────────────────────────────────────
 
 /**
- * One batch embed request. 1:1 with the Python `EmbedRequest` (`__contract_internal__`).
+ * One batch embed request.
  *
- * Field bounds (enforced by {@link validateEmbedRequest}, mirroring the Pydantic `Field(...)`):
- *   - `texts`: 1..128 items (Python `min_length=1, max_length=128`).
+ * Field bounds (enforced by {@link validateEmbedRequest}):
+ *   - `texts`: 1..128 items.
  *   - `model_name`: the platform model id (e.g. `"qwen3-embed-0.6b"`). NOTE: the OpenAI-compat
  *     adapter IGNORES this — its model is fixed at construction (credential rotation, not per-call).
  *   - `purpose`: why this embed is computed (`"review_query"`, `"confluence_chunk"`, `"in_repo_doc"`,
  *     `"portal"`, `"symbol"`, `"learning"`); free string on the wire.
  *
- * snake_case members are FAITHFUL to the Python wire body (`{texts, model_name, purpose}`) — the
- * JSON keys POSTed to `/embed` must match the platform service contract exactly.
+ * snake_case members match the platform service contract JSON keys POSTed to `/embed` exactly.
  */
 export type EmbedRequest = {
   texts: ReadonlyArray<string>;
@@ -52,9 +46,9 @@ export type EmbedRequest = {
 };
 
 /**
- * Response to an embed request: one vector per input text. 1:1 with the Python `EmbedResult`.
+ * Response to an embed request: one vector per input text.
  *
- *   - `vectors`: `len(vectors) === len(req.texts)` (the port invariant).
+ *   - `vectors`: `vectors.length === req.texts.length` (the port invariant).
  *   - `model_name` / `model_version`: echoed from the service response.
  *   - `cache_hits`: how many of the inputs were served from the service's cache (0 when the
  *     provider does not surface it — OpenAI-compat hardcodes 0).
@@ -74,16 +68,16 @@ export type EmbeddingsPort = {
   embed(req: EmbedRequest): Promise<EmbedResult>;
 };
 
-// ─── Request validation (mirrors the Pydantic Field bounds) ──────────────────────────────────────
+// ─── Request validation ───────────────────────────────────────────────────────────────────────────
 
-/** Lower / upper bounds on `EmbedRequest.texts`, 1:1 with the Python `min_length` / `max_length`. */
+/** Lower / upper bounds on `EmbedRequest.texts`. */
 export const MIN_TEXTS = 1;
 export const MAX_TEXTS = 128;
 
 /**
- * Validate an {@link EmbedRequest} against the Python Pydantic `Field` bounds. Throws
- * {@link EmbeddingsValidationError} on a shape the Python model would reject — so a malformed batch is
- * caught locally (the same 4xx-class semantics the service would return) rather than POSTed.
+ * Validate an {@link EmbedRequest} against the field bounds. Throws {@link EmbeddingsValidationError}
+ * on a malformed batch — caught locally (the same 4xx-class semantics the service would return) rather
+ * than POSTed.
  */
 export function validateEmbedRequest(req: EmbedRequest): void {
   if (req.texts.length < MIN_TEXTS) {
@@ -98,9 +92,9 @@ export function validateEmbedRequest(req: EmbedRequest): void {
   }
 }
 
-// ─── Typed exceptions (1:1 with the Python taxonomy) ─────────────────────────────────────────────
+// ─── Typed exceptions ─────────────────────────────────────────────────────────────────────────────
 
-/** Base for embeddings adapter errors (Python `EmbeddingsError`). */
+/** Base for embeddings adapter errors. */
 export class EmbeddingsError extends Error {
   public constructor(message: string) {
     super(message);
@@ -121,7 +115,7 @@ export class EmbeddingsConnectivityError extends EmbeddingsError {
   }
 }
 
-/** Service rate-limited us (Python `EmbeddingsRateLimitedError`); caller should back off. Maps from 429. */
+/** Service rate-limited us; caller should back off. Maps from 429. */
 export class EmbeddingsRateLimitedError extends EmbeddingsError {
   public constructor(message: string) {
     super(message);
@@ -130,8 +124,8 @@ export class EmbeddingsRateLimitedError extends EmbeddingsError {
 }
 
 /**
- * Request shape rejected (Python `EmbeddingsValidationError`); non-retryable. Maps from a 4xx other
- * than 429, and from local {@link validateEmbedRequest} failures.
+ * Request shape rejected; non-retryable. Maps from a 4xx other than 429, and from local
+ * {@link validateEmbedRequest} failures.
  */
 export class EmbeddingsValidationError extends EmbeddingsError {
   public constructor(message: string) {
@@ -143,8 +137,8 @@ export class EmbeddingsValidationError extends EmbeddingsError {
 // ─── Test/dev implementation ─────────────────────────────────────────────────────────────────────
 
 /**
- * Embedding dimensionality of the platform model (Python `EMBEDDING_DIM = 1024`). Used by the
- * deterministic {@link RecordingEmbeddingsClient} and by the platform-model pgvector column width.
+ * Embedding dimensionality of the platform model (1024). Used by the deterministic
+ * {@link RecordingEmbeddingsClient} and by the platform-model pgvector column width.
  *
  * NOTE: the live OpenAI-compat / Ollama path returns the PROVIDER's dimensionality (qwen3-embedding
  * on Ollama is 4096-dim). The aggregation merge uses cosine similarity, which is dim-agnostic, so it
@@ -159,14 +153,11 @@ export const EMBEDDING_DIM = 1024;
  * {@link resolveEmbeddingsConsumer} (dev environments without a real embedder); NEVER on a
  * production-configured path.
  *
- * ── Determinism note (DIVERGES from Python by design — documented for the verifier) ──
- * The Python `RecordingEmbeddingsClient` derives each vector from `abs(hash(text)) % 2**31` seeding a
- * Mersenne-Twister `random.Random`, then `r.uniform(-1, 1)` × {@link EMBEDDING_DIM}. That is NOT
- * reproducible cross-language: CPython's string `hash()` is salted by `PYTHONHASHSEED` (non-stable
- * even across CPython runs), and Mersenne Twister's `uniform` stream is impractical to replicate
- * byte-for-byte in TS. Because this client only needs determinism WITHIN the TS runtime (the
- * aggregation merge compares vectors produced by the SAME client, with cosine), we use a fully
- * self-contained, documented, reproducible TS algorithm instead:
+ * ── Determinism ──
+ * Cross-language reproduction of the CPython hash + Mersenne Twister PRNG is impractical. Because
+ * this client only needs determinism WITHIN the TS runtime (the aggregation merge compares vectors
+ * produced by the SAME client, with cosine), we use a fully self-contained, documented, reproducible
+ * TS algorithm instead:
  *
  *   1. seed = FNV-1a-32 over the UTF-8 bytes of `text` (offset basis 2166136261, prime 16777619,
  *      mod 2**32). Empty string → the offset basis (2166136261).
@@ -176,8 +167,8 @@ export const EMBEDDING_DIM = 1024;
  *   3. Emit {@link EMBEDDING_DIM} such floats, in order, as the vector.
  *
  * Same input → same vector (within a process AND across processes — there is no salt). A verifier can
- * reproduce any vector with the three steps above. `model_version` is the fixed sentinel `"test-v1"`
- * (1:1 with Python). `cache_hits` is 0 (this dev double does not simulate a cache).
+ * reproduce any vector with the three steps above. `model_version` is the fixed sentinel `"test-v1"`.
+ * `cache_hits` is 0 (this dev double does not simulate a cache).
  */
 export class RecordingEmbeddingsClient implements EmbeddingsPort {
   /** Every request passed to {@link embed}, in call order (tests assert against this). */
@@ -259,7 +250,7 @@ function deterministicVector(text: string): Array<number> {
 
 // ─── Injected HTTP-transport seam (shared by both production adapters) ────────────────────────────
 
-/** Default per-request transport timeout, in seconds (Python `_DEFAULT_TIMEOUT_SECONDS = 10.0`). */
+/** Default per-request transport timeout, in seconds. */
 export const DEFAULT_TIMEOUT_SECONDS = 10.0;
 
 /** The HTTP response shape the embeddings adapters consume. */
@@ -278,8 +269,7 @@ export type EmbeddingsHttpRequestArgs = {
 /**
  * Thrown by {@link FetchEmbeddingsHttpClient} when the underlying `fetch` fails at the transport level
  * (network error, DNS failure, connection reset, or an `AbortSignal.timeout` firing). The adapters
- * catch this and map it to {@link EmbeddingsConnectivityError} — the 1:1 analogue of the Python
- * `except httpx.ConnectError / TimeoutException / NetworkError` arms.
+ * catch this and map it to {@link EmbeddingsConnectivityError}.
  */
 export class EmbeddingsTransportError extends Error {
   public constructor(message: string) {

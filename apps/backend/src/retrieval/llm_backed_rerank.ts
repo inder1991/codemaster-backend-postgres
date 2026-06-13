@@ -1,5 +1,4 @@
-// LlmBackedRerankPort — a bounded LLM reranker (ENHANCEMENT beyond the frozen Python, which ships ONLY
-// the IdentityRerankPort no-op). Implements {@link LlmRerankerPort}: a small LLM (Haiku) scores each
+// LlmBackedRerankPort — a bounded LLM reranker. Implements {@link LlmRerankerPort}: a small LLM (Haiku) scores each
 // RRF-fused candidate in [0,1] for relevance to the query; LlmRerank keeps the top-5.
 //
 // Bounded on three axes the user asked for:
@@ -18,7 +17,7 @@
 //
 // OPT-IN: IdentityRerankPort stays the safe default. The retrieve_knowledge activity constructs THIS
 // port per-invocation with the query's installation_id (cost attribution) + a configured "secondary"
-// role; until the owner seeds that role + flips the wiring, identity rerank runs (1:1 with Python). The
+// role; until the owner seeds that role + flips the wiring, identity rerank runs. The
 // port carries installation_id at construction because LlmRerankerPort.rerank() does not receive it.
 
 import { createHash } from "node:crypto";
@@ -175,7 +174,7 @@ export class LlmBackedRerankPort implements LlmRerankerPort {
   // paid rerank call passes an idempotency context (keyed by purposeChunkId("rerank")), so a retry replays
   // the stored scores instead of buying a second Haiku completion. When ABSENT (the current wiring until a
   // review_id is plumbed through), the call carries no idempotency context → no ledgering → back-compat
-  // with the Temporal-legacy path (invoke, no replay), exactly the frozen-Python behavior.
+  // with the Temporal-legacy path (invoke, no replay) — back-compat with no ledgering.
   private readonly reviewId: string | undefined;
 
   public constructor(args: {

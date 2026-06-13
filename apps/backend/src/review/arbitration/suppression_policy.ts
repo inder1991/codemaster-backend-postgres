@@ -1,32 +1,26 @@
 /**
- * Suppression policy loader — 1:1 port of the frozen Python
- * `vendor/codemaster-py/codemaster/review/suppression_policy.py` (Phase D / static-analysis-coverage-gap).
+ * Suppression policy loader — Phase D / static-analysis-coverage-gap.
  *
  * Consulted by the Finding Arbitration Layer ({@link isSuppressible} from `./arbitrate.js`) per-finding to
  * decide whether an LLM-proposed SUPPRESS intent is honored.
  *
- * ## Port shape
+ * ## Schema
  *
- * The Python schema is a Pydantic model tree (`RuleSuppressibility` / `ToolPolicy` / `SuppressionPolicy`),
- * each `ConfigDict(extra="forbid", frozen=True)`. We re-author it as a Zod schema tree with `.strict()`
- * (extra=forbid) so a malformed policy is rejected identically. The six tool branches are ALL required
+ * Zod schema tree with `.strict()` (extra=forbid); the six tool branches are ALL required
  * (typed-Literal sealing — a missing branch is a config error, not a permissive fallback).
  *
  * ## Bundled default + YAML loader
  *
- * The frozen Python loads `codemaster/config/suppression_policy.yaml` once at worker bootstrap
- * (`@lru_cache`). The bundled default content is frozen 1:1 here as {@link BUNDLED_SUPPRESSION_POLICY}
- * (validated through {@link SuppressionPolicy} so the embedded literal can never drift out of the
- * contract). {@link loadPolicyFromYaml} parses + validates an arbitrary YAML string (the loader path
- * the Python `load_policy(path)` exercises for tests/operator overrides); {@link loadBundledPolicy}
- * returns the parsed default (the production path). Per-tenant overrides are NOT supported by design
- * (single-company internal tool; see project_single_company_not_saas).
+ * The bundled default content is validated through {@link SuppressionPolicy} so the embedded literal can
+ * never drift out of the contract. {@link loadPolicyFromYaml} parses + validates an arbitrary YAML string
+ * (operator overrides / tests); {@link loadBundledPolicy} returns the parsed default (the production path).
+ * Per-tenant overrides are NOT supported by design (single-company internal tool).
  *
  * ## is_suppressible
  *
- * {@link isSuppressible} mirrors the Python free function: per-rule first, then per-tool default; unknown
- * tools return the SUPPRESS-forbidden sentinel (`suppressible=false, min_confidence=1.0`) so a new tool
- * added to the orchestrator without a corresponding policy edit FAILS CLOSED rather than open.
+ * {@link isSuppressible}: per-rule first, then per-tool default; unknown tools return the
+ * SUPPRESS-forbidden sentinel (`suppressible=false, min_confidence=1.0`) so a new tool added to the
+ * orchestrator without a corresponding policy edit FAILS CLOSED rather than open.
  */
 
 import { load as yamlLoad } from "js-yaml";
@@ -34,7 +28,7 @@ import { z } from "zod";
 
 // ── Pydantic schema mirroring the YAML (Zod port) ──
 
-/** One per-rule (or per-tool default) entry. 1:1 with Python `RuleSuppressibility`. */
+/** One per-rule (or per-tool default) entry. */
 export const RuleSuppressibility = z
   .object({
     suppressible: z.boolean(),
@@ -43,7 +37,7 @@ export const RuleSuppressibility = z
   .strict();
 export type RuleSuppressibility = z.infer<typeof RuleSuppressibility>;
 
-/** Per-tool policy — a default plus zero-or-more per-rule overrides. 1:1 with Python `ToolPolicy`. */
+/** Per-tool policy — a default plus zero-or-more per-rule overrides. */
 export const ToolPolicy = z
   .object({
     default: RuleSuppressibility,
@@ -53,8 +47,8 @@ export const ToolPolicy = z
 export type ToolPolicy = z.infer<typeof ToolPolicy>;
 
 /**
- * Top-level suppression policy. All six tool branches are required (typed-Literal sealing). 1:1 with the
- * Python `SuppressionPolicy` (`ConfigDict(extra="forbid")` → .strict()).
+ * Top-level suppression policy. All six tool branches are required (typed-Literal sealing; a missing
+ * branch is a config error, not a permissive fallback). `.strict()` enforces extra=forbid.
  */
 export const SuppressionPolicy = z
   .object({
@@ -69,7 +63,7 @@ export const SuppressionPolicy = z
   .strict();
 export type SuppressionPolicy = z.infer<typeof SuppressionPolicy>;
 
-// ── Lookup result (1:1 with the Python `SuppressionDecision` dataclass) ──
+// ── Lookup result ──
 
 /**
  * One lookup result. `suppressible` rolls the policy + confidence check into a single boolean for the
@@ -80,7 +74,7 @@ export type SuppressionDecision = {
   readonly min_confidence: number;
 };
 
-// ── Tool keys that exist on the SuppressionPolicy model (1:1 with Python `_KNOWN_TOOLS`). ──
+// ── Tool keys that exist on the SuppressionPolicy model ──
 
 /** Used by {@link isSuppressible} to guard against unknown tools without raising (fail-closed). */
 export const KNOWN_TOOLS: ReadonlySet<string> = new Set([
@@ -92,11 +86,10 @@ export const KNOWN_TOOLS: ReadonlySet<string> = new Set([
   "llm",
 ]);
 
-// ── Bundled default policy (frozen 1:1 with codemaster/config/suppression_policy.yaml). ──
+// ── Bundled default policy ──
 //
 // Embedded as a typed literal (validated through SuppressionPolicy at module load) rather than read from a
-// copied YAML asset, so the production path is build-safe (no asset-copy step) and deterministic. The
-// content is byte-faithful to the frozen YAML's data (comments are documentation-only on both sides).
+// copied YAML asset, so the production path is build-safe (no asset-copy step) and deterministic.
 const BUNDLED_POLICY_INPUT = {
   schema_version: 1,
   // Ruff (Python) — style + correctness lints. Most are LLM-suppressible at high confidence.
@@ -132,15 +125,14 @@ const BUNDLED_POLICY_INPUT = {
 export const BUNDLED_SUPPRESSION_POLICY: SuppressionPolicy =
   SuppressionPolicy.parse(BUNDLED_POLICY_INPUT);
 
-/** Return the bundled default policy — the production path (1:1 with `load_policy(None)`). */
+/** Return the bundled default policy — the production path. */
 export function loadBundledPolicy(): SuppressionPolicy {
   return BUNDLED_SUPPRESSION_POLICY;
 }
 
 /**
- * Parse + validate a YAML policy string (1:1 with `load_policy(path)` reading + validating the YAML). The
- * operator-override / test path. Throws on malformed YAML or a contract violation (ZodError), mirroring
- * the Python Pydantic `model_validate` raising.
+ * Parse + validate a YAML policy string. The operator-override / test path. Throws on malformed YAML or
+ * a contract violation (ZodError).
  */
 export function loadPolicyFromYaml(yamlText: string): SuppressionPolicy {
   const raw = yamlLoad(yamlText);
@@ -150,7 +142,7 @@ export function loadPolicyFromYaml(yamlText: string): SuppressionPolicy {
 /**
  * Per-rule first, then per-tool default. Unknown tools return the SUPPRESS-forbidden sentinel
  * (`suppressible=false, min_confidence=1.0`) so a new tool added to the orchestrator without a policy edit
- * FAILS CLOSED. 1:1 with the Python `is_suppressible`.
+ * FAILS CLOSED.
  *
  * Object-injection note: the tool branch is selected via an explicit switch (NOT dynamic `policy[tool]`)
  * after the `KNOWN_TOOLS` guard, so no untrusted key reaches a property lookup. Per-rule lookup uses a
@@ -175,9 +167,9 @@ export function isSuppressible(args: {
 }
 
 /**
- * Per-rule override first, then the per-tool default — 1:1 with the Python `tool_policy.rules.get(rule_id,
- * tool_policy.default)`. Resolves via a fresh `Map` over the validated `rules` record so there is NO dynamic
- * property-access sink (the rule_id key is LLM-influenced; a `Map.get` is injection-safe).
+ * Per-rule override first, then the per-tool default. Resolves via a fresh `Map` over the validated
+ * `rules` record so there is NO dynamic property-access sink (the rule_id key is LLM-influenced; a
+ * `Map.get` is injection-safe).
  */
 export function lookupRuleOrDefault(toolPolicy: ToolPolicy, rule_id: string): RuleSuppressibility {
   const rules = new Map<string, RuleSuppressibility>(Object.entries(toolPolicy.rules));

@@ -1,5 +1,4 @@
-// doc_kind derivation heuristic — 1:1 port of the frozen Python
-// vendor/codemaster-py/codemaster/policy/doc_kind_heuristic.py (Sprint 26 / B-1).
+// doc_kind derivation heuristic (Sprint 26 / B-1).
 //
 // Pure function `deriveDocKind(relativePath) -> KnowledgeDocKind`. Path-first; falls back to `other`
 // when no pattern matches.
@@ -16,15 +15,14 @@
 
 import type { KnowledgeDocKind } from "#contracts/knowledge_chunks.v1.js";
 
-// 1:1 with the Python `re.compile(r"^adr-\d+", re.IGNORECASE)` etc. The `^` anchors to the start of the
-// FILENAME (not the full path); the JS `i` flag mirrors `re.IGNORECASE`.
+// The `^` anchors to the start of the FILENAME (not the full path).
 const ADR_FILENAME_RE = /^adr-\d+/i;
 const RFC_FILENAME_RE = /^rfc-/i;
 const RUNBOOK_FILENAME_RE = /^runbook/i;
 
 /**
  * Return True iff `first` immediately precedes `second` somewhere in the path. Matches "docs/adr/..."
- * OR "any/docs/adr/...". 1:1 with the Python `_path_has_segment_pair`.
+ * OR "any/docs/adr/...".
  */
 function pathHasSegmentPair(segments: ReadonlyArray<string>, first: string, second: string): boolean {
   for (let i = 0; i < segments.length - 1; i += 1) {
@@ -36,8 +34,7 @@ function pathHasSegmentPair(segments: ReadonlyArray<string>, first: string, seco
 }
 
 /**
- * Return the `doc_kind` for the given path per the program-plan first-match-wins table. 1:1 with the
- * frozen Python `derive_doc_kind`.
+ * Return the `doc_kind` for the given path per the program-plan first-match-wins table.
  *
  * Pure function — no I/O. Empty path → `other`.
  */

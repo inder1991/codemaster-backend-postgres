@@ -1,6 +1,5 @@
 /**
- * Observability counters for the fix-prompt feature — 1:1 port of the frozen Python
- * `vendor/codemaster-py/codemaster/observability/fix_prompt_metrics.py`.
+ * Observability counters for the fix-prompt feature.
  *
  * * `codemaster_fix_prompt_generated_total{generation_mode}` — one per generated fix prompt, labelled by
  *   mode (`llm` | `deterministic_fallback`). Bounded cardinality (2 label values).
@@ -13,23 +12,19 @@
  *
  * ## Emit context
  * This counter fires from inside the ACTIVITY body (`generate_fix_prompt_activity`), never the workflow
- * sandbox, so the TS port routes through the standard `#platform/observability/metrics.js::getMeter` seam
- * (the same activity-runtime meter the sibling counter modules use). The seam returns a no-op Meter when
- * no MeterProvider is registered, so emission is safe before the exporter is wired — the structural
- * analogue of the Python `get_meter(...) is None` no-op (the Python lazy-creates instruments on first
- * emit; here the meter+instruments cache at module scope, which is equivalent because `getMeter` always
- * returns a Meter and a no-op Meter's `createCounter`/`add` are themselves no-ops).
+ * sandbox. Routes through `#platform/observability/metrics.js::getMeter` (a no-op Meter when no
+ * MeterProvider is registered, so emission is safe before the exporter is wired; the meter+instruments
+ * cache at module scope — `getMeter` always returns a Meter).
  */
 
 import { type Counter, getMeter } from "#platform/observability/metrics.js";
 
-// Counter NAMES — copied VERBATIM from the Python `GENERATED_NAME` / `TRUNCATED_NAME`
-// (Grafana-query-stable; renaming requires ADR).
+// Counter NAMES — Grafana-query-stable; renaming requires ADR.
 export const GENERATED_NAME = "codemaster_fix_prompt_generated_total";
 export const TRUNCATED_NAME = "codemaster_fix_prompt_truncated_total";
 
-// Meter + instruments cached at MODULE scope (created once at import), mirroring the Python lazy-cache
-// that avoids per-emit create_* lock contention. Meter name = the dotted module path the Python uses.
+// Meter + instruments cached at MODULE scope (created once at import) to avoid per-emit create_*
+// lock contention.
 const METER = getMeter("codemaster.fix_prompt");
 const GENERATED_COUNTER: Counter = METER.createCounter(GENERATED_NAME, {
   description: "Fix prompts generated, by generation mode.",
@@ -40,8 +35,7 @@ const TRUNCATED_COUNTER: Counter = METER.createCounter(TRUNCATED_NAME, {
 
 /**
  * Emit the generated{generation_mode} counter (+ the truncated counter when the prompt was truncated).
- * 1:1 with the Python `record_fix_prompt_generated(*, generation_mode, truncated)`. No-op when no
- * MeterProvider is registered (the no-op Meter swallows the `add`).
+ * No-op when no MeterProvider is registered (the no-op Meter swallows the `add`).
  */
 export function recordFixPromptGenerated(args: {
   generationMode: string;

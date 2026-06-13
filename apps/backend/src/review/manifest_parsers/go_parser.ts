@@ -1,42 +1,39 @@
-// Go ecosystem dependency parsers — 1:1 TS port of the frozen Python
-//   vendor/codemaster-py/codemaster/review/manifest_parsers/_go.py
-//   (Commit 5 of FOLLOW-UP-manifest-dependency-parsing).
+// Go ecosystem dependency parsers (Commit 5 of FOLLOW-UP-manifest-dependency-parsing).
 //
 // Covers go.mod (module manifest) + go.sum (checksum file). Both are custom line-based text parsers
 // (no TOML/JSON lib). Pure functions: NO I/O, NO clock, NO random — replay-safe inside the Temporal
 // sandbox. Names normalized via normalizeName(raw, "go"); rejections returned in a parallel list so the
 // activity can log them with structured payloads. Malformed input fails open (empty ParseOutcome).
 //
-// Parity notes (venv-cross-checked against the frozen Python):
-//  - Python's `str.splitlines()` splits on a broad set of line boundaries and DROPS a trailing empty
-//    line; {@link pySplitlines} replicates that exactly (NOT JS `"...".split("\n")`).
-//  - Python `\w` (unicode, the default for `str`) matches `\p{L}`, `\p{N}`, and `_` (U+005F only — NOT
-//    the broader `Pc` connector class, and NOT combining marks). The go.mod require-line regex uses
-//    `\w`, so the JS port uses `[\p{L}\p{N}_…]` with the `u` flag — otherwise a name like `café.com/foo`
-//    would silently fail JS's ASCII `\w` and skip (no rejection) instead of matching → normalize-reject
-//    as the Python does.
-//  - Python `.strip()` / `.split()` (no-arg) use a unicode whitespace set that differs from JS `.trim()`
-//    / `\s`; {@link pyStrip}, {@link pyRStrip}, {@link pySplitWhitespace} replicate Python's set exactly.
+// Parity notes (venv-cross-checked):
+//  - `str.splitlines()` splits on a broad set of line boundaries and DROPS a trailing empty line;
+//    {@link pySplitlines} replicates that exactly (NOT JS `"...".split("\n")`).
+//  - `\w` (unicode) matches `\p{L}`, `\p{N}`, and `_` (U+005F only — NOT the broader `Pc` connector
+//    class, and NOT combining marks). The go.mod require-line regex uses `\w`, so the JS version uses
+//    `[\p{L}\p{N}_…]` with the `u` flag — otherwise a name like `café.com/foo` would silently fail
+//    JS's ASCII `\w` and skip (no rejection) instead of matching → normalize-reject.
+//  - `.strip()` / `.split()` (no-arg) use a unicode whitespace set that differs from JS `.trim()` /
+//    `\s`; {@link pyStrip}, {@link pyRStrip}, {@link pySplitWhitespace} replicate that set exactly.
 
 import { ParsedDependencyV1 } from "#contracts/pr_context.v1.js";
 
 import { isRejection, normalizeName, type NormalizationRejection } from "./normalize.js";
 import type { ParseOutcome } from "./parse_outcome.js";
 
-/** One parser input — body + the manifest path it came from (mirrors the Python keyword args). */
+/** One parser input — body + the manifest path it came from. */
 export type GoParseInput = {
   readonly body: string;
   readonly source_manifest: string;
 };
 
 // Matches the contract field's max_length cap; truncation is defensive so the construction never raises
-// on adversarial version_spec input (mirrors `_go.py::_VERSION_SPEC_MAX_LENGTH`).
+// on adversarial version_spec input.
 const VERSION_SPEC_MAX_LENGTH = 256;
 
 // Python unicode `\w` for these parsers = letters (`\p{L}`), numbers (`\p{N}`), and `_` (U+005F).
 const PY_WORD = "\\p{L}\\p{N}_";
 
-// 1:1 port of `_GO_REQUIRE_LINE`:
+// The go.mod require-line pattern (parity-checked):
 //   ^\s*(?:require\s+)?([\w./\-]+)\s+([\w.\-+/]+)(?:\s+//\s+(\w+))?\s*$
 // `\w` → PY_WORD with the `u` flag (see parity notes). The third group never fires in practice because
 // the caller strips the `//` comment before matching, but it is preserved for byte-faithfulness.
@@ -45,9 +42,9 @@ const GO_REQUIRE_LINE = new RegExp(
   "u",
 );
 
-// Python `str` whitespace code points (what `.strip()` / `.split()` treat as whitespace for `str`). Built
-// from explicit code points because JS `\s` omits 0x1C–0x1F and 0x85 and includes 0xFEFF — neither matches
-// Python. Source: probed from the frozen Python venv (every `c` where `c.strip() == ""`).
+// `str` whitespace code points (what `.strip()` / `.split()` treat as whitespace). Built from
+// explicit code points because JS `\s` omits 0x1C–0x1F and 0x85 and includes 0xFEFF — neither matches.
+// Source: probed from the venv (every `c` where `c.strip() == ""`).
 const PY_WHITESPACE_CODEPOINTS: ReadonlyArray<number> = [
   0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x85, 0xa0, 0x1680, 0x2000, 0x2001,
   0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f,
@@ -123,8 +120,7 @@ function splitFirst(s: string, sep: string): string {
 
 /**
  * Parse a go.mod body. Tracks `require (...)` blocks + single require lines. `// indirect` markers map to
- * dependency_type=`unknown` (neither prod nor dev in Go's taxonomy). Malformed lines are skipped. 1:1 with
- * `_go.py::parse_go_mod`.
+ * dependency_type=`unknown` (neither prod nor dev in Go's taxonomy). Malformed lines are skipped.
  */
 export function parseGoMod(input: GoParseInput): ParseOutcome {
   const { body, source_manifest } = input;
@@ -195,8 +191,7 @@ export function parseGoMod(input: GoParseInput): ParseOutcome {
 
 /**
  * Parse a go.sum body. Each unique `<path> <version>` pair emits one record; the parallel `/go.mod`
- * entries get deduped. All entries are dependency_type=`unknown` — go.sum doesn't carry scope. 1:1 with
- * `_go.py::parse_go_sum`.
+ * entries get deduped. All entries are dependency_type=`unknown` — go.sum doesn't carry scope.
  */
 export function parseGoSum(input: GoParseInput): ParseOutcome {
   const { body, source_manifest } = input;
@@ -243,7 +238,7 @@ type EmitArgs = {
   readonly rejections: Array<NormalizationRejection>;
 };
 
-/** Normalize the name; append to records OR rejections. 1:1 with `_go.py::_emit_go`. */
+/** Normalize the name; append to records OR rejections. */
 function emitGo(args: EmitArgs): void {
   const { rawName, dependencyType, sourceManifest, records, rejections } = args;
   let { versionSpec } = args;
@@ -253,8 +248,8 @@ function emitGo(args: EmitArgs): void {
     return;
   }
   if (versionSpec !== null) {
-    // Python `len(...)` + slice are code-point-based; the go.sum version field is not regex-gated so it
-    // may carry astral chars. Iterate code points (NOT UTF-16 units) to match Python exactly.
+    // `len(...)` + slice are code-point-based; the go.sum version field is not regex-gated so it
+    // may carry astral chars. Iterate code points (NOT UTF-16 units) to match the parity oracle.
     const codePoints = Array.from(versionSpec);
     if (codePoints.length > VERSION_SPEC_MAX_LENGTH) {
       versionSpec = codePoints.slice(0, VERSION_SPEC_MAX_LENGTH).join("");

@@ -9,7 +9,7 @@
 import { parse as parseToml } from "smol-toml";
 
 /** Raised on a size-cap breach, a TOML parse failure, or a non-table root. Parsers catch it + degrade
- *  ONLY that manifest (fail-open), exactly as the Python parsers catch `tomllib.TOMLDecodeError`. */
+ *  ONLY that manifest (fail-open). */
 export class TomlParseError extends Error {
   public constructor(message: string) {
     super(message);
@@ -27,8 +27,7 @@ export const MAX_TOML_PARSE_BYTES = 1_000_000;
 /**
  * Parse a TOML manifest body to its root table. Throws {@link TomlParseError} on a size-cap breach, a
  * parse failure, or a non-table root — the caller (an ecosystem parser) catches it and returns an empty
- * {@link ParseOutcome} for THAT manifest only (fail-open; the review proceeds). 1:1 in spirit with the
- * Python `try: tomllib.loads(body) except tomllib.TOMLDecodeError: return ParseOutcome([], [])`.
+ * {@link ParseOutcome} for THAT manifest only (fail-open; the review proceeds).
  */
 export function parseTomlManifest(text: string): Record<string, unknown> {
   if (Buffer.byteLength(text, "utf8") > MAX_TOML_PARSE_BYTES) {

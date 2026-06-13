@@ -1,5 +1,4 @@
-// Trust-tier post-filter — 1:1 port of the frozen Python
-// vendor/codemaster-py/codemaster/policy/trust_filter.py (Sprint 25 / A-6-a).
+// Trust-tier post-filter (Sprint 25 / A-6-a).
 //
 // `postFilterFindings` / `postFilterFindingsWithMetadata` are the LAST line of defense for platform safety
 // on LLM-emitted review findings. They run every entry in SYSTEM_INVARIANTS against every finding, in
@@ -30,11 +29,11 @@ import type { ResolvedGuidanceBundleV1 } from "#contracts/resolved_guidance.v1.j
 import type { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
 
 /**
- * Per-finding policy-filter outcome metadata — the JS shape of the Python `dict[str, Any]` rows. Aligned by
- * input index with the filtered findings. `invariant_violation_attempted` is true iff >=1 invariant changed
- * the finding; `invariants_fired` are the invariant_ids that modified it, in registry order. Threaded into
- * the persist activity's `precomputed_metadata` (→ `core.review_findings.policy_metadata`) so forensics on
- * "did SI-001 restore this finding?" is structurally answerable from the row alone.
+ * Per-finding policy-filter outcome metadata. Aligned by input index with the filtered findings.
+ * `invariant_violation_attempted` is true iff >=1 invariant changed the finding; `invariants_fired`
+ * are the invariant_ids that modified it, in registry order. Threaded into the persist activity's
+ * `precomputed_metadata` (→ `core.review_findings.policy_metadata`) so forensics on "did SI-001
+ * restore this finding?" is structurally answerable from the row alone.
  */
 export type FindingPolicyMetadata = {
   readonly invariant_violation_attempted: boolean;
@@ -44,7 +43,7 @@ export type FindingPolicyMetadata = {
 /**
  * Apply every SYSTEM_INVARIANT to every finding. Returns a new array in the same order as the input; each
  * finding is either returned unchanged or in its invariant-corrected form (e.g. severity upgraded to the
- * platform floor). 1:1 with the Python `post_filter_findings` (delegates to the metadata variant).
+ * platform floor). Delegates to the metadata variant.
  *
  * @throws {EmptyInvariantsRegistryError} when SYSTEM_INVARIANTS is empty (defensive misconfig guard).
  */
@@ -58,13 +57,12 @@ export function postFilterFindings(
 
 /**
  * Apply every SYSTEM_INVARIANT to every finding AND surface per-finding metadata describing which invariants
- * fired. Returns `[filteredFindings, metadata]` aligned by input index. 1:1 with the Python
- * `post_filter_findings_with_metadata`.
+ * fired. Returns `[filteredFindings, metadata]` aligned by input index.
  *
  * Fired-detection uses reference identity (`current !== previous`): each enforcement helper returns the SAME
- * finding object on its no-op path and a fresh object only when it floors severity, so a reference change is
- * exactly the Python's `current != previous` value-equality signal (the only mutation any invariant performs
- * is the severity floor — a strict subset change). See system_invariants.ts for the equality rationale.
+ * finding object on its no-op path and a fresh object only when it floors severity. A reference change is
+ * the fired signal — the only mutation any invariant performs is the severity floor (a strict subset change).
+ * See system_invariants.ts for the equality rationale.
  *
  * @throws {EmptyInvariantsRegistryError} when SYSTEM_INVARIANTS is empty.
  */

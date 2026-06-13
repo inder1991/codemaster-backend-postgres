@@ -1,13 +1,12 @@
-// Pure pipeline helpers — 1:1 ports of the workflow-sandbox-safe pure functions in the frozen Python.
+// Pure pipeline helpers — workflow-sandbox-safe pure functions.
 //
-// Sources:
-//   vendor/codemaster-py/codemaster/workflows/review_pull_request.py
+// Sources (review_pull_request.py unless noted):
 //     * _stage_outcome_for_publication      (~155)
 //     * _fix_prompt_stage_outcome           (~169)
 //     * _resolve_degraded_payload           (~192)
 //     * _config_change_notice_finding       (~225)
 //     * _compose_orchestrator_degradation_note (~356)
-//   vendor/codemaster-py/codemaster/workflows/review_pipeline_orchestrator.py
+//   review_pipeline_orchestrator.py:
 //     * _path_filters_excluded_all_finding  (~365)
 //     * _infer_pr_topology_kind             (~394)
 //

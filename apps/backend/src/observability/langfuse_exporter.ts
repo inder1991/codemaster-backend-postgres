@@ -1,6 +1,4 @@
-// LangfuseExporter — 1:1 port of the frozen Python
-// vendor/codemaster-py/codemaster/observability/langfuse_exporter.py (Sprint 6 / S6.1.4a,
-// Sprint 7 / S7.3.4).
+// LangfuseExporter (Sprint 6 / S6.1.4a, Sprint 7 / S7.3.4).
 //
 // Fire-and-forget POST to the Langfuse `traces` API. Exceptions are caught and logged WARN; NEVER
 // raised to the caller (the LlmClient must not have its return / raise path coupled to observability
@@ -14,11 +12,10 @@
 // configured the exporter REALLY POSTs. There is no faking stub anywhere on the production path.
 //
 // ── HTTP-transport seam ──
-// The HTTP transport is an INJECTED collaborator ({@link LangfuseHttpClient}), mirroring
-// FetchVaultHttpClient in #backend/adapters/vault_http.ts: production defaults to {@link
-// FetchLangfuseHttpClient} (a thin global-`fetch` wrapper — NO new dependency); tests inject a recorder
-// that captures the request and asserts URL / body / headers exactly. No DB; no clock (the exporter
-// takes no timestamp — the trace's `latency_ms` is supplied by the caller).
+// The HTTP transport is an INJECTED collaborator ({@link LangfuseHttpClient}): production defaults to
+// {@link FetchLangfuseHttpClient} (a thin global-`fetch` wrapper — NO new dependency); tests inject a
+// recorder that captures the request and asserts URL / body / headers exactly. No DB; no clock (the
+// exporter takes no timestamp — the trace's `latency_ms` is supplied by the caller).
 
 import { transportAbortSignal } from "#platform/transport_timeout.js";
 
@@ -26,22 +23,21 @@ import { redactPii } from "#backend/redact/pii_redactor.js";
 
 import { type BedrockTraceV1 } from "#contracts/llm_trace.v1.js";
 
-// ─── Constants (1:1 with the frozen Python module constants) ──────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────────────────────
 
-/** Max characters of redacted prompt / completion text in a snippet (Python `SNIPPET_MAX_CHARS`). */
+/** Max characters of redacted prompt / completion text in a snippet. */
 export const SNIPPET_MAX_CHARS = 200;
 
-/** Per-request transport timeout, in seconds (Python `timeout_seconds: float = 5.0`). */
+/** Per-request transport timeout, in seconds. */
 export const DEFAULT_TIMEOUT_SECONDS = 5.0;
 
-// ─── Snippet redaction (Python `redact_snippet`) ──────────────────────────────────────────────
+// ─── Snippet redaction ────────────────────────────────────────────────────────────────────────────
 
 /**
- * Strip PII via the ported `redactPii` (RegexPiiRedactor), then truncate to {@link SNIPPET_MAX_CHARS}.
+ * Strip PII via `redactPii` (RegexPiiRedactor), then truncate to {@link SNIPPET_MAX_CHARS}.
  *
  * Truncation happens AFTER redaction so a `[REDACTED:<kind>]` placeholder is never split across the
- * boundary — 1:1 with the Python `redact_snippet`. The findings array is discarded (the snippet only
- * needs the rewritten text).
+ * boundary. The findings array is discarded (the snippet only needs the rewritten text).
  */
 export function redactSnippet(text: string): string {
   const redacted = redactPii(text).rewritten;
@@ -51,7 +47,7 @@ export function redactSnippet(text: string): string {
   return redacted;
 }
 
-// ─── Injected HTTP-transport seam (mirror FetchVaultHttpClient in adapters/vault_http.ts) ──────
+// ─── Injected HTTP-transport seam ─────────────────────────────────────────────────────────────────
 
 /** Arguments to one Langfuse HTTP request. */
 export type LangfuseHttpRequestArgs = {
@@ -72,8 +68,7 @@ export type LangfuseHttpClient = {
 /**
  * Production HTTP transport: a thin wrapper over Node's built-in global `fetch` (undici). NO new
  * dependency. A timeout / abort / network failure surfaces as a thrown error which the exporter's
- * `export(...)` catches and swallows (fire-and-forget) — mirroring the Python `httpx.AsyncClient.post`
- * raising inside the `try` the exporter wraps.
+ * `export(...)` catches and swallows (fire-and-forget).
  */
 export class FetchLangfuseHttpClient implements LangfuseHttpClient {
   private readonly timeoutMs: number;
@@ -113,7 +108,7 @@ export type LangfuseExporterOptions = {
 
 /**
  * Fire-and-forget Langfuse trace exporter — the REAL exporter (env-gated OFF when unconfigured, NOT a
- * stub). 1:1 with the frozen Python `LangfuseExporter`.
+ * stub).
  */
 export class LangfuseExporter {
   private readonly host: string;
@@ -160,8 +155,8 @@ export class LangfuseExporter {
   }
 
   /**
-   * `fetch` owns no long-lived resource we allocated, so this is a no-op — kept for parity with the
-   * Python `aclose()` so callers can dispose the exporter uniformly across observability sinks.
+   * `fetch` owns no long-lived resource we allocated, so this is a no-op — kept so callers can
+   * dispose the exporter uniformly across observability sinks.
    */
   public async aclose(): Promise<void> {
     // No-op: the global-fetch transport holds nothing to release.
@@ -226,27 +221,25 @@ export class LangfuseExporter {
   }
 }
 
-// ─── The disabled no-op default the LlmClient injects (faithful to Python `self._langfuse is None`) ──
+// ─── The disabled no-op default the LlmClient injects ─────────────────────────────────────────────
 
 /**
  * The exporter collaborator surface the {@link LlmClient} depends on — the single `export` method it
- * calls. The Python client's `self._langfuse` is either `None` (no-op) or a `LangfuseExporter`; the TS
- * client always holds an object satisfying this type, defaulting to {@link DISABLED_LANGFUSE_EXPORTER}
- * (the structural analogue of `None` — a no-op `export`).
+ * calls. The TS client always holds an object satisfying this type, defaulting to
+ * {@link DISABLED_LANGFUSE_EXPORTER} (a no-op `export`).
  */
 export type LangfuseExporterPort = {
   export(trace: BedrockTraceV1): Promise<void>;
 };
 
 /**
- * The disabled no-op exporter the {@link LlmClient} defaults to — the structural analogue of the Python
- * `self._langfuse is None` (the `_maybe_export_langfuse_trace` early-return). Its `export` does nothing.
- * The production `LlmClientCache` REPLACES this with `LangfuseExporter.fromEnv()` (which is itself a
- * no-op when the env is unconfigured — so the default behaviour is identical, but the real one wakes up
- * the moment LANGFUSE_HOST / LANGFUSE_API_KEY are set).
+ * The disabled no-op exporter the {@link LlmClient} defaults to. Its `export` does nothing. The
+ * production `LlmClientCache` REPLACES this with `LangfuseExporter.fromEnv()` (which is itself a
+ * no-op when the env is unconfigured — so the default behaviour is identical, but the real one wakes
+ * up the moment LANGFUSE_HOST / LANGFUSE_API_KEY are set).
  */
 export const DISABLED_LANGFUSE_EXPORTER: LangfuseExporterPort = {
   async export(): Promise<void> {
-    // no-op — faithful to the Python `if self._langfuse is None: return`.
+    // no-op.
   },
 };

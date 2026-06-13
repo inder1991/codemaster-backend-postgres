@@ -1,8 +1,4 @@
-// confluence_source — port of the frozen Python
-//   vendor/codemaster-py/codemaster/retrieval/confluence_source.py
-//   (Sprint 13 / S13.3.1c; updated S21.LLM-DUAL.1-PLATFORM PR 3 Task 9).
-//
-// Pure-function helpers the hybrid retriever consumes to fan out queries against the
+// confluence_source — pure-function helpers the hybrid retriever consumes to fan out queries against the
 // `core.confluence_chunks` table alongside the repo + knowledge sources. Kept in its own module so the
 // hybrid_retriever stays touch-free — the retriever just composes these helpers.
 //
@@ -120,8 +116,8 @@ export type MergeSourcesArgs = {
 };
 
 /**
- * Deduplicate cross-source near-duplicates while preserving the original ordering (1:1 with the Python
- * `merge_sources`). Returns the merged list + a counter dict for telemetry.
+ * Deduplicate cross-source near-duplicates while preserving the original ordering. Returns the merged
+ * list + a counter dict for telemetry.
  *
  * Strategy: a deterministic sim-hash (cheap, no third-party dep) is a fast proxy for content overlap.
  * Anything ≥ `nearDuplicateThreshold` against an already-kept chunk is dropped. The drop-set is biased
@@ -170,8 +166,8 @@ export function mergeSources(
 /**
  * Read the chunk's text, falling back to "" when absent.
  *
- * Reads `chunk[attr]` (default `chunk_text`) for RAW rows. DIVERGENCE from the frozen Python `_get_text`
- * (which only read `chunk_text`): the HybridRetriever feeds WRAPPED `ScoredKnowledgeChunkV1` envelopes —
+ * Reads `chunk[attr]` (default `chunk_text`) for RAW rows. DIVERGENCE: the original only read `chunk_text`,
+ * but the HybridRetriever feeds WRAPPED `ScoredKnowledgeChunkV1` envelopes —
  * whose text lives at `.chunk.body`, NOT `.chunk_text` — into mergeSources for EVERY source (repo,
  * knowledge, and wrapped confluence). With only the `chunk_text` read, getText returned "" for every
  * wrapped envelope, so the near-duplicate protection was entirely INERT on the hybrid path (a latent gap
@@ -201,8 +197,8 @@ function getText(chunk: unknown, attr: string): string {
 // ─── Lightweight simhash (stdlib only) ─────────────────────────────────────────────────────────────
 
 /**
- * Cheap content-fingerprint: the set of MD5-hashed n-gram shingles (1:1 with the Python `_simhash`).
- * Compared via Jaccard similarity by {@link jaccardSimilarity}. The shingle key is produced by
+ * Cheap content-fingerprint: the set of MD5-hashed n-gram shingles. Compared via Jaccard similarity
+ * by {@link jaccardSimilarity}. The shingle key is produced by
  * {@link gramKey} (see its doc for the 48-bit JS-safe equivalence to Python's 64-bit digest read).
  */
 export function simhash(text: string, opts: { nGrams?: number } = {}): Set<number> {
@@ -211,7 +207,7 @@ export function simhash(text: string, opts: { nGrams?: number } = {}): Set<numbe
     return new Set<number>();
   }
   // Normalise: lowercase + strip the trust-tier wrapper so a Confluence chunk and a repo doc-comment
-  // with similar paragraph text actually match (1:1 with the Python normalisation).
+  // with similar paragraph text actually match.
   const normalised = text
     .toLowerCase()
     .replaceAll('<doc trust="untrusted">', "")
@@ -249,7 +245,7 @@ function gramKey(gram: string): number {
   );
 }
 
-/** Jaccard similarity; returns 0.0 when either set is empty (1:1 with the Python `_hamming_similarity`). */
+/** Jaccard similarity; returns 0.0 when either set is empty. */
 export function jaccardSimilarity(a: ReadonlySet<number>, b: ReadonlySet<number>): number {
   if (a.size === 0 || b.size === 0) {
     return 0;

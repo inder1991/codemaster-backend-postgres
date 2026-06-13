@@ -1,6 +1,5 @@
 /**
- * Citation validator — 1:1 port of the frozen Python `codemaster/review/citation_validator.py`
- * (Sprint 10 / S10.1.2).
+ * Citation validator (Sprint 10 / S10.1.2).
  *
  * Drops findings whose `sources[]` cannot be verified against the cloned workspace + the retriever's
  * chunk-id set for THIS review. Hallucinated citations are worse than no citation: they look
@@ -128,7 +127,7 @@ export class CitationValidator {
     return { schema_version: 1, surviving, dropped };
   }
 
-  /** Return the first failure reason, or null if all sources resolve. 1:1 with `_first_unresolvable_reason`. */
+  /** Return the first failure reason, or null if all sources resolve. */
   private firstUnresolvableReason(sources: ReadonlyArray<CitationV1>): string | null {
     for (const s of sources) {
       if (s.kind === "repo_path") {
@@ -174,14 +173,13 @@ export class CitationValidator {
   }
 
   /**
-   * Conservative existence check — 1:1 with the Python `_repo_path_exists`. Symlinks resolved; absolute
-   * paths rejected (locator must be relative to the workspace).
+   * Conservative existence check. Symlinks resolved; absolute paths rejected (locator must be relative
+   * to the workspace).
    *
-   * Faithful to the Python's prefix check, including its known sharp edge: the workspace-containment
-   * guard is a RAW STRING `startsWith` on the resolved paths (the Python `str(target).startswith(
-   * str(workspace_resolved))`), NOT a path-segment containment check. A sibling directory whose name
-   * SHARES the workspace's resolved prefix (e.g. `<root>/ws` vs `<root>/ws-evil`) therefore passes the
-   * guard — the port preserves this verbatim (1:1 fidelity to the frozen source, not a "fix").
+   * The workspace-containment guard is a RAW STRING `startsWith` on the resolved paths, NOT a
+   * path-segment containment check. A sibling directory whose name SHARES the workspace's resolved prefix
+   * (e.g. `<root>/ws` vs `<root>/ws-evil`) therefore passes the guard — this is a known sharp edge
+   * preserved for behavioral fidelity.
    */
   private repoPathExists(locator: string): boolean {
     // Python `if not locator or locator.startswith("/"): return False`.
@@ -208,15 +206,13 @@ export class CitationValidator {
 }
 
 /**
- * The Node analogue of Python `Path.resolve(strict=False)`: make absolute, then `realpath` the deepest
- * EXISTING ancestor (following symlinks + collapsing `..` on the existing prefix) and lexically rejoin
- * the trailing components that do not yet (or no longer) exist. Mirrors the resolver the frozen Python
- * relies on — and the sibling `release_workspace.activity.ts::resolveNonStrict` (kept private there;
- * re-authored here so this module owns no cross-activity import).
+ * Make absolute, then `realpath` the deepest EXISTING ancestor (following symlinks + collapsing `..` on
+ * the existing prefix) and lexically rejoin trailing components that do not yet exist. Re-authored here
+ * so this module owns no cross-activity import (the same logic lives privately in
+ * `release_workspace.activity.ts::resolveNonStrict`).
  *
- * Synchronous (the Python `_repo_path_exists` is sync); `realpathSync` throws on a non-existent prefix,
- * which the loop treats as "try a shorter prefix" — never propagated. A path with no resolvable prefix
- * (not even the fs root) falls back to the lexical absolute path.
+ * Synchronous; `realpathSync` throws on a non-existent prefix, which the loop treats as "try a shorter
+ * prefix". A path with no resolvable prefix falls back to the lexical absolute path.
  */
 function resolveNonStrict(candidate: string): string {
   const absolute = path.resolve(candidate);

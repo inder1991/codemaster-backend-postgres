@@ -1,22 +1,18 @@
-// resolveEmbeddingsConsumer — port of the frozen Python
-// vendor/codemaster-py/codemaster/worker/main.py::_resolve_embeddings_consumer (ADR-0059 Phase 1).
-//
-// Env-var-driven selection of the production {@link EmbeddingsPort} impl. This is the SHIPPED path —
-// the REAL adapters embed over HTTP. The RecordingEmbeddingsClient is reachable ONLY via the explicit
-// `stub://recording` DSN sentinel (dev environments without a real embedder), NEVER by default.
+// resolveEmbeddingsConsumer — env-var-driven selection of the production {@link EmbeddingsPort} impl
+// (ADR-0059 Phase 1). This is the SHIPPED path — the REAL adapters embed over HTTP. The
+// RecordingEmbeddingsClient is reachable ONLY via the explicit `stub://recording` DSN sentinel (dev
+// environments without a real embedder), NEVER by default.
 //
 // Provider selection (CODEMASTER_EMBEDDINGS_PROVIDER ∈ {platform, openai_compat}, default platform):
 //
 //   - platform (default): the legacy QwenEmbeddingsConsumer reading CODEMASTER_QWEN_DSN. Honours the
 //     `stub://recording` sentinel for dev environments without Qwen access (ADR-0015 closure). A
-//     missing/empty DSN is FAIL-LOUD (the previous silent fallback to the recording client was
-//     removed) — no silent degradation on the production path.
+//     missing/empty DSN is FAIL-LOUD — no silent degradation on the production path.
 //
 //   - openai_compat: the OpenAICompatibleEmbeddingsAdapter reading CODEMASTER_EMBEDDER_BASE_URL /
 //     CODEMASTER_EMBEDDER_API_KEY / CODEMASTER_EMBEDDER_MODEL_NAME. Any missing var is FAIL-LOUD.
 //
-// FAIL-LOUD posture (1:1 with the Python `raise RuntimeError`): construction throws when the chosen
-// provider's required env vars are missing, rather than silently degrading.
+// FAIL-LOUD posture: construction throws when the chosen provider's required env vars are missing.
 
 import {
   type EmbeddingsPort,
@@ -25,7 +21,7 @@ import {
 import { OpenAICompatibleEmbeddingsAdapter } from "#backend/integrations/openai_compat/adapter.js";
 import { QwenEmbeddingsConsumer } from "#backend/integrations/qwen/consumer.js";
 
-// Env var names + provider tokens (1:1 with the Python module constants).
+// Env var names + provider tokens.
 const EMBED_PROVIDER_ENV = "CODEMASTER_EMBEDDINGS_PROVIDER";
 const EMBED_PROVIDER_PLATFORM = "platform";
 const EMBED_PROVIDER_OPENAI_COMPAT = "openai_compat";

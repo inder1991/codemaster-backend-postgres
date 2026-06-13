@@ -1,16 +1,12 @@
 /**
- * Production Postgres-backed BlobStore adapter — 1:1 TypeScript/Kysely port of the frozen Python spine
- * adapter `vendor/codemaster-py/codemaster/adapters/blobstore_postgres.py::BlobStorePostgresAdapter`
- * (Sprint 5 / S5.1.7).
+ * Production Postgres-backed BlobStore adapter (Sprint 5 / S5.1.7).
  *
- * This is the REAL, ALWAYS-ON production blob store the frozen worker wires into the `LlmClient` —
- * NOT a stub, mock, or no-op. The `InMemoryBlobStoreAdapter` test double (in
+ * This is the REAL, ALWAYS-ON production blob store the worker wires into the `LlmClient` — NOT a
+ * stub, mock, or no-op. The `InMemoryBlobStoreAdapter` test double (in
  * `test/support/llm/cassette_sdk.ts`) is the cassette-replay equivalent; the production
- * `LlmClientCache.defaultClientFactory` injects an instance of THIS class — exactly the Python wiring
- * where the worker injects `BlobStorePostgresAdapter` while the cassette test injects
- * `BlobStoreInMemoryAdapter`. (`LlmClient` no longer carries an in-module blob-store default — the
- * `blobStore` constructor arg is REQUIRED, so an un-injected blob store is a wiring bug, not a silent
- * fall-through to discarding bytes.)
+ * `LlmClientCache.defaultClientFactory` injects an instance of THIS class. (`LlmClient` no longer
+ * carries an in-module blob-store default — the `blobStore` constructor arg is REQUIRED, so an
+ * un-injected blob store is a wiring bug, not a silent fall-through to discarding bytes.)
  *
  * ## What it does
  *
@@ -23,16 +19,14 @@
  *
  * ## Compression (node:zlib zstd — NO new dependency)
  *
- * The Python uses the `zstandard` package at level 3. Node 22+ ships zstd in the standard library
- * (`node:zlib::zstdCompressSync` / `zstdDecompressSync`); this repo runs Node 25, so the port reuses
- * the stdlib with `params: { [ZSTD_c_compressionLevel]: 3 }` to match the Python compression level.
+ * Node 22+ ships zstd in the standard library (`node:zlib::zstdCompressSync` / `zstdDecompressSync`);
+ * this repo runs Node 25, so we use `params: { [ZSTD_c_compressionLevel]: 3 }` (level 3).
  * No third-party compression dependency is added (spine-whitelist clean).
  *
  * ## Concurrency / connection contract (ADR-0062)
  *
  * Each call runs over the SHARED single-pool Kysely seam ({@link tenantKysely} / {@link getPool}); the
- * `INSERT` / `SELECT` / `DELETE` execute on a pool connection. The `pg.Pool` is NEVER created per call —
- * mirroring the Python `async with self._factory() as session`, which checks out one pooled session.
+ * `INSERT` / `SELECT` / `DELETE` execute on a pool connection. The `pg.Pool` is NEVER created per call.
  *
  * ## Tenancy (telemetry.llm_payloads is per-installation but NOT in TENANT_SCOPED_TABLES)
  *
@@ -40,19 +34,13 @@
  * (`WHERE installation_id = …` / `INTO … (installation_id, …)`), so the raw-SQL tenancy idiom is the
  * preferred "installation_id token in the SQL" escape hatch — no `tenant:exempt` marker is needed (the
  * table is also absent from `TENANT_SCOPED_TABLES`, so the runtime plugin does not police it; it is a
- * cold-tier telemetry payload archive, not a hot tenant table). This mirrors the frozen Python, which
- * carries the `installation_id` filter on every `telemetry.llm_payloads` query and relies on the
- * SQLAlchemy hook keying on that column.
+ * cold-tier telemetry payload archive, not a hot tenant table).
  *
  * ## Clock seam
  *
- * The injected {@link Clock} authors `created_at` on the write — mirroring the Python
- * `datetime.now(timezone.utc)`. The `blob_id` UUID is minted via the platform {@link SystemRandom} seam
- * (the Python `uuid.uuid4()`). No raw `Date` / `Math.random` is used (the `check_clock_random` gate is
- * satisfied; the only `node:crypto` randomness is inside the sanctioned randomness seam).
- *
- * @see vendor/codemaster-py/codemaster/adapters/blobstore_postgres.py — the frozen source of truth.
- * @see vendor/codemaster-py/codemaster/adapters/blobstore_port.py — MAX_BLOB_BYTES + the typed errors.
+ * The injected {@link Clock} authors `created_at` on the write. The `blob_id` UUID is minted via the
+ * platform {@link SystemRandom} seam. No raw `Date` / `Math.random` is used (the `check_clock_random`
+ * gate is satisfied; the only `node:crypto` randomness is inside the sanctioned randomness seam).
  */
 
 import { constants as zlibConstants, zstdCompressSync, zstdDecompressSync } from "node:zlib";
@@ -65,22 +53,21 @@ import { SystemRandom } from "#platform/randomness.js";
 
 import { BlobRef } from "#contracts/blob_ref.v1.js";
 
-// ─── Constants (1:1 with the frozen blobstore_port.py / blobstore_postgres.py module constants) ──────
+// ─── Constants ──────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Body-size cap (50 MiB). Mirrors the Python `MAX_BLOB_BYTES = 50 * 1024 * 1024`. The cap is enforced
- * on the UNCOMPRESSED body (the Python checks `len(body)` before compressing), so a body whose
- * compressed form would fit is still rejected if its raw size exceeds the cap — the cap protects the
- * Postgres TOAST from oversized blobs regardless of compressibility.
+ * Body-size cap (50 MiB). Enforced on the UNCOMPRESSED body, so a body whose compressed form would fit
+ * is still rejected if its raw size exceeds the cap — the cap protects the Postgres TOAST from oversized
+ * blobs regardless of compressibility.
  */
 export const MAX_BLOB_BYTES = 50 * 1024 * 1024;
 
-/** zstd compression level — mirrors the Python `ZSTD_COMPRESSION_LEVEL = 3`. */
+/** zstd compression level. */
 const ZSTD_COMPRESSION_LEVEL = 3;
 
-// ─── Typed errors (1:1 with the frozen blobstore_port.py exception hierarchy) ────────────────────────
+// ─── Typed errors ────────────────────────────────────────────────────────────────────────────────────
 
-/** Base for all BlobStore failures (the Python `BlobStoreError`). */
+/** Base for all BlobStore failures. */
 export class BlobStoreError extends Error {
   public constructor(message?: string) {
     super(message);
@@ -89,9 +76,9 @@ export class BlobStoreError extends Error {
 }
 
 /**
- * Raised when `get` cannot find the referenced blob (the Python `BlobNotFoundError`). A cross-tenant
- * `get` (a different `installation_id`) also raises this rather than a distinct access-denied error, so
- * the existence of a blob under another tenant does not leak.
+ * Raised when `get` cannot find the referenced blob. A cross-tenant `get` (a different
+ * `installation_id`) also raises this rather than a distinct access-denied error, so the existence of a
+ * blob under another tenant does not leak.
  */
 export class BlobNotFoundError extends BlobStoreError {
   public constructor(message?: string) {
@@ -100,7 +87,7 @@ export class BlobNotFoundError extends BlobStoreError {
   }
 }
 
-/** Raised when `body` exceeds {@link MAX_BLOB_BYTES} (the Python `BlobTooLargeError`). */
+/** Raised when `body` exceeds {@link MAX_BLOB_BYTES}. */
 export class BlobTooLargeError extends BlobStoreError {
   public constructor(message?: string) {
     super(message);
@@ -109,10 +96,9 @@ export class BlobTooLargeError extends BlobStoreError {
 }
 
 /**
- * Raised when the underlying store is unreachable / refuses writes (the Python
- * `BlobStoreUnavailableError`). The production Postgres adapter raises this on pool exhaustion or a
- * connectivity failure — every DB call below is wrapped so a driver error surfaces as this typed error
- * (mirroring the Python `except Exception as e: raise BlobStoreUnavailableError(str(e)) from e`).
+ * Raised when the underlying store is unreachable / refuses writes. The production Postgres adapter
+ * raises this on pool exhaustion or a connectivity failure — every DB call below is wrapped so a driver
+ * error surfaces as this typed error.
  */
 export class BlobStoreUnavailableError extends BlobStoreError {
   public constructor(message?: string) {
@@ -130,14 +116,14 @@ type PayloadRow = {
 
 // ─── Compression helpers (node:zlib zstd) ────────────────────────────────────────────────────────────
 
-/** zstd-compress at level 3 (the Python `ZstdCompressor(level=3).compress`). Returns a `Buffer`. */
+/** zstd-compress at level 3. Returns a `Buffer`. */
 function compress(body: Uint8Array): Buffer {
   return zstdCompressSync(body, {
     params: { [zlibConstants.ZSTD_c_compressionLevel]: ZSTD_COMPRESSION_LEVEL },
   });
 }
 
-/** zstd-decompress (the Python `ZstdDecompressor().decompress`). Returns a `Buffer`. */
+/** zstd-decompress. Returns a `Buffer`. */
 function decompress(bodyZstd: Buffer): Buffer {
   return zstdDecompressSync(bodyZstd);
 }
@@ -163,8 +149,7 @@ export class BlobStorePostgresAdapter {
 
   /**
    * Build an adapter whose `Kysely` is the shared single-pool tenant Kysely for `dsn` (ADR-0062 seam).
-   * Mirrors the `*.fromDsn(...)` convenience constructor the sibling spine adapters expose; the
-   * production `LlmClientCache` uses this to construct the always-on blob store from
+   * The production `LlmClientCache` uses this to construct the always-on blob store from
    * `CODEMASTER_PG_CORE_DSN`.
    */
   public static fromDsn(args: { dsn: string; clock?: Clock }): BlobStorePostgresAdapter {
@@ -177,10 +162,10 @@ export class BlobStorePostgresAdapter {
 
   /**
    * Compress `body`, enforce the 50 MiB cap on the UNCOMPRESSED size, INSERT the compressed bytes into
-   * `telemetry.llm_payloads`, and return the opaque {@link BlobRef}. 1:1 with the Python `put`.
+   * `telemetry.llm_payloads`, and return the opaque {@link BlobRef}.
    *
    * @throws {@link BlobTooLargeError}         when `body` exceeds {@link MAX_BLOB_BYTES} (checked BEFORE
-   *   compression, on the raw size — mirrors the Python `if len(body) > MAX_BLOB_BYTES`).
+   *   compression, on the raw size).
    * @throws {@link BlobStoreUnavailableError} when the DB write fails (pool exhaustion / connectivity).
    */
   public async put(args: {
@@ -220,7 +205,7 @@ export class BlobStorePostgresAdapter {
   }
 
   /**
-   * Read the most-recent blob for `(installation_id, key)` and decompress it. 1:1 with the Python `get`.
+   * Read the most-recent blob for `(installation_id, key)` and decompress it.
    *
    * @throws {@link BlobNotFoundError}         when no row exists for `(installation_id, key)`.
    * @throws {@link BlobStoreUnavailableError} when the DB read fails.
@@ -247,7 +232,7 @@ export class BlobStorePostgresAdapter {
   }
 
   /**
-   * Delete every row for `(installation_id, key)`. 1:1 with the Python `delete`.
+   * Delete every row for `(installation_id, key)`.
    *
    * @throws {@link BlobStoreUnavailableError} when the DB write fails.
    */
@@ -262,7 +247,7 @@ export class BlobStorePostgresAdapter {
     }
   }
 
-  /** Mint a random RFC4122 v4 UUID via the platform randomness seam (the Python `uuid.uuid4()`). */
+  /** Mint a random RFC4122 v4 UUID via the platform randomness seam. */
   private uuid4(): string {
     const b = Buffer.from(this.random.tokenBytes(16));
     b[6] = (b[6]! & 0x0f) | 0x40; // version 4
@@ -274,7 +259,7 @@ export class BlobStorePostgresAdapter {
 
 // ─── small helpers ──────────────────────────────────────────────────────────────────────────────────
 
-/** Stringify a thrown value for the `BlobStoreUnavailableError` message (the Python `str(e)`). */
+/** Stringify a thrown value for the `BlobStoreUnavailableError` message. */
 function errString(e: unknown): string {
   if (e instanceof Error) {
     return e.message === "" ? e.name : e.message;
@@ -282,7 +267,7 @@ function errString(e: unknown): string {
   return String(e);
 }
 
-/** Python `repr()` of a str: single-quoted, `\`→`\\`, `'`→`\'` (for the not-found message). */
+/** Single-quoted repr of a str: `\`→`\\`, `'`→`\'` (for the not-found message). */
 function pyReprStr(value: string): string {
   return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
 }

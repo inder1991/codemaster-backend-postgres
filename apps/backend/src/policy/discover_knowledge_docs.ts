@@ -1,8 +1,6 @@
-// discover_knowledge_docs (knowledge slice) — 1:1 port of the frozen Python knowledge-side walks in
-// vendor/codemaster-py/codemaster/activities/discover_repo_docs.py: `discover_repo_docs` (Sprint 10 /
-// S10.2.1) + `discover_knowledge_docs` (Sprint 26 / B-3). The POLICY-side walk
-// (`discover_guideline_files`) was ported earlier in `discover_repo_docs.ts`; this module carves out the
-// KNOWLEDGE side the earlier port explicitly left out (see that module's header lines 1-4).
+// discover_knowledge_docs (knowledge slice) — Sprint 10 / S10.2.1 + Sprint 26 / B-3. The POLICY-side
+// walk (`discover_guideline_files`) lives in `discover_repo_docs.ts`; this module carves out the
+// KNOWLEDGE side.
 //
 //   - `discoverRepoDocs({ workspace })` — walks the cloned workspace and emits one `RepoDocV1` per
 //     in-scope markdown file (README.md root-only, CLAUDE.md any-depth, docs/**\/*.md). The downstream
@@ -14,8 +12,7 @@
 //
 // Reuses the exported helpers from `discover_repo_docs.ts` (`isInScope`, `resolvesInside`,
 // `matchesGuidelinePattern`, `MalformedPatternError`) so the two walks share one symlink-escape guard +
-// one fnmatch engine + one error type. The private walk / hash / cap pieces are re-implemented here
-// (they were not exported), byte-faithfully to the frozen Python `discover_repo_docs`.
+// one fnmatch engine + one error type.
 //
 // Runtime context: activities run in the NORMAL Node runtime — NOT the workflow V8-isolate sandbox.
 // `node:fs` reads + `node:crypto` hashing are both permitted in an activity (the clock/random gate
@@ -41,8 +38,7 @@ import {
   resolvesInside,
 } from "./discover_repo_docs.js";
 
-// Top-level directories whose subtrees are ignored — noise + vendor code. Mirrors the frozen Python
-// `_EXCLUDED_DIRS` frozenset exactly (shared by both walks).
+// Top-level directories whose subtrees are ignored — noise + vendor code (shared by both walks).
 const EXCLUDED_DIRS: ReadonlySet<string> = new Set([
   ".git",
   "node_modules",
@@ -51,14 +47,14 @@ const EXCLUDED_DIRS: ReadonlySet<string> = new Set([
   "__pycache__",
 ]);
 
-/** Port of `_hash_bytes` — lowercase sha256 hex digest over the raw file bytes. */
+/** Lowercase sha256 hex digest over the raw file bytes. */
 function hashBytes(data: Buffer): string {
   return createHash("sha256").update(data).digest("hex");
 }
 
 /**
- * Port of `_validate_custom_patterns` (frozen Python, shared helper) — reject patterns with `..` segments
- * or absolute paths. Defensive; A-7's `.codemaster.yaml` validator should reject these upstream.
+ * Reject patterns with `..` segments or absolute paths. Defensive; A-7's `.codemaster.yaml` validator
+ * should reject these upstream.
  */
 function validateCustomPatterns(patterns: ReadonlyArray<string>): void {
   for (const pattern of patterns) {
@@ -77,11 +73,9 @@ function validateCustomPatterns(patterns: ReadonlyArray<string>): void {
 }
 
 /**
- * Recursive `os.walk(..., followlinks=False)` equivalent: yield every (relPath, absPath) under the
- * workspace, pruning `EXCLUDED_DIRS` in-place, NOT descending into symlinked directories. `relPath` is
- * the POSIX path relative to the workspace root. Mirrors the frozen Python `discover_repo_docs` walk;
- * the `.md`-suffix + in-scope filter is applied by the caller (matching the Python `if not
- * fname.endswith(".md"): continue` + `_is_in_scope` gate).
+ * Recursive directory walk: yield every (relPath, absPath) under the workspace, pruning
+ * `EXCLUDED_DIRS` in-place, NOT descending into symlinked directories. `relPath` is the POSIX path
+ * relative to the workspace root. The `.md`-suffix + in-scope filter is applied by the caller.
  */
 function walkFiles(
   workspace: string,
@@ -112,14 +106,14 @@ function walkFiles(
   }
 }
 
-/** Workspace-relative POSIX path for `absPath` (Python `file_path.relative_to(workspace).as_posix()`). */
+/** Workspace-relative POSIX path for `absPath`. */
 function toPosixRel(workspace: string, absPath: string): string {
   return relative(workspace, absPath).split(sep).join(posix.sep);
 }
 
 /**
- * Port of `file_path.is_symlink()` — True iff the leaf path component is itself a symlink. A stat failure
- * (broken-link race) is treated as a symlink so the `resolvesInside` guard then runs and rejects it.
+ * True iff the leaf path component is itself a symlink. A stat failure (broken-link race) is treated
+ * as a symlink so the `resolvesInside` guard then runs and rejects it.
  */
 function isSymlink(absPath: string): boolean {
   try {
@@ -130,8 +124,8 @@ function isSymlink(absPath: string): boolean {
 }
 
 /**
- * 1:1 port of the frozen Python `discover_repo_docs`. Walk `workspace` and emit one `RepoDocV1` per
- * in-scope markdown file (README.md root-only, CLAUDE.md any-depth, docs/**\/*.md).
+ * Walk `workspace` and emit one `RepoDocV1` per in-scope markdown file (README.md root-only,
+ * CLAUDE.md any-depth, docs/**\/*.md).
  *
  * Results are sorted by `relative_path` for determinism so re-runs produce byte-identical envelopes when
  * the underlying files haven't changed. Oversize files (> `MAX_DOC_BYTES`) are skipped; the per-repo cap
@@ -200,8 +194,8 @@ export function discoverRepoDocs(args: { workspace: string }): DiscoveredRepoDoc
 }
 
 /**
- * 1:1 port of the frozen Python `discover_knowledge_docs` (Sprint 26 / B-3). Walk `workspace` and emit
- * one `RepoDocV1` per in-scope KNOWLEDGE document (ADRs, RFCs, architecture docs, runbooks).
+ * Walk `workspace` and emit one `RepoDocV1` per in-scope KNOWLEDGE document (ADRs, RFCs, architecture
+ * docs, runbooks) — Sprint 26 / B-3.
  *
  * Carves out the knowledge side of `discoverRepoDocs`:
  *   - Reuses `discoverRepoDocs`'s walk + scope rules (README / CLAUDE.md / docs/**\/*.md).
@@ -212,8 +206,7 @@ export function discoverRepoDocs(args: { workspace: string }): DiscoveredRepoDoc
  *   - Filters IN any file whose `deriveDocKind` heuristic is non-`other` (adr / rfc / architecture /
  *     runbook), OR any file whose path matches a `customKnowledgePaths` pattern.
  *
- * Pure relative to the Python contract (no logging here; the metric-emit on `docs_cap_hit` is the
- * unported `record_knowledge_docs_cap_hit` — see refresh_semantic_docs.activity.ts metrics divergence).
+ * No logging here; the metric-emit on `docs_cap_hit` lives in refresh_semantic_docs.activity.ts.
  *
  * @throws {MalformedPatternError} if any `customKnowledgePaths` pattern contains `..` or is absolute
  *   (defensive — A-7 validates upstream).

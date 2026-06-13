@@ -1,8 +1,4 @@
-// effective_labels — port of the frozen Python
-//   vendor/codemaster-py/codemaster/retrieval/effective_labels.py::compute_effective_labels
-//   (Sub-spec B T9, spec §3.7, r2-#12).
-//
-// RESTRICTIVE-ONLY resolution: repo config CAN narrow the platform-exposed label set; it CANNOT
+// effective_labels — RESTRICTIVE-ONLY resolution (Sub-spec B T9, spec §3.7, r2-#12): repo config CAN narrow the platform-exposed label set; it CANNOT
 // elevate. This is the content-bleed protection within the single-company / multi-org deployment.
 //
 // The platform's allow-list (`platformExposedLabels`) is the ceiling. A repo's `.codemaster.yaml` can:
@@ -52,7 +48,7 @@ function union(a: ReadonlySet<string>, b: ReadonlySet<string>): Set<string> {
 }
 
 /**
- * Resolve the active retrieval label set for one PR (1:1 with the Python `compute_effective_labels`).
+ * Resolve the active retrieval label set for one PR.
  *
  * Semantics (spec §3.7):
  *   1. Run detectors. `detected ∪ {"default"}` is the base set.

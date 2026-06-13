@@ -1,14 +1,9 @@
-// AnnPort + PostgresAnnPort + InMemoryAnnPort — port of the frozen Python
-//   vendor/codemaster-py/codemaster/retrieval/ann_retriever.py::AnnPort / InMemoryAnnPort
-//   vendor/codemaster-py/codemaster/retrieval/postgres_ann_port.py::PostgresAnnPort (the _sql_no_cache branch only).
-//
-// Dense ANN over chunk embedding vectors using pgvector cosine distance. The narrow {@link AnnPort}
+// AnnPort + PostgresAnnPort + InMemoryAnnPort — dense ANN over chunk embedding vectors using pgvector cosine distance. The narrow {@link AnnPort}
 // type lets the retriever depend on EITHER the production Postgres adapter OR a pure-Python(/TS) test
 // double, without the retriever knowing which.
 //
 // ── PostgresAnnPort: REAL pgvector query (NO stub) ──
-// Production reads `core.knowledge_chunks` directly via the `_sql_no_cache` SQL (1:1 with the Python
-// `_sql_no_cache` branch; the `_sql_phase_a` / `_sql_phase_c` EmbedderCache branches are DEFERRED —
+// Production reads `core.knowledge_chunks` directly via the `_sql_no_cache` SQL (the `_sql_phase_a` / `_sql_phase_c` EmbedderCache branches are DEFERRED —
 // `embedder_cache` is `None` in the current composition so those are never taken). The pgvector `<=>`
 // operator returns cosine DISTANCE ∈ [0, 2]; we return `1 - distance` as a SIMILARITY ∈ [-1, 1] in the
 // SELECT clause, matching the {@link InMemoryAnnPort} `cosine` semantics (descending = better).
@@ -20,8 +15,7 @@
 //
 // ── pgvector text-bind ──
 // asyncpg/pg cannot encode a raw array for the `vector` column, so the query vector is bound as the
-// pgvector text literal `"[f1,f2,...]"` and CAST AS vector in the SQL (1:1 with the Python `qvec`
-// bind). The cast guarantees the value is parsed as a vector, not a text param.
+// pgvector text literal `"[f1,f2,...]"` and CAST AS vector in the SQL. The cast guarantees the value is parsed as a vector, not a text param.
 //
 // ── Hygiene ──
 // `include_stale=false` (default) appends `AND doc_status = 'active'` so deprecated/superseded/draft
@@ -65,12 +59,11 @@ export type AnnPort = {
 };
 
 /**
- * Cosine similarity in [-1, 1]; 0 for either zero-vector (1:1 with the Python `_cosine`). Used by the
+ * Cosine similarity in [-1, 1]; 0 for either zero-vector. Used by the
  * test-only {@link InMemoryAnnPort}; the production path computes this in pgvector.
  */
 export function cosine(a: ReadonlyArray<number>, b: ReadonlyArray<number>): number {
   if (a.length !== b.length) {
-    // Python uses `zip(..., strict=True)` which raises on a length mismatch — mirror that contract.
     throw new Error(`cosine: vector length mismatch (a=${a.length} b=${b.length})`);
   }
   let dot = 0;
@@ -106,7 +99,7 @@ type AnnRow = {
   score: number | string;
 };
 
-/** Map a SELECT row to `[KnowledgeChunkV1, score]` (1:1 with the Python `_row_to_chunk_and_score`). */
+/** Map a SELECT row to `[KnowledgeChunkV1, score]`. */
 function rowToChunkAndScore(row: AnnRow): readonly [KnowledgeChunkV1, number] {
   const chunk: KnowledgeChunkV1 = {
     schema_version: 2,
@@ -183,7 +176,7 @@ export class PostgresAnnPort implements AnnPort {
 export type InMemoryAnnRow = readonly [KnowledgeChunkV1, ReadonlyArray<number>];
 
 /**
- * TEST-ONLY {@link AnnPort} that scores via TS {@link cosine} (1:1 with the Python `InMemoryAnnPort`).
+ * TEST-ONLY {@link AnnPort} that scores via TS {@link cosine}.
  * NEVER used on the shipped path — the production retriever is wired with {@link PostgresAnnPort}.
  */
 export class InMemoryAnnPort implements AnnPort {

@@ -1,6 +1,5 @@
 /**
- * Reconcile-dispatch + repair-workflow lifecycle counters — 1:1 port of the frozen Python
- * `vendor/codemaster-py/codemaster/observability/reconcile_metrics.py`.
+ * Reconcile-dispatch + repair-workflow lifecycle counters.
  *
  * Four counters:
  *   * codemaster_reconcile_payload_missing_required_fields_total{event_type, missing_field}
@@ -14,10 +13,9 @@
  *
  * ## Emit context
  * These fire from the ACTIVITY / webhook (Node) runtime — `maybe_enqueue_repair` runs inside the webhook
- * transaction and the reconcile activity body, NEVER the workflow sandbox — so the TS port routes through
- * the standard `#platform/observability/metrics.js::getMeter` seam (the activity-runtime meter the sibling
- * counter modules use). The seam returns a no-op Meter when no MeterProvider is registered, so emission is
- * safe before the exporter is wired (the structural analogue of the Python `get_meter(...) is None` no-op).
+ * transaction and the reconcile activity body, NEVER the workflow sandbox — routes through
+ * `#platform/observability/metrics.js::getMeter`. The seam returns a no-op Meter when no MeterProvider
+ * is registered, so emission is safe before the exporter is wired.
  *
  * ## Cardinality discipline (the same the Python module enforces)
  * NO installation_id / repository_id / github_iid labels. Every label is a bounded enum:
@@ -30,7 +28,7 @@
 
 import { type Counter, getMeter } from "#platform/observability/metrics.js";
 
-// Counter NAMES — copied VERBATIM from the Python constants (Grafana-query-stable; renaming requires ADR).
+// Counter NAMES — Grafana-query-stable; renaming requires ADR.
 export const RECONCILE_PAYLOAD_MISSING_REQUIRED_FIELDS_NAME =
   "codemaster_reconcile_payload_missing_required_fields_total";
 export const REPOSITORY_BOOTSTRAP_REPAIRS_NAME = "codemaster_repository_bootstrap_repairs_total";
@@ -39,8 +37,8 @@ export const REPOSITORY_BOOTSTRAP_REPAIR_COOLDOWN_SKIPS_NAME =
 export const REPOSITORY_BOOTSTRAP_REPAIR_BLOCKED_SKIPS_NAME =
   "codemaster_repository_bootstrap_repair_blocked_skips_total";
 
-// Meter + instruments cached at MODULE scope (created once at import), mirroring the Python lazy-cache that
-// avoids per-emit create_* lock contention. Meter name = the dotted module path the Python uses.
+// Meter + instruments cached at MODULE scope (created once at import) to avoid per-emit create_*
+// lock contention.
 const METER = getMeter("codemaster.reconcile");
 const MISSING_FIELDS_COUNTER: Counter = METER.createCounter(
   RECONCILE_PAYLOAD_MISSING_REQUIRED_FIELDS_NAME,
@@ -75,9 +73,8 @@ const BLOCKED_SKIP_COUNTER: Counter = METER.createCounter(
 );
 
 /**
- * Emit one count for a builder-skip outcome (1:1 with the Python
- * `record_reconcile_payload_missing_required_fields`). `eventType` is bounded to the producer's accepted
- * set; `missingField` is the helper's SkipReason literal.
+ * Emit one count for a builder-skip outcome. `eventType` is bounded to the producer's accepted set;
+ * `missingField` is the helper's SkipReason literal.
  */
 export function recordReconcilePayloadMissingRequiredFields(args: {
   eventType: string;
@@ -87,27 +84,25 @@ export function recordReconcilePayloadMissingRequiredFields(args: {
 }
 
 /**
- * F-6 — emit one count per drift-detection event that ACTUALLY enqueued a repair workflow dispatch (1:1
- * with the Python `record_repository_bootstrap_repair`). `triggerSource` ∈ {pr_webhook, admin_manual,
- * installation_created} — bounded enum matching the RepairInstallationRepositoriesPayloadV1 contract.
+ * F-6 — emit one count per drift-detection event that ACTUALLY enqueued a repair workflow dispatch.
+ * `triggerSource` ∈ {pr_webhook, admin_manual, installation_created} — bounded enum matching the
+ * RepairInstallationRepositoriesPayloadV1 contract.
  */
 export function recordRepositoryBootstrapRepair(args: { triggerSource: string }): void {
   REPAIRS_COUNTER.add(1, { trigger_source: args.triggerSource });
 }
 
 /**
- * F-6 — emit per drift-detection event SUPPRESSED by the cooldown window (1:1 with the Python
- * `record_repository_bootstrap_repair_cooldown_skip`). Pair with {@link recordRepositoryBootstrapRepair}
- * to compute the suppression ratio during incidents.
+ * F-6 — emit per drift-detection event SUPPRESSED by the cooldown window. Pair with
+ * {@link recordRepositoryBootstrapRepair} to compute the suppression ratio during incidents.
  */
 export function recordRepositoryBootstrapRepairCooldownSkip(args: { triggerSource: string }): void {
   COOLDOWN_SKIP_COUNTER.add(1, { trigger_source: args.triggerSource });
 }
 
 /**
- * F-6 (v5 5.3 poison-installation) — emit per drift-detection event SUPPRESSED because the installation is
- * marked blocked (terminal-failure classification). 1:1 with the Python
- * `record_repository_bootstrap_repair_blocked_skip`. `blockedReason` ∈ {installation_not_found,
+ * F-6 (v5 5.3 poison-installation) — emit per drift-detection event SUPPRESSED because the installation
+ * is marked blocked (terminal-failure classification). `blockedReason` ∈ {installation_not_found,
  * installation_suspended, app_unauthorized, app_uninstalled} — bounded enum matching the SQL CHECK on
  * cache.repository_repair_state. EVERY emit is a manual-intervention candidate.
  */

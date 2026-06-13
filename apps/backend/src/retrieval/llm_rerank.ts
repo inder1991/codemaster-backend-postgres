@@ -1,16 +1,13 @@
-// LlmRerank — port of the frozen Python
-//   vendor/codemaster-py/codemaster/retrieval/llm_rerank.py (Sprint 10 / S10.3.5).
-//
-// A small LLM (Claude Haiku in production) re-scores the RRF-fused candidates for relevance to the
+// LlmRerank — a small LLM (Claude Haiku in production) re-scores the RRF-fused candidates for relevance to the
 // query, then we keep the top 5. Two seams:
 //
 //   - {@link LlmRerankerPort} — the production wraps an LLM call (a tight prompt asking for one float per
 //     candidate). Tests inject deterministic stubs. The production Bedrock-backed reranker model is
 //     OWNER-PROVIDED and DEFERRED — tracked as FOLLOW-UP-production-reranker (and the legacy
-//     FOLLOW-UP-retrieve-knowledge-llm-rerank). The frozen Python ships only the {@link IdentityRerankPort}
-//     no-op (the BedrockRerank impl was deferred per the program plan §B-2 "v1 retrieval ships without
-//     rerank"); this port mirrors that exactly. When the owner wires the LLM-backed port, it consumes the
-//     ported LlmClientCache (`forRole(...)` → `invokeModel(...)`) and an Ollama test double in CI.
+//     FOLLOW-UP-retrieve-knowledge-llm-rerank). The default ships only the {@link IdentityRerankPort}
+//     no-op (BedrockRerank deferred per program plan §B-2 "v1 retrieval ships without rerank"). When the
+//     owner wires the LLM-backed port, it consumes LlmClientCache (`forRole(...)` → `invokeModel(...)`) and
+//     an Ollama test double in CI.
 //   - {@link LlmRerankUnavailableError} — the typed error the port raises when the rerank LLM is
 //     unreachable / rate-limited. {@link LlmRerank.apply} catches it and falls back to "first top_k from
 //     the input list" with degraded=true so the review still ships, just without the rerank polish.
@@ -27,7 +24,6 @@ import type {
 /**
  * Locked top-K for the rerank pass. Five chunks is enough context for the model to reason about the
  * change without diluting attention, and small enough to keep prompt tokens under the cost ceiling.
- * 1:1 with the Python `RERANK_TOP_K: Final = 5`.
  */
 export const RERANK_TOP_K = 5;
 
@@ -58,8 +54,7 @@ export type LlmRerankerPort = {
 };
 
 /**
- * No-op {@link LlmRerankerPort} — returns a constant score per candidate, preserving the input order
- * (1:1 with the Python `IdentityRerankPort`).
+ * No-op {@link LlmRerankerPort} — returns a constant score per candidate, preserving the input order.
  *
  * Lets {@link HybridRetriever} be composed by callers that don't yet have an LLM-backed rerank port (the
  * production reranker is OWNER-PROVIDED + DEFERRED — FOLLOW-UP-production-reranker). Constructing
@@ -80,7 +75,7 @@ export class IdentityRerankPort implements LlmRerankerPort {
 
 /**
  * Return the input candidates capped at {@link RERANK_TOP_K} with stage rewritten to "rerank" so the
- * output shape is uniform (1:1 with the Python `_fallback`).
+ * output shape is uniform.
  */
 function fallback(candidates: RetrievedKnowledgeV1, reason: string): RetrievedKnowledgeV1 {
   const items: Array<ScoredKnowledgeChunkV1> = candidates.items
@@ -98,7 +93,7 @@ function fallback(candidates: RetrievedKnowledgeV1, reason: string): RetrievedKn
   };
 }
 
-/** Apply an LLM rerank pass over RRF-fused candidates (1:1 with the Python `LlmRerank`). */
+/** Apply an LLM rerank pass over RRF-fused candidates. */
 export class LlmRerank {
   private readonly port: LlmRerankerPort;
 

@@ -1,28 +1,23 @@
 /**
- * Vault adapter port — 1:1 port of `codemaster/adapters/vault_port.py`
- * (frozen Python, Sprint 0 / S0.3b).
+ * Vault adapter port (Sprint 0 / S0.3b).
  *
  * The {@link VaultPort} type is what `vault_credential_write` and any other secrets-touching code
  * depends on. Production wiring uses a real-Vault adapter (a later task); tests use the
  * {@link InMemoryVault} test double defined here.
  *
- * Why a Port: the outbox sink, the integrations API, and the on-startup secret loader all need
- * Vault operations. Putting them behind a typed interface means each can be unit-tested without
- * spinning up Vault, and chaos tests can inject failure modes deterministically (see
+ * Why a Port: the outbox sink, the integrations API, and the on-startup secret loader all need Vault
+ * operations. Putting them behind a typed interface means each can be unit-tested without spinning up
+ * Vault, and chaos tests can inject failure modes deterministically (see
  * {@link InMemoryVault.simulateUnreachable}).
  *
- * --- Port-fidelity notes vs the Python (see also the test header) ---
- *   - `bytes` → `Uint8Array`. Python Transit plaintext is `bytes`; TS uses `Uint8Array`. The
- *     in-memory fixture stores the array reference verbatim (Python stores the `bytes` object
- *     verbatim — `bytes` is immutable, `Uint8Array` is not, but the fixture is a test-only oracle
- *     keyed by an opaque ciphertext blob; callers never mutate the stored array in practice).
- *   - kv versions are 1-indexed in the public API exactly as in the Python: version N is stored at
- *     array index N-1; `kvWrite` returns the new length; `kvRead({ version: undefined })` reads the
- *     latest.
+ * --- InMemoryVault notes ---
+ *   - Transit plaintext is `Uint8Array`; the in-memory fixture stores the array reference verbatim
+ *     (the fixture is a test-only oracle keyed by an opaque ciphertext blob; callers never mutate
+ *     the stored array in practice).
+ *   - kv versions are 1-indexed: version N is stored at array index N-1; `kvWrite` returns the new
+ *     length; `kvRead({ version: undefined })` reads the latest.
  *   - copy-on-read / copy-on-write: `kvWrite` stores a `{ ...data }` shallow copy and `kvRead`
- *     returns a `{ ...stored }` shallow copy, mirroring the Python `dict(data)` / `dict(...)` so a
- *     caller cannot mutate stored state through the value it passed in or got back.
- *   - keyword args → a single args-object per call (the repo's args-object convention).
+ *     returns a `{ ...stored }` shallow copy so a caller cannot mutate stored state.
  */
 
 // ─── The narrow Vault-operation interface this codebase depends on ─────────────────────────────
@@ -61,7 +56,7 @@ export type VaultPort = {
   transitDecrypt(args: { keyName: string; ciphertext: string }): Promise<Uint8Array>;
 };
 
-// ─── Typed exceptions (1:1 with the Python error hierarchy) ────────────────────────────────────
+// ─── Typed exceptions ──────────────────────────────────────────────────────────────────────────
 
 /** Base class for Vault operation failures. */
 export class VaultError extends Error {
@@ -209,7 +204,7 @@ export class InMemoryVault implements VaultPort {
 
   // --- test-only API ---
 
-  /** Toggle simulated connectivity failure for chaos tests (Python `simulate_unreachable`). */
+  /** Toggle simulated connectivity failure for chaos tests. */
   public simulateUnreachable(value = true): void {
     this.unreachable = value;
   }

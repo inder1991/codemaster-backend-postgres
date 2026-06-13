@@ -1,8 +1,7 @@
 /**
- * Confluence label canonicalization — 1:1 TypeScript port of the frozen Python
- * `vendor/codemaster-py/codemaster/retrieval/label_taxonomy.py` (Sub-spec A Task 1).
+ * Confluence label canonicalization (Sub-spec A Task 1).
  *
- * Ported as a dependency of {@link ../domain/repos/confluence_chunks_repo.ts}'s `upsertChunks`, which
+ * Dependency of {@link ../domain/repos/confluence_chunks_repo.ts}'s `upsertChunks`, which
  * canonicalizes each raw Confluence label before persisting it (the `confluence_chunks_labels_canonical`
  * CHECK constraint requires canonical forms). Pure function over a static RECOGNITION_MAP — no wiring.
  */
@@ -70,7 +69,7 @@ const RECOGNITION_MAP: ReadonlyMap<string, string> = new Map([
 const KNOWN_CANONICAL: ReadonlySet<string> = new Set(RECOGNITION_MAP.values());
 
 /**
- * Confluence raw label → canonical form (1:1 with the Python `canonicalize`).
+ * Confluence raw label → canonical form.
  *
  * Lookup order:
  *   1. Empty / whitespace-only → 'unrecognized:empty'

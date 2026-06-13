@@ -1,39 +1,34 @@
 /**
- * Deterministic fix-prompt builder — 1:1 BYTE-EXACT port of the frozen Python
- * `vendor/codemaster-py/codemaster/review/fix_prompt_builder.py`
- * (spec: docs/superpowers/specs/2026-06-01-fix-prompt-design.md).
+ * Deterministic fix-prompt builder (spec: docs/superpowers/specs/2026-06-01-fix-prompt-design.md).
  *
  * PRIMARY path of the fix-prompt feature: produces a complete, structured, trust-safe, traceable,
  * size-bounded "paste into Claude Code" prompt with NO model call. It is ALSO the base the LLM
  * theme-synthesizer wraps. Pure functions only — no I/O — so it is trivially testable and replay-safe.
  *
- * Tier-1 parity: every public function here is asserted byte-equal against the frozen Python over the
- * dedicated parity ref (test/parity/fix_prompt_builder.parity.test.ts / tools/parity/run_fix_prompt_ref.py).
+ * Parity: every public function here is asserted byte-equal over the dedicated parity ref
+ * (test/parity/fix_prompt_builder.parity.test.ts).
  *
  * ## Runtime context
  *
  * Imported by the `generateFixPromptActivity` activity (the NORMAL Node runtime, NOT the workflow
- * V8-isolate sandbox), so `node:crypto` (the SHA-1 id digest) is permitted here — exactly as the Python
- * `hashlib.sha1` runs activity-side. These are pure transforms with no clock / RNG / DB / fetch, so the
- * clock-random gate is a no-op.
+ * V8-isolate sandbox), so `node:crypto` (the SHA-1 id digest) is permitted here. Pure transforms with
+ * no clock / RNG / DB / fetch — the clock-random gate is a no-op.
  *
  * ## Sort fidelity
  *
- * Python `sorted(...)` is stable, and V8's `Array.prototype.sort` is stable (ES2019+), so the tuple-key
- * sorts (`(-rank, file, start_line)`) reproduce the Python order exactly when the comparators below
- * replicate Python's tuple comparison (compare key-by-key, first difference wins). The `by_file` grouping
- * uses a `Map` (insertion-ordered like a Python dict) and then re-sorts the keys, byte-faithful to the
- * Python `for path in sorted(by_file, key=...)`.
+ * V8's `Array.prototype.sort` is stable (ES2019+), so the tuple-key sorts (`(-rank, file, start_line)`)
+ * reproduce the expected order exactly when the comparators below compare key-by-key. The `by_file`
+ * grouping uses a `Map` (insertion-ordered) and then re-sorts the keys.
  */
 
 import { createHash } from "node:crypto";
 
 import type { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
 
-/** Max findings rendered into one prompt (the Python `MAX_FIX_PROMPT_FINDINGS`). */
+/** Max findings rendered into one prompt. */
 export const MAX_FIX_PROMPT_FINDINGS = 40;
 
-/** Char budget for the whole rendered prompt (the Python `MAX_FIX_PROMPT_CHARS`; mirrors the DB CHECK). */
+/** Char budget for the whole rendered prompt (mirrors the DB CHECK constraint). */
 export const MAX_FIX_PROMPT_CHARS = 60000;
 
 /**
@@ -45,7 +40,7 @@ export const MAX_FIX_PROMPT_CHARS = 60000;
  */
 const PER_FINDING_RENDER_OVERHEAD_CHARS = 220;
 
-/** blocker > issue > suggestion > nit — the Python `_SEVERITY_RANK` (mirrors file_rows_synthesizer). */
+/** blocker > issue > suggestion > nit — mirrors file_rows_synthesizer's ranking. */
 const SEVERITY_RANK: ReadonlyMap<string, number> = new Map([
   ["nit", 0],
   ["suggestion", 1],
@@ -59,14 +54,11 @@ function severityRank(severity: string): number {
 }
 
 /**
- * Stable, deterministic per-finding id (replay-safe — no uuid4/clock). 1:1 with the Python
- * `finding_id_for`.
+ * Stable, deterministic per-finding id (replay-safe — no uuid4/clock).
  *
  * `sha1(file + "\n" + start_line + "\n" + end_line + "\n" + category + "\n" + title)`, first 8 hex chars,
  * prefixed `F-`. The hash inputs mirror aggregation's dedup-key dimensions (file, start_line, end_line,
- * category) plus title for stability, so two findings aggregation keeps DISTINCT never collide onto one
- * id. `usedforsecurity=False` on the Python side is a FIPS hint with no effect on the digest bytes, so it
- * has no TS counterpart — the hex digest is identical.
+ * category) plus title for stability, so two findings aggregation keeps DISTINCT never collide onto one id.
  */
 export function findingIdFor(f: ReviewFindingV1): string {
   const material = `${f.file}\n${f.start_line}\n${f.end_line}\n${f.category}\n${f.title}`;
@@ -136,7 +128,7 @@ export function severityTruncate(
   return [included, truncated];
 }
 
-/** The Python `_PREAMBLE` template (`{pr_number}` substituted at render time). */
+/** The preamble template (`{pr_number}` substituted at render time). */
 function preamble(prNumber: number): string {
   return (
     `You are fixing code-review findings on PR #${prNumber}. The findings below ` +
@@ -149,8 +141,8 @@ function preamble(prNumber: number): string {
 /**
  * Defang the trust-fence tags inside untrusted finding text so a field value containing a literal
  * `</finding>` / `<finding` cannot close the fence early and smuggle trailing text OUT of the untrusted
- * region. 1:1 with the Python `neutralize_fence` — a U+200B ZERO WIDTH SPACE is inserted after the
- * `<` so the exact tag token is broken while the text stays readable.
+ * region. A U+200B ZERO WIDTH SPACE is inserted after the `<` so the exact tag token is broken while
+ * the text stays readable.
  */
 export function neutralizeFence(value: string): string {
   // U+200B ZERO WIDTH SPACE built via fromCharCode (NOT a literal invisible byte in source) — the same
@@ -161,7 +153,7 @@ export function neutralizeFence(value: string): string {
     .replaceAll("<finding", `<${zwsp}finding`);
 }
 
-/** Render one <finding> block — the Python `_render_finding`. */
+/** Render one <finding> block. */
 function renderFinding(f: ReviewFindingV1): string {
   const safeFile = neutralizeFence(f.file);
   const lines: Array<string> = [
@@ -181,7 +173,7 @@ function renderFinding(f: ReviewFindingV1): string {
 }
 
 /**
- * Render the complete deterministic fix-prompt. 1:1 with the Python `build_fix_prompt_deterministic`.
+ * Render the complete deterministic fix-prompt.
  *
  * `findings` is the already-truncated `included` set (call {@link severityTruncate} first). `prNumber` is
  * passed explicitly (it is NOT on PrMetaV1). `prMeta` is accepted for future use (repo, title) but v1
@@ -245,7 +237,7 @@ export function buildFixPromptDeterministic(
   });
 }
 
-/** The Python `_render_with` — assemble the prompt parts and join with "\n". */
+/** Assemble the prompt parts and join with "\n". */
 function renderWith(
   findings: ReadonlyArray<ReviewFindingV1>,
   opts: {
@@ -305,7 +297,7 @@ function renderWith(
   return parts.join("\n");
 }
 
-/** `max(_SEVERITY_RANK.get(x.severity, 0) for x in group)` — group is never empty here. */
+/** Max severity rank of a group — group is never empty here. */
 function maxRank(group: ReadonlyArray<ReviewFindingV1>): number {
   let m = severityRank(group[0]!.severity);
   for (const x of group) {
@@ -345,7 +337,7 @@ function cmpTuple(a: ReadonlyArray<SortKeyElem>, b: ReadonlyArray<SortKeyElem>):
   return a.length - b.length;
 }
 
-/** Pair two arrays element-wise up to the shorter length (the Python `zip(a, b)`). */
+/** Pair two arrays element-wise up to the shorter length. */
 function zip<T>(a: ReadonlyArray<T>, b: ReadonlyArray<T>): Array<[T, T]> {
   const out: Array<[T, T]> = [];
   const ib = b[Symbol.iterator]();

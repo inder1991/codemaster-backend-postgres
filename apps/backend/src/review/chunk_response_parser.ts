@@ -1,7 +1,5 @@
-// `parseWithSkipMalformed` — 1:1 port of the frozen Python
-// vendor/codemaster-py/codemaster/review/activities.py::_parse_with_skip_malformed (line ~865).
-//
-// The deterministic activity-boundary enforcement seam for the `bedrock_review_chunk` activity. Parses
+// `parseWithSkipMalformed` — deterministic activity-boundary enforcement seam for the
+// `bedrock_review_chunk` activity. Parses
 // LLM tool_use response blocks ONE-AT-A-TIME (so a single malformed block doesn't poison the whole
 // response), then applies the two inv-14 / inv-15 structural enforcement layers:
 //
@@ -35,15 +33,14 @@ import { type Counter, getMeter } from "#platform/observability/metrics.js";
 
 // ─── counters (single-sourced at the parser; bounded-cardinality labels ONLY) ────────────────────────
 //
-// Names + descriptions are byte-copied from the frozen Python
-// codemaster/observability/pipeline_metrics.py so the deferred metric-name-parity gate passes and
-// existing dashboards/alerts map unchanged. Instruments are cached at MODULE scope (created once at
-// import) per the metrics-seam convention, mirroring the Python lazy `create_counter` cache.
+// Names + descriptions are byte-identical to the Python pipeline_metrics.py equivalents so existing
+// dashboards/alerts map unchanged. Instruments are cached at MODULE scope (created once at import) per
+// the metrics-seam convention.
 
-/** 1:1 with the Python `FINDING_SCOPE_VIOLATION_ATTEMPTED_COUNTER_NAME`. */
+/** Counter name (byte-identical to the Python constant). */
 const FINDING_SCOPE_VIOLATION_ATTEMPTED_COUNTER_NAME =
   "codemaster_finding_scope_violation_attempted_total";
-/** 1:1 with the Python `_FINDING_SCOPE_VIOLATION_DESCRIPTION` (byte-identical text). */
+/** Counter description (byte-identical text). */
 const FINDING_SCOPE_VIOLATION_DESCRIPTION =
   "Findings dropped by the v9-MINIMAL activity-boundary parser " +
   "structural scope-consistency check " +
@@ -63,9 +60,9 @@ const FINDING_SCOPE_VIOLATION_DESCRIPTION =
   "docs/superpowers/plans/2026-05-23-v9-scoped-findings-protocol.md " +
   "R-3 + R-13.";
 
-/** 1:1 with the Python `FINDING_EVIDENCE_REF_INVALID_COUNTER_NAME`. */
+/** Counter name (byte-identical to the Python constant). */
 const FINDING_EVIDENCE_REF_INVALID_COUNTER_NAME = "codemaster_finding_evidence_ref_invalid_total";
-/** 1:1 with the Python `_FINDING_EVIDENCE_REF_INVALID_DESCRIPTION` (byte-identical text). */
+/** Counter description (byte-identical text). */
 const FINDING_EVIDENCE_REF_INVALID_DESCRIPTION =
   "Findings dropped because their evidence_refs cited an ev_id " +
   "NOT in the issued ReviewContextV1.retrieved_evidence manifest. " +
@@ -77,9 +74,9 @@ const FINDING_EVIDENCE_REF_INVALID_DESCRIPTION =
   "See plan docs/superpowers/plans/2026-05-24-v8-v9-v10-" +
   "remediation.md Fix C-2 + ADR-0051 § 4.";
 
-/** 1:1 with the Python `FINDINGS_WITHOUT_EVIDENCE_REFS_COUNTER_NAME`. */
+/** Counter name (byte-identical to the Python constant). */
 const FINDINGS_WITHOUT_EVIDENCE_REFS_COUNTER_NAME = "codemaster_findings_without_evidence_refs_total";
-/** 1:1 with the Python `_FINDINGS_WITHOUT_EVIDENCE_REFS_DESCRIPTION` (byte-identical text). */
+/** Counter description (byte-identical text). */
 const FINDINGS_WITHOUT_EVIDENCE_REFS_DESCRIPTION =
   "Findings emitted with empty evidence_refs. Operational drift " +
   "signal — NOT a structural violation (v10 uses SHOULD-not-MUST " +
@@ -91,7 +88,7 @@ const FINDINGS_WITHOUT_EVIDENCE_REFS_DESCRIPTION =
   "docs/superpowers/plans/2026-05-23-v10-provenance-and-control-" +
   "loops.md R-11 + ADR-0051.";
 
-// Meter name mirrors the Python `get_meter("codemaster.review.finding_filters")`.
+// Meter name (byte-identical to the observability constant).
 const METER = getMeter("codemaster.review.finding_filters");
 
 const SCOPE_VIOLATION_COUNTER: Counter = METER.createCounter(
@@ -125,8 +122,7 @@ function recordFindingsWithoutEvidenceRefs(sourcePresentInManifest: boolean): vo
   });
 }
 
-// Hardcoded upstream activity name — the ONLY caller of this parser. Mirrors the Python
-// `_ACTIVITY_NAME = "bedrock_review_chunk"` local.
+// Hardcoded upstream activity name — the ONLY caller of this parser.
 const ACTIVITY_NAME = "bedrock_review_chunk";
 
 /**

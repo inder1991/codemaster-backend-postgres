@@ -271,5 +271,5 @@ export const COLLAPSED_GATES = Object.freeze({
 }) satisfies Readonly<Record<string, CollapsedGateEntry>>;
 
 /** The exact count of Python markers this ledger accounts for. A failing assertion here means a marker was
- *  added/removed in the frozen Python without updating the ledger — the audit lever for gate drift. */
+ *  added/removed without updating the ledger — the audit lever for gate drift. */
 export const COLLAPSED_GATE_COUNT = 25 as const;

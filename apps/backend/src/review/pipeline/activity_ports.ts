@@ -9,8 +9,7 @@
 //
 // The RETRY_POLICIES values are LOAD-BEARING — they are the exact start_to_close_timeout + RetryPolicy
 // (initial_interval, maximum_interval, backoff_coefficient, maximum_attempts, non_retryable_error_types,
-// heartbeat_timeout) from the frozen Python bridge closures in
-// vendor/codemaster-py/codemaster/workflows/review_pull_request.py. Each constant cites its source line.
+// heartbeat_timeout) from the bridge closures in review_pull_request.py. Each constant cites its source line.
 //
 // Duration shape: the TS SDK ActivityOptions accept either an ms number or a humanized string ("60s",
 // "5 minutes"). We use the SDK's string form. Defaults the Python RetryPolicy leaves implicit (the SDK's

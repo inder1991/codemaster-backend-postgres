@@ -1,7 +1,5 @@
 /**
- * Finding Arbitration Layer — 1:1 PURE-function port of the frozen Python
- * `vendor/codemaster-py/codemaster/review/arbitration_layer.py::arbitrate` (Phase D /
- * static-analysis-coverage-gap fix).
+ * Finding Arbitration Layer — PURE function (Phase D / static-analysis-coverage-gap fix).
  *
  * Consumes Tier-1 static-analysis findings ({@link AnalysisFindingV1}), Tier-2 LLM findings (paired
  * `[uuid, ReviewFindingV1]`), the LLM-emitted SUPPRESS intents ({@link ArbitrationIntentV1}), and the
@@ -55,8 +53,8 @@ import {
 } from "./suppression_policy.js";
 
 /**
- * Diagnose WHY a policy lookup said suppressible=false (1:1 with the Python `_rejection_reason`). Extracted
- * to keep `arbitrate`'s branch count down; the granularity drives the orchestrator's counter cardinality.
+ * Diagnose WHY a policy lookup said suppressible=false. Extracted to keep `arbitrate`'s branch count
+ * down; the granularity drives the orchestrator's counter cardinality.
  */
 function rejectionReason(args: {
   policy: SuppressionPolicy;
@@ -93,7 +91,7 @@ function noneDecision(findingId: string): ArbitrationDecisionV1 {
 
 /**
  * Run the arbitration layer. See module docstring for full semantics. PURE function — no Clock, no I/O, no
- * randomness, no DB. 1:1 with the frozen Python `arbitrate`.
+ * randomness, no DB.
  *
  * `now` is the caller-supplied ISO-8601 instant string (written onto SUPPRESSED_BY_LLM decisions'
  * `suppressed_at`); `tier1Findings` / `tier2Findings` / `intents` are the already-parsed contract shapes.

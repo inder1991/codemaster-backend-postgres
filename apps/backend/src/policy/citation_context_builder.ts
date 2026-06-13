@@ -1,10 +1,8 @@
-// Policy citation-context builder — partial 1:1 port of the frozen Python
-// vendor/codemaster-py/codemaster/policy/citation_context_builder.py. SCOPE (this port): the
-// `merge_per_chunk_bundles` helper the Step 7.2 inline post-filter calls to union the per-chunk
-// ResolvedGuidanceBundleV1 entries into ONE review-level bundle before running SYSTEM_INVARIANTS over the
-// aggregated findings (A-6-b / ADR 0042). The broader citation-context surface (the policy_rule citation
-// validator's context) is built elsewhere (helpers.ts::buildPolicyCitationContext) — only the merge helper
-// the post-filter needs lands here.
+// Policy citation-context builder — the `merge_per_chunk_bundles` helper the Step 7.2 inline
+// post-filter calls to union per-chunk ResolvedGuidanceBundleV1 entries into ONE review-level bundle
+// before running SYSTEM_INVARIANTS over the aggregated findings (A-6-b / ADR 0042). The broader
+// citation-context surface (the policy_rule citation validator's context) is built elsewhere
+// (helpers.ts::buildPolicyCitationContext) — only the merge helper the post-filter needs lands here.
 //
 // SANDBOX SAFETY (ADR-0065/0066): pure function over its input — NO node:crypto, NO clock, NO RNG, NO uuid,
 // NO env, NO I/O. The merge runs INSIDE the workflow sandbox at Step 7.2 (it reads state.policyBundles).
@@ -18,7 +16,7 @@ const REVIEW_LEVEL_CHANGED_PATH = "*";
 
 /**
  * Union per-chunk {@link ResolvedGuidanceBundleV1} entries into a single review-level bundle for the
- * post-filter's {@link postFilterFindings} call. 1:1 with the Python `merge_per_chunk_bundles`.
+ * post-filter's {@link postFilterFindings} call.
  *
  * Deduplicates by `rule.rule_id` — a rule that applies to multiple changed paths (e.g. a repo-root CLAUDE.md
  * rule) appears ONCE in the merged `applicable_rules`. Walks rules + explanations in LOCKSTEP (R-32) so the

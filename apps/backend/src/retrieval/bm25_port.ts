@@ -1,9 +1,5 @@
-// Bm25Port + PostgresBm25Port + InMemoryBm25Port — port of the frozen Python
-//   vendor/codemaster-py/codemaster/retrieval/bm25_retriever.py::Bm25Port / InMemoryBm25Port
-//   vendor/codemaster-py/codemaster/retrieval/postgres_bm25_port.py::PostgresBm25Port
-//
-// Lexical (BM25-ish) retrieval over `core.knowledge_chunks` using Postgres `ts_rank_cd` over the
-// `body_tsv` GIN-indexed generated tsvector column (baseline migration 0001 / Python migration 0059).
+// Bm25Port + PostgresBm25Port + InMemoryBm25Port — lexical (BM25-ish) retrieval over `core.knowledge_chunks` using Postgres `ts_rank_cd` over the
+// `body_tsv` GIN-indexed generated tsvector column (baseline migration 0001).
 // The narrow {@link Bm25Port} type lets the retriever depend on EITHER the production Postgres adapter
 // OR a pure-TS test double, without the retriever knowing which.
 //
@@ -11,7 +7,7 @@
 // Production reads `core.knowledge_chunks` directly: `ts_rank_cd(body_tsv, plainto_tsquery('english',
 // :query))` is the lexical score; the candidate set is gated by `body_tsv @@ plainto_tsquery(...)` so
 // only rows that match the query terms are scored; ordered by score DESC; `LIMIT :top_k`. The column
-// projection is identical to PostgresAnnPort → maps 1:1 to {@link KnowledgeChunkV1}.
+// projection is identical to PostgresAnnPort → maps to {@link KnowledgeChunkV1}.
 //
 // ── Tenancy (CLAUDE.md default-deny / GF-3 raw-SQL gate) ──
 // `core.knowledge_chunks` is tenant-scoped (`installation_id NOT NULL`). The query ALWAYS filters
@@ -20,8 +16,7 @@
 //
 // ── Hygiene ──
 // `include_stale=false` (default) appends `AND doc_status = 'active'` so deprecated/superseded/draft
-// chunks are excluded; an admin override (`include_stale=true`) drops the predicate (1:1 with the
-// Python two-SQL-path branch).
+// chunks are excluded; an admin override (`include_stale=true`) drops the predicate.
 
 import { type Kysely, sql } from "kysely";
 
@@ -65,7 +60,7 @@ type Bm25Row = {
   score: number | string;
 };
 
-/** Map a SELECT row to `[KnowledgeChunkV1, score]` (1:1 with the Python `_row_to_chunk_and_score`). */
+/** Map a SELECT row to `[KnowledgeChunkV1, score]`. */
 function rowToChunkAndScore(row: Bm25Row): readonly [KnowledgeChunkV1, number] {
   const chunk: KnowledgeChunkV1 = {
     schema_version: 2,
@@ -107,7 +102,7 @@ export class PostgresBm25Port implements Bm25Port {
     args: Bm25SearchArgs,
   ): Promise<ReadonlyArray<readonly [KnowledgeChunkV1, number]>> {
     const includeStale = args.includeStale ?? false;
-    // Two SQL paths (1:1 with the Python include_stale branch): the default appends
+    // Two SQL paths: the default appends
     // `AND doc_status = 'active'`. Both filter `installation_id` AND `repository_id` — the
     // `installation_id` token satisfies the raw-SQL tenancy gate. The stale predicate is a separate
     // sql`` fragment so the bound params stay parameterized. The `plainto_tsquery('english', :query)`
@@ -133,21 +128,19 @@ export class PostgresBm25Port implements Bm25Port {
 /** Match Postgres `plainto_tsquery` lexing closely enough for the in-memory parity double. */
 const TOKEN_RE = /[a-z0-9_]+/g;
 
-/** Lowercase + strip punctuation (1:1 with the Python `_tokenize`). */
+/** Lowercase + strip punctuation. */
 function tokenize(text: string): Array<string> {
   return text.toLowerCase().match(TOKEN_RE) ?? [];
 }
 
 /**
- * TEST-ONLY {@link Bm25Port} that scores by tf-idf token overlap (1:1 with the Python
- * `InMemoryBm25Port`). Ordering is consistent enough for behavioural tests; absolute score values are
- * NOT compared against Postgres. NEVER used on the shipped path — production wires {@link
- * PostgresBm25Port}.
+ * TEST-ONLY {@link Bm25Port} that scores by tf-idf token overlap. Ordering is consistent enough for
+ * behavioural tests; absolute score values are NOT compared against Postgres. NEVER used on the
+ * shipped path — production wires {@link PostgresBm25Port}.
  */
 export class InMemoryBm25Port implements Bm25Port {
-  // (chunk, pre-tokenized body) pairs — the TS analogue of the Python `zip(self._chunks, self._tokens,
-  // strict=True)`. Pairing them at construction lets `search` iterate without an index access (keeps the
-  // security/detect-object-injection sink closed).
+  // (chunk, pre-tokenized body) pairs — pairing at construction lets `search` iterate without an index
+  // access (keeps the security/detect-object-injection sink closed).
   private readonly chunkTokenPairs: ReadonlyArray<readonly [KnowledgeChunkV1, ReadonlyArray<string>]>;
   private readonly idf: ReadonlyMap<string, number>;
 

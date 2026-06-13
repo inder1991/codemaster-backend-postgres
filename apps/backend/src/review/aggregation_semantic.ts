@@ -1,22 +1,22 @@
 /**
- * Semantic-merge seam — 1:1 port of vendor/codemaster-py/codemaster/review/aggregation_semantic.py.
+ * Semantic-merge seam — Stage 2 of the aggregation chain.
  *
  * ## What this is
  *
- * Stage 2 of the aggregation chain. Given a real {@link EmbeddingsPort} it embeds every finding body in
- * ONE batch call, then GREEDILY merges same-file findings whose body-embedding cosine-similarity ≥
- * {@link SEMANTIC_MERGE_THRESHOLD} (0.92): the higher-confidence finding absorbs the lower-confidence
- * one's body (joined by `\n---\n`); title / suggestion / category / file / lines follow the ABSORBER;
- * severity + confidence take the max of the pair.
+ * Given a real {@link EmbeddingsPort} it embeds every finding body in ONE batch call, then GREEDILY
+ * merges same-file findings whose body-embedding cosine-similarity ≥ {@link SEMANTIC_MERGE_THRESHOLD}
+ * (0.92): the higher-confidence finding absorbs the lower-confidence one's body (joined by `\n---\n`);
+ * title / suggestion / category / file / lines follow the ABSORBER; severity + confidence take the max
+ * of the pair.
  *
  * Cross-file findings are NEVER considered — a similarity match across files almost always means two
  * real bugs in related code, not a duplicate.
  *
- * ## Fail-open contract (mirrors the frozen Python exactly)
+ * ## Fail-open contract
  *
- *   - fewer than 2 findings              → `[findings, false]`  (Python `len(findings) < 2` early return;
- *                                          nothing to merge, the embedder is never consulted).
- *   - embedder throws OR vector-count    → `[findings, true]`   (Python fail-open: input passed through
+ *   - fewer than 2 findings              → `[findings, false]`  (nothing to merge, the embedder is
+ *                                          never consulted).
+ *   - embedder throws OR vector-count    → `[findings, true]`   (fail-open: input passed through
  *     mismatch                              unchanged, `semantic_skipped=True`). Catches the typed
  *                                          {@link EmbeddingsError} family AND any unexpected throw.
  *   - real merge over ≥2 findings        → `[merged, false]`.
@@ -24,10 +24,7 @@
  * ## No-embedder fallback (the original skip-path seam, retained)
  *
  * When `embedder === undefined` the function takes the same fail-open shape WITHOUT calling an embedder:
- * `len < 2 → false`, else `true`. This is byte-identical to the Python output when its embedder fails on
- * ≥2 findings, and is what the activity used before a real embedder was threaded. The parity oracle
- * drives the frozen Python with an explicit-vector embedder so the merge branch is proven 1:1; the
- * no-embedder fallback is proven by the same oracle driven with a FAILING Python embedder.
+ * `len < 2 → false`, else `true`.
  *
  * The function is async because the embedder call is async; nothing else in the body does I/O.
  */
@@ -46,10 +43,10 @@ export const SEMANTIC_MERGE_THRESHOLD = 0.92;
 /** Default platform model id for the body-embed batch (Python `embedder_model="qwen3-embed-0.6b"`). */
 export const DEFAULT_EMBEDDER_MODEL = "qwen3-embed-0.6b";
 
-/** Body-union separator (Python `_BODY_SEPARATOR`). Mirrors aggregation.py's exact-merge separator. */
+/** Body-union separator (matches aggregation.ts's exact-merge separator). */
 const BODY_SEPARATOR = "\n---\n";
 
-/** Severity rank (Python `_SEVERITY_RANK`). Unknown severities rank below `nit` via the `-1` default. */
+/** Severity rank. Unknown severities rank below `nit` via the `-1` default. */
 const SEVERITY_RANK: Readonly<Record<string, number>> = {
   blocker: 3,
   issue: 2,
@@ -64,15 +61,14 @@ function severityRank(s: string): number {
   return rank === undefined ? -1 : rank;
 }
 
-/** Python `_max_severity`: returns `a` on a tie (`>=`). */
+/** Returns `a` on a tie (`>=`). */
 function maxSeverity(a: string, b: string): string {
   return severityRank(a) >= severityRank(b) ? a : b;
 }
 
 /**
- * Cosine similarity of two equal-length vectors (Python `_cosine`). Returns 0.0 on a length mismatch,
- * an empty vector, or a zero-norm vector — exactly the Python guard rails. Dimension-agnostic, so a
- * 4096-dim Ollama vector and a 1024-dim platform vector both work (we never assert a fixed width here).
+ * Cosine similarity of two equal-length vectors. Returns 0.0 on a length mismatch, an empty vector, or
+ * a zero-norm vector. Dimension-agnostic — we never assert a fixed width here.
  */
 function cosine(u: ReadonlyArray<number>, v: ReadonlyArray<number>): number {
   if (u.length !== v.length || u.length === 0) {
@@ -97,12 +93,11 @@ function cosine(u: ReadonlyArray<number>, v: ReadonlyArray<number>): number {
 }
 
 /**
- * Merge `absorbed` into `absorber` (Python `_merge`). The body union is the absorber's body + separator +
- * the absorbed body (UNLESS the absorbed body is already one of the absorber's separator-split segments —
- * the dedup guard). Severity + confidence take the max of the pair; title / suggestion / category / file /
- * lines all follow the ABSORBER. The additive fields (sources / scope / evidence_refs) reset to their
- * contract defaults, mirroring the frozen Python constructing `ReviewFindingV1` with only the 9 core
- * columns (identical to aggregation.py::aggregateExact's merge).
+ * Merge `absorbed` into `absorber`. The body union is the absorber's body + separator + the absorbed body
+ * (UNLESS the absorbed body is already one of the absorber's separator-split segments — the dedup guard).
+ * Severity + confidence take the max of the pair; title / suggestion / category / file / lines all follow
+ * the ABSORBER. The additive fields (sources / scope / evidence_refs) reset to their contract defaults
+ * (identical to aggregation.ts's aggregateExact merge).
  */
 function merge(absorber: ReviewFindingV1, absorbed: ReviewFindingV1): ReviewFindingV1 {
   const mergedBody = absorber.body.split(BODY_SEPARATOR).includes(absorbed.body)
@@ -126,14 +121,13 @@ function merge(absorber: ReviewFindingV1, absorbed: ReviewFindingV1): ReviewFind
 }
 
 /**
- * Greedy semantic merge (Python `aggregate_semantic`).
+ * Greedy semantic merge.
  *
  * Returns `[out, semanticSkipped]`. `semanticSkipped` is `true` iff the embedder failed (or returned the
  * wrong vector count) and we degraded to a no-op pass-through.
  *
  * `embedder` is optional: with a real {@link EmbeddingsPort} the merge branch runs; with `undefined` the
- * no-embedder fallback runs (same fail-open shape, no embed call). `threshold` and `embedderModel` carry
- * the Python keyword defaults.
+ * no-embedder fallback runs (same fail-open shape, no embed call).
  */
 export async function aggregateSemantic(
   findings: ReadonlyArray<ReviewFindingV1>,
@@ -148,8 +142,8 @@ export async function aggregateSemantic(
     return [[...findings], false];
   }
 
-  // No real embedder → fail-open pass-through, skip recorded (mirrors the Python embedder-failure branch
-  // byte-for-byte: ≥2 findings reach the stage, the embedder is "absent", so we degrade to no-op).
+  // No real embedder → fail-open pass-through, skip recorded (≥2 findings reach the stage, the embedder
+  // is "absent", so we degrade to no-op).
   if (embedder === undefined) {
     return [[...findings], true];
   }
@@ -178,10 +172,9 @@ export async function aggregateSemantic(
 
   // Greedy: walk in input order; for each finding still surviving, absorb any subsequent same-file
   // finding whose cosine ≥ threshold. Each slot is a MUTABLE record bundling the running absorber, its
-  // current vector, and a consumed flag — the TS twin of the Python parallel `surviving` / `surviving_vecs`
-  // / `consumed` arrays. Bundling into one record lets us iterate + mutate by reference (no parallel-array
-  // bracket-indexing), keeping the `slot.vec = ...` replacement (Python `surviving_vecs[i] = surviving_vecs[j]`)
-  // explicit when a higher-confidence finding takes over the slot.
+  // current vector, and a consumed flag. Bundling into one record lets us iterate + mutate by reference
+  // (no parallel-array bracket-indexing), keeping the `slot.vec = ...` replacement explicit when a
+  // higher-confidence finding takes over the slot.
   type Slot = { absorber: ReviewFindingV1; vec: ReadonlyArray<number>; consumed: boolean };
   const slots: Array<Slot> = findings.map((finding, idx) => ({
     absorber: finding,

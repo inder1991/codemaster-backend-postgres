@@ -1,10 +1,4 @@
-// detectors — port of the frozen Python label detectors (Sub-spec B T3-T6):
-//   vendor/codemaster-py/codemaster/retrieval/detection/detectors/base.py::LabelDetector (Protocol)
-//   vendor/codemaster-py/codemaster/retrieval/detection/detectors/language.py::LanguageDetector
-//   vendor/codemaster-py/codemaster/retrieval/detection/detectors/framework.py::FrameworkDetector
-//   vendor/codemaster-py/codemaster/retrieval/detection/detectors/infra.py::InfraDetector
-//
-// Each detector is a pure function over PRContext: no I/O, no clock, no random; order-independent
+// detectors — label detectors (Sub-spec B T3-T6). Each detector is a pure function over PRContext: no I/O, no clock, no random; order-independent
 // (a detector MUST NOT read another detector's output). Each emits ONLY labels in its own namespace.
 
 import { FRAMEWORK_MAPPINGS } from "#backend/retrieval/detection/framework_mappings.js";
@@ -28,11 +22,9 @@ export type LabelDetector = {
 // ─── LanguageDetector (T4) ─────────────────────────────────────────────────────────────────────────
 
 /**
- * Extension → canonical lang label (1:1 with Python `_EXTENSION_TO_LANG_LABEL`). NOT a framework hint:
- * `.tsx` does NOT imply React.
+ * Extension → canonical lang label. NOT a framework hint: `.tsx` does NOT imply React.
  *
- * EXPORTED so the platform-labels ceiling (`platform_labels.ts`) can union its values — 1:1 with the
- * Python `_build_platform_exposed_labels` reading `_EXTENSION_TO_LANG_LABEL.values()`.
+ * EXPORTED so the platform-labels ceiling (`platform_labels.ts`) can union its values.
  */
 export const EXTENSION_TO_LANG_LABEL: Readonly<Record<string, string>> = {
   ".py": "lang:python",
@@ -62,23 +54,22 @@ export const EXTENSION_TO_LANG_LABEL: Readonly<Record<string, string>> = {
 };
 
 /**
- * Return the file suffix including the leading dot, lowercased — 1:1 with Python
- * `pathlib.Path(path).suffix.lower()`. Python `PurePath.suffix` is the substring from the LAST dot in
- * the final path component, but ONLY when that dot is not the leading char of the name (a dotfile like
- * `.gitignore` has an EMPTY suffix; `archive.tar.gz` → `.gz`).
+ * Return the file suffix including the leading dot, lowercased (equivalent to `pathlib.PurePath.suffix`).
+ * Reads the substring from the LAST dot in the final path component, but ONLY when that dot is not the
+ * leading char of the name (a dotfile like `.gitignore` has an EMPTY suffix; `archive.tar.gz` → `.gz`).
  */
 function fileSuffix(path: string): string {
   const slash = path.lastIndexOf("/");
   const name = slash === -1 ? path : path.slice(slash + 1);
   const dot = name.lastIndexOf(".");
-  // Python: a leading-dot name (dotfile, dot===0) OR no dot → empty suffix.
+  // A leading-dot name (dotfile, dot===0) OR no dot → empty suffix.
   if (dot <= 0) {
     return "";
   }
   return name.slice(dot).toLowerCase();
 }
 
-/** Emits only `lang:*` labels via file-extension mapping (1:1 with Python `LanguageDetector`). */
+/** Emits only `lang:*` labels via file-extension mapping. */
 export class LanguageDetector implements LabelDetector {
   public readonly name = "language";
   public readonly version = 1;
@@ -132,7 +123,7 @@ function typeWeight(dependencyType: string): number {
   return typeof weight === "number" ? weight : TYPE_WEIGHTS["unknown"]!;
 }
 
-/** Emits only `framework:*` labels from manifest dependencies (1:1 with Python `FrameworkDetector`). */
+/** Emits only `framework:*` labels from manifest dependencies. */
 export class FrameworkDetector implements LabelDetector {
   public readonly name = "framework";
   public readonly version = 1;
@@ -164,7 +155,7 @@ export class FrameworkDetector implements LabelDetector {
   }
 
   /**
-   * Closes FOLLOW-UP-framework-detector-confidence-score (1:1 with Python `detect_with_confidence`).
+   * Closes FOLLOW-UP-framework-detector-confidence-score.
    * Returns a mapping of every label `detect(ctx)` would emit → a confidence score in [0.0, 1.0].
    *
    * Within a single manifest the maximum-weight occurrence wins; across manifests the maximum weight
@@ -218,8 +209,7 @@ export class FrameworkDetector implements LabelDetector {
 
 // ─── InfraDetector (T6) ──────────────────────────────────────────────────────────────────────────────
 
-// EXPORTED so the platform-labels ceiling (`platform_labels.ts`) can union the emitted labels — 1:1 with
-// the Python `_build_platform_exposed_labels` reading `(label for _rx, label in _INFRA_PATTERNS)`.
+// EXPORTED so the platform-labels ceiling (`platform_labels.ts`) can union the emitted labels.
 export const INFRA_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   // Terraform
   [/\.tf$/, "infra:terraform"],
@@ -245,7 +235,7 @@ export const INFRA_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/(?:^|\/)azure-pipelines\.ya?ml$/, "infra:azure-pipelines"],
 ];
 
-/** Emits only `infra:*` labels via path-based matching (1:1 with Python `InfraDetector`). */
+/** Emits only `infra:*` labels via path-based matching. */
 export class InfraDetector implements LabelDetector {
   public readonly name = "infra";
   public readonly version = 1;

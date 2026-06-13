@@ -1,7 +1,4 @@
-// floors — port of the frozen Python
-//   vendor/codemaster-py/codemaster/retrieval/floors.py::reserve_priority_floors (Sub-spec B T11 2/3).
-//
-// Stage-3 token-budget reservation: before the general MMR/rerank pass consumes the budget, reserve at
+// floors — Stage-3 token-budget reservation (Sub-spec B T11 2/3): before the general MMR/rerank pass consumes the budget, reserve at
 // least one slot for SECURITY_POLICY + REPO_ADR (high-authority tiers) so a giant infra PR can't squeeze
 // mandatory guidance out of the LLM context.
 //
@@ -91,8 +88,7 @@ function asPriorityClassifiable(c: FloorClassifiable): PriorityClassifiable {
 }
 
 /**
- * Reserve one slot per floor tier (SECURITY_POLICY, REPO_ADR) when candidates exist for that tier
- * (1:1 with the Python `reserve_priority_floors`).
+ * Reserve one slot per floor tier (SECURITY_POLICY, REPO_ADR) when candidates exist for that tier.
  *
  * Selection within a tier: highest match_specificity DESC, then lowest age_days (freshest first).
  * Deterministic. The budget is consumed from `tokenBudget` as floors are picked. If a tier's best
@@ -131,7 +127,7 @@ export function reservePriorityFloors(
 
     const pick = tierCandidates[0]!;
     // When the real KnowledgeChunkV1 normalizes without a token_count, ESTIMATE the cost from its body
-    // (estimateTokens is the 1:1 port of Python's estimate_tokens) rather than treating it as 0-cost —
+    // (`estimateTokens` gives word-count/4+1) rather than treating it as 0-cost —
     // a large knowledge floor pick reserved for free would silently under-budget the rerank pass.
     // `estimateTokens("")` returns 1, so a chunk with neither token_count nor body still costs ≥1 (never
     // NaN, never a free reservation).

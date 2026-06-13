@@ -1,12 +1,9 @@
-// Rust (Cargo) dependency parsers — 1:1 TS port of the frozen Python
-//   vendor/codemaster-py/codemaster/review/manifest_parsers/_cargo.py
-//   (Commit 5 of FOLLOW-UP-manifest-dependency-parsing).
+// Rust (Cargo) dependency parsers (Commit 5 of FOLLOW-UP-manifest-dependency-parsing).
 //
 // Covers Cargo.toml + Cargo.lock. Pure module: NO I/O, NO clock/random/crypto. Sandbox-safe (runs in the
 // parse_manifest_dependencies activity, not the workflow body). Both bodies are TOML — parsed via the
 // shared `parseTomlManifest` adapter (the ONLY TOML import seam), and any parse failure / non-table root
-// degrades THAT manifest to an empty ParseOutcome (fail-open), exactly as the Python catches
-// `tomllib.TOMLDecodeError`.
+// degrades THAT manifest to an empty ParseOutcome (fail-open).
 
 import { ParsedDependencyV1 } from "#contracts/pr_context.v1.js";
 
@@ -151,7 +148,7 @@ export function parseCargoLock({
  *   - a plain string version: `serde = "1.0"`
  *   - an inline table: `tokio = { version = "1", features = ["full"] }`
  *   - a git/path table without a version field.
- * Returns the version string when extractable, else null (1:1 with Python `_extract_cargo_version`).
+ * Returns the version string when extractable, else null.
  */
 function extractCargoVersion(rawSpec: unknown): string | null {
   if (typeof rawSpec === "string") {
@@ -166,9 +163,8 @@ function extractCargoVersion(rawSpec: unknown): string | null {
 
 /**
  * Normalize the name, drop on rejection, truncate an over-long version spec, then append the constructed
- * record (1:1 with Python `_emit_cargo`). The record is validated through `ParsedDependencyV1.parse` so it
- * fails exactly as the Pydantic model would — but the version-spec truncation here means the contract's
- * max_length=256 never trips for that field, matching the Python ordering.
+ * record. The record is validated through `ParsedDependencyV1.parse`; the version-spec truncation here
+ * means the contract's max_length=256 never trips for that field.
  */
 function emitCargo({
   rawName,
@@ -205,8 +201,8 @@ function emitCargo({
   );
 }
 
-/** True for a non-null, non-array object (the TS analogue of Python's `isinstance(x, dict)`). The TOML
- *  adapter returns plain objects for tables, so this discriminates tables from strings / numbers / arrays. */
+/** True for a non-null, non-array object. The TOML adapter returns plain objects for tables, so this
+ *  discriminates tables from strings / numbers / arrays. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

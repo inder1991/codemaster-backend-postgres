@@ -1,5 +1,4 @@
-// Workflow-body policy-engine metrics — 1:1 port of the WORKFLOW-meter variants in the frozen Python
-// vendor/codemaster-py/codemaster/observability/policy_metrics.py (Sprint 25 / T-3).
+// Workflow-body policy-engine metrics (Sprint 25 / T-3).
 //
 // These four counters fire from inside the WORKFLOW SANDBOX (the orchestrator's policy-compute step + the
 // Step 7.2 inline post-filter), so the Python sources them from `workflow.metric_meter()` — the replay-safe
@@ -28,7 +27,7 @@
 
 import { type Counter, getMeter } from "#platform/observability/metrics.js";
 
-// Counter NAMES — copied VERBATIM from the Python policy_metrics module constants.
+// Counter NAMES — Grafana-query-stable; renaming requires ADR.
 export const INVARIANT_VIOLATION_ATTEMPTED_NAME =
   "codemaster_policy_invariant_violation_attempted_total";
 export const INVARIANT_ENFORCEMENT_ERROR_NAME =
@@ -59,11 +58,9 @@ const BUNDLE_TOTAL: Counter = METER.createCounter(POLICY_BUNDLE_TOTAL_NAME, {
 });
 
 /**
- * Workflow-body counter — emitted from the Step 7.2 inline post-filter when an invariant fires (the current
- * finding differs from the pre-invariant version). 1:1 with `record_invariant_violation_attempted`.
- *
- * Low-cardinality labels only: `invariant_id` ∈ {SI-001..., SI-005...}, `category` ∈ the bounded Category
- * enum.
+ * Workflow-body counter — emitted from the Step 7.2 inline post-filter when an invariant fires (the
+ * current finding differs from the pre-invariant version). Low-cardinality labels only:
+ * `invariant_id` ∈ {SI-001..., SI-005...}, `category` ∈ the bounded Category enum.
  */
 export function recordInvariantViolationAttempted(args: {
   invariantId: string;
@@ -73,18 +70,18 @@ export function recordInvariantViolationAttempted(args: {
 }
 
 /**
- * Workflow-body counter — emitted from the Step 7.2 inline post-filter when an enforcement callable RAISES
- * (fail-CLOSED at finding level per ADR 0042: the finding is preserved unchanged AND this counter
- * increments so SREs see the bug). 1:1 with `record_invariant_enforcement_error`. Pages SRE via the
- * `PolicyInvariantEnforcementError` alert (any non-zero increase over 5min).
+ * Workflow-body counter — emitted from the Step 7.2 inline post-filter when an enforcement callable
+ * RAISES (fail-CLOSED at finding level per ADR 0042: the finding is preserved unchanged AND this
+ * counter increments so SREs see the bug). Pages SRE via the `PolicyInvariantEnforcementError` alert
+ * (any non-zero increase over 5min).
  */
 export function recordInvariantEnforcementError(args: { invariantId: string }): void {
   ENFORCEMENT_ERROR.add(1, { invariant_id: args.invariantId });
 }
 
 /**
- * Workflow-body counter — numerator for the policy-adoption ratio. Emitted when a review's policy_bundles
- * contained >=1 applicable rule across its chunks. 1:1 with `record_policy_bundle_hit`. Pair with
+ * Workflow-body counter — numerator for the policy-adoption ratio. Emitted when a review's
+ * policy_bundles contained >=1 applicable rule across its chunks. Pair with
  * {@link recordPolicyBundleTotal} for Grafana to compute the ratio.
  */
 export function recordPolicyBundleHit(): void {
@@ -92,9 +89,8 @@ export function recordPolicyBundleHit(): void {
 }
 
 /**
- * Workflow-body counter — denominator for the policy-adoption ratio. Emitted once per review whenever the
- * policy engine ran (collapse-on: the policy-compute step always runs in the TS port). 1:1 with
- * `record_policy_bundle_total`.
+ * Workflow-body counter — denominator for the policy-adoption ratio. Emitted once per review whenever
+ * the policy engine ran (collapse-on: the policy-compute step always runs).
  */
 export function recordPolicyBundleTotal(): void {
   BUNDLE_TOTAL.add(1);

@@ -1,7 +1,5 @@
-// generateWalkthrough — port of the frozen Python generate_walkthrough Temporal activity
-//   vendor/codemaster-py/codemaster/review/walkthrough_activity.py::WalkthroughActivities (S8.5.2b)
-//   + the COLLAPSED-ON walkthrough fallback that lives in the Python WORKFLOW body
-//   (vendor/codemaster-py/codemaster/workflows/review_pull_request.py:2222-2325).
+// generateWalkthrough — the generate_walkthrough Temporal activity, including the COLLAPSED-ON
+// walkthrough fallback.
 //
 // Takes a PrMetaV1 + AggregatedFindingsV1 (+ pre-resolved linked_issues / suggested_reviewers) and
 // produces a WalkthroughV1 via an Opus call with WALKTHROUGH_TOOL_SCHEMA. The activity holds an
@@ -10,19 +8,17 @@
 // sonnet). Untrusted PR content (title / description / file paths) is wrapped by wrapUntrusted; the
 // `truncated` flag from aggregation propagates verbatim (the model cannot override it).
 //
-// ── Where the fallback lives (a deliberate restructure during the port) ──────────────────────────
+// ── Where the fallback lives (a deliberate restructure) ──────────────────────────────────────────
 //
-// In the frozen Python, `generate_walkthrough` RAISES `ApplicationError` on every failure path
-// (budget / output-unsafe-terminal / invocation / parse), and the WORKFLOW BODY catches
-// `(BedrockInvocationError, ActivityError)` and synthesizes the fallback walkthrough. This TS port
-// FOLDS that fallback INTO the activity: the LLM-path errors are caught here and the activity returns
-// the synthesized fallback WalkthroughV1 directly instead of throwing. The behaviour is identical to
-// the Python (activity-raises → workflow-catches-and-synthesizes) composition; only the seam moved.
+// LLM-path errors (budget / output-unsafe-terminal / invocation / parse) are caught inside the
+// activity and it returns the synthesized fallback WalkthroughV1 directly instead of throwing. The
+// net observable behaviour is identical to a raise-and-synthesize composition at the workflow level;
+// only the seam moved.
 //
-// The fallback ALWAYS synthesizes file_rows via synthesizeFileRowsFromAggregated — the Python
+// The fallback ALWAYS synthesizes file_rows via synthesizeFileRowsFromAggregated — the
 // `workflow.patched("walkthrough-cost-cap-synthesis")` gate is COLLAPSED-ON per the gate ledger
 // (apps/backend/src/review/pipeline/gates.ts), so the empty-file_rows legacy branch is dead code and
-// is NOT ported. The synthesized fallback mirrors the collapsed-on Python branch byte-for-byte:
+// is NOT ported. The synthesized fallback shape:
 //   tldr = "Walkthrough generation temporarily unavailable. {n} finding(s) detected; see inline
 //           comments below."
 //   file_rows = synthesizeFileRowsFromAggregated(aggregated.findings)
@@ -70,11 +66,10 @@ export type LlmClientCacheLike = {
 };
 
 /**
- * Output-token budget for the walkthrough call. 1:1 with the frozen Python `WALKTHROUGH_MAX_TOKENS`:
- * the invoke default (1024) is too small — on a findings-heavy PR the TL;DR alone can consume the
- * budget before file_rows is emitted (stop_reason=max_tokens), so the rendered review carries NO
- * per-file table even though the activity "succeeds". 4096 leaves room for TL;DR + table. Surfaced by
- * the 2026-06-02 smoke (PR #122).
+ * Output-token budget for the walkthrough call. The invoke default (1024) is too small — on a
+ * findings-heavy PR the TL;DR alone can consume the budget before file_rows is emitted
+ * (stop_reason=max_tokens), so the rendered review carries NO per-file table even though the activity
+ * "succeeds". 4096 leaves room for TL;DR + table. Surfaced by the 2026-06-02 smoke (PR #122).
  */
 export const WALKTHROUGH_MAX_TOKENS = 4096;
 
@@ -84,7 +79,7 @@ export const WALKTHROUGH_MAX_TOKENS = 4096;
  * (which changes the SHAPE of the structured output, and therefore the parse), the key changes and a
  * stale stored response is NOT replayed. Per-site (distinct from review_activity's REVIEW_TOOL_SCHEMA_VERSION),
  * so two PR-level purposes never share a tool-schema digest. `createHash` is the gate-sanctioned hashing
- * primitive (clock_random gate bans random fns, NOT createHash; mirrors review_activity.ts:55).
+ * primitive (clock_random gate bans random fns, NOT createHash — see review_activity.ts).
  */
 export const WALKTHROUGH_TOOL_SCHEMA_VERSION = `wts-${createHash("sha256")
   .update(Buffer.from(JSON.stringify(WALKTHROUGH_TOOL_SCHEMA), "utf-8"))
@@ -93,7 +88,7 @@ export const WALKTHROUGH_TOOL_SCHEMA_VERSION = `wts-${createHash("sha256")
 
 /**
  * Strip the `refs/heads/` prefix GitHub sometimes returns so the prompt sees the bare branch name
- * (`main`, not `refs/heads/main`). 1:1 with the frozen Python `_normalize_ref`.
+ * (`main`, not `refs/heads/main`).
  */
 function normalizeRef(raw: string | null): string | null {
   if (raw === null) {
@@ -107,9 +102,9 @@ function normalizeRef(raw: string | null): string | null {
 }
 
 /**
- * Render the enrichment fields when populated. 1:1 with the frozen Python `_format_pr_context`. Empty
- * / null values are silently dropped so a pre-DM.12 PrMetaV1 (every field None) produces the same body
- * it did before. Adversarial values stay inside the wrapUntrusted block around the whole message.
+ * Render the enrichment fields when populated. Empty / null values are silently dropped so a
+ * pre-DM.12 PrMetaV1 (every field None) produces the same body it did before. Adversarial values
+ * stay inside the wrapUntrusted block around the whole message.
  */
 function formatPrContext(prMeta: PrMetaV1): Array<string> {
   const parts: Array<string> = [];
@@ -139,25 +134,22 @@ function formatPrContext(prMeta: PrMetaV1): Array<string> {
 }
 
 /**
- * Render the `opened_at` datetime's date component as an ISO date (YYYY-MM-DD), mirroring the Python
- * `pr_meta.opened_at.date().isoformat()`. `opened_at` on the wire is an RFC3339 string (Zod
- * `.datetime({offset:true})`); the leading 10 chars are the `YYYY-MM-DD` calendar date in the
- * payload's own offset — identical to what Python's `.date()` reads off the parsed datetime (both take
- * the date as written, with no timezone re-projection).
+ * Render the `opened_at` datetime's date component as an ISO date (YYYY-MM-DD). `opened_at` on the
+ * wire is an RFC3339 string (Zod `.datetime({offset:true})`); the leading 10 chars are the
+ * `YYYY-MM-DD` calendar date in the payload's own offset (no timezone re-projection).
  */
 function dateIso(rfc3339: string): string {
   return rfc3339.slice(0, 10);
 }
 
-/** Python `str(bool)` — `True` / `False` (capitalized). Mirrors the f-string rendering of a bool. */
+/** Render a bool as `True` / `False` (Python `str(bool)` casing — load-bearing for parity oracle). */
 function pyBool(value: boolean): string {
   return value ? "True" : "False";
 }
 
 /**
- * Build the walkthrough LLM user message. 1:1 with the frozen Python `_build_user_message`. Exported
- * for the Tier-1 parity oracle (the dual-run replays the recorded interaction keyed on these exact
- * bytes, so this is CHAR-FOR-CHAR significant).
+ * Build the walkthrough LLM user message. Exported for the Tier-1 parity oracle (the dual-run
+ * replays the recorded interaction keyed on these exact bytes, so this is CHAR-FOR-CHAR significant).
  */
 export function buildWalkthroughUserMessage(args: {
   prMeta: PrMetaV1;
@@ -199,7 +191,7 @@ export function buildWalkthroughUserMessage(args: {
 
 /**
  * Force `truncated` and degradation hints from aggregation onto the model's walkthrough — the model
- * cannot lie about these. 1:1 with the frozen Python `_propagate_aggregation_signals`.
+ * cannot lie about these.
  */
 function propagateAggregationSignals(
   walkthrough: WalkthroughV1,
@@ -224,10 +216,8 @@ function propagateAggregationSignals(
 }
 
 /**
- * Build the COLLAPSED-ON synthesized fallback walkthrough. 1:1 with the
- * `workflow.patched("walkthrough-cost-cap-synthesis")` true branch in the frozen Python workflow body
- * (review_pull_request.py:2305-2315). The legacy empty-file_rows branch is dead code (gate
- * collapsed-on) and is NOT ported.
+ * Build the COLLAPSED-ON synthesized fallback walkthrough. The legacy empty-file_rows branch is dead
+ * code (gate collapsed-on) and is NOT ported.
  */
 function synthesizedFallback(aggregated: AggregatedFindingsV1): WalkthroughV1 {
   const nFindings = aggregated.findings.length;
@@ -247,7 +237,7 @@ function synthesizedFallback(aggregated: AggregatedFindingsV1): WalkthroughV1 {
   };
 }
 
-/** The 64KB UTF-8-byte cap + marker the audit payload's original_text carries (1:1 with Python). */
+/** Apply the 64KB UTF-8-byte cap + truncation marker to the audit payload's original_text. */
 function capOriginalText(text: string): string {
   const encoded = new TextEncoder().encode(text);
   if (encoded.length <= ORIGINAL_TEXT_MAX_BYTES) {
@@ -259,10 +249,8 @@ function capOriginalText(text: string): string {
 }
 
 /**
- * Drive one walkthrough invocation. 1:1 in intent with the frozen Python `_do_generate` PLUS the
- * collapsed-on workflow-body fallback folded in: the LLM-path errors that the Python activity converts
- * to `ApplicationError` (and the workflow body catches) are caught here and return the synthesized
- * fallback directly.
+ * Drive one walkthrough invocation. LLM-path errors (budget / output-unsafe-terminal / invocation /
+ * parse) are caught here and the synthesized fallback is returned directly.
  *
  * The happy path parses the emit_walkthrough tool_use block, propagates aggregation signals, attaches
  * the sanitization event (when the secret-leaked sanitize-and-continue branch fired), and embeds the
@@ -282,8 +270,7 @@ export async function doGenerateWalkthrough(
 
   // Resolve the platform-scoped LlmClient via the cache. LlmRoleNotConfigured/Disabled are subclasses
   // of LlmInvocationError, so a resolve failure routes into the same graceful-degrade fallback as an
-  // upstream invocation flake (the Python maps both to type="BedrockInvocationError" and the workflow
-  // catch synthesizes; here we synthesize directly).
+  // upstream invocation flake (synthesize directly).
   let llmClient: LlmClient;
   try {
     llmClient = await deps.cache.forRole(role);
@@ -315,8 +302,7 @@ export async function doGenerateWalkthrough(
       tools: [WALKTHROUGH_TOOL_SCHEMA as unknown as Record<string, unknown>],
       purpose: "walkthrough",
       // TS hardening divergence (ADR-0068) — the REAL installation_id flows to the cost-cap (per-org
-      // isolation), blob put, and telemetry/Langfuse rows. Mirrors the review_activity decision; Python
-      // platform-scopes the call (substitutes the all-ones sentinel). Genuine platform jobs would pass
+      // isolation), blob put, and telemetry/Langfuse rows. Genuine platform jobs would pass
       // PLATFORM_INVOCATION_INSTALLATION_ID; the walkthrough is per-PR, so the PR's installation owns it.
       installationId: prMeta.installation_id,
       // de-Temporal Phase 2 (D2 / W2.2 / F9) — ledger this PR-level paid call by PURPOSE. The stable key is
@@ -326,8 +312,8 @@ export async function doGenerateWalkthrough(
       // stored provider response replays instead of buying a second paid Bedrock completion. F9: the SAME
       // "walkthrough" token drives BOTH the chunk-key surrogate AND the metric purpose label
       // (ledgerPurpose), so cost observability and replay keying never diverge. The client only acts on
-      // this when constructed with a ledger; unit tests / platform jobs (no ledger) behave as the frozen
-      // Python (invoke, no replay).
+      // this when constructed with a ledger; unit tests / platform jobs (no ledger) invoke directly
+      // (no replay).
       idempotency: {
         reviewId: prMeta.pr_id,
         chunkId: purposeChunkId("walkthrough"),
@@ -337,12 +323,12 @@ export async function doGenerateWalkthrough(
     });
     rawBlocks = result.raw_content_blocks;
   } catch (e) {
-    // (a) Budget exceeded → Python raises non-retryable; the workflow catch synthesizes. Synthesize here.
+    // (a) Budget exceeded → synthesize fallback.
     if (e instanceof BedrockBudgetExceededError) {
       return synthesizedFallback(aggregated);
     }
     // (b) Output unsafe → SANITIZE-AND-CONTINUE iff the decision reasons INCLUDE secret_leaked AND
-    //     secret findings exist; otherwise terminal (Python raises non-retryable → workflow synthesizes).
+    //     secret findings exist; otherwise terminal → synthesize fallback.
     if (e instanceof LlmOutputUnsafeError) {
       const decision = e.decision;
       if (!decision.reasons.includes("secret_leaked") || decision.findings.length === 0) {
@@ -354,7 +340,7 @@ export async function doGenerateWalkthrough(
       const truncatedOriginal = capOriginalText(e.contentText);
       // Sprint 1 v2 review item M3 — the client sets request_id unconditionally before the raise. If it
       // is ever null here the deterministic audit_event_id derivation would silently break idempotency;
-      // assert the invariant explicitly (1:1 with the Python RuntimeError).
+      // assert the invariant explicitly.
       if (e.requestId === null) {
         throw new Error(
           "LlmOutputUnsafeError carried no request_id — " +
@@ -377,7 +363,7 @@ export async function doGenerateWalkthrough(
       // text-only scan didn't redact them. Parse and fall through to the propagators below.
       rawBlocks = e.rawContentBlocks;
     } else if (e instanceof LlmInvocationError) {
-      // (c) Any other invocation error → Python raises retryable; the workflow catch synthesizes.
+      // (c) Any other invocation error → synthesize fallback.
       return synthesizedFallback(aggregated);
     } else {
       throw e;
@@ -389,7 +375,7 @@ export async function doGenerateWalkthrough(
     walkthrough = parseWalkthroughToolUse(rawBlocks);
   } catch (e) {
     if (e instanceof WalkthroughParseError) {
-      // Python raises non-retryable WalkthroughParseError → the workflow catch synthesizes.
+      // Parse failure → synthesize fallback.
       return synthesizedFallback(aggregated);
     }
     throw e;
@@ -411,15 +397,14 @@ export async function doGenerateWalkthrough(
 }
 
 /**
- * Bound-method holder for the generate_walkthrough activity — 1:1 with the frozen Python
- * `WalkthroughActivities(cache=...)`. The worker bootstrap constructs it with the role-keyed
- * LlmClientCache (the WALKTHROUGH role resolves to opus) and registers its `generateWalkthrough` bound
- * method. The method is an arrow property so it stays bound when destructured into the activities map
- * (Temporal registers the function value directly, losing `this`). Mirrors AggregateFindingsActivity.
+ * Bound-method holder for the generate_walkthrough activity. The worker bootstrap constructs it with
+ * the role-keyed LlmClientCache (the WALKTHROUGH role resolves to opus) and registers its
+ * `generateWalkthrough` bound method. The method is an arrow property so it stays bound when
+ * destructured into the activities map (Temporal registers the function value directly, losing
+ * `this`).
  *
- * The activity's single positional input is the {@link GenerateWalkthroughInputV1} envelope (CLAUDE.md
- * invariant 11 / ADR-0047) — the Python activity's 4-positional dispatch
- * (pr_meta, aggregated, linked_issues, suggested_reviewers) is closed into one typed envelope here.
+ * The activity's single positional input is the {@link GenerateWalkthroughInputV1} envelope
+ * (CLAUDE.md invariant 11 / ADR-0047).
  */
 export class WalkthroughActivities {
   private readonly cache: LlmClientCacheLike;
