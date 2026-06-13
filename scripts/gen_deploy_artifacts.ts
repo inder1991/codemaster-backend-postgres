@@ -38,14 +38,12 @@ function placeholderFor(s: SecretReq): string {
 }
 
 export function renderDoc(): string {
-  const secretRows = DEPLOY_CONTRACT.secrets
-    .map(
-      (s) =>
-        `| \`${s.name}\` | ${s.source} | \`${s.vaultPath}\` | ${s.key ?? "—"} | ${
-          s.required ? "**yes**" : "no"
-        } | ${s.gates ?? ""} |`,
-    )
-    .join("\n");
+  const rowOf = (s: (typeof DEPLOY_CONTRACT.secrets)[number]): string =>
+    `| \`${s.name}\` | ${s.source} | \`${s.vaultPath}\` | ${s.key ?? "—"} | ${
+      s.required ? "**yes**" : "no"
+    } | ${s.gates ?? ""} |`;
+  const secretRows = DEPLOY_CONTRACT.secrets.map(rowOf).join("\n");
+  const advisoryRows = DEPLOY_CONTRACT.advisory.map(rowOf).join("\n");
   const extRows = DEPLOY_CONTRACT.extensions
     .map((e) => `| \`${e.name}\` | \`${e.createSql}\` |`)
     .join("\n");
@@ -64,15 +62,24 @@ export function renderDoc(): string {
 > The boot preflight + \`npm run deploy:check\` enforce this contract; a deploy that violates it
 > exits 1 with the exact fix instead of going Ready-but-dead.
 
-## Secrets (seed in Vault)
+## Bootstrap secrets — BLOCKING (provision in an OpenShift Secret OR Vault)
+
+The ONLY secrets that gate boot. Provision both, from one source (\`CODEMASTER_SECRET_SOURCE\`).
 
 | Secret | Source | Vault path | Key | Required | Gates |
 |---|---|---|---|---|---|
 ${secretRows}
 
-\`source=file\` secrets are Vault-Agent-rendered files (one JSON object per Vault path);
-\`source=env\` secrets are injected as environment variables. Seed everything at once with
-\`deploy/seed-vault.sh\`, or by hand with the \`vault kv put\` commands it contains.
+## Feature secrets — NON-BLOCKING (UI / env / Vault)
+
+Never block boot; set later via the UI (stored in Postgres, encrypted by the field key), env, or
+Vault. \`/config-status\` reports which are configured vs pending.
+
+| Secret | Source | Vault path | Key | Required | Gates |
+|---|---|---|---|---|---|
+${advisoryRows}
+
+Seed Vault secrets at once with \`deploy/seed-vault.sh\`, or by hand with its \`vault kv put\` commands.
 
 ## Postgres extensions (self-managed Postgres)
 
@@ -94,7 +101,7 @@ ${cfgRows}
 
 export function renderSeeder(): string {
   const blocks: Array<string> = [];
-  for (const [path, secrets] of byVaultPath(DEPLOY_CONTRACT.secrets)) {
+  for (const [path, secrets] of byVaultPath([...DEPLOY_CONTRACT.secrets, ...DEPLOY_CONTRACT.advisory])) {
     const required = secrets.some((s) => s.required);
     const gates = secrets.find((s) => s.gates)?.gates ?? "";
     const kvArgs = secrets.map(placeholderFor).join(" ");

@@ -46,7 +46,11 @@ export type ConfigReq = {
 
 /** The declarative deploy contract — the single source of truth (doc + chart + seeder derive from it). */
 export type DeployContract = {
+  /** BLOCKING bootstrap secrets — the pod must not start without them (DB creds, field key). */
   readonly secrets: ReadonlyArray<SecretReq>;
+  /** NON-BLOCKING feature secrets (LLM/GitHub/Confluence) — reported by getConfigStatus, set later
+   *  via UI/env/Vault; their absence degrades only that feature, never boot. */
+  readonly advisory: ReadonlyArray<SecretReq>;
   readonly extensions: ReadonlyArray<ExtensionReq>;
   readonly schemas: ReadonlyArray<string>;
   readonly config: ReadonlyArray<ConfigReq>;
@@ -172,6 +176,8 @@ export function evaluateDeployContract(
  * deploy most often misses.
  */
 export const DEPLOY_CONTRACT: DeployContract = {
+  // BLOCKING: the two bootstrap secrets (DB creds + field-encryption key). The pod must not start
+  // without them. Provisioned from the selected source (openshift|vault); never UI-set.
   secrets: [
     {
       name: "CODEMASTER_PG_CORE_DSN",
@@ -192,13 +198,26 @@ export const DEPLOY_CONTRACT: DeployContract = {
       gates: "partition maintenance (pg_partman) — unset means partitions stop being maintained",
     },
     {
+      name: "field_encryption.keys",
+      source: "file",
+      fileName: "codemaster_field_encryption_keys",
+      vaultPath: "codemaster/field-encryption/keys",
+      key: "keys",
+      required: true,
+      gates: "field-level encryption keyset — the root of trust for all UI-saved secrets",
+    },
+  ],
+  // NON-BLOCKING feature secrets: GitHub / Confluence / auth-session. Set later via UI, env, or
+  // Vault; absence degrades only that feature, never boot. Reported by getConfigStatus.
+  advisory: [
+    {
       name: "github_app.app_id",
       source: "file",
       fileName: "codemaster_github_app",
       vaultPath: "codemaster/github/app",
       key: "app_id",
-      required: true,
-      gates: "GitHub App authentication — no PR reviews are possible without it",
+      required: false,
+      gates: "GitHub App authentication (no PR reviews until configured)",
     },
     {
       name: "github_app.private_key_pem",
@@ -206,7 +225,7 @@ export const DEPLOY_CONTRACT: DeployContract = {
       fileName: "codemaster_github_app",
       vaultPath: "codemaster/github/app",
       key: "private_key_pem",
-      required: true,
+      required: false,
       format: "pem",
       gates: "GitHub App authentication (clone + post review)",
     },
@@ -216,17 +235,17 @@ export const DEPLOY_CONTRACT: DeployContract = {
       fileName: "codemaster_github_app",
       vaultPath: "codemaster/github/app",
       key: "webhook_secret",
-      required: true,
+      required: false,
       gates: "inbound webhook HMAC verification",
     },
     {
-      name: "field_encryption.keys",
+      name: "confluence.token",
       source: "file",
-      fileName: "codemaster_field_encryption_keys",
-      vaultPath: "codemaster/field-encryption/keys",
-      key: "keys",
+      fileName: "codemaster_confluence_token",
+      vaultPath: "codemaster/confluence/token",
+      key: "token",
       required: false,
-      gates: "field-level encryption keyset (eager-loaded at boot when auth routes are on)",
+      gates: "Confluence ingestion (knowledge corpus)",
     },
     {
       name: "api_auth",
@@ -234,7 +253,7 @@ export const DEPLOY_CONTRACT: DeployContract = {
       fileName: "codemaster_api_auth",
       vaultPath: "codemaster/api/auth",
       required: false,
-      gates: "session / auth-route secrets (required only when auth routes are enabled)",
+      gates: "session / auth-route secrets",
     },
   ],
   extensions: [
@@ -279,7 +298,10 @@ export async function observeDeployState(
   };
 
   const secrets: Record<string, string | undefined> = {};
-  for (const s of contract.secrets) {
+  // Observe BOTH tiers: blocking secrets (validated) + advisory feature secrets (reported by
+  // getConfigStatus). Advisory presence here is the env/file/Vault view; DB-set config is layered in
+  // by the feature repos (Step 4).
+  for (const s of [...contract.secrets, ...contract.advisory]) {
     if (s.source === "env") {
       secrets[s.name] = deps.env(s.name);
       continue;
@@ -363,4 +385,35 @@ export function parseRenderedSecret(raw: string): Record<string, string> | null 
     }
   }
   return out;
+}
+
+/** A non-blocking feature-config item's state, for /config-status (never carries the secret value). */
+export type ConfigStatusItem = {
+  readonly key: string;
+  /** configured = a value is present; pending = not yet set in any source. (Step 4 adds db source +
+   *  an active `validated`/`invalid` probe; until then only configured/pending are reported.) */
+  readonly state: "configured" | "pending";
+  readonly source: SecretSource | "none";
+  readonly gates?: string;
+};
+
+/**
+ * Report the state of each NON-BLOCKING advisory feature secret (GitHub/Confluence/auth) from the
+ * observed env/file/Vault view. Drives the UI setup-checklist + the operator's /config-status. Never
+ * returns secret values — only presence/source. The pod is ready regardless of these.
+ */
+export function getConfigStatus(
+  contract: DeployContract,
+  observed: ObservedState,
+): Array<ConfigStatusItem> {
+  return contract.advisory.map((s) => {
+    const value = observed.secrets[s.name];
+    const present = value !== undefined && value !== "";
+    return {
+      key: s.name,
+      state: present ? "configured" : "pending",
+      source: present ? s.source : "none",
+      ...(s.gates === undefined ? {} : { gates: s.gates }),
+    };
+  });
 }

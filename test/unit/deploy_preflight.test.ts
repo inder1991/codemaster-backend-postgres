@@ -13,6 +13,7 @@ import {
 // A minimal contract exercising one required env secret. The real DEPLOY_CONTRACT is the
 // source-of-truth (tested separately); evaluateDeployContract is the pure validator over it.
 const ONE_SECRET: DeployContract = {
+  advisory: [],
   secrets: [
     {
       name: "CODEMASTER_PG_CORE_DSN",
@@ -59,6 +60,7 @@ describe("evaluateDeployContract", () => {
 });
 
 const DB_AND_CONFIG: DeployContract = {
+  advisory: [],
   secrets: [],
   extensions: [{ name: "pg_partman", createSql: "CREATE EXTENSION IF NOT EXISTS pg_partman;" }],
   schemas: ["core"],
@@ -113,6 +115,7 @@ describe("evaluateDeployContract — DB + config", () => {
 });
 
 const FILE_AND_ENV: DeployContract = {
+  advisory: [],
   secrets: [
     { name: "CODEMASTER_PG_CORE_DSN", source: "env", vaultPath: "codemaster/postgres/app", key: "dsn", required: true, format: "dsn" },
     { name: "github_app.app_id", source: "file", fileName: "codemaster_github_app", vaultPath: "codemaster/github/app", key: "app_id", required: true },
@@ -183,5 +186,50 @@ describe("parseRenderedSecret", () => {
     const { parseRenderedSecret } = await import("#backend/deploy_preflight.js");
     expect(parseRenderedSecret("not json")).toBeNull();
     expect(parseRenderedSecret("[1,2]")).toBeNull();
+  });
+});
+
+describe("getConfigStatus (advisory, non-blocking)", () => {
+  const advisoryContract: DeployContract = {
+    secrets: [],
+    advisory: [
+      {
+        name: "github_app.app_id",
+        source: "file",
+        fileName: "codemaster_github_app",
+        vaultPath: "codemaster/github/app",
+        key: "app_id",
+        required: false,
+        gates: "GitHub App auth",
+      },
+    ],
+    extensions: [],
+    schemas: [],
+    config: [],
+  };
+
+  it("reports a present advisory secret as configured with its source", async () => {
+    const { getConfigStatus } = await import("#backend/deploy_preflight.js");
+    const status = getConfigStatus(advisoryContract, {
+      secrets: { "github_app.app_id": "123" },
+      extensions: [],
+      schemas: [],
+      config: {},
+    });
+    expect(status).toEqual([
+      { key: "github_app.app_id", state: "configured", source: "file", gates: "GitHub App auth" },
+    ]);
+  });
+
+  it("reports an absent advisory secret as pending/none (never blocks)", async () => {
+    const { getConfigStatus } = await import("#backend/deploy_preflight.js");
+    const status = getConfigStatus(advisoryContract, {
+      secrets: {},
+      extensions: [],
+      schemas: [],
+      config: {},
+    });
+    expect(status[0]?.state).toBe("pending");
+    expect(status[0]?.source).toBe("none");
   });
 });

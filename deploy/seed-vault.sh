@@ -15,13 +15,16 @@ vault kv put "${MOUNT}/codemaster/postgres/app" dsn='<DSN>'
 # codemaster/postgres/maint (optional) — partition maintenance (pg_partman) — unset means partitions stop being maintained
 vault kv put "${MOUNT}/codemaster/postgres/maint" dsn='<DSN>'
 
-# codemaster/github/app (REQUIRED) — GitHub App authentication — no PR reviews are possible without it
-vault kv put "${MOUNT}/codemaster/github/app" app_id='<APP_ID>' private_key_pem=@codemaster-github-app.pem webhook_secret='<WEBHOOK_SECRET>'
-
-# codemaster/field-encryption/keys (optional) — field-level encryption keyset (eager-loaded at boot when auth routes are on)
+# codemaster/field-encryption/keys (REQUIRED) — field-level encryption keyset — the root of trust for all UI-saved secrets
 vault kv put "${MOUNT}/codemaster/field-encryption/keys" keys='<KEYS>'
 
-# codemaster/api/auth (optional) — session / auth-route secrets (required only when auth routes are enabled)
+# codemaster/github/app (optional) — GitHub App authentication (no PR reviews until configured)
+vault kv put "${MOUNT}/codemaster/github/app" app_id='<APP_ID>' private_key_pem=@codemaster-github-app.pem webhook_secret='<WEBHOOK_SECRET>'
+
+# codemaster/confluence/token (optional) — Confluence ingestion (knowledge corpus)
+vault kv put "${MOUNT}/codemaster/confluence/token" token='<TOKEN>'
+
+# codemaster/api/auth (optional) — session / auth-route secrets
 vault kv put "${MOUNT}/codemaster/api/auth" value='<VALUE>'
 
 echo "✓ seeded — now run 'npm run deploy:check' (or let the pod preflight) to verify."
