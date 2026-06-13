@@ -73,13 +73,29 @@ superadmin bootstrap, migration fusion, chart wiring.
 - **Edge cases:** creds present but DB down → block (connect error, not "missing"); key malformed → block; github unset → pod up + config-status "github: pending".
 - **Acceptance:** a pod with only DB+key provisioned reaches `/readyz` green; `/config-status` lists what still needs UI config.
 
-### Step 4 — UI-config encryption: Vault Transit → field codec
-**Objective:** UI-saved secrets encrypt with the local field key, so UI-config works with OR without Vault.
-- **Change `llm_provider_settings_repo.ts`** (+ any other Vault-Transit'd config) to encrypt/decrypt `api_key_ciphertext` via the field codec (versioned keyset) instead of `vault.transitDecrypt`.
-- Greenfield → **no existing Transit ciphertext to migrate.**
-- **Tests:** round-trip via field codec; repo persists field-codec ciphertext; decrypt path returns plaintext; zero Vault-Transit calls; keyset-version handled (decrypt old, encrypt new).
-- **Edge cases:** key rotation (versioned); malformed/!decryptable ciphertext → clear error, not crash; the LLM credentials_provider reads the field-codec key.
-- **Acceptance:** save an LLM API key via the repo with Vault OFF → it persists encrypted + decrypts on read.
+### Step 4 — Feature-config surfaces: LLM + GitHub + Confluence (UI-editable, field-codec, 3-source)
+**Objective:** all three feature configs are UI-editable, stored in Postgres encrypted by the field
+key, resolved **DB > env > Vault > disabled**, and never block boot. **[Decision R7 = (a): GitHub +
+Confluence get DB-config surfaces NOW, modeled on the LLM repo.]**
+- **LLM:** switch `llm_provider_settings_repo.ts` `api_key_ciphertext` from Vault Transit → field codec
+  (the only Transit user — R7). Greenfield → no existing ciphertext to migrate.
+- **GitHub:** new `core.github_app_settings` (`app_id` plain; `private_key_pem`, `webhook_secret` as
+  field-codec ciphertext) + `github_app_settings_repo.ts` + `GET/PUT /api/admin/github-config`
+  (super_admin). The GitHub client resolves creds **DB > env (`CODEMASTER_GITHUB_*`) > Vault file
+  (`codemaster/github/app`) > disabled**, lazily at use-time.
+- **Confluence:** new `core.confluence_settings` (`base_url` plain; `token`, `email` field-codec) +
+  repo + `GET/PUT /api/admin/confluence-config` + the same 3-source resolution (Vault source = the
+  existing `codemaster/confluence/token`).
+- **Shared resolver** `resolveFeatureConfig(key, {db, env, vault})` → `{value, source}`, used by all
+  three and surfaced by `/config-status` (R2).
+- New tables ship as dev migrations, then **fold into the fused baseline at Step 6**.
+- **Tests:** each repo round-trips via field codec with Vault OFF; resolver precedence (DB > env >
+  Vault > disabled, deterministic when a key is in two sources); admin APIs require super_admin + never
+  echo secrets; the github/confluence clients consume the resolved creds; zero Vault-Transit calls.
+- **Edge cases:** key rotation (versioned); undecryptable ciphertext → clear error, no crash; partial
+  config (github `app_id` set but key missing) → reported `invalid`, not a crash.
+- **Acceptance:** with Vault OFF, set LLM + GitHub + Confluence via the admin APIs → persisted
+  encrypted, decrypted on read, a review uses them; `/config-status` shows all three configured.
 
 ### Step 5 — Superadmin bootstrap
 **Objective:** first boot seeds `admin`/`admin`; idempotent; loud warning; UI-changeable.
@@ -89,13 +105,21 @@ superadmin bootstrap, migration fusion, chart wiring.
 - **Edge cases:** two replicas boot together (ON CONFLICT); admin already changed creds (never reset); email-encode needs the keyset (ordering: after keyset load).
 - **Acceptance:** fresh DB → `admin`/`admin` logs in; upgrade with changed creds → unchanged; default unchanged → warning visible.
 
-### Step 6 — Fuse 17 migrations → one baseline
-**Objective:** a single `0001_baseline.sql` for first go-live.
-- **Procedure:** fresh DB → run all 17 → `pg_dump --schema-only` + the `0002_seed` data → assemble one idempotent `migrations/0001_baseline.sql` (extensions, schemas, partman config, seed). Remove the 17 (greenfield).
+### Step 6 — Fuse all migrations → one baseline
+**Objective:** a single `0001_baseline.sql` for first go-live. Runs LAST, so it folds in the Step-4
+feature-config tables (`github_app_settings`, `confluence_settings`) too.
+- **Procedure:** fresh DB → run ALL migrations (the 17 + the Step-4 dev migrations) → `pg_dump
+  --schema-only --no-owner --no-privileges` + the `0002_seed` data → assemble one idempotent
+  `migrations/0001_baseline.sql` (extensions, schemas, partman config, seed, the new config tables).
+  Archive the prior migrations to `migrations/_archive/` until go-live passes (R3).
 - **Pin:** `EXPECTED_MIGRATIONS = ["0001_baseline"]`; update the schema_preflight test + the migrations-dir pin test.
-- **VERIFY (critical):** diff the schema of {fresh + fused baseline} vs {fresh + all 17} → must be empty. A throwaway script does this in CI/locally.
-- **Edge cases:** extensions in the baseline (`CREATE EXTENSION`); partman parent/retention config; seed rows (roles); node-pg-migrate journal = 1 entry; cold-only guards moot.
-- **Acceptance:** fresh DB migrates with one file; schema byte-identical to running all 17; `deploy:check`/preflight pass.
+- **VERIFY (critical, R3):** normalized + semantic schema diff of {fresh + fused baseline} vs {fresh +
+  all prior migrations} → must be empty (extensions/schemas/tables/indexes/constraints/functions/
+  grants/seed-rows/journal). A throwaway verify script gates this.
+- **Edge cases:** extensions in the baseline (`CREATE EXTENSION`); partman parent/retention config;
+  seed rows (roles); node-pg-migrate journal = 1 entry; cold-only guards moot.
+- **Acceptance:** fresh DB migrates with one file; schema semantically identical to running all prior
+  migrations; `deploy:check`/preflight pass.
 
 ### Step 7 — Helm chart wiring + runbook + regenerate artifacts
 **Objective:** the chart exposes the two-secret model + both sources + the SA→Vault path; docs match.
@@ -219,10 +243,9 @@ Backend exposes; frontend consumes (align contracts when building 3–5; fetch t
 - **Confirmed by grep:** the ONLY Vault-Transit-encrypted column is
   `core.llm_provider_settings.api_key_ciphertext` (`llm_provider_settings_repo.ts`). `email_ciphertext`
   is ALREADY the local field codec. **Step 4 switches exactly that one repo; there is no other.**
-- **Scope note:** GitHub app creds + Confluence token are currently FILE secrets (provisioned),
-  NOT DB-UI config. Making them UI-editable needs NEW DB-config surfaces (columns + field-codec) →
-  flagged as a decision: in-scope-for-UI-config, or provisioned-now + UI-config fast-follow. (LLM
-  already has the DB-config surface; it's the template for the others.)
+- **Scope (DECIDED = a):** GitHub app creds + Confluence token get NEW DB-config surfaces NOW
+  (columns + field-codec + admin APIs + 3-source resolver), modeled on the LLM repo — see the
+  expanded Step 4. They are still **non-blocking** (resolved DB > env > Vault > disabled at use-time).
 
 ### R8. Disaster-recovery acceptance (go-live tests)
 - **DR-1:** restore a DB backup + provision the SAME keyset → app boots, decrypts saved config → works.
