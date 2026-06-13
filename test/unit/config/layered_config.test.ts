@@ -44,4 +44,32 @@ describe("resolveLayered", () => {
     ]);
     expect(vaultCalls).toBe(0);
   });
+
+  // Review P1: a THROWING layer (transient DB/Vault outage) must NOT break fall-through — else a core-DB
+  // blip would disable a feature whose creds live in env/Vault. The throw is treated as "this layer has
+  // nothing" and surfaced via onError (so it's not silent).
+  it("falls through a THROWING layer to the next, reporting the error", async () => {
+    const errors: Array<{ source: string; message: string }> = [];
+    const got = await resolveLayered(
+      [
+        { source: "db", load: () => Promise.reject(new Error("db connection refused")) },
+        { source: "env", load: () => Promise.resolve({ k: "from-env" }) },
+      ],
+      (source, err) => errors.push({ source, message: err instanceof Error ? err.message : String(err) }),
+    );
+    expect(got).toEqual({ value: { k: "from-env" }, source: "env" });
+    expect(errors).toEqual([{ source: "db", message: "db connection refused" }]);
+  });
+
+  it("returns null (disabled) when the only layer throws — fail-closed, not fail-crash", async () => {
+    let reported = 0;
+    const got = await resolveLayered(
+      [{ source: "db", load: () => Promise.reject(new Error("db down")) }],
+      () => {
+        reported += 1;
+      },
+    );
+    expect(got).toBeNull();
+    expect(reported).toBe(1);
+  });
 });

@@ -76,14 +76,23 @@ function toSecretRecord(c: ConfluenceConfig): Record<string, string> {
 export function makeResolvingConfluenceReader(): ConfluenceVaultReader {
   return {
     kvRead: async (): Promise<Record<string, string>> => {
-      const resolved = await resolveLayered<ConfluenceConfig>([
-        { source: "db", load: confluenceConfigFromDb },
-        { source: "env", load: () => Promise.resolve(confluenceConfigFromEnv((n) => process.env[n])) },
-        {
-          source: "vault",
-          load: async () => confluenceConfigFromVaultData(await VaultHttpPort.fromEnv().kvRead({ path: VAULT_KV_PATH })),
+      const resolved = await resolveLayered<ConfluenceConfig>(
+        [
+          { source: "db", load: confluenceConfigFromDb },
+          { source: "env", load: () => Promise.resolve(confluenceConfigFromEnv((n) => process.env[n])) },
+          {
+            source: "vault",
+            load: async () => confluenceConfigFromVaultData(await VaultHttpPort.fromEnv().kvRead({ path: VAULT_KV_PATH })),
+          },
+        ],
+        // A tier outage (e.g. a transient core-DB error) falls through to the next tier (review P1).
+        (source, err) => {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `confluence config: the '${source}' tier failed (${err instanceof Error ? err.message : String(err)}) — falling through`,
+          );
         },
-      ]);
+      );
       if (resolved === null) {
         throw new Error(
           `Confluence not configured: no UI/DB settings, no CODEMASTER_CONFLUENCE_BASE_URL/_TOKEN env, ` +

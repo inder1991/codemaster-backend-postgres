@@ -19,11 +19,21 @@ type Layered<T> = {
 };
 
 async function resolve<T>(s: Layered<T>): Promise<{ value: T; source: string } | null> {
-  return resolveLayered<T>([
-    { source: "db", load: s.fromDb },
-    { source: "env", load: () => Promise.resolve(s.fromEnv()) },
-    { source: "vault", load: s.fromVault },
-  ]);
+  return resolveLayered<T>(
+    [
+      { source: "db", load: s.fromDb },
+      { source: "env", load: () => Promise.resolve(s.fromEnv()) },
+      { source: "vault", load: s.fromVault },
+    ],
+    // A tier outage (e.g. a transient core-DB error) falls through to the next tier (review P1) — surface
+    // it so a degraded resolution isn't silent.
+    (source, err) => {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `github config: the '${source}' tier failed (${err instanceof Error ? err.message : String(err)}) — falling through to the next tier`,
+      );
+    },
+  );
 }
 
 /** Resolve the GitHub App token-mint creds DB > env > Vault > disabled; reports the winning source. */
