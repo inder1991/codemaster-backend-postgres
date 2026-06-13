@@ -28,9 +28,7 @@
  *   - span github.token.mint emitted on mint with the `outcome` attribute.
  */
 
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { generateKeyPairSync } from "node:crypto";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -54,12 +52,14 @@ import {
 // ─── Shared fixtures ───────────────────────────────────────────────────────────────────────────
 
 // The same real RSA-2048 PEM the app_jwt parity test uses, so `signAppJwt` actually signs.
-const HERE = dirname(fileURLToPath(import.meta.url));
-// test/unit/integrations/github -> test/parity/fixtures
-const TEST_PEM = readFileSync(
-  join(HERE, "..", "..", "..", "parity", "fixtures", "jwt_test_rsa.pem"),
-  "utf8",
-);
+// A fresh RSA-2048 PEM generated in-test so signAppJwt actually signs (the mocked GitHub never
+// verifies the signature, so any valid key works). Replaces the former
+// test/parity/fixtures/jwt_test_rsa.pem — the parity fixtures were retired with the Python oracle.
+const TEST_PEM = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  publicKeyEncoding: { type: "spki", format: "pem" },
+  privateKeyEncoding: { type: "pkcs1", format: "pem" },
+}).privateKey;
 
 const APP_ID = 123456;
 const INSTALLATION_ID = 999;
