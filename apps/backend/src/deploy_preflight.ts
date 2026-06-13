@@ -16,7 +16,7 @@ import {
 export type SecretSource = "env" | "file";
 
 /** Lightweight well-formedness check applied when a secret IS present. */
-export type SecretFormat = "dsn" | "pem" | "nonempty";
+export type SecretFormat = "dsn" | "pem" | "nonempty" | "keyset";
 
 /** One required (or optional) secret in the deploy contract. */
 export type SecretReq = {
@@ -93,7 +93,10 @@ function formatOk(value: string, format: SecretFormat | undefined): boolean {
       return value.includes("://");
     case "pem":
       return value.includes("-----BEGIN");
+    // "keyset": observed value is the env keyset JSON (openshift) or the "present" sentinel (file/vault);
+    // presence suffices here — the loader's boot self-check does the deep keyset validation.
     case "nonempty":
+    case "keyset":
     case undefined:
       return value.length > 0;
   }
@@ -208,7 +211,11 @@ export const DEPLOY_CONTRACT: DeployContract = {
       source: "file",
       fileName: "codemaster_field_encryption_keys",
       vaultPath: "codemaster/field-encryption/keys",
-      key: "keys",
+      // WHOLE-SECRET: the KV payload IS the keyset ({current_version, keys:{...}}) — the loader reads it
+      // via kvReadRaw (the nested keys object must survive). NOT a flat key=value: seeding it as
+      // `keys="<json>"` produces no top-level current_version → the loader crashloops (the P0 seed bug).
+      // The seeder pipes the full JSON via stdin; the observer checks current_version (see below).
+      format: "keyset",
       required: true,
       gates: "field-level encryption keyset — the root of trust for all UI-saved secrets",
     },
@@ -351,8 +358,15 @@ export async function observeDeployState(
       } else if (fk === "vault") {
         secrets[s.name] = deps.env("VAULT_ADDR") === undefined ? undefined : "present";
         continue;
+      } else {
+        // file / vault-agent / null: the rendered file IS the whole keyset ({current_version, keys:{...}}).
+        // parseRenderedSecret drops the nested keys OBJECT, so presence = a top-level current_version
+        // string — NOT a `keys` field (seeding `keys="<json>"` is the P0 bug the loader rejects at boot).
+        const data = s.fileName === undefined ? null : await readFileOnce(s.fileName);
+        const cv = data?.["current_version"];
+        secrets[s.name] = typeof cv === "string" && cv !== "" ? "present" : undefined;
+        continue;
       }
-      // file / vault-agent / null → fall through to the file branch (s.source is "file")
     }
     if (source === "env") {
       secrets[s.name] = deps.env(envName);

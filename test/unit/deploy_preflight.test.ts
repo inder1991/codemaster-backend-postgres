@@ -155,8 +155,25 @@ describe("observeDeployState", () => {
     expect(observed.secrets["field_encryption.keys"]).toBeDefined();
   });
 
-  // The vault-agent / file path is unchanged: the rendered file still satisfies the field key.
-  it("observes field_encryption.keys from the rendered file in vault-agent mode", async () => {
+  // The keyset is a WHOLE-SECRET ({current_version, keys:{...}}) — the loader reads it via kvReadRaw.
+  // parseRenderedSecret drops the nested `keys` OBJECT (non-string), leaving current_version, so the
+  // observer must check current_version (presence of a keyset), NOT a `keys` string field.
+  it("observes field_encryption.keys from the rendered keyset file (current_version present)", async () => {
+    const observed = await observeDeployState(
+      DEPLOY_CONTRACT,
+      fakeDeps({
+        env: { CODEMASTER_FIELD_KEY_SOURCE: "vault-agent" },
+        // What readSecretFile yields after parseRenderedSecret drops the nested keys object.
+        files: { codemaster_field_encryption_keys: { current_version: "v1" } },
+      }),
+    );
+    expect(observed.secrets["field_encryption.keys"]).toBeDefined();
+  });
+
+  // Regression guard for the P0 seed-shape bug: a keyset wrapped under a single `keys` string field
+  // (the OLD `vault kv put .../keys keys="$KEYSET"` form) has NO top-level current_version — the loader
+  // would crashloop on it, so the preflight must REJECT it (not pass, as the pre-fix observer did).
+  it("rejects a keys-wrapped field-encryption secret (no top-level current_version)", async () => {
     const observed = await observeDeployState(
       DEPLOY_CONTRACT,
       fakeDeps({
@@ -164,7 +181,7 @@ describe("observeDeployState", () => {
         files: { codemaster_field_encryption_keys: { keys: '{"current_version":"v1","keys":{}}' } },
       }),
     );
-    expect(observed.secrets["field_encryption.keys"]).toBeDefined();
+    expect(observed.secrets["field_encryption.keys"]).toBeUndefined();
   });
 
   it("resolves env secrets from env and file-secret keys from the rendered file", async () => {

@@ -17,7 +17,9 @@ vault kv put "${MOUNT}/codemaster/postgres/app" dsn='<DSN>'
 vault kv put "${MOUNT}/codemaster/postgres/maint" dsn='<DSN>'
 
 # codemaster/field-encryption/keys (REQUIRED) — field-level encryption keyset — the root of trust for all UI-saved secrets
-vault kv put "${MOUNT}/codemaster/field-encryption/keys" keys='<KEYS>'
+# Fill in your base64 32-byte AES key(s) — 'openssl rand -base64 32' generates one.
+printf '%s' '{"current_version":"v1","keys":{"v1":"<BASE64_32_BYTE_KEY>"}}' \
+  | vault kv put "${MOUNT}/codemaster/field-encryption/keys" -
 
 # codemaster/github/app (optional) — GitHub App authentication (no PR reviews until configured)
 vault kv put "${MOUNT}/codemaster/github/app" app_id='<APP_ID>' private_key_pem=@codemaster-github-app.pem webhook_secret='<WEBHOOK_SECRET>'

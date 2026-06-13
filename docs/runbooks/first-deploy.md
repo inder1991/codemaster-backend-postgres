@@ -104,7 +104,10 @@ vault write auth/kubernetes/role/codemaster-backend \
 
 # 4. Seed the secrets (KV-v2).
 vault kv put secret/codemaster/postgres/app dsn='postgresql://user:pass@pg-host:5432/codemaster'
-vault kv put secret/codemaster/field-encryption/keys keys="$KEYSET"
+# The keyset is a WHOLE-SECRET ({current_version, keys:{...}}): pipe the full JSON via stdin so the nested
+# `keys` object survives (the loader reads it raw). Do NOT use `keys="$KEYSET"` — that wraps the keyset
+# under one field with no top-level current_version and the pod crashloops at boot.
+printf '%s' "$KEYSET" | vault kv put secret/codemaster/field-encryption/keys -
 ```
 
 Chart values:

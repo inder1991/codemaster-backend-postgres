@@ -104,11 +104,21 @@ export function renderSeeder(): string {
   for (const [path, secrets] of byVaultPath([...DEPLOY_CONTRACT.secrets, ...DEPLOY_CONTRACT.advisory])) {
     const required = secrets.some((s) => s.required);
     const gates = secrets.find((s) => s.gates)?.gates ?? "";
+    const header = `# ${path} (${required ? "REQUIRED" : "optional"})${gates ? ` — ${gates}` : ""}`;
+    // A keyset is a WHOLE-SECRET ({current_version, keys:{...}}): pipe the full JSON via stdin so the
+    // nested keys object survives (the loader reads it raw via kvReadRaw). Seeding it as a flat
+    // `keys='<json>'` field has no top-level current_version → the pod crashloops at boot (the P0 bug).
+    if (secrets.some((s) => s.format === "keyset")) {
+      blocks.push(
+        `${header}\n` +
+          `# Fill in your base64 32-byte AES key(s) — 'openssl rand -base64 32' generates one.\n` +
+          `printf '%s' '{"current_version":"v1","keys":{"v1":"<BASE64_32_BYTE_KEY>"}}' \\\n` +
+          `  | vault kv put "\${MOUNT}/${path}" -`,
+      );
+      continue;
+    }
     const kvArgs = secrets.map(placeholderFor).join(" ");
-    blocks.push(
-      `# ${path} (${required ? "REQUIRED" : "optional"})${gates ? ` — ${gates}` : ""}\n` +
-        `vault kv put "\${MOUNT}/${path}" ${kvArgs}`,
-    );
+    blocks.push(`${header}\n` + `vault kv put "\${MOUNT}/${path}" ${kvArgs}`);
   }
   return `#!/usr/bin/env bash
 # ${GEN_NOTE}

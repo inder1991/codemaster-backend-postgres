@@ -12,7 +12,7 @@ The ONLY secrets that gate boot. Provision both, from one source (`CODEMASTER_SE
 |---|---|---|---|---|---|
 | `CODEMASTER_PG_CORE_DSN` | env | `codemaster/postgres/app` | dsn | **yes** | the primary application database — nothing works without it |
 | `CODEMASTER_PG_MAINT_DSN` | env | `codemaster/postgres/maint` | dsn | no | partition maintenance (pg_partman) — unset means partitions stop being maintained |
-| `field_encryption.keys` | file | `codemaster/field-encryption/keys` | keys | **yes** | field-level encryption keyset — the root of trust for all UI-saved secrets |
+| `field_encryption.keys` | file | `codemaster/field-encryption/keys` | — | **yes** | field-level encryption keyset — the root of trust for all UI-saved secrets |
 
 ## Feature secrets — NON-BLOCKING (UI / env / Vault)
 
