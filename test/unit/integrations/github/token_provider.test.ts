@@ -30,7 +30,7 @@
 
 import { generateKeyPairSync } from "node:crypto";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { trace, type TracerProvider } from "@opentelemetry/api";
 
@@ -168,6 +168,7 @@ beforeEach(() => {
 
 afterEach(() => {
   RECORDING.spans.length = 0;
+  vi.unstubAllEnvs();
 });
 
 /** Construct a provider over a scripted HTTP stub with the shared key/clock. */
@@ -308,6 +309,22 @@ describe("GitHubAppTokenProvider.fromEnv", () => {
     const provider = await GitHubAppTokenProvider.fromEnv({ vault, http, clock });
     const token = await provider.getToken(INSTALLATION_ID);
     expect(token).toBe("ghs_minted");
+    expect(count()).toBe(1);
+  });
+
+  it("resolves from env creds with NO vault arg + VAULT_ADDR unset (the openshift path the posting activities use)", async () => {
+    // post_check_run + update_pr_description_summary call fromEnv({http,clock}) WITHOUT a pre-built vault
+    // (review P1 parity). This guards that contract is openshift-safe: env creds resolve and Vault is NEVER
+    // touched — an eager VaultHttpPort.fromEnv() (the bug those activities had) would throw VAULT_ADDR-unset.
+    vi.stubEnv("CODEMASTER_GITHUB_APP_ID", String(APP_ID));
+    vi.stubEnv("CODEMASTER_GITHUB_PRIVATE_KEY_PEM", TEST_PEM);
+    vi.stubEnv("VAULT_ADDR", "");
+    vi.stubEnv("CODEMASTER_PG_CORE_DSN", ""); // no DB tier in this unit
+    const { http, count } = scriptedHttp([{ kind: "resp", status: 201, bodyText: tokenBody() }]);
+    const clock = new FakeClock({ now: NOW });
+
+    const provider = await GitHubAppTokenProvider.fromEnv({ http, clock });
+    expect(await provider.getToken(INSTALLATION_ID)).toBe("ghs_minted");
     expect(count()).toBe(1);
   });
 

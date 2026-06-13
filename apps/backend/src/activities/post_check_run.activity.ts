@@ -37,7 +37,6 @@ import {
   type GhCheckRunClient,
 } from "#backend/integrations/github/check_run_client.js";
 import { GitHubAppTokenProvider } from "#backend/integrations/github/token_provider.js";
-import { VaultHttpPort } from "#backend/adapters/vault_http.js";
 
 import { WallClock } from "#platform/clock.js";
 
@@ -138,12 +137,11 @@ export async function postCheckRun(input: PostCheckRunInputV1): Promise<PostedCh
   }
   const clock = new WallClock();
   // One GitHub HTTP transport shared by the token-provider's JWT→installation-token mint AND the
-  // GitHubApiClient's check-run calls. Vault is read via its own env-built transport (VaultHttpPort.fromEnv
-  // constructs the inner FetchVaultHttpClient itself).
+  // GitHubApiClient's check-run calls. fromEnv resolves creds DB > env > Vault, building VaultHttpPort
+  // LAZILY only if DB+env miss — so an openshift-no-Vault pod never eagerly constructs it. (Review P1
+  // parity: do NOT pre-build `VaultHttpPort.fromEnv()` — it throws VAULT_ADDR-unset before resolution.)
   const githubHttp = new FetchGitHubHttpClient({});
-  const vault = VaultHttpPort.fromEnv();
   const tokenProvider = await GitHubAppTokenProvider.fromEnv({
-    vault,
     http: githubHttp,
     clock,
   });
