@@ -33,6 +33,23 @@ async function fetchGetJson(url: string, token: string): Promise<{ status: numbe
   return { status: r.status, body: await r.json().catch(() => ({})) };
 }
 
+/** Build the Step-2 {@link VaultK8sAuth} (SA-JWT login) from env — the ONE place the K8s-auth env keys
+ *  (role / auth-path / SA-token path) are read, so the KV reader (DB creds) and the VaultHttpPort
+ *  SA-auth path (field key / server / webhook) can't drift. `addr` must be non-empty (VAULT_ADDR). */
+export function makeVaultK8sAuthFromEnv(deps: VaultReaderFactoryDeps & { addr: string }): VaultK8sAuth {
+  const { env } = deps;
+  const saTokenPath = env["CODEMASTER_VAULT_SA_TOKEN_PATH"] ?? DEFAULT_SA_TOKEN_PATH;
+  const authPath = env["CODEMASTER_VAULT_K8S_AUTH_PATH"];
+  return new VaultK8sAuth({
+    addr: deps.addr,
+    role: env["CODEMASTER_VAULT_K8S_ROLE"] ?? "codemaster",
+    readToken: deps.readSaToken ?? (async () => (await readFile(saTokenPath, "utf-8")).trim()),
+    httpPostJson: deps.httpPostJson ?? fetchPostJson,
+    now: deps.now,
+    ...(authPath === undefined || authPath === "" ? {} : { authPath }),
+  });
+}
+
 /** Build `readVaultKv(path) → Record<string,string>` for vault mode (SA login + KV-v2 read). */
 export function makeReadVaultKv(
   deps: VaultReaderFactoryDeps,
@@ -46,16 +63,7 @@ export function makeReadVaultKv(
       );
   }
 
-  const saTokenPath = env["CODEMASTER_VAULT_SA_TOKEN_PATH"] ?? DEFAULT_SA_TOKEN_PATH;
-  const authPath = env["CODEMASTER_VAULT_K8S_AUTH_PATH"];
-  const auth = new VaultK8sAuth({
-    addr,
-    role: env["CODEMASTER_VAULT_K8S_ROLE"] ?? "codemaster",
-    readToken: deps.readSaToken ?? (async () => (await readFile(saTokenPath, "utf-8")).trim()),
-    httpPostJson: deps.httpPostJson ?? fetchPostJson,
-    now: deps.now,
-    ...(authPath === undefined || authPath === "" ? {} : { authPath }),
-  });
+  const auth = makeVaultK8sAuthFromEnv({ ...deps, addr });
 
   return makeVaultKvReader({
     addr,

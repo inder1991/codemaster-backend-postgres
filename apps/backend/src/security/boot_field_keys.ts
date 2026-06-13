@@ -21,8 +21,8 @@
 //     under the installed registry; on any mismatch the registry is uninstalled and boot refuses.
 //
 // Sources:
-//   vault       — VaultHttpPort.fromEnv() (VAULT_ADDR + VAULT_TOKEN/VAULT_AGENT_TOKEN_PATH), the
-//                 existing kvReadRaw path runServer uses.
+//   vault       — VaultHttpPort.fromEnv() (VAULT_ADDR + VAULT_TOKEN / agent-token-file, OR SA-auth via
+//                 CODEMASTER_VAULT_AUTH=kubernetes — review P0-B), the kvReadRaw path runServer uses.
 //   vault-agent — the Agent-rendered keyset file `<CODEMASTER_VAULT_SECRETS_DIR|/vault/secrets>/
 //                 codemaster_field_encryption_keys` (the FileKvReader sanitization rule applied to
 //                 FIELD_ENCRYPTION_KEYS_VAULT_PATH; the flat-string FileKvReader itself cannot

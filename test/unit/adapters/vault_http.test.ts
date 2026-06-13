@@ -97,6 +97,30 @@ function portWith(
   });
 }
 
+// ─── SA-auth token provider (P0-B) ───────────────────────────────────────────────────────────────
+
+describe("VaultHttpPort — SA-auth tokenProvider", () => {
+  it("uses the async tokenProvider for X-Vault-Token (no static token / file)", async () => {
+    const http = new StubVaultHttpClient([jsonResponse(200, { data: { data: { k: "v" } } })]);
+    let calls = 0;
+    const port = new VaultHttpPort({
+      addr: "https://vault.internal:8200",
+      tokenProvider: () => {
+        calls += 1;
+        return Promise.resolve("sa-vault-token");
+      },
+      http,
+      clock: new FakeClock(),
+    });
+
+    const result = await port.kvRead({ path: "foo" });
+
+    expect(result).toEqual({ k: "v" });
+    expect(http.requests[0]!.headers["X-Vault-Token"]).toBe("sa-vault-token");
+    expect(calls).toBe(1); // the SA-login token was resolved per request
+  });
+});
+
 // ─── KV read ───────────────────────────────────────────────────────────────────────────────────
 
 describe("VaultHttpPort — kvRead", () => {

@@ -24,6 +24,8 @@ import { readFileSync } from "node:fs";
 import { type Clock, WallClock } from "#platform/clock.js";
 import { transportAbortSignal } from "#platform/transport_timeout.js";
 
+import { makeVaultK8sAuthFromEnv } from "#backend/config/vault_reader_factory.js";
+
 import {
   type VaultPort,
   VaultCasMismatch,
@@ -143,6 +145,9 @@ export type VaultHttpPortOptions = {
   addr: string;
   tokenPath?: string;
   token?: string;
+  /** Async token source (e.g. VaultK8sAuth.token) for SA-auth (kubernetes) mode; takes precedence over
+   *  `token`/`tokenPath` when set, and is re-invoked per request attempt so lease-renewal is transparent. */
+  tokenProvider?: () => Promise<string>;
   kvMount?: string;
   transitMount?: string;
   timeoutSeconds?: number;
@@ -170,6 +175,7 @@ export class VaultHttpPort implements VaultPort {
   private readonly addr: string;
   private readonly tokenPath: string;
   private readonly token: string | undefined;
+  private readonly tokenProvider: (() => Promise<string>) | undefined;
   private readonly kvMount: string;
   private readonly transitMount: string;
   private readonly http: VaultHttpClient;
@@ -179,6 +185,7 @@ export class VaultHttpPort implements VaultPort {
     addr,
     tokenPath = DEFAULT_TOKEN_PATH,
     token,
+    tokenProvider,
     kvMount = "secret",
     transitMount = "transit",
     timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
@@ -188,6 +195,7 @@ export class VaultHttpPort implements VaultPort {
     this.addr = addr.replace(/\/+$/, "");
     this.tokenPath = tokenPath;
     this.token = token;
+    this.tokenProvider = tokenProvider;
     this.kvMount = kvMount;
     this.transitMount = transitMount;
     this.http = http ?? new FetchVaultHttpClient({ timeoutSeconds });
@@ -205,6 +213,15 @@ export class VaultHttpPort implements VaultPort {
     const addr = process.env["VAULT_ADDR"];
     if (!addr) {
       throw new VaultConnectivityError("VAULT_ADDR env var unset; cannot construct VaultHttpPort");
+    }
+    // SA-auth (kubernetes, review P0-B): the app logs in with its projected service-account JWT — no
+    // static token, no agent-rendered token file. The SHARED VaultK8sAuth (env-keyed role/auth-path/
+    // SA-token path — same as the DB-creds reader) caches + lease-renews; its token() is the async
+    // tokenProvider so the field-key / server / webhook Vault reads ride SA-auth too.
+    if (process.env["CODEMASTER_VAULT_AUTH"] === "kubernetes") {
+      const clock = new WallClock();
+      const auth = makeVaultK8sAuthFromEnv({ env: process.env, now: () => clock.now().getTime(), addr });
+      return new VaultHttpPort({ addr, tokenProvider: () => auth.token() });
     }
     const tokenEnv = process.env["VAULT_TOKEN"];
     if (tokenEnv) {
@@ -242,6 +259,15 @@ export class VaultHttpPort implements VaultPort {
     }
   }
 
+  /** Resolve the Vault token for a request. SA-auth (kubernetes) mode supplies an async tokenProvider
+   *  (VaultK8sAuth.token — cached + lease-renewed); otherwise the sync static-token / agent-file path. */
+  private async resolveToken(): Promise<string> {
+    if (this.tokenProvider !== undefined) {
+      return this.tokenProvider();
+    }
+    return this.readToken();
+  }
+
   /**
    * Drives the retry / backoff decision loop; returns the {@link VaultHttpResponse} (any status;
    * per-method status mapping happens at the call site) or raises {@link VaultConnectivityError}
@@ -259,7 +285,7 @@ export class VaultHttpPort implements VaultPort {
     let backoff = INITIAL_BACKOFF_SECONDS;
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt += 1) {
-      const token = this.readToken();
+      const token = await this.resolveToken();
       const args: VaultHttpRequestArgs = {
         method,
         url,
