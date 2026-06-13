@@ -11,13 +11,16 @@ import { registerAuthRoutes } from "#backend/api/auth/auth_routes.js";
 import { makeAuthSecretsProvider } from "#backend/api/auth/auth_secrets_provider.js";
 import { PostgresLocalUserRepo } from "#backend/api/auth/local_user_repo.js";
 import { NoOpLdapClient } from "#backend/api/auth/noop_ldap.js";
+import { hashPassword, verifyPassword } from "#backend/api/auth/password_hasher.js";
 import { PostgresLoginRateLimiter } from "#backend/api/auth/rate_limit.js";
 import { persistWebhook } from "#backend/ingest/github_webhook_persistence.js";
 import { makeWebhookSecretProvider } from "#backend/ingest/webhook_secret_provider.js";
 import { getAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
+import { bootstrapSuperAdmin } from "#backend/security/superadmin_bootstrap.js";
 
 import { tenantKysely } from "#platform/db/database.js";
 import { WallClock } from "#platform/clock.js";
+import { uuid4 } from "#platform/randomness.js";
 
 import { buildApp, type BuildAppDeps } from "./app.js";
 import { registerGithubWebhookRoutes } from "./github_webhook_routes.js";
@@ -103,8 +106,22 @@ export async function runServer(deps: RunServerDeps = {}): Promise<void> {
         `CODEMASTER_TRUSTED_PROXY_HOPS must be a non-negative integer, got ${JSON.stringify(process.env["CODEMASTER_TRUSTED_PROXY_HOPS"])}.`,
       );
     }
+    const localRepo = new PostgresLocalUserRepo({ db: coreDb, registry });
+    // Go-live Step 5: ensure a usable super-admin exists on first deploy (constant admin/admin, changed
+    // via the UI after) and warn — never block — while the default password is in use. Idempotent +
+    // race-safe across replicas; runs before the auth routes serve.
+    await bootstrapSuperAdmin({
+      repo: localRepo,
+      hashPassword,
+      verifyPassword,
+      now: () => clock.now(),
+      newUserId: () => uuid4(),
+      warn: (m) => {
+        app.log.warn(m);
+      },
+    });
     await registerAuthRoutes(app, {
-      localRepo: new PostgresLocalUserRepo({ db: coreDb, registry }),
+      localRepo,
       ldap: new NoOpLdapClient(),
       clock,
       signingKey,
