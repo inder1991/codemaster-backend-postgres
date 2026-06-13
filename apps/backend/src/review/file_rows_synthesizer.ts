@@ -1,5 +1,4 @@
-// Client-side file_rows synthesizer — 1:1 port of the frozen Python
-//   vendor/codemaster-py/codemaster/review/file_rows_synthesizer.py (R-W3 / R-WR1 / R-WR8).
+// Client-side file_rows synthesizer (R-W3 / R-WR1 / R-WR8).
 //
 // Builds a per-file FileRowV1 tuple from aggregated findings, used when the LLM's walkthrough output
 // came back with empty (or missing) file_rows OR when the walkthrough activity fell into its
@@ -21,7 +20,7 @@ import { type FileRowV1, type Severity } from "#contracts/walkthrough.v1.js";
 /**
  * The minimal finding shape the synthesizer reads: a file path + a severity literal. `ReviewFindingV1`
  * (the aggregated finding) satisfies this structurally — the synthesizer only touches `.file` and
- * `.severity` (mirroring the frozen Python `f.file` / `f.severity` attribute reads).
+ * `.severity`.
  */
 export type SynthesizableFinding = {
   readonly file: string;
@@ -40,7 +39,7 @@ const SEVERITY_RANK: ReadonlyMap<string, number> = new Map<string, number>([
   ["blocker", 3],
 ]);
 
-// Inverse map for synthesizer rank → severity literal. Mirrors Python `_RANK_TO_SEVERITY`.
+// Inverse map for synthesizer rank → severity literal.
 const RANK_TO_SEVERITY: ReadonlyMap<number, Severity> = new Map<number, Severity>([
   [0, "nit"],
   [1, "suggestion"],
@@ -50,19 +49,17 @@ const RANK_TO_SEVERITY: ReadonlyMap<number, Severity> = new Map<number, Severity
 
 // R-WR1: the WalkthroughV1.file_rows contract caps file_rows. The synthesizer caps at 49 real rows + 1
 // overflow row aggregating the remainder. The overflow row's path token is intentionally
-// non-filesystem so the renderer's per-file linking doesn't resolve it as a real file. Mirrors the
-// frozen Python module-level Finals.
+// non-filesystem so the renderer's per-file linking doesn't resolve it as a real file.
 export const FILE_ROWS_HARD_CAP = 50;
 export const FILE_ROWS_REAL_CAP = FILE_ROWS_HARD_CAP - 1; // 49 real + 1 overflow
 export const OVERFLOW_ROW_PATH = "…(additional files)"; // "…(additional files)"
 
 /**
- * R-W3 / R-WR1 — build a per-file FileRowV1 tuple from aggregated findings. 1:1 with the frozen
- * Python `synthesize_file_rows_from_aggregated`.
+ * R-W3 / R-WR1 — build a per-file FileRowV1 tuple from aggregated findings.
  *
- * Returns [] when `findings` is empty. The `change_summary` placeholder text is fixed-format (byte-for
- * -byte with Python) so a future operator dashboard can grep for "synthesized from" occurrences as the
- * runtime signal that synthesis fired.
+ * Returns [] when `findings` is empty. The `change_summary` placeholder text is fixed-format so a
+ * future operator dashboard can grep for "synthesized from" occurrences as the runtime signal that
+ * synthesis fired.
  */
 export function synthesizeFileRowsFromAggregated(
   findings: ReadonlyArray<SynthesizableFinding>,
@@ -116,7 +113,7 @@ export function synthesizeFileRowsFromAggregated(
   for (const path of realPaths) {
     const { maxRank, count } = byFile.get(path)!;
     // change_summary is required (min_length=1, max_length=300). Use the singular/plural that scans
-    // cleanly at any count — byte-identical to the frozen Python f-string.
+    // cleanly at any count (byte-identical to the parity oracle).
     const findingWord = count === 1 ? "finding" : "findings";
     rows.push({
       path,
@@ -150,6 +147,6 @@ export function synthesizeFileRowsFromAggregated(
 
 // R-WR8 — degradation note used when the walkthrough fallback path fires because the LLM activity
 // raised (cost cap, output safety block, parse error, etc.) and the per-file table was synthesized
-// from data already in hand. Byte-identical to the frozen Python `LLM_FALLBACK_SYNTHESIS_NOTE`.
+// from data already in hand.
 export const LLM_FALLBACK_SYNTHESIS_NOTE =
   "walkthrough generation failed; per-file table synthesized from aggregated findings";

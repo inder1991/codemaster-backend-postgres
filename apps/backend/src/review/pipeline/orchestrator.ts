@@ -1,12 +1,9 @@
 // orchestrator — the deterministic review-pipeline driver (finding 1).
 //
-// 1:1 PORT of the frozen Python orchestrate_review_pipeline
-// (vendor/codemaster-py/codemaster/workflows/review_pipeline_orchestrator.py:412) for the SPINE happy
-// path, FUSED with the per-chunk ReviewContextV1 build the Python workflow body's `_review_chunk` closure
-// performed (review_pull_request.py:1513). In the Python the orchestrator was unopinionated about the
-// chunk callable and the workflow body injected `_review_chunk`; the TS port pulls the per-chunk context
-// build INTO the orchestrator (as `buildChunkContext`) so the whole deterministic spine is one
-// unit-testable module — the workflow body (Workflow phase) only wires the typed activity ports + state.
+// FUSED with the per-chunk ReviewContextV1 build the workflow body's `_review_chunk` closure performed.
+// The orchestrator pulls the per-chunk context build INTO itself (as `buildChunkContext`) so the whole
+// deterministic spine is one unit-testable module — the workflow body (Workflow phase) only wires the
+// typed activity ports + state.
 //
 // ── SIGNATURE (finding 2) ──
 // The ~35-kwarg Python signature collapses to ONE typed `ReviewPipelineContext` object
@@ -312,7 +309,7 @@ function toMutableRanges(ranges: ChangedLineRanges): Record<string, Array<[numbe
   );
 }
 
-// ─── tunables (1:1 with the Python module constants) ─────────────────────────────────────────────
+// ─── tunables ────────────────────────────────────────────────────────────────────────────────────
 
 /** _CLASSIFIER_FAILURE_THRESHOLD (review_pipeline_orchestrator.py:292). > this ratio → a degradation note. */
 const CLASSIFIER_FAILURE_THRESHOLD = 0.1;

@@ -1,10 +1,8 @@
 // Purpose→model resolver — single source of truth (ADR-0060, step 0).
 //
-// 1:1 port of codemaster/integrations/llm/purpose_model.py (frozen Python). NOTE the subsystem name:
-// the task brief calls this "model_router", but the class-based ModelRouter / RoutingPolicyV1 /
-// RoutingDecisionV1 mechanism was RETIRED by ADR-0060 A (see libs/contracts/src/llm_routing.v1.ts).
-// Model selection now lives in this purpose→model resolver. The file is named model_router.ts to
-// match the requested subsystem path; its surviving content is the purpose→model seam.
+// NOTE the subsystem name: the class-based ModelRouter / RoutingPolicyV1 / RoutingDecisionV1 mechanism
+// was RETIRED by ADR-0060 A (see libs/contracts/src/llm_routing.v1.ts). Model selection now lives in
+// this purpose→model resolver. The file is named model_router.ts to match the requested subsystem path.
 //
 // Before this module, "which Claude model serves which job" lived as three scattered hardcoded
 // constants (review_finding → sonnet, walkthrough → opus, analysis_curator → haiku). The configured
@@ -27,8 +25,8 @@ export const DEFAULT_MODEL = "claude-sonnet-4-6";
  *
  * Keyed by the LlmPurposeV1 `.value` strings. Only four of the eight purposes carry an explicit pin;
  * the rest resolve to DEFAULT_MODEL via the dict-miss fallback in modelForPurpose. Modeled as a
- * ReadonlyMap (not an object) so the resolver's lookup is a Map.get — matching Python's
- * `dict.get(purpose, DEFAULT_MODEL)` semantics without a dynamic object-index injection sink.
+ * ReadonlyMap (not an object) so the resolver's lookup is a Map.get — no dynamic object-index
+ * injection sink.
  */
 export const PURPOSE_MODEL_SEED: ReadonlyMap<string, string> = new Map<string, string>([
   ["review_finding", "claude-sonnet-4-6"],
@@ -40,21 +38,19 @@ export const PURPOSE_MODEL_SEED: ReadonlyMap<string, string> = new Map<string, s
 /**
  * Return the model id assigned to `purpose`.
  *
- * Permissive (mirrors Python `dict.get(purpose, DEFAULT_MODEL)`): an out-of-vocabulary string does
- * NOT raise — it falls through to DEFAULT_MODEL. Today: the seeded default. ADR-0060 step 1 swaps the
- * body to read core.llm_purpose_model first and fall back to this seed.
+ * Permissive: an out-of-vocabulary string does NOT raise — it falls through to DEFAULT_MODEL. Today:
+ * the seeded default. ADR-0060 step 1 swaps the body to read core.llm_purpose_model first and fall
+ * back to this seed.
  */
 export function modelForPurpose(purpose: string): string {
-  // Mirror Python `PURPOSE_MODEL_SEED.get(purpose, DEFAULT_MODEL)`: a Map.get yields the pinned model
-  // for a seeded purpose or undefined on a miss (in-vocab-but-unpinned, or out-of-vocab) → fall
-  // through to DEFAULT_MODEL. A Map keeps the lookup off a dynamic object index (no injection sink)
-  // and narrows cleanly under noUncheckedIndexedAccess.
+  // Map.get yields the pinned model for a seeded purpose or undefined on a miss → fall through to
+  // DEFAULT_MODEL. A Map keeps the lookup off a dynamic object index (no injection sink) and narrows
+  // cleanly under noUncheckedIndexedAccess.
   return PURPOSE_MODEL_SEED.get(purpose) ?? DEFAULT_MODEL;
 }
 
 /**
  * The full set of documented LLM-call purposes (re-exported for callers that want to iterate the
- * vocabulary). Mirrors the Python LlmPurposeV1 StrEnum membership; the per-purpose model is resolved
- * via modelForPurpose, not by reading this list.
+ * vocabulary). The per-purpose model is resolved via modelForPurpose, not by reading this list.
  */
 export const LLM_PURPOSES: ReadonlyArray<string> = LLM_PURPOSE_LITERALS;

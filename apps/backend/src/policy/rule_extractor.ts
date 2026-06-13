@@ -1,5 +1,4 @@
-// rule_extractor — 1:1 port of the frozen Python codemaster/policy/rule_extractor.py
-// (Sprint 25 / A-2 heading-aware markdown parser).
+// rule_extractor — heading-aware markdown parser (Sprint 25 / A-2).
 //
 // Consumes one `GuidelineFileV1` and emits zero-to-many `ExtractedRuleV1` instances.
 //
@@ -12,17 +11,13 @@
 //      intent via rule_classifier, priority via DEFAULT_PRIORITY_BY_CATEGORY, rule_id +
 //      normalized_hash via rule_id, provenance, oversized-rule truncation.
 //
-// Byte-parity notes (vs the frozen Python):
-//   - `text.split("\n")` (Python str.split) maps to JS `text.split("\n")` — IDENTICAL semantics
-//     including the trailing "" element when the string ends in "\n".
-//   - `str.strip()` / `.rstrip()` / `.lstrip(" \t")` are reproduced via anchored replaces over the
-//     ASCII whitespace the inputs carry (markdown text). `_normalize_text` uses per-line rstrip.
-//   - The R-33 CommonMark continuation logic (`expandtabs(4)`, indent threshold = marker-indent + 2)
-//     is reproduced exactly: tab→4-space expansion via a helper, indent measured in expanded chars.
-//   - The classifier-heading is the deepest heading if present, else the derived title (matches the
-//     source: `heading_path[-1] if heading_path else title`).
-//   - Output rules are validated through the Zod ExtractedRuleV1 contract so the wire shape (and its
-//     defaults / strictness) matches the Pydantic model the source constructs.
+// Implementation notes:
+//   - `text.split("\n")` includes the trailing "" element when the string ends in "\n".
+//   - `strip()` / `rstrip()` / `lstrip(" \t")` are reproduced via anchored replaces over ASCII
+//     whitespace; `normalizeText` uses per-line rstrip.
+//   - R-33 CommonMark continuation logic: tab→4-space expansion, indent threshold = marker-indent + 2.
+//   - Classifier-heading is the deepest heading if present, else the derived title.
+//   - Output rules are validated through the Zod ExtractedRuleV1 contract.
 
 import { inferCategory, inferIntent } from "./rule_classifier.js";
 import { deriveNormalizedHash, deriveRuleId } from "./rule_id.js";
@@ -50,18 +45,17 @@ const MARKER_RE = /^(\s*)(?:[-*]|\d+\.)\s+(.+)$/;
 // Max title length when derived from body (not heading).
 const MAX_DERIVED_TITLE_CHARS = 80;
 
-/** Python str.rstrip() — strip trailing ASCII whitespace. */
+/** Strip trailing ASCII whitespace. */
 function rstrip(s: string): string {
   return s.replace(/[\s]+$/, "");
 }
 
-/** Python str.strip() — strip leading + trailing ASCII whitespace. JS .trim() is equivalent for the
- *  ASCII/markdown inputs this parser consumes. */
+/** Strip leading + trailing ASCII whitespace (`.trim()` for the ASCII/markdown inputs this parser consumes). */
 function strip(s: string): string {
   return s.trim();
 }
 
-/** Tab-expanded length of `s` with tab stops of 4 (Python str.expandtabs(4), length only). */
+/** Tab-expanded length of `s` with tab stops of 4 (length only). */
 function expandedLen(s: string): number {
   let col = 0;
   for (const ch of s) {
@@ -191,7 +185,7 @@ function extractListItems(body: string): Array<string> {
   return items;
 }
 
-/** Python line.lstrip(" \t") — strip leading spaces + tabs only. */
+/** Strip leading spaces + tabs only. */
 function lstripWs(s: string): string {
   return s.replace(/^[ \t]+/, "");
 }
@@ -259,8 +253,7 @@ function truncateBody(body: string): readonly [string, boolean] {
 
 /**
  * Parse a guideline file into typed rules. Returns an empty array if the file body has no
- * extractable rules. Mirrors the frozen Python `extract_rules`; output objects are validated through
- * the Zod ExtractedRuleV1 contract (same defaults / strictness as the source's Pydantic model).
+ * extractable rules. Output objects are validated through the Zod ExtractedRuleV1 contract.
  */
 export function extractRules(guidelineFile: GuidelineFileV1): Array<ExtractedRuleV1> {
   const sections = splitIntoSections(guidelineFile.body);

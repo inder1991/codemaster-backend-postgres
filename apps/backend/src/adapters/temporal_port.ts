@@ -1,5 +1,4 @@
-// Temporal client adapter port — 1:1 port of vendor/codemaster-py/codemaster/adapters/temporal_port.py
-// (Sprint 0 / S0.3c).
+// Temporal client adapter port (Sprint 0 / S0.3c).
 //
 // Production code drives Temporal directly inside workflow definitions, but cross-cutting code that
 // *triggers* workflows (ingest, the outbox `temporal_workflow_start` sink) goes through TemporalClientPort
@@ -9,8 +8,8 @@
 
 import { type IdConflictPolicy, type IdReusePolicy } from "#contracts/outbox_payloads.v1.js";
 
-/** A start-workflow invocation (Python `StartWorkflowCall`). camelCase — this is an internal adapter DTO,
- *  not a wire contract (the wire shape is TemporalWorkflowStartPayloadV1, which stays snake_case). */
+/** A start-workflow invocation. camelCase — this is an internal adapter DTO, not a wire contract (the
+ *  wire shape is TemporalWorkflowStartPayloadV1, which stays snake_case). */
 export type StartWorkflowCall = {
   workflowType: string;
   workflowId: string;
@@ -23,7 +22,7 @@ export type StartWorkflowCall = {
   idConflictPolicy: IdConflictPolicy;
 };
 
-/** The triggering surface cross-cutting code depends on (Python `TemporalClientPort` Protocol). */
+/** The triggering surface cross-cutting code depends on. */
 export type TemporalClientPort = {
   /** Start a workflow. Returns the run_id. Idempotent w.r.t. `workflowId`.
    *
@@ -53,7 +52,7 @@ export type TemporalClientPort = {
   }): Promise<void>;
 };
 
-/** Base class for Temporal client failures (Python `TemporalError`). */
+/** Base class for Temporal client failures. */
 export class TemporalError extends Error {
   public constructor(message: string) {
     super(message);
@@ -80,7 +79,7 @@ export class WorkflowAlreadyStarted extends TemporalError {
 // === Recording implementation for tests (Python `RecordingTemporalClient`) ===
 
 /** In-memory TemporalClientPort that records every call. Tests assert against `.calls` after the code
- *  under test runs; idempotency under ALLOW_DUPLICATE / REJECT_DUPLICATE is emulated. */
+ *  under test runs; idempotency under ALLOW_DUPLICATE / REJECT_DUPLICATE is emulated in-process. */
 export class RecordingTemporalClient implements TemporalClientPort {
   public readonly calls: Array<StartWorkflowCall> = [];
   public readonly cancellations: Array<string> = [];

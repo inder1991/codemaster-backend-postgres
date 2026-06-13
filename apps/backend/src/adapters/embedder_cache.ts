@@ -1,37 +1,27 @@
 /**
- * PostgresEmbedderCache — TypeScript port of the frozen Python
- *   vendor/codemaster-py/codemaster/embedder/cache.py::EmbedderCache (spec v4 §11.5).
+ * PostgresEmbedderCache — config_version-aware in-process snapshot of the singleton
+ * `core.embedder_runtime_state` row (spec v4 §11.5). Worker activities + retrieval queries read the
+ * active generation / model / retrieval_mode from this cache (avoiding a per-call DB round-trip), and
+ * the read methods serve a FROZEN snapshot so concurrent readers never see a torn read.
  *
- * A config_version-aware in-process snapshot of the singleton `core.embedder_runtime_state` row. Worker
- * activities + retrieval queries read the active generation / model / retrieval_mode from this cache
- * (avoiding a per-call DB round-trip), and the read methods serve a FROZEN snapshot so concurrent
- * readers never see a torn read.
+ * ── LAZY-TTL refresh, NOT a background poll TASK ────────────────────────────────────────────────────
+ * Every `get*()` read first checks whether the snapshot is older than a 15s TTL (measured on the
+ * injected {@link Clock}'s monotonic axis); if so, it re-reads `core.embedder_runtime_state` and — on
+ * a config_version change — installs a fresh snapshot (re-validating the embedding-dimension
+ * invariant against the new active generation).
  *
- * ── DIVERGENCE: LAZY-TTL refresh, NOT a background poll TASK (faithful + simpler) ────────────────────
- * The frozen Python `EmbedderCache.start()` spawns a background `asyncio.create_task(_poll_loop)` that
- * re-reads the runtime state every 15s and atomically refreshes the snapshot on a config_version bump.
- * This TS port REPLACES that worker-spawned poll task with a LAZY config_version-aware refresh: every
- * `get*()` read first checks whether the snapshot is older than a 15s TTL (measured on the injected
- * {@link Clock}'s monotonic axis); if so, it re-reads `core.embedder_runtime_state` and — on a
- * config_version change — installs a fresh snapshot (re-validating the embedding-dimension invariant
- * against the new active generation).
- *
- * Why the divergence is faithful: the per-query / per-batch readers are the ONLY consumers, and the
- * lazy refresh gives the SAME ≤30s-staleness guarantee the Python's 15s poll does (a reader observes a
- * config bump within one TTL of its next read). A worker-spawned poll loop (with its
- * `asyncio.create_task` / OTel gauge-on-tick liveness surface) is OUT OF SCOPE here — it belongs to the
- * embedder-maintenance worker composition, tracked as FOLLOW-UP-embedder-cache-worker-composition. The
- * gauge-emit / refresh-lag telemetry the Python emits per tick is therefore NOT ported (no per-tick
- * tick to hang it on); the lazy refresh emits no metric.
+ * The per-query / per-batch readers are the ONLY consumers, and the lazy refresh gives the SAME
+ * ≤30s-staleness guarantee as a 15s poll (a reader observes a config bump within one TTL of its next
+ * read). A worker-spawned poll loop is OUT OF SCOPE here — it belongs to the embedder-maintenance
+ * worker composition, tracked as FOLLOW-UP-embedder-cache-worker-composition. The lazy refresh emits
+ * no metric.
  *
  * ── Dimension invariant (spec v4 §4.4) ──────────────────────────────────────────────────────────────
- * The Python probes the active model via the EmbeddingsPort at boot and raises if the returned vector
- * dim != 1024. This port validates the SAME invariant against the persisted truth instead of a live
- * probe: the active generation's `core.embedding_generations.embedding_dimension` MUST equal the
- * expected dim (default {@link PLATFORM_EMBEDDING_DIMENSION} = 1024). A mismatch (or a missing active
- * generation row) throws {@link EmbeddingDimensionInvariantError}. This avoids a network round-trip in
- * the cache (the embedder is not a cache collaborator in TS) while preserving the structural guarantee:
- * a generation whose stored dim disagrees with the platform invariant can never be served.
+ * The active generation's `core.embedding_generations.embedding_dimension` MUST equal the expected dim
+ * (default {@link PLATFORM_EMBEDDING_DIMENSION} = 1024). A mismatch (or a missing active generation
+ * row) throws {@link EmbeddingDimensionInvariantError}. This avoids a network round-trip in the cache
+ * while preserving the structural guarantee: a generation whose stored dim disagrees with the platform
+ * invariant can never be served.
  *
  * ── Singleton over CODEMASTER_PG_CORE_DSN ────────────────────────────────────────────────────────────
  * {@link embedderCacheSingleton} builds + memoizes ONE started cache over the process-wide ADR-0062 pool
@@ -50,17 +40,17 @@ import { tenantKysely } from "#platform/db/database.js";
 
 import type { EmbedderRuntimeStateRowV1, RetrievalMode } from "#contracts/embedder_runtime_state.v1.js";
 
-// ─── Constants (1:1 with the frozen Python module constants) ─────────────────────────────────────
+// ─── Constants ───────────────────────────────────────────────────────────────────────────────────
 
-/** v4 §11.5 ≤30s SLA = 15s refresh TTL (the Python's 15s poll cadence). */
+/** v4 §11.5 ≤30s SLA = 15s refresh TTL. */
 const REFRESH_TTL_SECONDS = 15.0;
 
 /** v4 §4.4 platform invariant: every active generation must embed at 1024 dimensions. */
 export const PLATFORM_EMBEDDING_DIMENSION = 1024;
 
-// ─── Errors (1:1 with the frozen Python taxonomy) ────────────────────────────────────────────────
+// ─── Errors ──────────────────────────────────────────────────────────────────────────────────────
 
-/** Base for embedder-cache errors (Python `EmbedderCacheError`). */
+/** Base for embedder-cache errors. */
 export class EmbedderCacheError extends Error {
   public constructor(message: string) {
     super(message);
@@ -70,8 +60,7 @@ export class EmbedderCacheError extends Error {
 
 /**
  * v4 §4.4 — the active generation's persisted `embedding_dimension` disagrees with the platform
- * invariant (or the active generation row is missing). 1:1 with the Python
- * `EmbeddingDimensionInvariantError`.
+ * invariant (or the active generation row is missing).
  */
 export class EmbeddingDimensionInvariantError extends EmbedderCacheError {
   public constructor(message: string) {
@@ -92,7 +81,7 @@ export type GenerationsReader = {
   get(generationId: number): Promise<{ embedding_dimension: number } | null>;
 };
 
-/** Immutable snapshot of the runtime state at last refresh (1:1 with the Python `_CachedState`). */
+/** Immutable snapshot of the runtime state at last refresh. */
 type CachedState = {
   readonly activeGeneration: number;
   readonly activeModelName: string;
@@ -130,9 +119,9 @@ export class PostgresEmbedderCache {
   }
 
   /**
-   * Load the initial snapshot + validate the dimension invariant (1:1 with the Python `start()` minus
-   * the poll-task spawn — the lazy TTL replaces it). Raises {@link EmbeddingDimensionInvariantError} if
-   * the active generation's persisted dim disagrees with the expected dim (or the row is missing).
+   * Load the initial snapshot + validate the dimension invariant. Raises
+   * {@link EmbeddingDimensionInvariantError} if the active generation's persisted dim disagrees with
+   * the expected dim (or the row is missing).
    */
   public async start(): Promise<void> {
     const row = await this.stateRepo.get();

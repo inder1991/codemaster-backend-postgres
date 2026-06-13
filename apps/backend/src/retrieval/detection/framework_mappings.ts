@@ -1,12 +1,8 @@
-// framework_mappings — port of the versioned data file
-//   vendor/codemaster-py/codemaster/retrieval/detection/data/framework_mappings.toml
-//   (Sub-spec B T5 + FOLLOW-UP-framework-detector-data-file; schema_version 1).
+// framework_mappings — versioned data file (Sub-spec B T5 + FOLLOW-UP-framework-detector-data-file; schema_version 1).
 //
 // Maps ecosystem-agnostic dependency names (canonical-normalized per ADR-0058: NFKC + lowercase +
 // ASCII regex) to canonical `framework:*` labels. Multiple ecosystems may resolve to the same label —
-// the label is canonical, not per-ecosystem. The Python loads this from TOML at import + validates
-// every value is `framework:*` namespaced; here the data is a frozen const (the data file IS the
-// source of truth — this is the thin TS equivalent of the Python loader's output).
+// the label is canonical, not per-ecosystem.
 
 /** schema_version of the source data file. */
 export const FRAMEWORK_MAPPINGS_SCHEMA_VERSION = 1 as const;

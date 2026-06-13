@@ -1,6 +1,4 @@
-// Python ecosystem dependency parsers — 1:1 TS port of the frozen Python
-//   vendor/codemaster-py/codemaster/review/manifest_parsers/_python.py
-//   (Commit 3 of FOLLOW-UP-manifest-dependency-parsing).
+// Python ecosystem dependency parsers (Commit 3 of FOLLOW-UP-manifest-dependency-parsing).
 //
 // Covers 5 Python manifest formats:
 //   * pyproject.toml         — PEP 621 + Poetry sections
@@ -15,7 +13,7 @@
 // Pure functions: NO I/O, NO clock, NO random. Replay-safe (these run in the parse activity, not the
 // workflow sandbox). pyproject.toml + Pipfile bodies go through {@link parseTomlManifest} (the swappable
 // TOML adapter) — a parse failure / non-table root throws {@link TomlParseError}, which we catch and
-// degrade ONLY that manifest (empty ParseOutcome), matching the Python `except tomllib.TOMLDecodeError`.
+// degrade ONLY that manifest (empty ParseOutcome).
 
 import { ParsedDependencyV1 } from "#contracts/pr_context.v1.js";
 
@@ -23,11 +21,11 @@ import { isRejection, normalizeName, type NormalizationRejection } from "./norma
 import type { ParseOutcome } from "./parse_outcome.js";
 import { parseTomlManifest, TomlParseError } from "./toml_adapter.js";
 
-/** The closed dependency_type vocabulary (1:1 with the Pydantic `Literal`). */
+/** The closed dependency_type vocabulary. */
 type DependencyType = "prod" | "dev" | "optional" | "test" | "unknown";
 
 // Matches the contract field's max_length cap; truncation is defensive so the contract write never
-// raises on adversarial version_spec input. Mirrors Python `_VERSION_SPEC_MAX_LENGTH`.
+// raises on adversarial version_spec input.
 const VERSION_SPEC_MAX_LENGTH = 256;
 
 // PEP 508 name extraction: capture the leading run of name characters, stopping at the first
@@ -35,8 +33,7 @@ const VERSION_SPEC_MAX_LENGTH = 256;
 // (`^([A-Za-z0-9._\-]+)`). NOTE: no `g` / `i` flags — case-sensitive prefix exactly like Python.
 const PEP508_NAME_PREFIX = /^([A-Za-z0-9._-]+)/;
 
-// Poetry / PEP 621 optional-dependency group-name → dependency_type maps (1:1 with the Python
-// frozensets). Lower-cased before lookup.
+// Poetry / PEP 621 optional-dependency group-name → dependency_type maps. Lower-cased before lookup.
 const DEV_GROUP_NAMES: ReadonlySet<string> = new Set(["dev", "develop", "development"]);
 const TEST_GROUP_NAMES: ReadonlySet<string> = new Set(["test", "tests", "testing"]);
 
@@ -301,7 +298,6 @@ function splitNameAndVersion(rawSpec: string): [string, string | null] {
 
 /**
  * Map a Poetry / PEP 621 optional-dependency group name to the closed dependency_type vocabulary.
- * 1:1 with Python `_classify_python_group`.
  */
 function classifyPythonGroup(name: string): DependencyType {
   const n = name.toLowerCase();
@@ -316,7 +312,6 @@ function classifyPythonGroup(name: string): DependencyType {
 
 /**
  * Coerce a manifest field to a list of string. Returns [] for anything else (malformed input).
- * 1:1 with Python `_ensure_str_list`.
  */
 function ensureStrList(value: unknown): Array<string> {
   if (!Array.isArray(value)) {
@@ -325,7 +320,7 @@ function ensureStrList(value: unknown): Array<string> {
   return value.filter((item): item is string => typeof item === "string");
 }
 
-/** True when `value` is a non-null, non-array object — the TS analogue of Python `isinstance(x, dict)`. */
+/** True when `value` is a non-null, non-array object. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

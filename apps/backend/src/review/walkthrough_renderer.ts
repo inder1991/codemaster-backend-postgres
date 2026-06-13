@@ -1,8 +1,5 @@
-// Walkthrough renderer — 1:1 TS port of the frozen Python
-//   vendor/codemaster-py/codemaster/review/walkthrough_renderer.py (Sprint 8 / S8.5.3).
-//
-// Pure function: `renderWalkthrough(WalkthroughV1) -> string` returns the markdown body of the PR-top
-// comment. Section order + truncation priority (highest = always preserved):
+// Walkthrough renderer. Pure function: `renderWalkthrough(WalkthroughV1) -> string` returns the
+// markdown body of the PR-top comment. Section order + truncation priority (highest = always preserved):
 //   1. TL;DR (required) — `🤖 **codemaster review** — {tldr}`
 //   2. Truncated notice (if `walkthrough.truncated`)
 //   3. Degradation note (if present)
@@ -16,10 +13,10 @@
 // appended; TL;DR + degradation note are preserved. The last-resort path drops the config / linked /
 // suggested sections by reconstructing a minimal envelope.
 //
-// PARITY NOTE — length counting: Python's `len(str)` counts Unicode CODE POINTS, while JS `string.length`
+// PARITY NOTE — length counting: `len(str)` counts Unicode CODE POINTS, while JS `string.length`
 // counts UTF-16 code units (the 🤖 header emoji is 1 code point but 2 code units). The safety-cap
-// comparison therefore uses `[...s].length` (code-point count) so the truncation boundary is byte-exact
-// with the frozen Python. Proven in test/parity/walkthrough_renderer.parity.test.ts.
+// comparison therefore uses `[...s].length` (code-point count) to match that boundary exactly.
+// Proven in test/parity/walkthrough_renderer.parity.test.ts.
 //
 // Sandbox-pure: no crypto, clock, RNG, I/O — safe inside the Temporal workflow sandbox (it renders the
 // post body the orchestrator hands to the post_review activity).
@@ -38,17 +35,17 @@ const HEADER_PREFIX = "🤖 **codemaster review** — ";
 const TRUNCATED_NOTICE =
   "> ⚠️ The per-review finding cap was hit; only the top-50 findings are surfaced below.";
 
-/** Python `len(str)` counts Unicode code points; `[...s].length` matches it (UTF-16-pair-safe). */
+/** Code-point count: `[...s].length` (UTF-16-pair-safe, matching the parity oracle). */
 function codePointLength(s: string): number {
   return [...s].length;
 }
 
-/** Python `str.rstrip()`: strip trailing whitespace. */
+/** Strip trailing whitespace. */
 function rstrip(s: string): string {
   return s.replace(/\s+$/, "");
 }
 
-/** Render the per-file markdown table (1:1 with `_render_table`). Empty rows → "". */
+/** Render the per-file markdown table. Empty rows → "". */
 function renderTable(rows: ReadonlyArray<FileRowV1>): string {
   if (rows.length === 0) {
     return "";
@@ -60,7 +57,7 @@ function renderTable(rows: ReadonlyArray<FileRowV1>): string {
   return out.join("\n");
 }
 
-/** Render the collapsible configuration section (1:1 with `_render_config_section`). Empty md → "". */
+/** Render the collapsible configuration section. Empty md → "". */
 function renderConfigSection(md: string): string {
   if (md === "") {
     return "";
@@ -69,8 +66,8 @@ function renderConfigSection(md: string): string {
 }
 
 /**
- * Render the walkthrough envelope to markdown (1:1 with the Python `_assemble`). `rows` is the (possibly
- * tail-truncated) row set to render; `tableTruncated` appends the truncation marker.
+ * Render the walkthrough envelope to markdown. `rows` is the (possibly tail-truncated) row set to
+ * render; `tableTruncated` appends the truncation marker.
  */
 function assemble(
   walkthrough: WalkthroughV1,
@@ -121,9 +118,9 @@ function assemble(
 }
 
 /**
- * Drop file rows from the tail until the rendered output fits the cap (1:1 with `_truncate_table_to_fit`).
- * TL;DR + degradation note are preserved. Last resort: a minimal envelope that drops the config / linked /
- * suggested sections (reconstructed with empty file_rows / config / linked / suggested).
+ * Drop file rows from the tail until the rendered output fits the cap. TL;DR + degradation note are
+ * preserved. Last resort: a minimal envelope that drops the config / linked / suggested sections
+ * (reconstructed with empty file_rows / config / linked / suggested).
  */
 function truncateTableToFit(walkthrough: WalkthroughV1, maxChars: number): string {
   const rows = [...walkthrough.file_rows];
@@ -134,8 +131,8 @@ function truncateTableToFit(walkthrough: WalkthroughV1, maxChars: number): strin
       return body;
     }
   }
-  // Even the no-table form is too long → drop the configuration / linked / suggested sections as a last
-  // resort (1:1 with the Python minimal-WalkthroughV1 reconstruction, which defaults those fields empty).
+  // Even the no-table form is too long → drop the configuration / linked / suggested sections as a
+  // last resort (minimal-envelope reconstruction).
   const minimal: WalkthroughV1 = {
     ...walkthrough,
     file_rows: [],
@@ -147,8 +144,8 @@ function truncateTableToFit(walkthrough: WalkthroughV1, maxChars: number): strin
 }
 
 /**
- * Render the walkthrough envelope as a single markdown body (1:1 with `render_walkthrough`). The length
- * cap defaults to MAX_OUTPUT_CHARS so callers can pass the result straight into OutputSafetyValidator.
+ * Render the walkthrough envelope as a single markdown body. The length cap defaults to
+ * MAX_OUTPUT_CHARS so callers can pass the result straight into OutputSafetyValidator.
  */
 export function renderWalkthrough(walkthrough: WalkthroughV1, maxChars: number = MAX_OUTPUT_CHARS): string {
   const body = assemble(walkthrough, walkthrough.file_rows, false);

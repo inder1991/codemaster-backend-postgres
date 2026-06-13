@@ -1,7 +1,6 @@
 // pipeline_result — the orchestrator's return envelope.
 //
-// 1:1 PORT of the frozen Python dataclass ReviewPipelineResult
-// (vendor/codemaster-py/codemaster/workflows/review_pipeline_orchestrator.py:245).
+// Port of ReviewPipelineResult (review_pipeline_orchestrator.py:245):
 //
 //   @dataclass(frozen=True, slots=True)
 //   class ReviewPipelineResult:
@@ -46,9 +45,9 @@ import type { ArbitrationIntentV1 } from "#contracts/arbitration_intent.v1.js";
 import type { ArbitrationResultV1 } from "#contracts/arbitration_result.v1.js";
 
 /**
- * The Python `ArbitrationResult` envelope (vendor/codemaster-py/codemaster/review/arbitration_layer.py:108
- * — frozen dataclass with `decisions: tuple[ArbitrationDecisionV1, ...]` + `rejected_intents:
- * tuple[RejectedIntent, ...]`). Stage 5 ported it as the {@link ArbitrationResultV1} Zod contract (it
+ * The `ArbitrationResult` envelope (arbitration_layer.py:108 — frozen dataclass with
+ * `decisions: tuple[ArbitrationDecisionV1, ...]` + `rejected_intents: tuple[RejectedIntent, ...]`).
+ * Stage 5 ported it as the {@link ArbitrationResultV1} Zod contract (it
  * crosses the Temporal boundary as the apply_arbitration activity's return value), so the alias tightens
  * from the placeholder `unknown` to the real type. The orchestrator stashes it through to the workflow
  * body's walkthrough-footer renderer, which treats `null` as equivalent to an empty result.

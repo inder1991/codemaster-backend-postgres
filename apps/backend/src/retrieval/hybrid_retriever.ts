@@ -1,7 +1,4 @@
-// HybridRetriever — port of the frozen Python
-//   vendor/codemaster-py/codemaster/retrieval/hybrid_retriever.py (Sprint 10 / S10.4.1; Sub-spec B T11).
-//
-// Composition root. Wires the retrieval stages into one async `retrieve` call:
+// HybridRetriever — composition root. Wires the retrieval stages into one async `retrieve` call:
 //
 //     BM25 (lexical)        ┐
 //                           ├─→ RRF (rank fusion) ─→ LLM rerank (top-5)
@@ -22,7 +19,7 @@
 //     Confluence (pgvector) ┘
 //
 // When any of the four conditions is false the new path is SKIPPED and the legacy three-stage flow runs
-// unchanged. The exact composition ORDER on the confluence path mirrors the frozen Python verbatim:
+// unchanged. The confluence path composition ORDER:
 //   1. rrfCombine(bm25, ann)                                   → fused
 //   2. wrap confluence chunks as ScoredKnowledgeChunkV1        → confluenceScored
 //   3. mergeSources(knowledgeChunks=fused.items, confluence=…) → merged + sourceCounts (dedup)
@@ -41,15 +38,14 @@
 // If the ANN side returns degraded=true (embed service down) RRF still emits results from BM25; the
 // rerank pass receives degraded=true and propagates it. Confluence retrieval is best-effort — if it
 // returns empty OR FAILS, the BM25+ANN path produces results as usual and `degraded=true` is surfaced
-// with reason `confluence_retrieval_failed`. NOTE: this is a deliberate DIVERGENCE from frozen Python,
-// whose bare `asyncio.gather(bm25, ann, confluence)` propagates a confluence exception and fails the
-// whole retrieval — the Python docstring claims best-effort-on-failure but the reference code never
-// delivered it. See the `.catch` isolation in `retrieve`.
+// with reason `confluence_retrieval_failed`. NOTE: this is a deliberate DIVERGENCE from the original
+// design, whose bare gather propagated a confluence exception and failed the whole retrieval — the
+// docstring claimed best-effort-on-failure but the reference code never delivered it. See the `.catch`
+// isolation in `retrieve`.
 //
 // ── OTel span ─────────────────────────────────────────────────────────────────────────────────────
-// The Python wraps the whole call in the locked `retrieval.hybrid_retrieve` span. That observability
-// module is not ported yet, so this port keeps the composition intact but omits the (absent) span —
-// exactly as the sibling AnnRetriever / Bm25Retriever ports omit their histograms.
+// The `retrieval.hybrid_retrieve` OTel span is deferred (observability module not yet ported);
+// the composition is intact but the span emission is absent — as with AnnRetriever / Bm25Retriever.
 
 import type { AnnRetriever } from "#backend/retrieval/ann_retriever.js";
 import type { Bm25Retriever } from "#backend/retrieval/bm25_retriever.js";
@@ -71,18 +67,16 @@ import type {
   ScoredKnowledgeChunkV1,
 } from "#contracts/knowledge_chunks.v1.js";
 
-// Single-sourced over-fetch / pre-rerank width (1:1 with the Python `_PRE_RERANK_TOP_K`, aliased from
-// the shared `PRE_FUSION_TOP_K` constant).
+// Single-sourced over-fetch / pre-rerank width (aliased from the shared `PRE_FUSION_TOP_K` constant).
 const PRE_RERANK_TOP_K = PRE_FUSION_TOP_K;
 
 // Default token budget passed to reservePriorityFloors. The spec's three-stage pipeline computes a real
-// budget at the activity layer; this is the in-call default for the composition (1:1 with the Python
-// `_DEFAULT_TOKEN_BUDGET = 32_000`).
+// budget at the activity layer; this is the in-call default for the composition.
 const DEFAULT_TOKEN_BUDGET = 32_000;
 
 /**
  * Wrap a {@link ConfluenceRetrievedChunk} in the homogeneous {@link ScoredKnowledgeChunkV1} envelope used
- * downstream (1:1 with the Python `_confluence_to_scored`).
+ * downstream.
  *
  * `installationId` + `repoId` are carried from the query so the chunk is greppable by tenancy even
  * though the underlying confluence corpus is platform-shared.
@@ -193,11 +187,10 @@ export class HybridRetriever {
     }
 
     // Confluence is best-effort: isolate its failure so a Confluence outage degrades to repo-only context
-    // instead of failing the whole retrieval. DIVERGENCE from frozen Python, whose bare
-    // `asyncio.gather(bm25, ann, confluence)` fails-ALL on a Confluence exception — the docstring's
-    // "best-effort … if it fails … BM25+ANN produces results as usual" intent was never delivered in the
-    // reference code. bm25/ann stay core (their failures still propagate via Promise.all); only the
-    // confluence task is caught (the `.catch` converts a rejection into [] + a degraded flag).
+    // instead of failing the whole retrieval. DIVERGENCE: the original bare gather failed-ALL on a
+    // Confluence exception — the "best-effort on failure" intent was never delivered. bm25/ann stay core
+    // (their failures still propagate via Promise.all); only the confluence task is caught (the `.catch`
+    // converts a rejection into [] + a degraded flag).
     let confluenceDegraded = false;
     const confluencePromise = confluencePort
       .search({
@@ -237,7 +230,7 @@ export class HybridRetriever {
     // mergeSources types `confluenceChunks: Iterable<ConfluenceRetrievedChunk>`, but the Python passes
     // the already-WRAPPED ScoredKnowledgeChunkV1 envelopes here (`# type: ignore[arg-type]`) — merge only
     // reads the `chunk_text` attr via a structural getter, so the wrapped envelopes (whose text lives at
-    // `.chunk.body`, NOT `.chunk_text`) simply never near-dup-match, exactly as in the frozen Python.
+    // `.chunk.body`, NOT `.chunk_text`) simply never near-dup-match (faithfully reproducing the original behavior).
     const [mergedObjects, sourceCounts] = mergeSources({
       repoChunks: [],
       knowledgeChunks: fused.items,

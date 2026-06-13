@@ -1,13 +1,11 @@
-// Node ecosystem dependency parsers — 1:1 TS port of the frozen Python
-//   vendor/codemaster-py/codemaster/review/manifest_parsers/_node.py
-//   (Commit 4 of FOLLOW-UP-manifest-dependency-parsing).
+// Node ecosystem dependency parsers (Commit 4 of FOLLOW-UP-manifest-dependency-parsing).
 //
 // Covers package.json (top-level manifest) + package-lock.json (lockfile v1 + v2+). Only top-level
 // direct dependencies are emitted from lockfiles to honor MAX_DEPENDENCIES_PER_MANIFEST; the full
 // transitive walk stays out of v1 scope.
 //
 // Pure functions: NO I/O, NO clock, NO random. Both parsers JSON.parse the body; on failure they
-// return an empty ParseOutcome (fail-open) — identical to the Python `json.JSONDecodeError` handler.
+// return an empty ParseOutcome (fail-open).
 
 import { ParsedDependencyV1 } from "#contracts/pr_context.v1.js";
 
@@ -15,8 +13,8 @@ import { isRejection, normalizeName } from "./normalize.js";
 import type { NormalizationRejection } from "./normalize.js";
 import type { ParseOutcome } from "./parse_outcome.js";
 
-// Matches the contract field's max_length cap; truncation is defensive so the Pydantic/Zod write never
-// raises on adversarial version_spec input. 1:1 with `_node.py::_VERSION_SPEC_MAX_LENGTH`.
+// Matches the contract field's max_length cap; truncation is defensive so the Zod write never raises on
+// adversarial version_spec input.
 const VERSION_SPEC_MAX_LENGTH = 256;
 
 /** Python `dependency_type` Literal vocabulary used by the npm emitters. */
@@ -31,7 +29,7 @@ const SECTION_TO_TYPE: ReadonlyArray<readonly [string, NpmDependencyType]> = [
   ["peerDependencies", "unknown"], // peer semantics don't fit our taxonomy
 ];
 
-/** Python `isinstance(x, dict)` — a plain JSON object (NOT null, NOT an array). */
+/** A plain JSON object (NOT null, NOT an array). */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -169,7 +167,7 @@ export function parsePackageLockJson(args: { body: string; source_manifest: stri
 
 /**
  * Normalize + emit one npm record. Scoped names (@scope/pkg) pass through `normalizeName` unchanged (the
- * `/` and `@` are in the ASCII regex class). 1:1 with `_node.py::_emit_npm`.
+ * `/` and `@` are in the ASCII regex class).
  */
 function emitNpm(args: {
   rawName: string;

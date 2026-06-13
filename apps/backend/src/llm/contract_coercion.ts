@@ -1,10 +1,8 @@
-// Coerce LLM-output payloads to fit contract string-length constraints — 1:1 port of
-// codemaster/llm/contract_coercion.py::coerce_for_contract.
+// Coerce LLM-output payloads to fit contract string-length constraints.
 //
 // The LLM overshoots `max_length`; this walks a contract's fields and truncates over-length string
 // values BEFORE validation so a length violation never crashes the parser. Pure function (no I/O,
-// clock, random). The Python original introspects Pydantic `model_fields` / annotations; the TS port
-// introspects the equivalent Zod schema — unwrapping the `.strict().superRefine(...)` (+ optional /
+// clock, random). Introspects the Zod schema — unwrapping the `.strict().superRefine(...)` (+ optional /
 // nullable / default) wrappers the registered contracts carry to reach the core ZodObject / ZodString.
 //
 // eslint-disable security/detect-object-injection -- every dynamic key is a CONTRACT-DECLARED field
@@ -16,7 +14,7 @@ import { z } from "zod";
 
 const TRUNCATION_SUFFIX = "...";
 
-/** One truncation event (mirrors the Python frozen dataclass). `contract` is the inner contract name. */
+/** One truncation event. `contract` is the inner contract name. */
 export type TruncationEvent = {
   readonly contract: string;
   readonly field: string;
@@ -37,7 +35,7 @@ function unwrap(schema: z.ZodTypeAny): z.ZodTypeAny {
   }
 }
 
-/** The `max` string-length constraint on a ZodString, or null. Mirrors `_max_length_for`. */
+/** The `max` string-length constraint on a ZodString, or null. */
 function maxLengthOf(schema: z.ZodString): number | null {
   for (const check of schema._def.checks) {
     if (check.kind === "max") return check.value;
@@ -45,16 +43,16 @@ function maxLengthOf(schema: z.ZodString): number | null {
   return null;
 }
 
-/** True iff `value` is a plain (non-array, non-null) object — the Python `isinstance(value, dict)`. */
+/** True iff `value` is a plain (non-array, non-null) object. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
  * For an already-unwrapped field core, return the inner object-schema it bears (or null) and whether
- * the field is a container. Mirrors `_inner_model_from_annotation` + `_annotation_is_container`:
- * a ZodObject is a nested model (not container); ZodArray/ZodTuple/ZodSet are containers whose element
- * may be a model. The returned `inner` may still be wrapped — coerce unwraps it at the top.
+ * the field is a container. A ZodObject is a nested model (not container); ZodArray/ZodTuple/ZodSet
+ * are containers whose element may be a model. The returned `inner` may still be wrapped — coerce
+ * unwraps it at the top.
  */
 function innerModelAndContainer(core: z.ZodTypeAny): {
   inner: z.ZodTypeAny | null;
@@ -88,10 +86,10 @@ function contractName(schema: z.ZodTypeAny): string {
 /**
  * Coerce `payload` to fit `schema`'s string-length constraints. Returns a NEW object (input never
  * mutated). For each field present in the payload: a non-null string longer than its `max` is
- * truncated to `value[:max-3] + "..."` (code-point-exact, matching Python's str slicing); a nested
- * object recurses; a container of objects recurses each element. Unknown / null / non-matching fields
- * pass through untouched. `onTruncate` fires once per truncation (default: no-op — the metric emission
- * lives in the caller; this helper stays pure, like the Python original's sandbox-safe contract).
+ * truncated to `value[:max-3] + "..."` (code-point-exact); a nested object recurses; a container of
+ * objects recurses each element. Unknown / null / non-matching fields pass through untouched.
+ * `onTruncate` fires once per truncation (default: no-op — the metric emission lives in the caller;
+ * this helper stays pure).
  */
 export function coerceForContract(
   payload: Record<string, unknown>,

@@ -1,5 +1,4 @@
-// Per-workflow chunk parallelism — 1:1 port of the frozen Python
-// vendor/codemaster-py/codemaster/review/parallelism.py (Sprint 8 / S8.2.3).
+// Per-workflow chunk parallelism (Sprint 8 / S8.2.3).
 //
 // `fanOutReview` runs at most `concurrency` review-chunk dispatches at a time. The default
 // CHUNK_CONCURRENCY_DEFAULT = 4 matches the Sprint-6 routing-policy slot; callers can override
@@ -141,7 +140,7 @@ export function coerceChunkResult(raw: ReviewChunkResponseV1): CoercedChunkResul
 // fan-in result is discarded (the externally-observable "first error re-raised, success ordering
 // preserved" contract of the Python task-group).
 //
-// FIX #11 — CANCEL-PEERS HARDENING DIVERGENCE (owner-requested; NOT a 1:1 port detail).
+// FIX #11 — CANCEL-PEERS HARDENING DIVERGENCE (owner-requested).
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 // Python's `anyio.create_task_group()` CANCELS every peer task the instant one task raises — tasks
 // still parked at `async with semaphore` (not yet inside `invoke`) are cancelled before they ever
@@ -292,7 +291,7 @@ export async function fanOutReview(
       if (failureSlots[idx] !== undefined) {
         continue; // fail-soft: the failed chunk contributes zero findings + zero intents.
       }
-      // istanbul ignore next — defensive: unreachable on the success path (mirrors the Python asserts).
+      // istanbul ignore next — defensive: unreachable on the success path.
       throw new Error("fanOutReview: result slot unexpectedly empty after fan-in");
     }
     const [findings, intents] = slot;

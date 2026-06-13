@@ -1,22 +1,17 @@
-// doReview + bedrockReviewChunk — 1:1 port of the frozen Python
-//   vendor/codemaster-py/codemaster/review/activities.py::_do_review (972-1177) and
-//   ReviewActivities.bedrock_review_chunk (1200-1224).
+// doReview + bedrockReviewChunk.
 //
 // doReview drives one review-chunk LLM invocation and returns (findings, intents, sanitization_event).
 // bedrockReviewChunk wraps that into the ReviewChunkResponseV1 envelope — the activity return shape.
 //
 // The OBSERVABLE OUTPUT is the ReviewChunkResponseV1 — a DETERMINISTIC pure transform of the cassette
-// LLM response. doReview composes the (already-ported) reuse modules: buildSystemPrompt +
-// buildCachedReviewPrompt (the LLM input — W2.2 cache-ordered: the byte-stable PR prefix before the
-// per-chunk suffix so the Anthropic/Bedrock prompt cache can re-bill the shared prefix at ~10%), the
-// LlmClient.invokeModel transform (which runs the REAL output-safety validator), and
-// parseWithSkipMalformed (the scope/evidence-enforcing parser). The three error paths + the
-// sanitize-and-continue branch are ported byte-faithfully. (The pre-W2.2 single-user-message
-// assembly, buildUserMessage, stays byte-frozen in prompt_builder.ts for the Python parity oracle.)
+// LLM response. doReview composes: buildSystemPrompt + buildCachedReviewPrompt (the LLM input — W2.2
+// cache-ordered: the byte-stable PR prefix before the per-chunk suffix so the Anthropic/Bedrock prompt
+// cache can re-bill the shared prefix at ~10%), the LlmClient.invokeModel transform (which runs the
+// REAL output-safety validator), and parseWithSkipMalformed (the scope/evidence-enforcing parser).
+// The three error paths + the sanitize-and-continue branch are handled exactly.
 //
-// Temporal mapping: the Python raises `temporalio.exceptions.ApplicationError(msg, type=..., non_retryable=...)`.
-// Faults are raised as ActivityError (review/activity_error.ts) carrying the type NAME the runner
-// (the same class the Python ApplicationError serializes to over the wire).
+// Faults are raised as ActivityError (review/activity_error.ts) carrying the type NAME the runner's
+// retry classifier matches on.
 
 import { createHash } from "node:crypto";
 
@@ -61,9 +56,9 @@ export const REVIEW_TOOL_SCHEMA_VERSION = `rfs-${createHash("sha256")
   .slice(0, 16)}`;
 
 /**
- * `_evidence_ids_from_context` (Python ~840-862): the allowed-evidence-id set the parser enforces.
+ * The allowed-evidence-id set the parser enforces.
  *   * empty `retrieved_evidence` → `null` ("no v10 manifest was issued for this chunk"; validation
- *     disabled — back-compat). This is NOT `frozenset()` (which would mean "evidence explicitly
+ *     disabled — back-compat). This is NOT an empty frozen set (which would mean "evidence explicitly
  *     forbidden"); the distinction is load-bearing for the parser kwarg semantics.
  *   * otherwise → the set of `ev.evidence_id`.
  */
@@ -82,7 +77,7 @@ export type DoReviewResult = {
 };
 
 /**
- * Drive a single review-chunk invocation. 1:1 with the Python `_do_review`.
+ * Drive a single review-chunk invocation.
  *
  * ADR-0060 step 0: when `model` is undefined (the default), it resolves from the central purpose→model
  * seed for `review_finding` (unchanged value: claude-sonnet-4-6). An explicit `model` still overrides.
@@ -120,7 +115,7 @@ export async function doReview(
   // `cachePrefixMessages: 2` tells the SDK adapter where to place `cache_control:{type:"ephemeral"}`,
   // so the (tools + system + stable-prefix) bytes are billed full price once per review and at ~10%
   // (cache read) on every other chunk call. The pre-W2.2 single-user-message assembly
-  // (buildUserMessage) remains byte-frozen for the Python parity oracle; the LLM-visible content here
+  // (buildUserMessage) remains byte-frozen for the parity oracle; the LLM-visible content here
   // is the SAME blocks reordered (pinned by test/unit/review/prompt_cache_split.test.ts).
   const systemPrompt = buildSystemPrompt({ policyRevision: context.policy_revision });
   const { stablePrefix, chunkSuffix } = buildCachedReviewPrompt(context);
@@ -180,8 +175,8 @@ export async function doReview(
       });
     }
     // (b) Output unsafe → SANITIZE-AND-CONTINUE iff the decision reasons INCLUDE secret_leaked AND
-    //     secret findings exist (Python 1076: `"secret_leaked" not in reasons or not findings` → terminal);
-    //     otherwise non-retryable. A secret_leaked reason alongside a non-secret reason still sanitizes.
+    //     secret findings exist; otherwise non-retryable. A secret_leaked reason alongside a non-secret
+    //     reason still sanitizes.
     if (e instanceof LlmOutputUnsafeError) {
       return sanitizeAndContinue(e, context);
     }
@@ -210,10 +205,10 @@ export async function doReview(
 }
 
 /**
- * The output-safety sanitize-and-continue branch (Python 1067-1136). The EXACT condition: the decision
- * reasons must include `secret_leaked` AND carry secret findings; otherwise the block is terminal
- * (length / privileged_tag / tool_call_shape indicate a structurally-broken response, not a sanitizable
- * one) → non-retryable ActivityError.
+ * The output-safety sanitize-and-continue branch. The EXACT condition: the decision reasons must
+ * include `secret_leaked` AND carry secret findings; otherwise the block is terminal (length /
+ * privileged_tag / tool_call_shape indicate a structurally-broken response, not a sanitizable one)
+ * → non-retryable ActivityError.
  */
 function sanitizeAndContinue(e: LlmOutputUnsafeError, context: ReviewContextV1): DoReviewResult {
   const decision = e.decision;
@@ -267,12 +262,9 @@ function sanitizeAndContinue(e: LlmOutputUnsafeError, context: ReviewContextV1):
 }
 
 /**
- * The `bedrock_review_chunk` activity body (Python 1200-1224). Resolves the LlmClient via the injected
- * cache, drives doReview, and wraps the 3-tuple into the ReviewChunkResponseV1 envelope.
- *
- * The Python keeps the cache on a `ReviewActivities` instance because Temporal disallows keyword-only
- * args on activity functions; the TS port takes the cache as an explicit collaborator (worker bootstrap
- * binds it).
+ * The `bedrock_review_chunk` activity body. Resolves the LlmClient via the injected cache, drives
+ * doReview, and wraps the 3-tuple into the ReviewChunkResponseV1 envelope. The cache is an explicit
+ * collaborator (worker bootstrap binds it).
  */
 export async function bedrockReviewChunk(
   context: ReviewContextV1,

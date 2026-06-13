@@ -1,26 +1,20 @@
 /**
- * Prompt-assembly OTel metric helpers — 1:1 port of the frozen Python
- * `codemaster/observability/prompt_assembly_metrics.py` (Sprint 26 / B-4 + R-10 follow-up).
+ * Prompt-assembly OTel metric helpers (Sprint 26 / B-4 + R-10 follow-up). Counter family for
+ * `codemaster.review.prompt_assembler.assemblePrompt`. Emitted from the review-chunk-activity body
+ * (activity context, NOT the workflow sandbox), so the meter routes through
+ * `#platform/observability/metrics.js::getMeter`. The seam returns a no-op Meter when no
+ * MeterProvider is registered, so emission is optional/defensive: instruments register and `.add()`
+ * calls are no-ops until an exporter is wired (no null-checks, no TODOs).
  *
- * Counter family for `codemaster.review.prompt_assembler.assemblePrompt`. Emitted from the
- * review-chunk-activity body (activity context, NOT the workflow sandbox), so the meter routes through
- * the standard `#platform/observability/metrics.js::getMeter` seam — the same activity-runtime meter
- * the sibling counter modules (policy_metrics.ts, chunk_response_parser.ts) use. The seam returns a
- * no-op Meter when no MeterProvider is registered, so emission is optional/defensive: instruments
- * register and `.add()` calls are no-ops until an exporter is wired (no null-checks, no TODOs).
+ * `@opentelemetry/api` always resolves and `getMeter` always returns a Meter (no-op when no
+ * provider), so no import guard is needed — the no-op Meter IS the "OTel SDK absent" behaviour.
  *
- * The Python module lazy-imports `opentelemetry.metrics` and no-ops on ImportError; `@opentelemetry/api`
- * always resolves and `getMeter` always returns a Meter (no-op when no provider), so the TS port needs
- * no import guard — the no-op Meter IS the "OTel SDK absent" behaviour.
- *
- * ## Cardinality discipline (the same the Python module enforces)
+ * ## Cardinality discipline
  * NO `installation_id` / `repository_id` / per-PR labels. Labels restricted to bounded enum spaces
  * (5 categories × 3 intents = 15 label combinations max). Per-installation drill-down lives in Tempo
  * traces (span attributes), NOT in metric labels.
  *
- * Counter NAMES copied VERBATIM from the Python `*_NAME` constants (Grafana-query-stable; a rename
- * requires an ADR) so the deferred metric-name-parity gate passes and existing dashboards/alerts map
- * unchanged.
+ * Counter NAMES are Grafana-query-stable; a rename requires an ADR.
  */
 import { type Counter, getMeter } from "#platform/observability/metrics.js";
 
@@ -34,9 +28,8 @@ export const OVER_BUDGET_FORCED_INCLUDE_NAME =
   "codemaster_review_prompt_over_budget_forced_include_total";
 export const KNOWLEDGE_DROPPED_NAME = "codemaster_review_prompt_knowledge_dropped_total";
 
-// Meter + instruments cached at MODULE scope (created once at import), mirroring the Python lazy-cache
-// that avoids per-emit create_* lock contention. Meter name = the dotted module path the Python uses
-// (`get_meter("codemaster.review.prompt_assembler")`).
+// Meter + instruments cached at MODULE scope (created once at import) to avoid per-emit create_*
+// lock contention.
 const METER = getMeter("codemaster.review.prompt_assembler");
 
 const POLICY_TOKENS_COUNTER: Counter = METER.createCounter(POLICY_TOKENS_NAME, {
@@ -92,7 +85,7 @@ export function recordKnowledgeDropped(n: number): void {
 /**
  * Emit all 5 counters for one AssembledPromptV1 envelope. Called from the review-chunk activity body
  * (the prompt builder's budget path) after each assemblePrompt call. Reads counts off the envelope; no
- * additional state needed. 1:1 with the Python `emit_assembled_prompt_counters`.
+ * additional state needed.
  *
  * R-25 (multi-lens audit 2026-05-22) — reads the explicit `policy_tokens` + `knowledge_tokens` +
  * `forced_rules` fields the assembler emits, so per-half token attribution and per-rule forced-include

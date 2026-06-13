@@ -1,6 +1,5 @@
-// Finding-delivery-lifecycle metrics — port of the lifecycle counters in the frozen Python
-// vendor/codemaster-py/codemaster/observability/finding_lifecycle_metrics.py (ADR-0056). Closes
-// FOLLOW-UP-lifecycle-bookkeeping-otel-counters from Stage 3.
+// Finding-delivery-lifecycle metrics (ADR-0056). Closes FOLLOW-UP-lifecycle-bookkeeping-otel-counters
+// from Stage 3.
 //
 // SCOPE (this module): the two counters the lifecycle-bookkeeping block emits —
 //   * codemaster_finding_lifecycle_setter_succeeded_total{setter}        (H-3)
@@ -27,7 +26,7 @@ export type LifecycleSuccessLabel = "finalized" | "skipped" | "degraded";
 /** The setter label on the FAILED counter (includes the F9 finalized_len_mismatch failure-only value). */
 export type LifecycleFailureLabel = "finalized" | "skipped" | "degraded" | "finalized_len_mismatch";
 
-// Counter NAMES — copied VERBATIM from the Python constants (dashboard/alert stable).
+// Counter NAMES — dashboard/alert stable; renaming requires ADR.
 export const LIFECYCLE_SETTER_SUCCEEDED_COUNTER_NAME =
   "codemaster_finding_lifecycle_setter_succeeded_total";
 export const LIFECYCLE_SETTER_FAILED_COUNTER_NAME =
@@ -50,7 +49,6 @@ const FAILED: Counter = METER.createCounter(LIFECYCLE_SETTER_FAILED_COUNTER_NAME
 
 /**
  * Increment the setter-succeeded counter — called immediately after a lifecycle dispatch returns cleanly.
- * 1:1 with `record_lifecycle_setter_succeeded`.
  */
 export function recordLifecycleSetterSucceeded(args: { setter: LifecycleSuccessLabel }): void {
   SUCCEEDED.add(1, { setter: args.setter });
@@ -59,7 +57,7 @@ export function recordLifecycleSetterSucceeded(args: { setter: LifecycleSuccessL
 /**
  * Increment the setter-failed counter — called when a lifecycle dispatch raises (or the F9
  * finalized_len_mismatch path fires). The `retryable` label is the string form `"true"` / `"false"`
- * (the Prometheus bool serialization convention). 1:1 with `record_lifecycle_setter_failed`.
+ * (the Prometheus bool serialization convention).
  */
 export function recordLifecycleSetterFailed(args: {
   setter: LifecycleFailureLabel;

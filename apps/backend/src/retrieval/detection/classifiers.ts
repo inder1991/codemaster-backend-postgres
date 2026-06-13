@@ -1,10 +1,4 @@
-// classifiers — port of the frozen Python file-classifier stage (Sub-spec B T2):
-//   vendor/codemaster-py/codemaster/retrieval/detection/classifiers/generated.py::classify_generated
-//   vendor/codemaster-py/codemaster/retrieval/detection/classifiers/vendored.py::classify_vendored
-//   vendor/codemaster-py/codemaster/retrieval/detection/classifiers/test.py::classify_test
-//   vendor/codemaster-py/codemaster/retrieval/detection/classifiers/classify_files.py::classify_files
-//
-// Stage-1 of the detection pipeline (spec §3.5 line 369-371). Walks `PRContext.changed_files` and
+// classifiers — Stage-1 of the detection pipeline (spec §3.5 line 369-371). Walks `PRContext.changed_files` and
 // rebuilds it with the `classification` field populated from the per-classifier outputs. Pure functions
 // — replay-safe (no I/O, no clock, no random).
 
@@ -13,7 +7,7 @@ import type { ChangedFile, FileClassification, PRContext } from "#contracts/pr_c
 /** One classifier pattern: a regex + the reason string emitted on first match. */
 type ClassifierPattern = readonly [RegExp, string];
 
-// ─── Generated-file patterns (1:1 with Python `_GENERATED_PATTERNS`) ───────────────────────────────
+// ─── Generated-file patterns ────────────────────────────────────────────────────────────────────────
 // Order matters only for the `reason` attribution — the first-matching pattern wins.
 const GENERATED_PATTERNS: ReadonlyArray<ClassifierPattern> = [
   // protobuf
@@ -36,7 +30,7 @@ const GENERATED_PATTERNS: ReadonlyArray<ClassifierPattern> = [
   [/(?:^|\/)__generated__\//, "double-underscore-generated"],
 ];
 
-// ─── Vendored-file patterns (1:1 with Python `_VENDORED_PATTERNS`) ─────────────────────────────────
+// ─── Vendored-file patterns ──────────────────────────────────────────────────────────────────────────
 const VENDORED_PATTERNS: ReadonlyArray<ClassifierPattern> = [
   // More-specific patterns first so reason attribution is precise.
   [/(?:^|\/)vendor\/bundle\//, "bundler-vendor"],
@@ -50,7 +44,7 @@ const VENDORED_PATTERNS: ReadonlyArray<ClassifierPattern> = [
   [/(?:^|\/)Godeps\//, "godeps"],
 ];
 
-// ─── Test-file patterns (1:1 with Python `_TEST_PATTERNS`) ─────────────────────────────────────────
+// ─── Test-file patterns ──────────────────────────────────────────────────────────────────────────────
 const TEST_PATTERNS: ReadonlyArray<ClassifierPattern> = [
   // Path-segment matches
   [/(?:^|\/)tests?\//, "tests-dir"],
@@ -68,7 +62,7 @@ const TEST_PATTERNS: ReadonlyArray<ClassifierPattern> = [
   [/Spec\.(scala|kt)$/, "jvm-spec-suffix"],
 ];
 
-/** First-matching pattern → `[true, reason]`; no match → `[false, null]` (Python `classify_*`). */
+/** First-matching pattern → `[true, reason]`; no match → `[false, null]`. */
 function classify(path: string, patterns: ReadonlyArray<ClassifierPattern>): readonly [boolean, string | null] {
   for (const [rx, reason] of patterns) {
     if (rx.test(path)) {
@@ -78,25 +72,24 @@ function classify(path: string, patterns: ReadonlyArray<ClassifierPattern>): rea
   return [false, null] as const;
 }
 
-/** Return `(is_generated, reason)` (1:1 with Python `classify_generated`). */
+/** Return `(is_generated, reason)`. */
 export function classifyGenerated(path: string): readonly [boolean, string | null] {
   return classify(path, GENERATED_PATTERNS);
 }
 
-/** Return `(is_vendored, reason)` (1:1 with Python `classify_vendored`). */
+/** Return `(is_vendored, reason)`. */
 export function classifyVendored(path: string): readonly [boolean, string | null] {
   return classify(path, VENDORED_PATTERNS);
 }
 
-/** Return `(is_test, reason)` (1:1 with Python `classify_test`). */
+/** Return `(is_test, reason)`. */
 export function classifyTest(path: string): readonly [boolean, string | null] {
   return classify(path, TEST_PATTERNS);
 }
 
 /**
- * Return a new PRContext with every ChangedFile's classification populated (1:1 with Python
- * `classify_files`). Pre-existing non-default classifications on the input are preserved verbatim —
- * never silently overwritten.
+ * Return a new PRContext with every ChangedFile's classification populated. Pre-existing non-default
+ * classifications on the input are preserved verbatim — never silently overwritten.
  */
 export function classifyFiles(ctx: PRContext): PRContext {
   const newFiles: Array<ChangedFile> = [];

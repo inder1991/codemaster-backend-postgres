@@ -1,5 +1,4 @@
-// rule_id — 1:1 port of the frozen Python codemaster/policy/rule_id.py
-// (Sprint 25 / A-2 stable rule_id + normalized_hash).
+// rule_id — stable rule_id + normalized_hash (Sprint 25 / A-2).
 //
 // Two pure deterministic helpers:
 //   - deriveRuleId(...)        → `<CAT>-<scope-slug>-<title-slug>-<short-hash>`
@@ -8,17 +7,10 @@
 // rule_extractor depends on both. Kept in its own module so it is testable in isolation and reused
 // across consumers (matches the source layout).
 //
-// Byte-parity notes (vs the frozen Python re/hashlib):
-//   - hashlib.sha256(s.encode("utf-8")).hexdigest() → createHash("sha256").update(s,"utf8").digest("hex").
-//     `createHash` is a deterministic hash (NOT randomness) — outside the clock/random gate's scope.
-//   - The slug/markdown-strip regexes mirror the Python `re.compile` patterns verbatim. Python flags
-//     map: re.MULTILINE → /m, re.DOTALL → /s. `re.sub` global replace → /g on every pattern.
-//   - The punctuation-collapse class `[.,;:'\"!?\\-‐‑‒–—―]+` carries the same Unicode dash variants
-//     (U+2010..U+2015) verbatim; JS character classes treat them identically.
-//   - `_slugify` truncates to max_len with `s.slice(0, max_len)` then `.rstrip("-")` →
-//     trailing-hyphen strip via a right-anchored replace. Python `str.strip("-")` strips BOTH ends;
-//     `_NON_SLUG_CHARS_RE`/`_MULTI_HYPHEN_RE` already collapse runs, so only end-trim remains.
-//   - `.lower()` → `.toLowerCase()` (ASCII-equivalent for the slug/normalize char domain).
+// Implementation notes:
+//   - `createHash` is a deterministic hash (NOT randomness) — outside the clock/random gate's scope.
+//   - The punctuation-collapse class carries the Unicode dash variants (U+2010..U+2015).
+//   - `slugify` truncates to max_len then strips a trailing hyphen the cut may have introduced.
 
 import { createHash } from "node:crypto";
 
@@ -46,7 +38,7 @@ const NON_SLUG_CHARS_RE = /[^a-z0-9-]+/g;
 const MULTI_HYPHEN_RE = /-+/g;
 
 // Markdown formatting patterns stripped during normalization. ORDER matters: longer / more-specific
-// patterns first (mirrors the Python tuple order exactly). `$1` reproduces Python's `\1` backref.
+// patterns first. `$1` is the backref for captured inner text.
 const MARKDOWN_STRIP_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   // Code fences (triple-backtick); strip fence markers, keep the body. Non-greedy.
   [/```[a-zA-Z0-9]*\n/gm, ""],
@@ -73,11 +65,10 @@ const MARKDOWN_STRIP_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/[.,;:'"!?\-‐‑‒–—―]+/g, " "],
 ];
 
-// Whitespace collapse — \s in JS matches the same ASCII whitespace class Python's `\s` does for the
-// in-domain inputs. Global so every run collapses.
+// Whitespace collapse — global so every run collapses.
 const WHITESPACE_RE = /\s+/g;
 
-/** sha256 hex digest over the UTF-8 bytes of `s`. Deterministic — no randomness seam needed. */
+/** sha256 hex digest over the UTF-8 bytes of `s`. Deterministic. */
 function sha256Hex(s: string): string {
   return createHash("sha256").update(s, "utf8").digest("hex");
 }
@@ -97,16 +88,16 @@ function slugify(text: string, maxLen: number = MAX_SLUG_LEN): string {
   if (!s) {
     return "unnamed";
   }
-  // Truncate then right-strip a trailing hyphen the cut may have left (Python `[:max].rstrip("-")`).
+  // Truncate then right-strip a trailing hyphen the cut may have left.
   return rstripHyphens(s.slice(0, maxLen));
 }
 
-/** Strip leading + trailing '-' (Python str.strip("-")). */
+/** Strip leading + trailing '-'. */
 function stripHyphens(s: string): string {
   return s.replace(/^-+/, "").replace(/-+$/, "");
 }
 
-/** Strip trailing '-' only (Python str.rstrip("-")). */
+/** Strip trailing '-' only. */
 function rstripHyphens(s: string): string {
   return s.replace(/-+$/, "");
 }
@@ -132,8 +123,7 @@ export function deriveRuleId(args: {
 
   // eslint-disable-next-line security/detect-object-injection -- read-only lookup in a frozen const map keyed by the RuleCategory enum (5 fixed values), not user input
   const cat = CATEGORY_SHORTCODES[category];
-  // Python: `_slugify(scope_dir.replace("/", "-")) if scope_dir else "root"`. Note Python
-  // `str.replace("/", "-")` replaces ALL occurrences → JS `replaceAll`.
+  // `scope_dir.replaceAll("/", "-")` so nested dirs produce a single slug segment.
   const scopeSlug = scope_dir ? slugify(scope_dir.replaceAll("/", "-")) : "root";
   const titleSlug = slugify(title);
   // Stable hash material: source_file + "/"-joined heading_path + rule_index + normalized_hash.

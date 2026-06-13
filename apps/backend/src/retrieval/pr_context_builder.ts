@@ -1,8 +1,4 @@
-// pr_context_builder — port of the frozen Python
-//   vendor/codemaster-py/codemaster/review/pr_context_builder.py
-//   (closes FOLLOW-UP-confluence-pr-context-full-pr).
-//
-// The Sub-spec B T17 wiring constructs a {@link PRContext} for every chunk it sends to
+// pr_context_builder (closes FOLLOW-UP-confluence-pr-context-full-pr) — the Sub-spec B T17 wiring constructs a {@link PRContext} for every chunk it sends to
 // `retrieve_knowledge_activity`. Two pure helpers build it:
 //
 //   - `buildPrContextFull` uses the enrichment result captured at the top of the workflow body
@@ -17,14 +13,14 @@
 // `workflow.patched("confluence-pr-context-full-pr")`).
 //
 // ── classify_files seam ─────────────────────────────────────────────────────────────────────────
-// The Python `build_pr_context_full` calls the detection-pipeline orchestrator
-// `codemaster.retrieval.detection.classifiers.classify_files` directly to populate each ChangedFile's
+// `buildPrContextFull` calls the detection-pipeline orchestrator {@link classifyFiles} to populate each
+// ChangedFile's
 // `classification` (is_generated / is_vendored / is_test). That subsystem IS now ported
 // ({@link classifyFiles} in retrieval/detection/classifiers.ts), and `buildPrContextFull` DEFAULTS to it
-// — so classification flags populate exactly as in Python (Tier-1-parity-tested). The classifier stays an
+// — so classification flags populate exactly as intended (Tier-1-parity-tested). The classifier stays an
 // INJECTED seam ({@link PrContextClassifier}) so tests can substitute a stub; {@link identityClassifier}
 // is the no-op opt-out. All other fields (path / additions / deletions order, head_sha + branch
-// passthrough, manifest threading) are byte-for-byte 1:1 with the frozen Python.
+// passthrough, and manifest threading.
 
 import {
   ChangedFile,
@@ -38,8 +34,8 @@ import type { PrFilesEnrichmentResultV1 } from "#contracts/pr_files_enrichment.v
 import { classifyFiles } from "#backend/retrieval/detection/classifiers.js";
 
 /**
- * The detection-pipeline classifier seam (Python `classify_files: (PRContext) -> PRContext`). Takes a
- * raw PRContext + returns one with every ChangedFile's `classification` populated. Replay-safe (pure).
+ * The detection-pipeline classifier seam: takes a raw PRContext + returns one with every
+ * ChangedFile's `classification` populated. Replay-safe (pure).
  */
 export type PrContextClassifier = (ctx: PRContext) => PRContext;
 
@@ -65,16 +61,15 @@ function changedFileFromPrFile(pf: PrFileV1): ChangedFile {
 }
 
 /**
- * Build the workflow-body-level full-PR PRContext from the `enrich_pr_files_activity_v2` result
- * (1:1 with the Python `build_pr_context_full`).
+ * Build the workflow-body-level full-PR PRContext from the `enrich_pr_files_activity_v2` result.
  *
  * Returns `null` when `enrichment` is `null`/`undefined` — the workflow's enrich step is fail-open
  * (skipped / v1-replay / errored branches all leave enrichment unbound). When this returns null, the
  * caller falls back to {@link buildPrContextMvp} per chunk.
  *
- * Each ChangedFile is passed through the injected {@link PrContextClassifier} (Python's `classify_files`)
- * so `classification` is populated at construction time. `manifestSnapshots` defaults to `[]` (the
- * pre-manifest behavior); the workflow body threads `fetch_manifest_snapshots_activity`'s result here.
+ * Each ChangedFile is passed through the injected {@link PrContextClassifier} so `classification` is
+ * populated at construction time. `manifestSnapshots` defaults to `[]` (the pre-manifest behavior);
+ * the workflow body threads `fetch_manifest_snapshots_activity`'s result here.
  */
 export function buildPrContextFull(args: {
   prId: string;
@@ -90,8 +85,8 @@ export function buildPrContextFull(args: {
   if (enrichment === null || enrichment === undefined) {
     return null;
   }
-  // Default to the real detection-pipeline classify_files (1:1 with Python's build_pr_context_full, which
-  // always classifies). Callers may still inject a stub via `classify` for testing. Pure + replay-safe.
+  // Default to the real detection-pipeline classify_files (always classifies, matching the intended behavior).
+  // Callers may still inject a stub via `classify` for testing. Pure + replay-safe.
   const classify = args.classify ?? classifyFiles;
   const rawCtx = PRContext.parse({
     pr_id: args.prId,
@@ -104,8 +99,7 @@ export function buildPrContextFull(args: {
 }
 
 /**
- * Legacy per-chunk single-file PRContext shipped in Sub-spec B T17 MVP wiring (1:1 with the Python
- * `build_pr_context_mvp`).
+ * Legacy per-chunk single-file PRContext shipped in Sub-spec B T17 MVP wiring.
  *
  * Kept available for the unpatched-replay path so in-flight workflows that started before
  * `workflow.patched("confluence-pr-context-full-pr")` landed continue to replay deterministically.
@@ -134,7 +128,7 @@ export function buildPrContextMvp(args: {
 }
 
 /**
- * Convenience selector used by the workflow body (1:1 with the Python `pick_pr_context`).
+ * Convenience selector used by the workflow body.
  *
  * Returns the full PR context when `useFull` is true AND the enrichment is usable; falls back to the MVP
  * per-chunk context otherwise. The boolean is passed in (not derived here) so the workflow body owns the

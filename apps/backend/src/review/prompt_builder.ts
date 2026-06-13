@@ -1,31 +1,22 @@
-// Byte-exact port of the codemaster review-chunk USER-MESSAGE builder
-// (vendor/codemaster-py/codemaster/review/activities.py::_build_user_message and its pure render
-// helpers, plus codemaster/llm/review_prompt.py::build_linter_aware_review_prompt and
-// codemaster/policy/prompt_renderer.py::render_policy_blocks).
+// Review-chunk USER-MESSAGE builder.
 //
 // PARITY-CRITICAL: buildUserMessage produces the LLM INPUT for bedrock_review_chunk. The dual-run
 // replays the recorded LLM interaction, so a single-char drift here = a different recorded
-// interaction. Every space, newline, markdown header, truncation boundary, ordering and number
-// format mirrors the frozen Python EXACTLY. The review_prompt.parity.test.ts oracle asserts
-// char-for-char equality against the live frozen Python over representative ReviewContextV1 inputs.
+// interaction. Every space, newline, markdown header, truncation boundary, ordering and number format
+// must be byte-exact. The review_prompt.parity.test.ts oracle asserts char-for-char equality over
+// representative ReviewContextV1 inputs.
 //
 // PURE FUNCTION: no clock, no random, no IO. (check_clock_random scans this file.)
 //
 // TOKEN COUNTING: the manifest/evidence truncation boundaries use the codebase's `estimateTokens`
-// 4-chars-per-token heuristic with the non-ASCII safety factor (port of
-// codemaster/chunking/token_budget.py::estimate_tokens). This is a DETERMINISTIC char heuristic — NOT
-// a real tokenizer — so it ports to TS byte-for-byte with no tokenizer-equivalence risk. See the
-// per-function notes + the parity test's over-budget fixtures.
+// 4-chars-per-token heuristic with the non-ASCII safety factor. This is a DETERMINISTIC char heuristic
+// — NOT a real tokenizer — so it is byte-for-byte reproducible. See the per-function notes + the
+// parity test's over-budget fixtures.
 //
-// BUDGET ENFORCEMENT: `_apply_budget` in Python trims policy + knowledge through the
-// `assemble_prompt` budget subsystem ONLY when `context.budget_enforcement` (or the
-// CODEMASTER_PROMPT_BUDGET_ENFORCEMENT env var) is truthy. That subsystem is now ported
-// (apps/backend/src/review/prompt_assembler.ts — byte-exact, Tier-1 parity-tested), so `applyBudget`
-// below reproduces BOTH paths 1:1: the budget-OFF path (the default — context fields unchanged) AND
-// the budget-ON path (rank-then-wholesale-drop via assemblePrompt, with resolution_explanation
-// projected to the kept rule_ids). The pure builder has NO process-env access (replay determinism), so
-// only the contract flag `context.budget_enforcement` is honored — the env-var fallback in the Python
-// `_apply_budget` is for in-flight pre-R-35 workflow histories the worker resolves, not this builder.
+// BUDGET ENFORCEMENT: `applyBudget` below reproduces BOTH paths: the budget-OFF path (the default —
+// context fields unchanged) AND the budget-ON path (rank-then-wholesale-drop via assemblePrompt, with
+// resolution_explanation projected to the kept rule_ids). The pure builder has NO process-env access
+// (replay determinism), so only the contract flag `context.budget_enforcement` is honored.
 
 import type { ManifestSnapshot } from "#contracts/pr_context.v1.js";
 import { ManifestFetchStatus } from "#contracts/pr_context.v1.js";
@@ -57,7 +48,7 @@ const ASCII_MAX = 127;
 const NON_ASCII_FACTOR_THRESHOLD = 0.1;
 
 /**
- * 4-chars-per-token proxy. Matches the frozen Python `estimate_tokens` exactly.
+ * 4-chars-per-token proxy (byte-identical to the parity oracle's `estimate_tokens`).
  *
  * Python iterates Unicode CODE POINTS (`for c in body`) and tests `ord(c) > 127`; the share is over
  * `len(body)` (code-point count). JS `[...body]` iterates code points too, and `s.length` here is the
@@ -765,8 +756,8 @@ function applyBudget(
 
   // Wrap bare KnowledgeChunkV1 in ScoredKnowledgeChunkV1 so assemblePrompt can token-cost them. Score
   // is a placeholder (RetrieveKnowledgeActivity already ranked via RRF; B-4's budget enforcer doesn't
-  // re-rank, just takes in-order). 1:1 with the Python `ScoredKnowledgeChunkV1(chunk=c, score=1.0,
-  // stage="rrf")` wrapping.
+  // re-rank, just takes in-order). Wrapped as `ScoredKnowledgeChunkV1(chunk=c, score=1.0,
+  // stage="rrf")` for the budget enforcer.
   const scoredKnowledge: ReadonlyArray<ScoredKnowledgeChunkV1> = context.retrieved_knowledge.map(
     (c) => ({ schema_version: 1, chunk: c, score: 1.0, stage: "rrf" }),
   );
@@ -777,8 +768,8 @@ function applyBudget(
   emitAssembledPromptCounters(assembled);
 
   // R-4 — project resolution_explanation to kept rule_ids so the ResolvedGuidanceBundleV1
-  // parallel-tuple invariant survives the trim. 1:1 with the Python `model_copy(update={...})`: keep
-  // every other bundle field (schema_version, changed_path), replace applicable_rules with the kept
+  // parallel-tuple invariant survives the trim. Keep every other bundle field (schema_version,
+  // changed_path), replace applicable_rules with the kept
   // policy_blocks, and filter resolution_explanation to the entries whose rule was kept.
   let policyForRender: ResolvedGuidanceBundleV1 | null = context.applicable_policy;
   if (context.applicable_policy !== null) {

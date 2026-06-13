@@ -1,7 +1,4 @@
-// precedence — port of the frozen Python
-//   vendor/codemaster-py/codemaster/retrieval/precedence.py (Sub-spec B T7).
-//
-// Pure-function module. Three responsibilities:
+// precedence (Sub-spec B T7) — pure-function module. Three responsibilities:
 //   1. `priorityTier(chunk)`  — classify a retrieved chunk into one of five priority tiers
 //      (SECURITY_POLICY < REPO_ADR < FRAMEWORK_GUIDANCE < LANG_GUIDANCE < DEFAULT_ONLY).
 //   2. `deriveAuthority(tier)` — map tier → authority class for the `<knowledge authority="...">`
@@ -60,7 +57,7 @@ export type PriorityClassifiable = {
 };
 
 /**
- * Classify a chunk into a priority tier (1:1 with the Python `priority_tier`).
+ * Classify a chunk into a priority tier.
  *
  * Spec §3.4 line 638-651 verbatim:
  *   1. If `topic:security_policy` in labels → SECURITY_POLICY.

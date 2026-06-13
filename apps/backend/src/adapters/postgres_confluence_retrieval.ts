@@ -1,7 +1,5 @@
-// postgres_confluence_retrieval — port of the frozen Python
-//   vendor/codemaster-py/codemaster/adapters/postgres_confluence_retrieval.py::PostgresConfluenceRetrieval
-//   (Sub-spec B T10 + Phase 4 T4.2A). Production impl of `ConfluenceRetrievalPort`
-//   (`apps/backend/src/retrieval/confluence_source.ts`).
+// postgres_confluence_retrieval — production impl of `ConfluenceRetrievalPort`
+//   (`apps/backend/src/retrieval/confluence_source.ts`). Sub-spec B T10 + Phase 4 T4.2A.
 //
 // Adapter responsibilities (spec §3.4 + §3.7 + r3 P0-2/P1 + §8):
 //
@@ -31,12 +29,10 @@
 // ── Cross-tenant access posture (PLATFORM-SHARED) ──────────────────────────────────────────────────
 // `core.confluence_chunks` is a PLATFORM-SHARED corpus (migration 0063 dropped `installation_id`). The
 // adapter intentionally does NOT filter on `installation_id`; every active installation sees the same
-// approved Confluence content. This mirrors the Python `@privileged_path` + `cross_tenant_audit=True`
-// by-design cross-tenant access (confluence_source.py:10). In the TS registry,
-// `core.confluence_chunks` / `core.chunk_embeddings` / `core.confluence_page_approvals` are NOT in
-// `TENANT_SCOPED_TABLES` (already de-scoped), so the raw-SQL tenancy gate does not police these
-// queries — but the `// tenant:exempt` marker is retained on each `sql` site to make the by-design
-// cross-tenant intent explicit (matching the frozen Python's tenancy-exemption marker).
+// approved Confluence content. `core.confluence_chunks` / `core.chunk_embeddings` /
+// `core.confluence_page_approvals` are NOT in `TENANT_SCOPED_TABLES` (already de-scoped), so the
+// raw-SQL tenancy gate does not police these queries — but the `// tenant:exempt` marker is retained on
+// each `sql` site to make the by-design cross-tenant intent explicit.
 
 import { type Kysely, sql } from "kysely";
 
@@ -46,9 +42,9 @@ import { computeMatchSpecificity } from "#backend/retrieval/match_specificity.js
 import { formatPgvectorLiteral } from "#backend/retrieval/pgvector_literal.js";
 
 /**
- * The EmbedderCache seam (Python `codemaster.embedder.cache.EmbedderCache`). NOT yet ported to TS
- * (FOLLOW-UP-embedder-cache). The adapter accepts it for forward-compat: when null/undefined it runs
- * the pre-v4 legacy query; when present it dispatches Phase A / Phase C.
+ * The EmbedderCache seam. NOT yet ported to TS (FOLLOW-UP-embedder-cache). The adapter accepts it for
+ * forward-compat: when null/undefined it runs the pre-v4 legacy query; when present it dispatches
+ * Phase A / Phase C.
  */
 export type EmbedderCache = {
   /** "fallback" (Phase A) or "generation_only" (Phase C). */
@@ -83,9 +79,9 @@ type ConfluenceRow = {
 // (retrieval/pgvector_literal.ts) — plain decimal (never exponential), value-exact round-trip,
 // fail-loud on non-finite components. The previous inline `String(x)` join could emit exponent notation.
 
-/** Map a SELECT row to a ConfluenceRetrievedChunk (1:1 with the Python `_row_to_chunk`, PLUS the
- *  W1.3/RH8 Stage-1.5 specificity computation — `search()` has the caller's effective_labels in scope,
- *  so the score is computed HERE instead of the legacy hardcoded 0 every consumer used to see). */
+/** Map a SELECT row to a ConfluenceRetrievedChunk (W1.3/RH8 Stage-1.5 specificity computation —
+ *  `search()` has the caller's effective_labels in scope, so the score is computed HERE instead of the
+ *  legacy hardcoded 0 every consumer used to see). */
 function rowToChunk(row: ConfluenceRow, effectiveLabels: ReadonlySet<string>): ConfluenceRetrievedChunk {
   const labels = row.labels === null ? [] : [...row.labels];
   return {
@@ -139,7 +135,7 @@ export class PostgresConfluenceRetrieval {
   }
 
   /**
-   * Cosine-similarity search over the confluence ANN index (1:1 with the Python `search`).
+   * Cosine-similarity search over the confluence ANN index.
    *
    * Returns up to `topK` chunks sorted by similarity DESC. The result is empty when:
    *   - `topK <= 0` (short-circuit before DB call)
@@ -187,8 +183,8 @@ export class PostgresConfluenceRetrieval {
   }
 
   /**
-   * Pre-v4 legacy SQL (Python `_SEARCH_SQL`). Reads directly from the legacy `cc.embedding` column.
-   * Used when no EmbedderCache is wired. Preserves the P0-2 approval-drift LEFT JOIN + skip-hygiene.
+   * Pre-v4 legacy SQL. Reads directly from the legacy `cc.embedding` column. Used when no
+   * EmbedderCache is wired. Preserves the P0-2 approval-drift LEFT JOIN + skip-hygiene.
    */
   private async runLegacy(args: {
     qvec: string;
@@ -232,8 +228,8 @@ export class PostgresConfluenceRetrieval {
   }
 
   /**
-   * Phase A read-through fallback (Python `_SEARCH_SQL_PHASE_A`). LEFT JOIN `core.chunk_embeddings`
-   * under the active generation; COALESCE prefers the chunk_embeddings row, legacy column fallback.
+   * Phase A read-through fallback. LEFT JOIN `core.chunk_embeddings` under the active generation;
+   * COALESCE prefers the chunk_embeddings row, legacy column fallback.
    */
   private async runPhaseA(args: {
     qvec: string;
@@ -283,8 +279,8 @@ export class PostgresConfluenceRetrieval {
   }
 
   /**
-   * Phase C generation-only (Python `_SEARCH_SQL_PHASE_C`). INNER JOIN `core.chunk_embeddings` filtered
-   * by active_generation; the legacy `cc.embedding` column is never read.
+   * Phase C generation-only. INNER JOIN `core.chunk_embeddings` filtered by active_generation; the
+   * legacy `cc.embedding` column is never read.
    */
   private async runPhaseC(args: {
     qvec: string;

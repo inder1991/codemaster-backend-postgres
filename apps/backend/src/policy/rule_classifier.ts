@@ -1,5 +1,4 @@
-// rule_classifier — 1:1 port of the frozen Python
-// codemaster/policy/rule_classifier.py (Sprint 25 / A-2 category + intent inference).
+// rule_classifier — category + intent inference (Sprint 25 / A-2).
 //
 // Pure deterministic helpers that classify a rule's category and intent from its heading + body
 // text. Used by rule_extractor to populate ExtractedRuleV1.{category, intent}.
@@ -11,22 +10,18 @@
 //      `<!-- codemaster:intent=require -->`) let the customer override the heuristic explicitly.
 //      Markers win over heuristic; unknown values fall back to the heuristic.
 //
-// Byte-parity notes (vs the frozen Python re module):
-//   - Substring containment (`keyword in blob` → `blob.includes(keyword)`) — NOT word-boundary; a
-//     partial like "vulnerab" deliberately catches "vulnerable"/"vulnerability".
-//   - The search blob is `(heading + " " + body[:500]).lower()` — JS `.toLowerCase()` matches
-//     Python `.lower()` for the ASCII keyword set; the 500-char body slice is `body.slice(0, 500)`.
+// Implementation notes:
+//   - Substring containment — NOT word-boundary; a partial like "vulnerab" deliberately catches
+//     "vulnerable"/"vulnerability".
+//   - The search blob is `(heading + " " + body[:500]).toLowerCase()`.
 //   - Table ORDER is load-bearing (first-match-wins): forbid before require so "must not" beats
 //     "must"; more-specific categories first.
-//   - The inline-marker regex mirrors Python verbatim with the IGNORECASE flag; only the FIRST
-//     marker of a given kind is honored (Python iterates `finditer` and returns on first match).
-//   - Python's logging diagnostic (`_LOG.info(... unknown inline-marker ...)`) is intentionally NOT
-//     reproduced: it is a side-effect with no return-value/wire impact, so it does not affect parity.
+//   - Only the FIRST inline-marker of a given kind is honored.
+//   - No logging on unknown inline-marker values (no return-value/wire impact).
 
 import { RuleCategory, RuleIntent } from "#contracts/extracted_rules.v1.js";
 
-// Valid category + intent literal values, derived from the contract's enums. Used by inline-marker
-// validation (the frozen Python derives these via `get_args(RuleCategory)` / `get_args(RuleIntent)`).
+// Valid category + intent literal values derived from the contract's enums; used by inline-marker validation.
 const VALID_CATEGORIES: ReadonlySet<string> = new Set(RuleCategory.options);
 const VALID_INTENTS: ReadonlySet<string> = new Set(RuleIntent.options);
 
@@ -49,8 +44,7 @@ const INTENT_KEYWORDS: ReadonlyArray<readonly [RuleIntent, ReadonlyArray<string>
 
 // Inline-marker regex. Matches `<!-- codemaster:category=security -->` /
 // `<!-- codemaster:intent=require -->`. Whitespace around the value is permitted; value is
-// case-insensitive at match time (lowered before lookup). `g` so `matchAll` can find each marker;
-// `i` mirrors Python's `re.IGNORECASE`.
+// lowercased before lookup. `g` so `matchAll` can find each marker; `i` for case-insensitive match.
 const INLINE_MARKER_RE = /<!--\s*codemaster:(category|intent)\s*=\s*([a-zA-Z_]+)\s*-->/gi;
 
 // First 500 chars of body searched for category, matching the program plan spec. Keeps
@@ -63,7 +57,7 @@ const MAX_CATEGORY_SEARCH_CHARS = 500;
  */
 function findInlineMarker(body: string, kind: "category" | "intent"): string | null {
   // `String.prototype.matchAll` clones the regex internally and resets `lastIndex` to 0, so reusing
-  // the module-level literal is stateless per call — equivalent to the source module's `finditer`.
+  // the module-level literal is stateless per call.
   for (const match of body.matchAll(INLINE_MARKER_RE)) {
     const markerKind = match[1]?.toLowerCase();
     const markerValue = match[2]?.toLowerCase();

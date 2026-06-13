@@ -1,8 +1,7 @@
 // ReviewWorkflowState — the typed replacement for the Python workflow body's mutable closure boxes
 // (finding 4 of docs/superpowers/plans/2026-06-05-review-orchestrator-full-port.md).
 //
-// 1:1 PORT of the closure boxes + capture dataclasses in the frozen Python
-// vendor/codemaster-py/codemaster/workflows/review_pull_request.py:
+// Closure boxes + capture dataclasses (review_pull_request.py):
 //   * policy_bundles            (~1165)  dict[str, ResolvedGuidanceBundleV1]
 //   * repo_config_box           (~1173)  list[CodemasterConfigV1] (1-element box)
 //   * query_vector_cache        (~1189)  dict[str, tuple[float, ...]]  (keyed by chunk path — finding 10)
@@ -60,8 +59,8 @@ export class DegradationCollector {
   }
 
   /** Compose a single WalkthroughV1.degradation_note string from the accumulated notes, optionally
-   *  chained onto a prior note. Delegates to the pure helper (the parity-tested 1:1 port of
-   *  _compose_orchestrator_degradation_note) so both the collector and direct callers share one
+   *  chained onto a prior note. Delegates to the pure helper (parity-tested —
+   *  {@link composeOrchestratorDegradationNote}) so both the collector and direct callers share one
    *  implementation. Empty notes → returns priorNote unchanged. */
   compose(priorNote?: string | null): string | null {
     return composeOrchestratorDegradationNote({

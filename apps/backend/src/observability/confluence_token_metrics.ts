@@ -1,17 +1,13 @@
 /**
- * Confluence-token OTel metric helpers — 1:1 port of the frozen Python
- * `vendor/codemaster-py/codemaster/observability/confluence_token_metrics.py`.
- *
- * Mirrors the sibling metric modules: module-level lazy instrument construction through the
+ * Confluence-token OTel metric helpers. Module-level lazy instrument construction through the
  * `#platform/observability/metrics.js::getMeter` seam (a NO-OP Meter when no MeterProvider is
- * registered, so emission is safe before the exporter is wired — the structural analogue of the
- * Python `get_meter(...) is None` no-op), bounded-cardinality labels, fail-quietly.
+ * registered, so emission is safe before the exporter is wired), bounded-cardinality labels,
+ * fail-quietly.
  *
  * Cardinality discipline: `outcome` ∈ {success, failure} (2 values). NO installation_id / tenant labels.
  *
- * Clock note (port fidelity): the Python age-gauge callback reads `time.time()` directly. Per the TS
- * Clock Protocol (the check_clock_random gate bans raw `Date`), the wall-time read here routes through
- * an injected {@link Clock} (default {@link WallClock}). Tests set a {@link FakeClock} via
+ * Clock note: the wall-time read for the age gauge routes through an injected {@link Clock} (default
+ * {@link WallClock}; the check_clock_random gate bans raw `Date`). Tests set a {@link FakeClock} via
  * {@link setClockForTests} for a deterministic, monotone-increasing age.
  */
 
@@ -22,19 +18,19 @@ import {
   type ObservableResult,
 } from "#platform/observability/metrics.js";
 
-// ─── Counter / gauge names (copied VERBATIM from the Python constants; Grafana-query-stable) ─────
+// ─── Counter / gauge names (Grafana-query-stable; renaming requires ADR) ─────────────────────────
 
 export const REFRESH_TOTAL_NAME = "codemaster_confluence_token_refresh_total";
 export const ENV_FALLBACK_NAME = "codemaster_confluence_token_env_fallback_used_total";
 export const AGE_SECONDS_NAME = "codemaster_confluence_token_age_seconds";
 export const LAST_REFRESH_TIMESTAMP_NAME = "codemaster_confluence_token_last_refresh_timestamp";
 
-// ─── Module-level instrument cache (lazy-init on first use, mirroring the Python module state) ───
+// ─── Module-level instrument cache (lazy-init on first use) ──────────────────────────────────────
 
 let refreshTotal: Counter | null = null;
 let envFallback: Counter | null = null;
 // Gauge values updated via callback; we hold the latest snapshot in module-level state and OTel reads
-// them via observable-gauge callback (1:1 with the Python module state).
+// them via observable-gauge callback.
 let latestRefreshTimestamp = 0.0;
 let gaugesRegistered = false;
 // The injectable wall-clock seam for the age computation (default WallClock; FakeClock in tests).
@@ -42,10 +38,10 @@ let clock: Clock = new WallClock();
 
 const METER_NAME = "codemaster.confluence_token";
 
-/** Increment the refresh counter. `outcome` ∈ {success, failure} (1:1 with `record_refresh`). */
+/** Increment the refresh counter. `outcome` ∈ {success, failure}. */
 export function recordRefresh({ outcome }: { outcome: string }): void {
   if (outcome !== "success" && outcome !== "failure") {
-    // Unexpected outcome — ignore (1:1 with the Python guard; no throw).
+    // Unexpected outcome — ignore silently (no throw).
     return;
   }
   if (refreshTotal === null) {
@@ -67,16 +63,16 @@ export function recordEnvFallbackUsed(): void {
 }
 
 /**
- * Update the latest-successful-refresh timestamp in module state (1:1 with `update_age_gauge`). The
- * observable gauges read this via callback so OTel always reflects the freshest values without a
- * producer loop. `refreshTimestamp` is Unix epoch SECONDS (the Python `time.time()` axis).
+ * Update the latest-successful-refresh timestamp in module state. The observable gauges read this via
+ * callback so OTel always reflects the freshest values without a producer loop. `refreshTimestamp` is
+ * Unix epoch SECONDS.
  */
 export function updateAgeGauge({ refreshTimestamp }: { refreshTimestamp: number }): void {
   latestRefreshTimestamp = refreshTimestamp;
   ensureGaugesRegistered();
 }
 
-/** Lazy-register the observable gauges with their callbacks. Idempotent (1:1 with `_ensure_gauges_registered`). */
+/** Lazy-register the observable gauges with their callbacks. Idempotent. */
 function ensureGaugesRegistered(): void {
   if (gaugesRegistered) return;
   const meter = getMeter(METER_NAME);
@@ -90,8 +86,8 @@ function ensureGaugesRegistered(): void {
 }
 
 /**
- * OTel callback: compute age at observation time so the gauge is monotone-increasing between refreshes
- * (1:1 with `_observe_age_seconds`). Emits nothing until the first refresh.
+ * OTel callback: compute age at observation time so the gauge is monotone-increasing between refreshes.
+ * Emits nothing until the first refresh.
  */
 function observeAgeSeconds(result: ObservableResult): void {
   if (latestRefreshTimestamp === 0.0) return;
@@ -104,9 +100,9 @@ function observeLastRefreshTimestamp(result: ObservableResult): void {
   result.observe(latestRefreshTimestamp, {});
 }
 
-// ─── Test-only API (the Python `_reset_for_tests`; plus the TS clock seam + observe oracles) ─────
+// ─── Test-only API ────────────────────────────────────────────────────────────────────────────────
 
-/** Test-only — reset module state between tests (1:1 with `_reset_for_tests`). */
+/** Test-only — reset module state between tests. */
 export function resetForTests(): void {
   refreshTotal = null;
   envFallback = null;

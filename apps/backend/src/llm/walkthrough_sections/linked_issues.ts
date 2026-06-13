@@ -1,20 +1,16 @@
 /**
- * Linked-issues walkthrough section — 1:1 TS port of the frozen Python
- * `codemaster/llm/walkthrough_sections/linked_issues.py` (Sprint 22 / S22.DM.16).
+ * Linked-issues walkthrough section (Sprint 22 / S22.DM.16).
  *
  * Pure assembler. Maps parser output ({@link IssueLink} triples) → the walkthrough's
  * {@link LinkedIssueV1} envelope tuple, layering a `(title, state)` resolver on top.
  *
- * Display order (per spec, ported exactly):
+ * Display order:
  *   - auto-closing kinds first (`closes` > `fixes` > `resolves`), issue number ASC within a kind,
  *   - `mentioned` links last, issue number ASC.
  *
  * Failure mode: when the GitHub lookup failed (rate-limited, not-found, …) the resolver has no entry
  * for that issue number; the assembled `LinkedIssueV1` carries `title=null, state=null` so the
  * renderer falls back to `#42 — (title unavailable)`.
- *
- * Both the activity-consumed assembler (`assemble_linked_issues`) AND the walkthrough-rendering
- * formatter (`format_linked_issues_md`) are ported here, 1:1 with the frozen Python.
  */
 
 import type { IssueLink, LinkageKind } from "#contracts/issue_link.v1.js";
@@ -23,7 +19,7 @@ import type { LinkedIssueV1 } from "#contracts/walkthrough.v1.js";
 /**
  * Display ordering for `linkage_kind`. `closes` > `fixes` > `resolves` > `mentioned`. Within each
  * band, sort by issue number ascending so reviewers see #1 before #5 — deterministic regardless of
- * parse order. 1:1 with the Python `_KIND_RANK` dict.
+ * parse order.
  */
 const KIND_RANK: Readonly<Record<LinkageKind, number>> = {
   closes: 0,
@@ -32,7 +28,7 @@ const KIND_RANK: Readonly<Record<LinkageKind, number>> = {
   mentioned: 3,
 };
 
-/** Lower rank wins (sorts first). Unknown kinds fall back to 99 (mirrors the Python `.get(..., 99)`). */
+/** Lower rank wins (sorts first). Unknown kinds fall back to 99. */
 function rankOf(kind: string): number {
   return Object.prototype.hasOwnProperty.call(KIND_RANK, kind)
     ? KIND_RANK[kind as LinkageKind]
@@ -47,16 +43,14 @@ function sortKey(link: LinkedIssueV1): readonly [number, number] {
 export type TitleStateEntry = readonly [string | null, "open" | "closed" | null];
 
 /**
- * Map parser output → walkthrough envelope, with title + state populated from the resolver. 1:1 with
- * the Python `assemble_linked_issues`.
+ * Map parser output → walkthrough envelope, with title + state populated from the resolver.
  *
  * The resolver maps `issue_number` → `(title, state)`. Missing keys produce
  * `{ title: null, state: null }` — graceful degradation.
  *
  * Cross-source dedup: an issue mentioned in BOTH description AND title produces ONE walkthrough entry,
  * not two. The strongest linkage kind wins (`closes` ranks BELOW `mentioned` in `KIND_RANK` = HIGHER
- * priority); within equal-rank ties, first-seen wins (preserves source-file ordering — JS `Map`
- * preserves insertion order, matching the Python dict-insertion-order semantics).
+ * priority); within equal-rank ties, first-seen wins (JS `Map` preserves insertion order).
  */
 export function assembleLinkedIssues(args: {
   parsed: ReadonlyArray<IssueLink>;
@@ -96,7 +90,7 @@ export function assembleLinkedIssues(args: {
   });
 }
 
-/** Python `str.capitalize()`: first char upper, the rest lower. linkage_kind values are single words. */
+/** First char upper, the rest lower. linkage_kind values are single words. */
 function capitalize(s: string): string {
   if (s === "") {
     return "";
@@ -105,8 +99,8 @@ function capitalize(s: string): string {
 }
 
 /**
- * Render the linked-issues walkthrough section (1:1 with the Python `format_linked_issues_md`). Returns
- * "" for an empty tuple so the caller never emits an orphan header. Each line:
+ * Render the linked-issues walkthrough section. Returns "" for an empty tuple so the caller never
+ * emits an orphan header. Each line:
  * `- **<Kind>** #<N> — <title or "(title unavailable)">` with an optional ` \`[<state>]\`` suffix.
  */
 export function formatLinkedIssuesMd(linked: ReadonlyArray<LinkedIssueV1>): string {

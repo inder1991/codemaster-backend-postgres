@@ -1,5 +1,4 @@
-// SYSTEM_INVARIANTS registry — 1:1 port of the frozen Python
-// vendor/codemaster-py/codemaster/policy/system_invariants.py (Sprint 25 / A-6-a).
+// SYSTEM_INVARIANTS registry (Sprint 25 / A-6-a).
 //
 // Platform-owned safety properties applied to every review finding AFTER the LLM emits and BEFORE Postgres
 // persistence (per ADR 0042). The registry is intentionally small + frozen — adding/removing entries
@@ -39,7 +38,6 @@ import type { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
  * Raised by {@link postFilterFindings} / {@link postFilterFindingsWithMetadata} when {@link SYSTEM_INVARIANTS}
  * is empty — fail-CLOSED at the activity boundary (a misconfigured deploy that deleted entries without
  * updating the regression-cap test). The review pipeline refuses to emit findings until invariants load.
- * 1:1 with the Python `EmptyInvariantsRegistryError`.
  */
 export class EmptyInvariantsRegistryError extends Error {
   public constructor(message: string) {
@@ -49,9 +47,8 @@ export class EmptyInvariantsRegistryError extends Error {
 }
 
 /**
- * One platform-safety invariant. 1:1 with the Python frozen `@dataclass SystemInvariant`. The `enforcement`
- * callable takes a finding + the review-level bundle and returns the finding either unchanged (same ref) or
- * in its invariant-corrected form (a fresh object).
+ * One platform-safety invariant. The `enforcement` callable takes a finding + the review-level bundle
+ * and returns the finding either unchanged (same ref) or in its invariant-corrected form (a fresh object).
  */
 export type SystemInvariant = {
   readonly invariant_id: string;
@@ -63,12 +60,11 @@ export type SystemInvariant = {
   readonly rationale: string;
 };
 
-// ─── Severity floor for safety-critical categories (1:1 with the Python constants) ─────────────────
+// ─── Severity floor for safety-critical categories ───────────────────────────────────────────────
 
-/** Severity rank — higher = more severe (1:1 with the Python `_SEVERITY_RANK`). Switch-based so there is no
- *  object-injection sink (the input is the bounded Severity enum, but the switch is sink-free regardless).
- *  An unknown value ranks below the floor (defensive — a future severity would be floored, never silently
- *  passed). */
+/** Severity rank — higher = more severe. Switch-based so there is no object-injection sink.
+ *  An unknown value ranks below the floor (defensive — a future severity would be floored, never
+ *  silently passed). */
 function severityRank(severity: string): number {
   switch (severity) {
     case "nit":
@@ -84,15 +80,14 @@ function severityRank(severity: string): number {
   }
 }
 
-/** The safety floor severity (`issue`) + its rank. 1:1 with `_SAFETY_FLOOR_SEVERITY` / `_SAFETY_FLOOR_RANK`. */
+/** The safety floor severity (`issue`) + its rank. */
 const SAFETY_FLOOR_SEVERITY = "issue";
 const SAFETY_FLOOR_RANK = severityRank(SAFETY_FLOOR_SEVERITY);
 
 /**
  * Helper shared by SI-001 / SI-005. When the finding's category matches `categoryMustBe` and its severity is
  * BELOW the safety floor (`issue`), upgrade to `issue`; otherwise return the finding UNCHANGED (same ref).
- * 1:1 with the Python `_enforce_severity_floor` (which returns the same instance on the no-op path and a
- * `model_copy(update={"severity": ...})` on the floor path).
+ * Returns a fresh object on the floor path (the reference change is the post-filter's fired signal).
  */
 function enforceSeverityFloor(
   finding: ReviewFindingV1,
@@ -112,7 +107,7 @@ function enforceSeverityFloor(
 
 /**
  * SI-001 enforcement: security findings can't be silently downgraded below `issue` regardless of repo
- * policy. 1:1 with `_enforce_security_non_suppressible`. The bundle is accepted for symmetry but unused.
+ * policy. The bundle is accepted for signature symmetry but unused by this invariant.
  */
 function enforceSecurityNonSuppressible(
   finding: ReviewFindingV1,
@@ -125,7 +120,7 @@ function enforceSecurityNonSuppressible(
 /**
  * SI-005 enforcement: severity grading of platform-emitted findings is platform-owned. For safety-critical
  * categories the floor is enforced; for non-safety categories the LLM's grading is respected. Defense-in-
- * depth alongside SI-001. 1:1 with `_enforce_severity_grading_platform_owned`.
+ * depth alongside SI-001.
  */
 function enforceSeverityGradingPlatformOwned(
   finding: ReviewFindingV1,
@@ -139,8 +134,8 @@ function enforceSeverityGradingPlatformOwned(
 }
 
 /**
- * The frozen platform-safety registry. 1:1 with the Python `SYSTEM_INVARIANTS` tuple (2 active invariants;
- * SI-002/003/004 dropped in T-7). Any change requires a same-PR regression-cap test update.
+ * The frozen platform-safety registry (2 active invariants; SI-002/003/004 dropped in T-7). Any change
+ * requires a same-PR regression-cap test update.
  */
 export const SYSTEM_INVARIANTS: ReadonlyArray<SystemInvariant> = [
   {

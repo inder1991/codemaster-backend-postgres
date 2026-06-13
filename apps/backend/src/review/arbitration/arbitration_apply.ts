@@ -1,12 +1,11 @@
 /**
- * Arbitration persistence glue — 1:1 port of the frozen Python
- * `vendor/codemaster-py/codemaster/review/arbitration_apply.py::apply_arbitration` (Phase D Task D.7).
+ * Arbitration persistence glue — Phase D Task D.7.
  *
  * Turns the in-memory output of {@link arbitrate} into `core.review_findings` row writes (Tier-1 INSERT /
  * Tier-2 UPDATE, via the {@link ReviewFindingsArbitrationPort}) and `core.arbitration_rejections` row writes
  * (via the {@link ArbitrationRejectionsRepoPort}).
  *
- * Per-decision flow (1:1 with the Python):
+ * Per-decision flow:
  *
  *  1. **Tier-1 decision** (`finding_id` is in `tier1Findings`) → INSERT a new `core.review_findings` row
  *     carrying `tier=1`, `source_tool=<tool>`, the decision's suppression columns. Idempotent via
@@ -34,10 +33,10 @@
  *
  * ## suppression_model / suppression_prompt_version
  *
- * Mirrors the Python signature: `suppressionModel` / `suppressionPromptVersion` are threaded into the
- * REJECTION rows (provenance), NOT re-derived. The DECISION rows carry the decision's OWN
- * suppression_model / suppression_prompt_version (already populated by the arbitration layer for the
- * SUPPRESSED_BY_LLM path; null for NONE).
+ * `suppressionModel` / `suppressionPromptVersion` are threaded into the REJECTION rows (provenance),
+ * NOT re-derived. The DECISION rows carry the decision's OWN suppression_model /
+ * suppression_prompt_version (already populated by the arbitration layer for the SUPPRESSED_BY_LLM path;
+ * null for NONE).
  */
 
 import type { ArbitrationResultV1 } from "#contracts/arbitration_result.v1.js";
@@ -92,8 +91,7 @@ const CONSOLE_LOGGER: ApplyLogger = {
 };
 
 /**
- * Persist an {@link ArbitrationResultV1} to `core.review_findings` (+ `core.arbitration_rejections`). 1:1
- * with the frozen Python `apply_arbitration`.
+ * Persist an {@link ArbitrationResultV1} to `core.review_findings` (+ `core.arbitration_rejections`).
  *
  * `tier2ReviewFindingIdByArbitrationId` is the reconstructed `arbitration_id → review_finding_id` map (the
  * activity rebuilds it from the JSON-safe `Record<string, string>` wire shape). `suppressedAt` strings on

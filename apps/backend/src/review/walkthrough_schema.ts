@@ -1,10 +1,9 @@
-// WALKTHROUGH_TOOL_SCHEMA + parseWalkthroughToolUse — 1:1 port of the frozen Python
-//   vendor/codemaster-py/codemaster/review/walkthrough_schema.py (S8.5.2a).
+// WALKTHROUGH_TOOL_SCHEMA + parseWalkthroughToolUse.
 //
 // The single Anthropic tool the Opus walkthrough activity hands to the model, plus the parser that
 // turns the response back into a WalkthroughV1 envelope.
 //
-// Parser policy (byte-faithful with Python):
+// Parser policy:
 //   * Non-tool_use blocks (text / images) are ignored.
 //   * tool_use blocks with names other than `emit_walkthrough` are ignored.
 //   * No walkthrough block → WalkthroughParseError("no walkthrough block").
@@ -12,8 +11,8 @@
 //   * Malformed input → WalkthroughParseError(block_id, reason).
 //
 // The schema is key-ORDER-significant (the LLM sees the exact byte sequence in the function-calling
-// tool definition), so the object-literal key order mirrors Python dict insertion order exactly. A
-// frozen JSON document matches the Python `Final[dict[str, Any]]` contract.
+// tool definition), so the object-literal key order is insertion-order stable. A frozen JSON document
+// is the canonical form.
 
 import { coerceForContract } from "#backend/llm/contract_coercion.js";
 
@@ -55,8 +54,8 @@ export const WALKTHROUGH_TOOL_SCHEMA: { readonly [k: string]: JsonValue } = {
   },
 };
 
-/** Raised when the model's emit_walkthrough block cannot be validated. Mirrors the Python class:
- *  message = `block {block_id}: {reason}`; carries blockId + reason. */
+/** Raised when the model's emit_walkthrough block cannot be validated. Message format:
+ *  `block {block_id}: {reason}`; carries blockId + reason. */
 export class WalkthroughParseError extends Error {
   public readonly blockId: string;
   public readonly reason: string;
@@ -68,19 +67,17 @@ export class WalkthroughParseError extends Error {
   }
 }
 
-/** True iff `value` is a plain (non-array, non-null) object — the Python `isinstance(x, dict)`. */
+/** True iff `value` is a plain (non-array, non-null) object. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
- * Extract the first emit_walkthrough block as a WalkthroughV1. 1:1 with the frozen Python
- * `parse_walkthrough_tool_use`.
+ * Extract the first emit_walkthrough block as a WalkthroughV1.
  *
  * Raises WalkthroughParseError if no walkthrough block was emitted or if the block fails validation.
  * Subsequent walkthrough blocks are dropped (the model is supposed to call the tool exactly once);
- * the Python WARN-log of the extra-block count is observability-only with no behaviour change, so the
- * observable return is identical whether or not it would fire.
+ * the WARN-log of the extra-block count is observability-only with no behaviour change.
  */
 export function parseWalkthroughToolUse(
   blocks: ReadonlyArray<Record<string, unknown>>,
@@ -107,7 +104,7 @@ export function parseWalkthroughToolUse(
   // log is observability-only with no return-value effect).
 
   const block = walkthroughBlocks[0]!;
-  // Python: `str(block.get("id", "<no-id>"))`. `id` may be any type; stringify, defaulting to "<no-id>".
+  // `id` may be any type; stringify, defaulting to "<no-id>".
   const rawId = block["id"];
   const blockId = rawId === undefined ? "<no-id>" : String(rawId);
   const payload = block["input"];

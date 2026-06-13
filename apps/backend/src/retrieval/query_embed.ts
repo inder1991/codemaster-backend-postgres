@@ -4,7 +4,7 @@
 //
 //   1. INCONSISTENT QUERY PURPOSE — `embed_query.activity.ts` used `purpose="in_repo_doc"` while
 //      `ann_retriever.ts`'s per-chunk fallback used `purpose="review_query"` (an inconsistency carried
-//      from the frozen Python). A chunk whose memoized embed failed therefore got a DIFFERENT query
+//      an inconsistency in the original code). A chunk whose memoized embed failed therefore got a DIFFERENT query
 //      vector than its siblings, depressing cosine similarity for the truly relevant chunk. Both
 //      paths now share {@link QUERY_EMBED_PURPOSE} — "review_query", the query-mode bucket (queries
 //      are queries, not documents; if the embed service keys query-instruction handling on `purpose`,

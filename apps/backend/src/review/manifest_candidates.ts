@@ -1,7 +1,7 @@
 /**
  * Common root-manifest seeding for the `fetch_manifest_snapshots` candidate set.
  *
- * EXCEEDS the frozen Python: `review_pull_request.py:953` passes `candidate_paths=changed_paths` ONLY, so
+ * EXCEEDS the original design: the prior implementation passed `candidate_paths=changed_paths` ONLY, so
  * a PR whose changed files are not themselves manifests depends entirely on the GitHub Tree-API
  * nearest-walk to discover the enclosing manifest — and that walk returns `[]` on any tree fetch failure
  * or >100k-entry truncation (large monorepos). When that happens, the repo's top-level dependency context

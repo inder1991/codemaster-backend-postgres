@@ -1,6 +1,4 @@
-// Manifest path matcher — 1:1 TS port of the frozen Python
-//   vendor/codemaster-py/codemaster/review/manifest_matcher.py
-//   (FOLLOW-UP-confluence-pr-context-manifests Commit 2).
+// Manifest path matcher (FOLLOW-UP-confluence-pr-context-manifests Commit 2).
 //
 // Pure module: maps a repo-relative path to a {@link ManifestPattern} (or null) so the
 // fetch_manifest_snapshots activity knows which paths to fetch and which ecosystem they belong to.
@@ -20,10 +18,10 @@
 export type ManifestPatternKind = "exact" | "suffix";
 
 /**
- * One manifest path pattern + ecosystem + lockfile flag (1:1 with the Python `ManifestPattern` frozen
- * dataclass). `kind` is `"exact"` (basename equality) or `"suffix"` (basename endswith). `ecosystem` is
- * the inferred language/runtime/build-system. `is_lockfile` flags pinning artifacts that drop priority
- * under budget rationing (manifests describing intent win over lockfiles describing resolution).
+ * One manifest path pattern + ecosystem + lockfile flag. `kind` is `"exact"` (basename equality) or
+ * `"suffix"` (basename endswith). `ecosystem` is the inferred language/runtime/build-system.
+ * `is_lockfile` flags pinning artifacts that drop priority under budget rationing (manifests describing
+ * intent win over lockfiles describing resolution).
  */
 export type ManifestPattern = {
   readonly kind: ManifestPatternKind;
@@ -103,8 +101,8 @@ export const EXCLUDED_PATH_SEGMENTS: ReadonlySet<string> = new Set([
 
 /**
  * Return the first matching {@link ManifestPattern} for `path`, or null if it is not a manifest OR is in
- * a Tier-3 excluded segment (1:1 with the Python `match_path`). Tier-3 exclusion runs FIRST (a vendored
- * `package.json` is rejected immediately). Pure function — determined entirely by the input string.
+ * a Tier-3 excluded segment. Tier-3 exclusion runs FIRST (a vendored `package.json` is rejected
+ * immediately). Pure function — determined entirely by the input string.
  */
 export function matchPath(path: string): ManifestPattern | null {
   if (path === "") {

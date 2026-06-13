@@ -1,6 +1,4 @@
-// PHP (Composer) dependency parsers — 1:1 TS port of the frozen Python
-//   vendor/codemaster-py/codemaster/review/manifest_parsers/_composer.py
-//   (Commit 5 of FOLLOW-UP-manifest-dependency-parsing).
+// PHP (Composer) dependency parsers (Commit 5 of FOLLOW-UP-manifest-dependency-parsing).
 //
 // Covers composer.json + composer.lock. Both are JSON.
 //
@@ -19,13 +17,13 @@ import { type NormalizationRejection, isRejection, normalizeName } from "./norma
 import type { ParseOutcome } from "./parse_outcome.js";
 
 /** Matches the contract field's `max_length`; truncation is defensive so the parse never throws on an
- *  adversarial version_spec. 1:1 with the Python `_VERSION_SPEC_MAX_LENGTH`. */
+ *  adversarial version_spec. */
 const VERSION_SPEC_MAX_LENGTH = 256;
 
 /** One parsed composer dependency `dependency_type`. Mirrors the Python `Literal[...]`. */
 type ComposerDependencyType = "prod" | "dev" | "optional" | "test" | "unknown";
 
-/** Narrow an unknown to a plain object (Python `isinstance(x, dict)`). Arrays / null are excluded. */
+/** Narrow an unknown to a plain object. Arrays / null are excluded. */
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -144,7 +142,7 @@ export function parseComposerLock({
 
 /**
  * Normalize the name; on rejection append to `rejections`, else truncate the version_spec to the
- * contract cap and append a {@link ParsedDependencyV1}. 1:1 with the Python `_emit_composer`.
+ * contract cap and append a {@link ParsedDependencyV1}.
  */
 function emitComposer({
   rawName,

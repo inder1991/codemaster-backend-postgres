@@ -1,11 +1,6 @@
-// ActivityError — the de-Temporal replacement for `@temporalio/common`'s `ApplicationFailure` on the
-// review-pipeline activity surfaces (post_review_results / record_delivery_lifecycle / review_activity)
-// and the posting.ts dropped-state reader.
-//
-// The Python/Temporal path threw `ApplicationFailure.create({ message, type, nonRetryable, details })`:
-//   * `type`        — the error-NAME the workflow retry policy matched against `nonRetryableErrorTypes`.
-//   * `nonRetryable` — fail-fast vs. retry hint.
-//   * `details`     — a carrier array (the H-2 dropped-state payload rides `details[0]`).
+// ActivityError — de-Temporal replacement for `ApplicationFailure` on the review-pipeline activity
+// surfaces (post_review_results / record_delivery_lifecycle / review_activity) and the posting.ts
+// dropped-state reader.
 //
 // In the Postgres runtime there is no Temporal retry policy: the runner classifies retries by the error's
 // `name` (CS4.3 / W1.9c, runner/retry_policies.ts) and the in-process call propagates the error DIRECTLY
@@ -15,10 +10,10 @@
 // throw sites change minimally.
 
 export class ActivityError extends Error {
-  /** Fail-fast hint (1:1 with ApplicationFailure.nonRetryable). The runner's name-match classifier is the
-   *  authority on the review path; this is carried for parity + any caller that inspects it. */
+  /** Fail-fast hint — the runner's name-match classifier is the authority on the review path; this is
+   *  carried for any caller that inspects it. */
   public readonly nonRetryable: boolean;
-  /** Carrier array (1:1 with ApplicationFailure.details) — the H-2 dropped-state payload rides `details[0]`. */
+  /** Carrier array — the H-2 dropped-state payload rides `details[0]`. */
   public readonly details: ReadonlyArray<unknown>;
 
   public constructor(args: {

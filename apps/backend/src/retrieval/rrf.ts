@@ -1,7 +1,4 @@
-// rrfCombine — port of the frozen Python
-// vendor/codemaster-py/codemaster/retrieval/rrf_combiner.py::rrf_combine (Sprint 10 / S10.3.4).
-//
-// Reciprocal Rank Fusion: score-free combination of N ranked result lists. Each chunk's RRF score is
+// rrfCombine — Reciprocal Rank Fusion: score-free combination of N ranked result lists. Each chunk's RRF score is
 // the sum, over the retrievers it appeared in, of `1 / (k + rank)` where rank is 1-based. The fused
 // score depends ONLY on rank position — raw retriever scores aren't comparable across BM25 and ANN, so
 // RRF deliberately ignores them.
@@ -34,7 +31,7 @@ export type RrfCombineOptions = {
 };
 
 /**
- * Fuse retriever results via Reciprocal Rank Fusion (1:1 with the Python `rrf_combine`).
+ * Fuse retriever results via Reciprocal Rank Fusion.
  *
  * @param results - zero or more retriever outputs (BM25, ANN, ...). Empty → an empty envelope.
  * @param opts.topK - max items in the fused output.

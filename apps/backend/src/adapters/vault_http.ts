@@ -1,12 +1,9 @@
 /**
- * VaultHttpPort — 1:1 port of `codemaster/adapters/vault_http.py`
- * (frozen Python, Sprint 5 / S5.1.1; later S19.F.NS clock seam).
- *
- * Production HTTP adapter for the Sprint-0 {@link VaultPort} type (defined in `./vault_port.ts`).
- * Reads the Vault Agent token from disk on EVERY call (Vault Agent rotates the token on disk),
- * issues HTTP requests via the injected transport (production: global `fetch`/undici), retries
- * transport errors and 5xx with exponential backoff through the injected {@link Clock} seam, and
- * surfaces the typed errors from `./vault_port.ts`.
+ * VaultHttpPort — production HTTP adapter for the {@link VaultPort} type (Sprint 5 / S5.1.1;
+ * S19.F.NS clock seam). Reads the Vault Agent token from disk on EVERY call (Vault Agent rotates
+ * the token on disk), issues HTTP requests via the injected transport (production: global
+ * `fetch`/undici), retries transport errors and 5xx with exponential backoff through the injected
+ * {@link Clock} seam, and surfaces the typed errors from `./vault_port.ts`.
  *
  * --- Token redaction ---
  * The token NEVER appears in a log line. Every log line carries only `{ attempt, method, path,
@@ -20,14 +17,6 @@
  *   - `clock`: ALL timing (the retry backoff sleep) goes through the injected {@link Clock}
  *     (`clock.sleep`), NEVER `setTimeout`/`Date` — the check_clock_random gate enforces this and
  *     tests assert the recorded sleep durations via `FakeClock.recordedSleeps()`.
- *
- * Port-fidelity notes vs the Python:
- *   - httpx → fetch: the HTTP EXECUTION differs, but every retry / backoff / status-mapping DECISION
- *     is preserved 1:1. `httpx.HTTPError` (network errors, timeouts) → a thrown transport error the
- *     retry loop catches; `AbortSignal.timeout` arms the same retryable-timeout behaviour.
- *   - `bytes` → `Uint8Array`: Transit `transitDecrypt` returns `Uint8Array` (the VaultPort shape);
- *     `transitEncrypt` base64-encodes the input `Uint8Array` exactly as Python base64-encodes bytes.
- *   - keyword args → a single args-object per public method (the repo's args-object convention).
  */
 
 import { readFileSync } from "node:fs";
@@ -42,7 +31,7 @@ import {
   VaultPathNotFound,
 } from "./vault_port.js";
 
-// ─── Constants (1:1 with the frozen Python module constants) ──────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────────────────────
 
 /** Path the Vault Agent Injector renders the token to on every renewal. */
 export const DEFAULT_TOKEN_PATH = "/var/run/secrets/vault/token";
@@ -90,8 +79,7 @@ export type VaultHttpClient = {
 /**
  * Thrown by {@link FetchVaultHttpClient} when the underlying `fetch` fails at the transport level
  * (network error, DNS failure, connection reset, or an `AbortSignal.timeout` firing). The retry
- * loop in {@link VaultHttpPort} catches this and retries — the 1:1 analogue of the Python
- * `except httpx.HTTPError` arm.
+ * loop in {@link VaultHttpPort} catches this and retries.
  */
 export class VaultTransportError extends Error {
   public constructor(message: string) {
@@ -255,9 +243,9 @@ export class VaultHttpPort implements VaultPort {
   }
 
   /**
-   * The 1:1 port of Python `_request`. Drives the retry / backoff decision loop; returns the
-   * {@link VaultHttpResponse} (any status; per-method status mapping happens at the call site) or
-   * raises {@link VaultConnectivityError} once retries are exhausted.
+   * Drives the retry / backoff decision loop; returns the {@link VaultHttpResponse} (any status;
+   * per-method status mapping happens at the call site) or raises {@link VaultConnectivityError}
+   * once retries are exhausted.
    *
    * The token is re-read at the TOP of EACH attempt (per-attempt rotation safety). Log lines carry
    * ONLY `{ attempt, method, path, status }` — never the token.
@@ -335,10 +323,9 @@ export class VaultHttpPort implements VaultPort {
   }
 
   /**
-   * Read a KV secret WITHOUT coercing values to strings — preserves nested objects (unlike {@link kvRead},
-   * which `String()`s every value, turning a nested object into "[object Object]"). Required for payloads
-   * like the field-encryption keyset (`{current_version, keys: {vN: base64}}`). Mirrors the Python
-   * `VaultPort.kv_read`'s `dict[str, Any]` return.
+   * Read a KV secret WITHOUT coercing values to strings — preserves nested objects (unlike
+   * {@link kvRead}, which `String()`s every value, turning a nested object into "[object Object]").
+   * Required for payloads like the field-encryption keyset (`{current_version, keys: {vN: base64}}`).
    */
   public async kvReadRaw(args: {
     path: string;
