@@ -56,6 +56,19 @@ async function main(): Promise<void> {
     },
   });
 
+  // Resolve the DB DSN from the selected bootstrap-secret source (CODEMASTER_SECRET_SOURCE:
+  // openshift env | vault SA-read) and publish it to the env, so every downstream reader (the shared
+  // pool, the preflight, the runner) sees ONE resolved value. The DB is the hard boot requirement —
+  // a resolution failure (no creds in the chosen source) propagates to the fail-loud exit handler.
+  {
+    const { resolveDbDsn } = await import("#backend/config/db_credentials.js");
+    const { makeReadVaultKv } = await import("#backend/config/vault_reader_factory.js");
+    process.env["CODEMASTER_PG_CORE_DSN"] = await resolveDbDsn({
+      env: process.env,
+      readVaultKv: makeReadVaultKv({ env: process.env, now: () => clock.now().getTime() }),
+    });
+  }
+
   // CS3.2 readiness deps (each wired only when its target exists in this pod's env — never fail
   // readiness on a dependency this pod does not have by design).
   const dsn = process.env["CODEMASTER_PG_CORE_DSN"];
