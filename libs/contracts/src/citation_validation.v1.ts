@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { ReviewFindingV1 } from "./review_findings.v1.js";
 
-// Zod port of contracts/citation_validation/v1.py (frozen Python). Parity-validated in
+// Zod port of contracts/citation_validation/v1.py. Parity-validated in
 // citation_validation.v1.parity.test.ts.
 //
 // Source models / enums / constants ported (every public one):

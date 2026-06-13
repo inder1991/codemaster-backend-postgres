@@ -52,7 +52,7 @@ import { runWithRetry, type RetryPolicy } from "./run_with_retry.js";
 /**
  * Parse a Temporal SDK duration string ("2s", "200ms", "15 seconds", "2 minutes") into SECONDS.
  * Fail-loud on anything else — a silently-defaulted curve is exactly the drift this seam exists
- * to prevent (the RETRY_POLICIES comments transcribe the frozen Python byte-for-byte).
+ * to prevent.
  */
 export function parseTemporalDuration(d: string): number {
   // eslint-disable-next-line security/detect-unsafe-regex -- anchored; `(?:\.\d+)?` is a single optional group whose `\.` separator removes any overlap with the preceding `\d+`, and the unit alternation carries no quantifier — no catastrophic backtracking (heuristic false positive)
@@ -101,8 +101,8 @@ export function toRetryPolicy(name: string, options: RetryActivityOptions): Retr
     ? parseTemporalDuration(options.retry.maximumInterval)
     : initialIntervalS * SDK_DEFAULT_MAX_INTERVAL_FACTOR;
   const declared = new Set(options.retry?.nonRetryableErrorTypes ?? []);
-  // Wave-1 adversarial-review fix: RETRY_POLICIES transcribes the PYTHON ApplicationError type
-  // names; the REAL TS classes differ. Carry both vocabularies so deterministic faults fail fast
+  // Wave-1 adversarial-review fix: RETRY_POLICIES uses Python ApplicationError type names;
+  // the REAL TS classes differ. Carry both vocabularies so deterministic faults fail fast
   // instead of burning the curve (pinned with the real classes in retry_policies.test.ts).
   if (declared.has("BedrockOutputUnsafeError")) {
     declared.add("LlmOutputUnsafeError");

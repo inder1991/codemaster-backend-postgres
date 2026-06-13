@@ -22,8 +22,8 @@
 //   - "triggerPageResyncWorkflow"
 //       api/admin/page_resync_dispatcher.ts (TRIGGER_PAGE_RESYNC_DISPATCH_WORKFLOW_TYPE — the
 //       W4c.2 #5 concrete OutboxPageResyncDispatcher server.ts wires into the DELETE-approval
-//       route, replacing the previously-unwired optional seam that mirrored the frozen Python's
-//       recording stub). The constant equals the registered TS workflow TYPE string — the EXPORTED
+//       route, replacing the previously-unwired optional seam (recording stub). The constant equals
+//       the registered TS workflow TYPE string — the EXPORTED
 //       function name (workflows/trigger_page_resync.workflow.ts) RealTemporalClient.startWorkflow
 //       dispatches by (NOT the vestigial PascalCase TRIGGER_PAGE_RESYNC_WORKFLOW_TYPE — that const
 //       preserves the Python class name for parity only).

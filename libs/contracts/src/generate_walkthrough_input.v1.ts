@@ -4,8 +4,8 @@ import { AggregatedFindingsV1 } from "./aggregated_findings.v1.js";
 import { LinkedIssueV1, PrMetaV1 } from "./walkthrough.v1.js";
 
 // NEW typed-input envelope introduced DURING the Python→TS port — there is NO Python Pydantic
-// counterpart to diff against. The frozen Python `WalkthroughActivities.generate_walkthrough`
-// (vendor/codemaster-py/codemaster/review/walkthrough_activity.py) dispatches with FOUR positional
+// counterpart to diff against. `WalkthroughActivities.generate_walkthrough`
+// dispatches with FOUR positional
 // arguments — `(pr_meta, aggregated, linked_issues=(), suggested_reviewers=())` — which violates
 // CLAUDE.md invariant 11 / ADR-0047 ("every Temporal activity takes EXACTLY ONE positional argument
 // typed as a Pydantic v2 BaseModel"). The TS port CLOSES that violation: the activity's single
@@ -16,9 +16,9 @@ import { LinkedIssueV1, PrMetaV1 } from "./walkthrough.v1.js";
 // Because there is no Python contract for this envelope, the parity test only covers round-trip /
 // validation (accepts a valid envelope; `.strict()` rejects unknown keys) — there is no
 // source-of-truth to byte-diff against. The constituent shapes (PrMetaV1, AggregatedFindingsV1,
-// LinkedIssueV1) ARE parity-validated against the frozen Python in their own suites.
+// LinkedIssueV1) ARE parity-validated in their own suites.
 //
-// Field-for-field mirror of the frozen Python positional argument list:
+// Field-for-field mapping of the Python positional argument list:
 //   * pr_meta              → PrMetaV1               (required; positional arg 1)
 //   * aggregated           → AggregatedFindingsV1   (required; positional arg 2)
 //   * linked_issues        → tuple[LinkedIssueV1,…] = () → z.array(LinkedIssueV1).default([])

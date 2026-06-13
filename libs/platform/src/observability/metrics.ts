@@ -1,6 +1,5 @@
 /**
- * Observability meter seam — 1:1 TS analogue of the frozen Python
- * `codemaster/observability/_otel.py::get_meter`.
+ * Observability meter seam — analogue of `codemaster/observability/_otel.py::get_meter`.
  *
  * The single sanctioned entry point for OpenTelemetry metrics across the backend. Subsystems get a
  * {@link Meter} from here and create their instruments through it, rather than importing
@@ -19,7 +18,7 @@
  *    subsystem). Only the exporter wiring + the name-parity gate + dashboards are deferred.
  *  - Copy the metric NAME from the Python verbatim (e.g. `codemaster_finding_scope_violation_attempted_total`)
  *    so the deferred name-parity gate passes and existing dashboards/alerts map unchanged.
- *  - Cache the instrument at MODULE scope (created once at import), not per-emit — mirrors the Python
+ *  - Cache the instrument at MODULE scope (created once at import), not per-emit — matches the Python
  *    lazy-cache that exists to avoid per-emit `create_*` lock contention.
  *  - Bounded-cardinality labels ONLY (enum-like dimensions). NEVER per-tenant / per-installation /
  *    per-PR labels — same cardinality discipline the Python metric modules enforce.

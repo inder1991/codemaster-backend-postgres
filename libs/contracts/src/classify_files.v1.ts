@@ -1,8 +1,8 @@
 import { z } from "zod";
 
 // NEW typed-input envelope introduced DURING the Python→TS port — there is NO Python Pydantic
-// counterpart to diff against. The frozen Python `ClassifyFilesActivity.classify_files`
-// (vendor/codemaster-py/codemaster/activities/classify_files.py) dispatches with TWO positional
+// counterpart to diff against. `ClassifyFilesActivity.classify_files`
+// dispatches with TWO positional
 // arguments — `(workspace_path: str, files: tuple[str, ...])` — which violates CLAUDE.md invariant 11 /
 // ADR-0047 ("every Temporal activity takes EXACTLY ONE positional argument typed as a Pydantic v2
 // BaseModel"). The TS port CLOSES that violation: the activity's single positional input is this

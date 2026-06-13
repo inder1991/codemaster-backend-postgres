@@ -1,9 +1,8 @@
 /**
- * ReviewFindingsRepo — 1:1 TypeScript/Kysely port of the frozen Python spine repo
- * `vendor/codemaster-py/codemaster/domain/repos/review_findings_repo.py`
+ * ReviewFindingsRepo — async repo over `core.review_findings`
  * (Sprint 20 / S20.DM.7 step B + Phase D / Task D.7 + ADR-0056 PR-1 lifecycle setters).
  *
- * Async repo over `core.review_findings`. Methods (1:1 with the Python class):
+ * Methods:
  *
  *   - persistAggregated          — multi-row INSERT of one row per ReviewFindingV1 in the
  *                                  AggregatedFindingsV1 envelope. Idempotent via the uuid5-derived
@@ -26,10 +25,8 @@
  * `TenancyPlugin` (`#platform/db/tenancy_plugin.js`). The query-builder read path
  * (`fetchSkippedForWalkthrough`) therefore has its `installation_id = :iid` equality predicate
  * verified by the plugin's AST walk at build time. The raw-`sql`-template write paths bypass the AST
- * walk by design (same as the frozen Python `text()` SQL bypassing the SQLAlchemy ORM hook); every
- * one of them carries `installation_id` explicitly in the literal SQL (in the INSERT VALUES, or in
- * the UPDATE WHERE clause) — exactly as the Python source does, so cross-tenant mutation is
- * structurally impossible.
+ * walk by design; every one of them carries `installation_id` explicitly in the literal SQL (in the
+ * INSERT VALUES, or in the UPDATE WHERE clause) — so cross-tenant mutation is structurally impossible.
  *
  * ADR-0062 (Postgres connection-pool lifecycle): this repo NO LONGER owns a per-repo pool/engine
  * cache. The "get a Kysely for this DSN" path routes through the shared {@link tenantKysely} seam
@@ -40,12 +37,10 @@
  * WIRED cross-subsystem composition (Phase 2.1 stale-write gate, part B of 3):
  *   - `persistAggregated` now runs its whole body inside ONE transaction and, as the first step inside
  *     that transaction, calls the AD-4 stale-write guard ({@link assertCurrentRun} from
- *     `../stale_write_guard.js`, the TS port of `codemaster.domain.stale_write_guard.assert_current_run`)
- *     framed in a raw Postgres SAVEPOINT — mirroring the frozen Python `async with
- *     session.begin_nested() as sp: try: assert_current_run(...) except: await sp.commit(); raise`.
- *     The savepoint is RELEASEd (not rolled back to) on a {@link StaleWriteError} so the guard's
- *     `STALE_WRITE_BLOCKED` forensic INSERT is structurally retained per the Python idiom before the
- *     re-raise propagates out of `.execute()` and rolls the outer transaction back.
+ *     `../stale_write_guard.js`) framed in a raw Postgres SAVEPOINT. The savepoint is RELEASEd (not
+ *     rolled back to) on a {@link StaleWriteError} so the guard's `STALE_WRITE_BLOCKED` forensic INSERT
+ *     is structurally retained before the re-raise propagates out of `.execute()` and rolls the outer
+ *     transaction back.
  *   - After the guard passes, `persistAggregated` emits the idempotent `FINDINGS_PERSISTED` milestone
  *     into `audit.workflow_events` ({@link emitWorkflowEvent} from `../../ingest/_workflow_events_repository.js`),
  *     guarded by a pre-emit SELECT so a Temporal retry does not double-emit. Both the bulk INSERT and
@@ -77,8 +72,7 @@ import { emitWorkflowEvent } from "../../ingest/_workflow_events_repository.js";
 
 // ─── uuid5 (deterministic; NOT randomness — outside the clock/random gate's scope) ──────────────
 //
-// 1:1 with the Python `uuid.uuid5(_REVIEW_FINDING_UUID5_NAMESPACE, name)`. Re-authored from
-// node:crypto SHA-1 (no `uuid` npm dep), mirroring libs/contracts/src/retrieved_evidence.v1.ts.
+// Re-authored from node:crypto SHA-1 (no `uuid` npm dep).
 
 /** uuid5 namespace — stable across replays so the same per-finding tuple maps to the same id. */
 const REVIEW_FINDING_UUID5_NAMESPACE = "8a8c9d11-0a3e-5e0f-9b7e-fc2c3a8d9701";
@@ -97,8 +91,7 @@ function uuid5(namespaceHex: string, name: string): string {
 /**
  * Stable per-finding UUID5. Workflow replays produce the same id so the
  * `ON CONFLICT (review_finding_id) DO NOTHING` clause makes {@link PostgresReviewFindingsRepo.persistAggregated}
- * idempotent. 1:1 with the Python `derive_review_finding_id` name composition:
- * `f"{pr_id}|{file}|{start_line}|{end_line}|{severity}|{title}"`.
+ * idempotent. Name composition: `f"{pr_id}|{file}|{start_line}|{end_line}|{severity}|{title}"`.
  */
 export function deriveReviewFindingId(args: {
   prId: string;
@@ -112,8 +105,7 @@ export function deriveReviewFindingId(args: {
   return uuid5(REVIEW_FINDING_UUID5_NAMESPACE, name);
 }
 
-// ─── Eligibility-reason allowlist (1:1 with codemaster/domain/review_findings/eligibility_reasons.py
-//     EligibilityReason StrEnum / migration 0091 core.finding_eligibility_reason enum). ───────────
+// ─── Eligibility-reason allowlist (migration 0091 core.finding_eligibility_reason enum) ────────
 
 /**
  * `record_delivery_skipped` rejects a stale/typo'd reason BEFORE the SQL UPDATE — Postgres would
@@ -127,7 +119,7 @@ export const VALID_ELIGIBILITY_REASONS: ReadonlySet<string> = new Set([
   "line_in_unchanged_gap",
 ]);
 
-// ─── Read-model row shape (1:1 with the Python frozen dataclass SkippedFindingRow). ─────────────
+// ─── Read-model row shape ─────────────────────────────────────────────────────────────────────────
 
 /**
  * Read-model row shape for the walkthrough renderer's DB-mode (F-8 follow-up). Returned by
@@ -196,7 +188,7 @@ export function tenantKyselyForDsn(dsn: string): Kysely<ReviewFindingsDb> {
 
 // ─── The repo ───────────────────────────────────────────────────────────────────────────────────
 
-/** Implements the frozen Python ReviewFindingsRepoPort against `core.review_findings`. */
+/** Implements the ReviewFindingsRepoPort against `core.review_findings`. */
 export class PostgresReviewFindingsRepo {
   private readonly db: Kysely<ReviewFindingsDb>;
   private readonly clock: Clock;
@@ -207,26 +199,24 @@ export class PostgresReviewFindingsRepo {
   }
 
   /**
-   * Persist findings; returns the ordered finding IDs (1:1 with Python `persist_aggregated`).
+   * Persist findings; returns the ordered finding IDs.
    *
    * Multi-row INSERT (one `VALUES (...)` tuple per finding) collapsing N round-trips into one, with
    * `ON CONFLICT (review_finding_id) DO NOTHING` for replay idempotency. JSONB columns (`citations`,
    * `policy_metadata`, `evidence_refs`) are written with `CAST(:x AS JSONB)` over a `JSON.stringify`d
-   * payload — mirroring the frozen Python idiom. The empty-findings case skips the INSERT (an empty
-   * VALUES clause is illegal in Postgres) but still returns the (empty) ordered id tuple.
+   * payload. The empty-findings case skips the INSERT (an empty VALUES clause is illegal in Postgres)
+   * but still returns the (empty) ordered id tuple.
    *
-   * `policyMetadata` is per-finding aligned by index (None / out-of-range → `{}`), 1:1 with the
-   * Python T-8b semantics.
+   * `policyMetadata` is per-finding aligned by index (None / out-of-range → `{}`) — T-8b semantics.
    *
    * WIRED (Phase 2.1 stale-write gate, part B): the whole body runs inside ONE transaction. FIRST,
    * inside a raw Postgres SAVEPOINT, the AD-4 stale-write guard ({@link assertCurrentRun}) validates
    * that `runId` is still `core.pull_request_reviews.current_run_id`; on a {@link StaleWriteError} the
-   * savepoint is RELEASEd (retaining the guard's `STALE_WRITE_BLOCKED` forensic INSERT, per the frozen
-   * Python `begin_nested → sp.commit() → raise` idiom) and the error re-raises out of the transaction,
-   * rolling back the (un-persisted) findings. THEN the bulk INSERT runs (skipped on 0 findings — an
-   * empty VALUES clause is illegal in Postgres, BF-8). THEN the idempotent `FINDINGS_PERSISTED`
-   * milestone is emitted (a pre-emit SELECT dedupes a Temporal retry). The OTel counter the guard
-   * queued fires only after the transaction commits (via {@link PendingEmits.drain}).
+   * savepoint is RELEASEd (retaining the guard's `STALE_WRITE_BLOCKED` forensic INSERT) and the error
+   * re-raises out of the transaction, rolling back the (un-persisted) findings. THEN the bulk INSERT
+   * runs (skipped on 0 findings — an empty VALUES clause is illegal in Postgres, BF-8). THEN the
+   * idempotent `FINDINGS_PERSISTED` milestone is emitted (a pre-emit SELECT dedupes a Temporal retry).
+   * The OTel counter the guard queued fires only after the transaction commits (via {@link PendingEmits.drain}).
    */
   public async persistAggregated(args: {
     prId: string;
@@ -297,7 +287,7 @@ export class PostgresReviewFindingsRepo {
     // Phase 2.1 stale-write gate, part B — the WHOLE body (guard + bulk INSERT + milestone emit) runs
     // inside ONE transaction so they share fate. The post-commit OTel collector is created BEFORE the
     // transaction; it is drained ONLY after `.execute()` resolves (i.e. after a successful commit), so
-    // a rollback drops every queued emit (mirrors the Python after_commit/after_rollback listener pair).
+    // a rollback drops every queued emit.
     const pending = new PendingEmits();
 
     await this.db.transaction().execute(async (txTyped) => {
@@ -308,14 +298,12 @@ export class PostgresReviewFindingsRepo {
       // transaction handle the raw `sql\`...\`.execute(...)` calls below also run on).
       const tx = txTyped as unknown as Transaction<unknown>;
 
-      // FIRST: the AD-4 stale-write guard, framed in a raw Postgres SAVEPOINT. 1:1 with the frozen
-      // Python `async with session.begin_nested() as sp: try: assert_current_run(...) except: await
-      // sp.commit(); raise`. Kysely's auto-managed nested `tx.transaction().execute(...)` would ROLL
-      // BACK to the savepoint on a throw (discarding the guard's STALE_WRITE_BLOCKED INSERT), so we use
-      // raw SAVEPOINT / RELEASE SAVEPOINT to reproduce Python's RELEASE-on-error: the forensic INSERT is
-      // structurally retained at the outer-transaction level, then the re-raise propagates out of
-      // `.execute()` and the outer transaction rolls back (so a STALE write persists NEITHER the
-      // findings NOR — at the outer level — the merged STALE_WRITE_BLOCKED row).
+      // FIRST: the AD-4 stale-write guard, framed in a raw Postgres SAVEPOINT. Kysely's auto-managed
+      // nested `tx.transaction().execute(...)` would ROLL BACK to the savepoint on a throw (discarding
+      // the guard's STALE_WRITE_BLOCKED INSERT), so we use raw SAVEPOINT / RELEASE SAVEPOINT: the
+      // forensic INSERT is structurally retained at the outer-transaction level, then the re-raise
+      // propagates out of `.execute()` and the outer transaction rolls back (so a STALE write persists
+      // NEITHER the findings NOR — at the outer level — the merged STALE_WRITE_BLOCKED row).
       await sql`SAVEPOINT sp_stale_write_guard`.execute(tx);
       try {
         await assertCurrentRun({
@@ -328,7 +316,7 @@ export class PostgresReviewFindingsRepo {
         });
       } catch (err) {
         // RELEASE (not ROLLBACK TO) the savepoint so the guard's STALE_WRITE_BLOCKED INSERT is merged
-        // into the outer transaction, exactly as the Python `sp.commit()` does, THEN re-raise. The
+        // into the outer transaction, THEN re-raise. The
         // StaleWriteError propagates out of `.execute()` → outer rollback. Narrow to StaleWriteError per
         // the primitive's caller-idiom contract (any other throw is a real fault — let it surface raw).
         if (err instanceof StaleWriteError) {
@@ -360,7 +348,7 @@ export class PostgresReviewFindingsRepo {
         `.execute(tx);
       }
 
-      // THEN: the idempotent FINDINGS_PERSISTED milestone, 1:1 with the Python (lines 511-539). A
+      // THEN: the idempotent FINDINGS_PERSISTED milestone. A
       // Temporal retry re-runs this body (the INSERT is absorbed by ON CONFLICT DO NOTHING); the
       // pre-emit SELECT checks whether a row already exists for (run_id, FINDINGS_PERSISTED) and skips
       // the re-emit if so. The SELECT and the emit run in the SAME txn as the INSERT, so the milestone
@@ -407,12 +395,11 @@ export class PostgresReviewFindingsRepo {
   // ─── Phase D / Task D.7 — arbitration persistence ─────────────────────────────────────────────
 
   /**
-   * Insert one Tier-1 `core.review_findings` row (1:1 with Python `insert_tier1_finding`).
-   *
-   * Idempotent via `ON CONFLICT (review_finding_id) DO NOTHING`. `installation_id` is part of the
-   * INSERT VALUES (literal SQL) so the tenancy gate sees the column. Tier-1 scaffolding defaults
-   * (1:1 with the frozen source): severity='issue', category='other', confidence=1.0,
-   * title=body=`<tool>:<rule_id>`, citations=[], scope='chunk_observed', evidence_refs=[], tier=1.
+   * Insert one Tier-1 `core.review_findings` row. Idempotent via
+   * `ON CONFLICT (review_finding_id) DO NOTHING`. `installation_id` is part of the INSERT VALUES
+   * (literal SQL) so the tenancy gate sees the column. Tier-1 scaffolding defaults: severity='issue',
+   * category='other', confidence=1.0, title=body=`<tool>:<rule_id>`, citations=[],
+   * scope='chunk_observed', evidence_refs=[], tier=1.
    */
   public async insertTier1Finding(args: {
     installationId: string;
@@ -456,9 +443,8 @@ export class PostgresReviewFindingsRepo {
   }
 
   /**
-   * UPDATE a previously-persisted Tier-2 finding row with the arbitration decision metadata
-   * (1:1 with Python `update_tier2_arbitration`). The WHERE clause filters on `installation_id` so
-   * cross-tenant mutation is structurally impossible.
+   * UPDATE a previously-persisted Tier-2 finding row with the arbitration decision metadata. The WHERE
+   * clause filters on `installation_id` so cross-tenant mutation is structurally impossible.
    */
   public async updateTier2Arbitration(args: {
     installationId: string;
@@ -488,8 +474,7 @@ export class PostgresReviewFindingsRepo {
   // ─── ADR-0056 / PR-1 — finding-delivery-lifecycle setters ─────────────────────────────────────
 
   /**
-   * Atomically flip rows to DELIVERY_FINALIZED via inline delivery (1:1 with Python
-   * `record_delivery_finalized`): sets delivery_eligibility='eligible' +
+   * Atomically flip rows to DELIVERY_FINALIZED via inline delivery: sets delivery_eligibility='eligible' +
    * delivery_outcome='inline_delivered' + github_comment_id + posted_review_pr_id +
    * lifecycle_updated_at=NOW() in one bulk `UPDATE ... FROM unnest(rfids, comment_ids)`.
    *
@@ -541,8 +526,8 @@ export class PostgresReviewFindingsRepo {
   }
 
   /**
-   * Atomically flip rows to DELIVERY_FINALIZED via the not_applicable outcome (1:1 with Python
-   * `record_delivery_skipped`): sets delivery_eligibility='skipped' + per-row eligibility_reason +
+   * Atomically flip rows to DELIVERY_FINALIZED via the not_applicable outcome: sets
+   * delivery_eligibility='skipped' + per-row eligibility_reason +
    * delivery_outcome='not_applicable' + posted_review_pr_id + lifecycle_updated_at=NOW() via
    * `UPDATE ... FROM unnest(rfids, reasons)`.
    *
@@ -598,8 +583,8 @@ export class PostgresReviewFindingsRepo {
   }
 
   /**
-   * Atomically flip rows to DELIVERY_FINALIZED via a degraded outcome (1:1 with Python
-   * `record_delivery_degraded`): sets delivery_eligibility='eligible' + delivery_outcome=outcome +
+   * Atomically flip rows to DELIVERY_FINALIZED via a degraded outcome: sets
+   * delivery_eligibility='eligible' + delivery_outcome=outcome +
    * posted_review_pr_id + lifecycle_updated_at=NOW() where outcome ∈ {body_only_fallback, failed}.
    *
    * Outcome validation runs BEFORE the writesEnabled short-circuit so a typo in a wired-but-disabled
@@ -647,8 +632,7 @@ export class PostgresReviewFindingsRepo {
   }
 
   /**
-   * Read query for the walkthrough renderer's DB-mode (1:1 with Python
-   * `fetch_skipped_for_walkthrough`). Returns rows where delivery_eligibility='skipped' AND
+   * Read query for the walkthrough renderer's DB-mode. Returns rows where delivery_eligibility='skipped' AND
    * suppression_state='NONE', tenancy-scoped on installation_id, ordered by severity rank
    * (blocker 0 < issue 1 < suggestion 2 < nit 3 < else 4) then file_path then start_line.
    *

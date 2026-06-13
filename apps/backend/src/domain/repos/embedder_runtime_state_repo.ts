@@ -1,11 +1,9 @@
 /**
- * PostgresEmbedderRuntimeStateRepo — 1:1 TypeScript port of the frozen Python
- * `vendor/codemaster-py/codemaster/embedder/runtime_state_repo.py`.
- *
- * Accessor for the SINGLETON `core.embedder_runtime_state` row (CHECK singleton=true → exactly one row).
+ * PostgresEmbedderRuntimeStateRepo — accessor for the SINGLETON `core.embedder_runtime_state` row
+ * (CHECK singleton=true → exactly one row).
  * The table owns the active/pending generation pointers + retrieval_mode + a MONOTONIC config_version.
  *
- * The load-bearing correctness property (ported byte-faithfully from the Python): every write bumps
+ * The load-bearing correctness property: every write bumps
  * `config_version` by exactly 1, ATOMICALLY with the field change, in ONE transaction. Workers poll
  * config_version and refresh their EmbedderCache on a bump (spec v4 §11.5 ≤30s propagation SLA).
  *
@@ -17,7 +15,7 @@
  * raw-SQL tenancy gate does not fire. Inline `// tenant:exempt` markers mirror the platform-wide intent.
  *
  * ADR-0062: owns NO pool/engine cache; handed a `Kysely<unknown>` over the process-wide pool. Each write
- * runs inside `db.transaction()` (mirroring the Python `async with session.begin()`).
+ * runs inside `db.transaction()`.
  */
 
 import { type Kysely, sql, type Transaction } from "kysely";
@@ -47,7 +45,7 @@ export class PostgresEmbedderRuntimeStateRepo {
     this.db = db;
   }
 
-  /** Fetch the singleton row (1:1 with the Python `get`; raises if the singleton is missing). */
+  /** Fetch the singleton row (raises if the singleton is missing). */
   public async get(): Promise<EmbedderRuntimeStateRowV1> {
     // tenant:exempt reason=embedder-platform-wide follow_up=PERMANENT-EXEMPTION-embedder
     const result = await sql<RawStateRow>`
@@ -75,8 +73,8 @@ export class PostgresEmbedderRuntimeStateRepo {
   }
 
   /**
-   * Set the pending pair + bump config_version in one transaction (1:1 with the Python `set_pending`).
-   * Writes BOTH pending fields so the pending-pair biconditional holds.
+   * Set the pending pair + bump config_version in one transaction. Writes BOTH pending fields so the
+   * pending-pair biconditional holds.
    */
   public async setPending(args: {
     generationId: number;
@@ -99,8 +97,8 @@ export class PostgresEmbedderRuntimeStateRepo {
   }
 
   /**
-   * Clear the pending pair + bump config_version in one transaction (1:1 with the Python
-   * `clear_pending`). Clears BOTH pending fields so the pending-pair biconditional holds.
+   * Clear the pending pair + bump config_version in one transaction. Clears BOTH pending fields so the
+   * pending-pair biconditional holds.
    */
   public async clearPending(args: { updatedByEmail: string }): Promise<void> {
     await this.db.transaction().execute(async (txTyped) => {
@@ -119,8 +117,8 @@ export class PostgresEmbedderRuntimeStateRepo {
   }
 
   /**
-   * Set the active pointer, clear pending, bump config_version — atomically (1:1 with the Python
-   * `activate`). Called by EmbedderGenerationService.activate().
+   * Set the active pointer, clear pending, bump config_version — atomically. Called by
+   * EmbedderGenerationService.activate().
    */
   public async activate(args: {
     generationId: number;
@@ -145,8 +143,8 @@ export class PostgresEmbedderRuntimeStateRepo {
   }
 
   /**
-   * Flip retrieval_mode + bump config_version atomically (1:1 with the Python `set_retrieval_mode`;
-   * spec v4 §8). Caller responsibility: verify the coverage gate before flipping to 'generation_only';
+   * Flip retrieval_mode + bump config_version atomically (spec v4 §8). Caller responsibility: verify
+   * the coverage gate before flipping to 'generation_only';
    * the DB CHECK constraint provides the structural backstop on the vocabulary.
    */
   public async setRetrievalMode(args: {
@@ -168,8 +166,8 @@ export class PostgresEmbedderRuntimeStateRepo {
   }
 
   /**
-   * Increment config_version WITHOUT changing any other field (1:1 with the Python
-   * `bump_config_version`). Used by the platform-credentials admin API to signal workers that the Qwen
+   * Increment config_version WITHOUT changing any other field. Used by the platform-credentials admin
+   * API to signal workers that the Qwen
    * credential rotated so they refresh their EmbedderCache within the v4 §11.5 ≤30s SLA.
    */
   public async bumpConfigVersion(args: { updatedByEmail: string }): Promise<void> {

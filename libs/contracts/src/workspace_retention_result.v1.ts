@@ -1,7 +1,7 @@
 import { z } from "zod";
 
-// Zod port of the THREE result contracts of the workspace-retention janitor activities (frozen Python,
-// codemaster/activities/workspace_retention.py:73-101). Parity-validated in
+// Zod port of the THREE result contracts of the workspace-retention janitor activities
+// (codemaster/activities/workspace_retention.py:73-101). Parity-validated in
 // workspace_retention_result.v1.parity.test.ts.
 //
 // Pydantic v2 envelopes for the WorkspaceRetentionWorkflow's three composed activities. Every model

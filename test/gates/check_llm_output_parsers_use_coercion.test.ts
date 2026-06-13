@@ -294,13 +294,13 @@ describe("llm-output-parsers-use-coercion gate", () => {
 
     it("suppresses an exempted real-tree site in a fixture replica (key = path::line)", () => {
       // Reconstruct the exempted shape at the exact exempted path + line so the registry branch is
-      // exercised hermetically: pad the fixture so the parse call lands on line 132.
+      // exercised hermetically: pad the fixture so the parse call lands on line 125 (the upsert key).
       const path = "apps/backend/src/domain/repos/review_walkthroughs_repo.ts";
-      const pad = "// pad\n".repeat(129);
+      const pad = "// pad\n".repeat(122);
       const code =
         `${pad}function upsert(args: { walkthrough: unknown }) {\n` +
         `  const s =\n` +
-        `    JSON.stringify(WalkthroughV1.parse(args.walkthrough));\n` + // line 132
+        `    JSON.stringify(WalkthroughV1.parse(args.walkthrough));\n` + // line 125
         `  return s;\n}\n`;
       expect(violations(code, path)).toHaveLength(0);
       // The same shape at an UN-exempted line in another file is a violation — the exemption is

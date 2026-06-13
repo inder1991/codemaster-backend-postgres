@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 /**
- * Contracts for the single-page resync workflow (Sub-spec C T8b). 1:1 with the frozen Python
+ * Contracts for the single-page resync workflow (Sub-spec C T8b).
  * contracts/workflows/trigger_page_resync/v1.py. Both `ConfigDict(extra="forbid", frozen=True)` ->
  * `.strict()`.
  *

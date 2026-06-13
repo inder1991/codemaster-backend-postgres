@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/codemaster_config/v1.py (frozen Python). Parity-validated in
+// Zod port of contracts/codemaster_config/v1.py. Parity-validated in
 // codemaster_config.v1.parity.test.ts.
 //
 // Source models / enums / constants / helpers ported (every public one):
@@ -120,8 +120,7 @@ const RECOGNITION_MAP: Readonly<Record<string, string>> = {
 const KNOWN_CANONICAL: ReadonlySet<string> = new Set(Object.values(RECOGNITION_MAP));
 
 /**
- * Confluence raw label → canonical form. Byte-for-byte port of the frozen Python
- * `label_taxonomy.canonicalize`. Lookup order:
+ * Confluence raw label → canonical form. Port of `label_taxonomy.canonicalize`. Lookup order:
  *   1. empty / whitespace-only → "unrecognized:empty"
  *   2. already-canonical (in RECOGNITION_MAP values, or matches CANONICAL_LABEL_REGEX) → passthrough
  *   3. known raw key in RECOGNITION_MAP → mapped value

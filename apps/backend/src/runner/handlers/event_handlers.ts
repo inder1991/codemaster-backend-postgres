@@ -62,7 +62,7 @@ import {
 //
 // ## Input contracts (handler-owned parsing — the W2b opaque-payload posture)
 // The Temporal workflows pass the bare webhook payload dict through WITHOUT validating (the activity
-// re-validates at its boundary, 1:1 with the Python `model_validate`). The adapters parse the SAME
+// re-validates at its boundary). The adapters parse the SAME
 // contract at the platform boundary so a malformed payload fails the attempt with the ZodError
 // surfaced in last_error — the activities still re-parse internally (defense-in-depth, byte-cheap).
 //

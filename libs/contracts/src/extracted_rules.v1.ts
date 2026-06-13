@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/extracted_rules/v1.py (frozen Python, Sprint 25 / A-2).
+// Zod port of contracts/extracted_rules/v1.py (Sprint 25 / A-2).
 // Pydantic ConfigDict(extra="forbid", frozen=True) → .strict() (frozen is a TS-side concern, not wire).
 // Parity-validated in extracted_rules.v1.parity.test.ts.
 //

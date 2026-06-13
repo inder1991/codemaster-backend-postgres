@@ -3,7 +3,7 @@ import { z } from "zod";
 import { OutputSafetySanitizationEventV1 } from "./review_chunk_response.v1.js";
 
 // Zod port of codemaster/activities/_emit_output_safety_audit_inputs.py::EmitOutputSafetyAuditEventInput
-// (frozen Python: ConfigDict(extra="forbid", frozen=True), __contract_internal__ = True). A thin envelope
+// (ConfigDict(extra="forbid", frozen=True), __contract_internal__ = True). A thin envelope
 // around OutputSafetySanitizationEventV1 (ported in review_chunk_response.v1.ts — IMPORTED here, not
 // redefined). Parity-validated in test/contracts/emit_output_safety_audit.v1.parity.test.ts.
 //

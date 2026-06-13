@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/confluence/page_approval/v1.py (frozen Python). Parity-validated in
+// Zod port of contracts/confluence/page_approval/v1.py. Parity-validated in
 // page_approval.v1.parity.test.ts.
 //
 // Source members ported (every public one in v1.py):

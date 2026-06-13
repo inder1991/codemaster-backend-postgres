@@ -1,7 +1,7 @@
 import { z } from "zod";
 
-// Zod port of the `InstallationTokenV1` Pydantic model defined INLINE in the frozen Python module
-// `codemaster/integrations/github/installation_token.py` (Sprint 4 / S4.1.1). It is NOT in
+// Zod port of the `InstallationTokenV1` Pydantic model
+// (codemaster/integrations/github/installation_token.py, Sprint 4 / S4.1.1). It is NOT in
 // `contracts/` on the Python side, but it IS a cross-time data envelope (the cached installation
 // token), so we port it as a first-class contract here. Parity-validated in
 // installation_token.v1.parity.test.ts.

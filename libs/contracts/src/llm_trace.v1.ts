@@ -1,7 +1,6 @@
 import { z } from "zod";
 
-// Zod port of vendor/codemaster-py/contracts/observability/v1.py::LlmTraceV1
-// (frozen Python, Sprint 6 / S6.1.4a). Parity-validated in test/contracts/llm_trace.v1.parity.test.ts.
+// Zod port of LlmTraceV1 (Sprint 6 / S6.1.4a). Parity-validated in test/contracts/llm_trace.v1.parity.test.ts.
 //
 // LlmTraceV1 is the single trace exported to Langfuse per LLM invocation. The redacted snippets carry at
 // most 200 characters of prompt / completion text with PII masked (the LangfuseExporter's
@@ -49,7 +48,7 @@ export type LlmTraceV1 = z.infer<typeof LlmTraceV1>;
 // `BedrockTraceV1 = LlmTraceV1`. Same object identity in Python; here the alias re-exports the SAME
 // Zod schema object + the SAME inferred type, so `BedrockTraceV1.parse(...)` and `LlmTraceV1.parse(...)`
 // are interchangeable (the exporter ports the name it actually uses — see langfuse_exporter.ts, which
-// imports BedrockTraceV1, mirroring the frozen Python exporter's `from contracts.observability.v1 import
+// imports BedrockTraceV1 (matching the Python exporter's `from contracts.observability.v1 import
 // BedrockTraceV1`).
 export const BedrockTraceV1 = LlmTraceV1;
 export type BedrockTraceV1 = LlmTraceV1;

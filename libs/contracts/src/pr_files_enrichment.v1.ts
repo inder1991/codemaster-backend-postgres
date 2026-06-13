@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { PrFileV1 } from "./pr_file.v1.js";
 
-// Zod port of contracts/pr_files_enrichment/v1.py::PrFilesEnrichmentResultV1 (frozen Python).
+// Zod port of contracts/pr_files_enrichment/v1.py::PrFilesEnrichmentResultV1.
 // Pydantic ConfigDict(extra="forbid", frozen=True) → .strict() (frozen is a TS-side concern, not wire).
 // Parity-validated in pr_files_enrichment.v1.parity.test.ts.
 //

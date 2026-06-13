@@ -1,5 +1,4 @@
-// Canonical write surface for `core.outbox` — Layer-2 typed producer repo. 1:1 port of
-// vendor/codemaster-py/codemaster/domain/repos/outbox_repo.py (PostgresOutboxRepo / OutboxRepoPort).
+// Canonical write surface for `core.outbox` — Layer-2 typed producer repo.
 //
 // Three typed factory methods — one per workflow-causality class (ADR-0053). The method SIGNATURE is the
 // enforcement layer (what SQL CHECK cannot express):
@@ -51,11 +50,10 @@ export const REVIEW_WORKFLOW_TYPES: ReadonlySet<string> = new Set(["reviewPullRe
 /** A Kysely instance or an open Transaction — the executor the raw `sql` runs on. */
 type Executor = Kysely<unknown>;
 
-/** A claimed outbox row (Python `OutboxRow`) — projected by {@link PostgresOutboxRepo.claimPending} for the
- *  dispatcher (run_id/review_id/provider feed the stale-write guard + the INGESTED emit). `deliveryId`
- *  (W1.9e — a TS-side addition over the frozen Python projection) carries the row's webhook delivery id so
- *  the Postgres drain loop can thread it into the SinkContext for the destination-side identity cross-check;
- *  the parity-locked DispatchRowInputV1 wire shape stays untouched. */
+/** A claimed outbox row projected by {@link PostgresOutboxRepo.claimPending} for the dispatcher
+ *  (run_id/review_id/provider feed the stale-write guard + the INGESTED emit). `deliveryId` (W1.9e)
+ *  carries the row's webhook delivery id so the Postgres drain loop can thread it into the SinkContext
+ *  for the destination-side identity cross-check; the DispatchRowInputV1 wire shape stays untouched. */
 export type OutboxRow = {
   id: string;
   sink: string;

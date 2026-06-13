@@ -4,11 +4,9 @@ import { AggregatedFindingsV1 } from "./aggregated_findings.v1.js";
 
 // ─── UpdatePrDescriptionInputV1 — the NEW typed-input envelope (CLAUDE.md invariant 11 / ADR-0047) ──
 //
-// The frozen Python `UpdatePrDescriptionSummaryActivity.update_pr_description_summary` dispatches with
-// FOUR positional arguments — `update_pr_description_summary(owner, repo, pr_number, aggregated)` (see
-// vendor/codemaster-py/codemaster/activities/update_pr_description_summary.py + the workflow-body
-// `workflow.execute_activity("update_pr_description_summary", args=[owner, repo, pr_number, aggregated])`
-// dispatch at review_pull_request.py). That violates CLAUDE.md invariant 11 / ADR-0047 ("every Temporal
+// `UpdatePrDescriptionSummaryActivity.update_pr_description_summary` dispatches with
+// FOUR positional arguments — `update_pr_description_summary(owner, repo, pr_number, aggregated)`.
+// That violates CLAUDE.md invariant 11 / ADR-0047 ("every Temporal
 // activity takes EXACTLY ONE positional argument typed as a Pydantic v2 BaseModel"). The TS port CLOSES
 // that violation: the activity's single positional input is this `UpdatePrDescriptionInputV1` envelope
 // (consistent with the post_check_run.v1 / persist_review_findings.v1 envelopes that closed the other

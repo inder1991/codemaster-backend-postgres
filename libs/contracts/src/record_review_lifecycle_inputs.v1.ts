@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of the frozen Python `codemaster/activities/_record_review_lifecycle_inputs.py` (Phase 4
+// Zod port of codemaster/activities/_record_review_lifecycle_inputs.py (Phase 4
 // Task 4 + BF-5 + BF-13). Parity-validated in record_review_lifecycle_inputs.v1.parity.test.ts.
 //
 // Four activity-input contracts for the run-state lifecycle activities:

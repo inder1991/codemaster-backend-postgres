@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { AggregatedFindingsV1 } from "./aggregated_findings.v1.js";
 
-// Zod port of contracts/generate_fix_prompt/v1.py (frozen Python). Parity-validated in
+// Zod port of contracts/generate_fix_prompt/v1.py. Parity-validated in
 // generate_fix_prompt.v1.parity.test.ts.
 //
 // GenerateFixPromptInputV1 — single typed input for generate_fix_prompt_activity
@@ -36,8 +36,8 @@ export const GenerateFixPromptInputV1 = z
     // NUMERIC GitHub-App installation id the advisory fix-prompt comment posts under (per-review routing).
     // DISTINCT from installation_id above (the internal UUID tenant FK used for the fix_prompts persist).
     // NULLABLE (faithful to the nullable workflow payload; the activity enforces presence). `.default(null)`
-    // keeps the KEY required at construction so the dispatch threads the id explicitly. TS-only field, absent
-    // in frozen Python; the parity test strips it.
+    // keeps the KEY required at construction so the dispatch threads the id explicitly. TS-only field;
+    // the parity test strips it.
     github_installation_id: z.number().int().gte(0).nullable().default(null),
     pr_number: z.number().int(),
     owner: z.string(),

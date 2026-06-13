@@ -3,8 +3,7 @@ import { z } from "zod";
 // Typed single-arg input envelope for the `sync_code_owners_activity` activity (CLAUDE.md invariant 11 —
 // exactly one positional Pydantic/Zod-model argument per Temporal activity; ADR-0047).
 //
-// The frozen Python `SyncCodeOwnersWorkflow.run` (vendor/codemaster-py/codemaster/workflows/
-// sync_code_owners.py) takes a BARE `payload: dict[str, Any]` and dispatches the activity MULTI-positional:
+// `SyncCodeOwnersWorkflow.run` takes a BARE `payload: dict[str, Any]` and dispatches the activity MULTI-positional:
 //
 //     return await workflow.execute_activity(
 //         "sync_code_owners_activity",

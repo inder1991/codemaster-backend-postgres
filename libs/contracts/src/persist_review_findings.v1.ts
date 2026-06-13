@@ -4,7 +4,7 @@ import { AggregatedFindingsV1 } from "./aggregated_findings.v1.js";
 import { FindingPolicyMetadataV1 } from "./finding_policy_metadata.v1.js";
 import { ResolvedGuidanceBundleV1 } from "./resolved_guidance.v1.js";
 
-// Zod port of contracts/persist_review_findings/v1.py::PersistReviewFindingsInputV1 (frozen Python,
+// Zod port of contracts/persist_review_findings/v1.py::PersistReviewFindingsInputV1 (
 // 2026-05-24 retrofit). Typed input envelope for `persist_review_findings_activity_v2`
 // (CLAUDE.md invariant 11 — single positional Pydantic BaseModel input per activity).
 // Pydantic ConfigDict(extra="forbid", frozen=True) → .strict() (frozen is a TS-side concern, not wire).

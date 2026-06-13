@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/policy_citation/v1.py::PolicyCitationContextV1 (frozen Python).
+// Zod port of contracts/policy_citation/v1.py::PolicyCitationContextV1.
 // Pydantic ConfigDict(extra="forbid", frozen=True) → .strict() (frozen is a TS-side concern, not wire).
 // Parity-validated in policy_citation.v1.parity.test.ts.
 

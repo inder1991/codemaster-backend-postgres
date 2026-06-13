@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/integrations/v1.py (frozen Python). Parity-validated in
+// Zod port of contracts/integrations/v1.py. Parity-validated in
 // integrations.v1.parity.test.ts.
 //
 // Boundary: admin-console integrations UI writes/reads; carries ONLY non-secret metadata

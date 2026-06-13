@@ -1,11 +1,10 @@
 /**
- * ADR-0033 — local AES-256-GCM field encryption. 1:1 TS port of
- * vendor/codemaster-py/codemaster/security/local_key_field_encryption.py.
+ * ADR-0033 — local AES-256-GCM field encryption.
  *
  * Replaces Vault Transit (a network round-trip per encrypt/decrypt) with in-process AES-256-GCM
  * using keys from the {@link KeyRegistry} (populated at startup from Vault KV).
  *
- * Envelope formats (byte-exact with the Python original — this is security-critical: a drift makes
+ * Envelope formats (byte-exact across implementations — this is security-critical: a drift makes
  * encrypted DB columns cross-unreadable between the implementations):
  *
  *     kms:vN:<base64(  12-byte nonce || ciphertext || 16-byte GCM tag )>
@@ -70,7 +69,7 @@ export class LocalKeyEncryptionError extends Error {
  * Returns `kms:vN:<base64(nonce||ct||tag)>` when `aad` is undefined and `kms2:vN:...` when set. The
  * differing prefix lets the dual-format read path route correctly during the migration window.
  *
- * 1:1-DIVERGENCE (nonce source): the Python original uses `os.urandom(12)`. Here the nonce comes
+ * DIVERGENCE (nonce source): Python uses `os.urandom(12)`. Here the nonce comes
  * from `new SystemRandom().tokenBytes(12)` — the sanctioned CSPRNG seam (the clock/random gate bans
  * raw `node:crypto` random calls outside randomness.ts; `SystemRandom.tokenBytes` wraps
  * `crypto.randomBytes`). Same 96-bit OS-CSPRNG entropy. The nonce is random, so it is NOT

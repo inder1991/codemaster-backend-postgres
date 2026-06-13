@@ -1,9 +1,9 @@
 import { z } from "zod";
 
-// Zod port of contracts/notifications/v1.py (frozen Python). Parity-validated in
+// Zod port of contracts/notifications/v1.py. Parity-validated in
 // notifications.v1.parity.test.ts.
 //
-// This module carries TWO families of envelope (mirrors the Python module docstring):
+// This module carries TWO families of envelope (per the Python module docstring):
 //   1. Outbound delivery payload (NotificationPayloadV1) — Sprint 0; Slack/Email/PagerDuty sinks.
 //      ConfigDict(extra="ignore") → Zod's default .strip() (unknown keys silently dropped, NOT rejected).
 //   2. The S19.C rule envelopes (NotificationRuleV1, *CreateRequestV1, *UpdateRequestV1,

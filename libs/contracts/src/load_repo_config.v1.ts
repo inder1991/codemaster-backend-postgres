@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { CodemasterConfigV1 } from "./codemaster_config.v1.js";
 
-// Zod port of contracts/load_repo_config/v1.py (frozen Python). Parity-validated in
+// Zod port of contracts/load_repo_config/v1.py. Parity-validated in
 // load_repo_config.v1.parity.test.ts.
 //
 // Source models / enums / constants ported (every public one):
@@ -27,7 +27,7 @@ export const LoadRepoConfigInputV1 = z
 export type LoadRepoConfigInputV1 = z.infer<typeof LoadRepoConfigInputV1>;
 
 // ─── W4.4 [M6] — the status-carrying RESULT envelope (TS hardening divergence) ────────────────────
-// The frozen Python activity returns the bare CodemasterConfigV1, so its WARN +
+// The Python activity returns the bare CodemasterConfigV1, so its WARN +
 // `record_config_malformed` observability was structurally unreachable from the orchestrator: a
 // valid-equals-defaults config and a rejected-malformed one were indistinguishable, and the SEED
 // contract ("fail-open to defaults + a NOTICE") could not be honored. This envelope is additive:

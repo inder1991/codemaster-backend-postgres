@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/refresh_semantic_docs/v1.py (frozen Python — Sprint 26 / B-3).
+// Zod port of contracts/refresh_semantic_docs/v1.py (Sprint 26 / B-3).
 // Parity-validated in refresh_semantic_docs.v1.parity.test.ts.
 //
 // Source models / enums / constants ported (every public one):

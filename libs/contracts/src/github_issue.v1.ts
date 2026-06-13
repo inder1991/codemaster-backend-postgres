@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/github_issue/v1.py::GithubIssueV1 (frozen Python).
+// Zod port of contracts/github_issue/v1.py::GithubIssueV1.
 // One row of `core.github_issues_cache` (DM-WIRE T4 / S22.DM.16). Parity-validated in
 // github_issue.v1.parity.test.ts.
 //

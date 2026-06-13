@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/markdown_chunks/v1.py::MarkdownChunkV1 (frozen Python).
+// Zod port of contracts/markdown_chunks/v1.py::MarkdownChunkV1.
 // Pydantic ConfigDict(extra="forbid", frozen=True) → .strict() (frozen is a TS-side concern, not wire).
 // Parity-validated in markdown_chunk.v1.parity.test.ts.
 export const MAX_CHUNK_CHARS = 6000;

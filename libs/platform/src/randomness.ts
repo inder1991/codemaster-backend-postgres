@@ -1,5 +1,5 @@
 /**
- * Randomness seam — 1:1 port of `codemaster/infra/randomness.py` (frozen Python, Sprint 0).
+ * Randomness seam (codemaster/infra/randomness.py, Sprint 0).
  *
  * Production code MUST NOT use `Math.random()` or call `node:crypto` random functions directly.
  * Use the injected {@link Random} seam instead. The CI gate `scripts/gates/check_clock_random.ts`
@@ -93,7 +93,7 @@ export class SystemRandom implements Random {
 /**
  * Test implementation with a deterministic seed. Bit-for-bit identical to CPython's
  * `random.Random(seed)` because it delegates to the {@link Mt19937} engine. Proven against the
- * live frozen Python by `test/parity/randomness.parity.test.ts`.
+ * against the Python impl by `test/parity/randomness.parity.test.ts`.
  *
  * @example
  * ```ts

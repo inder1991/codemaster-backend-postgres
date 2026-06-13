@@ -2,8 +2,8 @@ import { z } from "zod";
 
 import { ArbitrationDecisionV1 } from "./finding_arbitration.v1.js";
 
-// Zod port of the `ArbitrationResult` + `RejectedIntent` + `RejectionReason` types from the frozen Python
-// arbitration LAYER (`vendor/codemaster-py/codemaster/review/arbitration_layer.py`). In the Python these
+// Zod port of the `ArbitrationResult` + `RejectedIntent` + `RejectionReason` types from the
+// arbitration layer. In the Python these
 // are `@dataclass(frozen=True, slots=True)` value objects (NOT Pydantic / NOT `contracts/` models) — they
 // are the in-memory output of the pure `arbitrate()` function. We re-author them as `#contracts` Zod
 // schemas here because the activity returns the result over the Temporal boundary (so it IS a cross-process

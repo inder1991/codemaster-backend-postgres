@@ -1,23 +1,18 @@
 /**
- * Repo for `core.review_policy_bundles` (review-detail P0-B).
+ * Repo for `core.review_policy_bundles` (review-detail P0-B). Persists the per-review merged
+ * {@link ResolvedGuidanceBundleV1} so the review-detail governance scorecard can show rules that
+ * APPLIED AND PASSED, not only rules that became findings.
  *
- * 1:1 TypeScript/Kysely port of the frozen Python repo
- * `vendor/codemaster-py/codemaster/domain/repos/review_policy_bundles_repo.py`. Persists the
- * per-review merged {@link ResolvedGuidanceBundleV1} (the output of
- * `codemaster.policy.citation_context_builder.merge_per_chunk_bundles`) so the review-detail
- * governance scorecard can show rules that APPLIED AND PASSED, not only rules that became findings.
- *
- * SQL semantics preserved verbatim from the Python source:
+ * SQL semantics:
  *  - `upsert` issues `INSERT ... ON CONFLICT (review_id) DO UPDATE SET ... updated_at = now()`;
- *    the bundle is bound as a JSON string and inserted through `CAST(:x AS jsonb)` (write idiom —
- *    asyncpg/pg pass a `text` literal that Postgres parses into `jsonb`).
- *  - `get` reads `applied_bundle::text` (read-cast idiom) so the driver hands back a JSON STRING we
- *    reparse through the contract — never a pre-deserialized object whose key order / number shape
- *    could drift from the canonical contract serialization.
+ *    the bundle is bound as a JSON string and inserted through `CAST(:x AS jsonb)`.
+ *  - `get` reads `applied_bundle::text` so the driver hands back a JSON STRING we reparse through
+ *    the contract — never a pre-deserialized object whose key order / number shape could drift from
+ *    the canonical contract serialization.
  *  - `rule_count = len(bundle.applicable_rules)` — derived, never trusted from the caller.
  *
- * Tenancy: every read statement carries the `installation_id` token in the SQL and is keyed by it,
- * matching the frozen Python repo (GF-3 raw-SQL tenancy discipline). The Kysely instance installs
+ * Tenancy: every read statement carries the `installation_id` token in the SQL and is keyed by it
+ * (GF-3 raw-SQL tenancy discipline). The Kysely instance installs
  * `TenancyPlugin` (defense-in-depth, invariant #10) — a no-op AST pass for raw `sql` templates, but it
  * guards any future ORM-builder query this repo grows; it is installed centrally by {@link tenantKysely}.
  *

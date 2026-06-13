@@ -1,12 +1,10 @@
 /**
- * PostgresConfluencePageApprovalsRepo — 1:1 TypeScript port of the frozen Python data-layer repo
- * `vendor/codemaster-py/codemaster/domain/repos/confluence_page_approvals_repo.py` (Sub-spec 0 Task 4).
- *
- * Pure data-access helpers over `core.confluence_page_approvals`. Sub-spec C's admin API calls these
+ * PostgresConfluencePageApprovalsRepo — pure data-access helpers over `core.confluence_page_approvals`
+ * (Sub-spec 0 Task 4). Sub-spec C's admin API calls these
  * from POST/DELETE handlers; Sub-spec A's upsert_chunks activity calls `getActiveApproval()` at
  * default-tag write time.
  *
- * Methods (1:1 with the Python module):
+ * Methods:
  *   - upsertApproval    — idempotent upsert. Takes a per-page advisory xact-lock, revokes any current
  *                         active approval (revoked_by = actor — F-28), then inserts the new row. Returns
  *                         the new approval_id.
@@ -23,7 +21,7 @@
  *
  * Tenancy: `core.confluence_page_approvals` is PLATFORM-WIDE (no `installation_id`), so it is NOT in
  * `TENANT_SCOPED_TABLES` and the raw-SQL tenancy gate does not fire on it. The inline `// tenant:exempt`
- * markers mirror the frozen Python source for documentation parity.
+ * markers document the platform-wide intent.
  *
  * ADR-0062 (Postgres connection-pool lifecycle): this repo owns NO pool/engine cache. It is handed a
  * `Kysely<unknown>` over the process-wide single pool (via {@link tenantKysely}) by injection.
@@ -55,10 +53,9 @@ type ApprovalRow = {
 };
 
 /**
- * Reconstruct a {@link ConfluencePageApprovalV1} from a raw row (1:1 with the Python
- * `ConfluencePageApprovalV1(**dict(row))`). node-pg hands timestamptz columns back as JS `Date`; the
- * Zod contract expects ISO strings, so the timestamp columns are stringified via `toISOString()` (the
- * Python path received `datetime` objects which Pydantic accepted directly — this is the TS analogue).
+ * Reconstruct a {@link ConfluencePageApprovalV1} from a raw row. node-pg hands timestamptz columns back
+ * as JS `Date`; the Zod contract expects ISO strings, so the timestamp columns are stringified via
+ * `toISOString()`.
  */
 function rowToApproval(row: ApprovalRow): ConfluencePageApprovalV1 {
   return ConfluencePageApprovalV1.parse({
@@ -86,7 +83,7 @@ export class PostgresConfluencePageApprovalsRepo {
   }
 
   /**
-   * Idempotent upsert (1:1 with the Python `upsert_approval`). Revokes any current active approval, then
+   * Idempotent upsert. Revokes any current active approval, then
    * inserts the new one. Returns the new approval_id.
    *
    * Per-page concurrency: takes a `pg_advisory_xact_lock(hashtext("<space>/<page>"))` so two parallel
@@ -134,8 +131,7 @@ export class PostgresConfluencePageApprovalsRepo {
   }
 
   /**
-   * The single active approval (revoked_at IS NULL) for (space_key, page_id), or null (1:1 with the
-   * Python `get_active_approval`).
+   * The single active approval (revoked_at IS NULL) for (space_key, page_id), or null.
    */
   public async getActiveApproval(args: {
     spaceKey: string;
@@ -151,8 +147,7 @@ export class PostgresConfluencePageApprovalsRepo {
   }
 
   /**
-   * Active approvals for a space (or all, with `includeRevoked`), ordered newest-first by created_at
-   * (1:1 with the Python `list_for_space`).
+   * Active approvals for a space (or all, with `includeRevoked`), ordered newest-first by created_at.
    */
   public async listForSpace(args: {
     spaceKey: string;
@@ -174,8 +169,8 @@ export class PostgresConfluencePageApprovalsRepo {
   }
 
   /**
-   * Revoke the active approval for (space_key, page_id): set revoked_at = now() + revoked_by (1:1 with
-   * the Python `revoke`). Returns true iff a row changed (an already-revoked / absent page → false).
+   * Revoke the active approval for (space_key, page_id): set revoked_at = now() + revoked_by. Returns
+   * true iff a row changed (an already-revoked / absent page → false).
    */
   public async revoke(args: {
     spaceKey: string;

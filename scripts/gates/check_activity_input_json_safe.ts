@@ -1,6 +1,4 @@
-// Activity/job-input JSON-safety gate (ts-morph adaptation of the frozen Python gate
-// vendor/codemaster-py/scripts/check_temporal_activity_input_json_safe.py — the smoke-#10
-// dict[UUID, UUID] crash class).
+// Activity/job-input JSON-safety gate (smoke-#10 dict[UUID, UUID] crash class).
 //
 // ── Why this gate exists (the Python incident, transposed) ──
 // Temporal serializes every activity input through a JSON payload converter; the background/review
@@ -44,15 +42,14 @@
 //
 // ── Modes & escape hatches ──
 // ERROR-mode: any violation returns 1. WARN is reserved for `z.record(K, V)` keys the gate cannot
-// statically classify (the Python gate's unresolvable-external-alias WARN, narrowed the same way).
+// statically classify.
 // Exemptions (S23.AR.17 P-2 rotation discipline — both forms require a follow-up):
 //   * inline marker on the construct's line or the line above:
 //       // json-safe:exempt reason=<short> follow_up=<story-id>
 //   * an EXEMPTED entry keyed "<repo-relative contract path>::<SchemaName>" carrying
 //     reason + follow_up_story (walked by check_exempted_lists_pointed / rotation-age meta-gates).
-// Post-ADR-0034 note from the Python original does NOT carry over: the TS worker uses the default
-// JSON-ish converter semantics for these surfaces, so this gate is load-bearing, not
-// belt-and-suspenders.
+// Post-ADR-0034 note: the TS worker uses the default JSON-ish converter semantics for these
+// surfaces, so this gate is load-bearing, not belt-and-suspenders.
 import * as path from "node:path";
 
 import {
@@ -416,9 +413,9 @@ const STRINGISH_KEY_RE = /z\.(string\(|enum\(|literal\(["'`])/;
 const NON_STRING_KEY_RE = /^z\.(number\(|boolean\(|bigint\(|date\(|nan\(|symbol\(|coerce\.)/;
 
 /** Classify a record KEY schema expression: "string" (JSON-safe), "non-string" (refused), or
- *  "unknown" (opaque — WARN, the Python gate's unresolvable-alias posture). Identifier / helper-call
- *  keys are resolved through same-file declarations and contract imports, then matched textually
- *  (the uuidLower()-style helper: its declaration text contains `z.string(`). */
+ *  "unknown" (opaque — WARN). Identifier / helper-call keys are resolved through same-file
+ *  declarations and contract imports, then matched textually (the uuidLower()-style helper: its
+ *  declaration text contains `z.string(`). */
 function classifyRecordKeySchema(expr: Node, sf: SourceFile): "string" | "non-string" | "unknown" {
   const norm = expr.getText().replace(/\s+/g, "");
   if (/^z\.(string\(|enum\(|literal\(["'`])/.test(norm)) return "string";

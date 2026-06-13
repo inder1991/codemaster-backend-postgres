@@ -1,9 +1,6 @@
 /**
- * PostgresGithubIssuesCacheRepo — 1:1 TS port of the frozen Python
- * `vendor/codemaster-py/codemaster/domain/repos/github_issues_cache_repo.py`
- * (`PostgresGithubIssuesCacheRepo`, DM-WIRE T4 / S22.DM.16).
- *
- * Async repo over `core.github_issues_cache`. Two operations, ported method-for-method:
+ * PostgresGithubIssuesCacheRepo — async repo over `core.github_issues_cache`
+ * (DM-WIRE T4 / S22.DM.16). Two operations:
  *
  *   - {@link PostgresGithubIssuesCacheRepo.getMany} — bulk SELECT of cache entries for a set of
  *     `(installation_id, github_issue_number)` pairs. Returns a Map keyed by issue number. Missing
@@ -18,7 +15,7 @@
  *
  * Tenancy (CLAUDE.md invariant #10 / "default deny everywhere"): the `getMany` SELECT filters
  * `WHERE installation_id = ...`; the `upsert` INSERT carries `installation_id` as an explicit column
- * value (no WHERE to scope). 1:1 with the frozen Python `text()` SQL.
+ * value (no WHERE to scope).
  *
  * ADR-0062: this repo NO LONGER owns a `pg.Pool` or constructs a `new Kysely(...)`. It is handed a
  * `Kysely<GithubIssuesCacheDb>` over the process-wide single pool from {@link tenantKysely}
@@ -46,10 +43,9 @@ import { tenantKysely } from "#platform/db/database.js";
 import type { Clock } from "#platform/clock.js";
 
 /**
- * The in-process row shape {@link PostgresGithubIssuesCacheRepo.getMany} returns. Mirrors the fields
- * of the Python `GithubIssueV1` envelope the activity reads — but `cached_at` is a `Date` (NOT the
- * wire string) because the consuming `fetchLinkedIssues` activity does age math on it
- * (`now - entry.cached_at`), exactly as the Python activity reads `entry.cached_at` as a `datetime`.
+ * The in-process row shape {@link PostgresGithubIssuesCacheRepo.getMany} returns. `cached_at` is a
+ * `Date` (NOT the wire string) because the consuming `fetchLinkedIssues` activity does age math on it
+ * (`now - entry.cached_at`).
  */
 export type CachedIssueRow = {
   readonly github_issue_number: number;
@@ -78,8 +74,8 @@ type GithubIssuesCacheDb = {
 };
 
 /**
- * The repo Port consumed by `fetchLinkedIssues` (1:1 with the Python `GithubIssuesCacheRepoPort`).
- * The activity depends on this narrow surface, not the concrete class.
+ * The repo Port consumed by `fetchLinkedIssues`. The activity depends on this narrow surface, not the
+ * concrete class.
  */
 export type GithubIssuesCacheRepoPort = {
   getMany(args: {
@@ -126,7 +122,7 @@ export class PostgresGithubIssuesCacheRepo implements GithubIssuesCacheRepoPort 
   }
 
   /**
-   * Bulk SELECT for the activity's resolver-dict build path, 1:1 with the Python `get_many`.
+   * Bulk SELECT for the activity's resolver-dict build path.
    *
    * Returns a Map keyed by `github_issue_number`. Missing entries are absent from the Map; the
    * activity then attempts a single ETag-aware fetch per miss (or per stale entry). Empty
@@ -175,9 +171,9 @@ export class PostgresGithubIssuesCacheRepo implements GithubIssuesCacheRepoPort 
   }
 
   /**
-   * INSERT ON CONFLICT DO UPDATE on `(installation_id, github_issue_number)`, 1:1 with the Python
-   * `upsert`. Refreshes `cached_at` via the injected clock so cache TTL semantics are deterministic in
-   * tests. The title is sliced to 500 chars (column `varchar(500)` + the Python `title[:500]`).
+   * INSERT ON CONFLICT DO UPDATE on `(installation_id, github_issue_number)`. Refreshes `cached_at`
+   * via the injected clock so cache TTL semantics are deterministic in tests. The title is sliced to
+   * 500 chars (the column's `varchar(500)` bound).
    */
   public async upsert(args: {
     installationId: string;

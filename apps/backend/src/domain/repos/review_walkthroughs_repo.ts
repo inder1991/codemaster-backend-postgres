@@ -1,38 +1,31 @@
 /**
- * Repo for `core.review_walkthroughs` (review-detail P3).
+ * Repo for `core.review_walkthroughs` (review-detail P3). Persists the structured `WalkthroughV1` per
+ * review so the review-detail page can render the bot's TL;DR + per-file table.
  *
- * 1:1 TypeScript/Kysely port of the frozen Python source
- * `vendor/codemaster-py/codemaster/domain/repos/review_walkthroughs_repo.py`. Persists the structured
- * `WalkthroughV1` per review so the review-detail page can render the bot's TL;DR + per-file table.
- *
- * Public surface (method-for-method with the Python `ReviewWalkthroughsRepo`):
+ * Public surface:
  *   - `upsert({ reviewId, installationId, walkthrough })` → `INSERT … ON CONFLICT (review_id) DO UPDATE`.
  *   - `get({ reviewId, installationId })` → tenant-scoped read; `null` when absent / in a different tenant.
  *
- * IDIOMS preserved from the frozen Python:
- *   - JSONB WRITE: the `WalkthroughV1` is serialised to a compact JSON string and bound as TEXT with an
- *     explicit `CAST(:walkthrough AS jsonb)` (Python: `walkthrough.model_dump_json()` +
- *     `CAST(:walkthrough AS jsonb)`).
+ * IDIOMS:
+ *   - JSONB WRITE: the `WalkthroughV1` is serialised to a compact JSON string and bound as TEXT with
+ *     an explicit `CAST(:walkthrough AS jsonb)`.
  *   - JSONB READ: the column is cast `walkthrough::text` in the SELECT so we reparse it through Zod
  *     (`WalkthroughV1.parse(JSON.parse(...))`) rather than trusting the `pg` driver's auto-deserialised
- *     object — byte-faithful, and the parse re-applies the contract (Python: `walkthrough::text` +
- *     `WalkthroughV1.model_validate_json(...)`; asyncpg/`pg` return a `dict`/object otherwise).
- *   - TENANCY: every read carries the `installation_id` equality predicate (Python carries the
- *     `installation_id` token in its raw SQL to satisfy the GF-3 raw-SQL tenancy AST gate). The Kysely
- *     instance installs the {@link TenancyPlugin} (defense-in-depth; see TENANCY NOTE below).
+ *     object — the parse re-applies the contract.
+ *   - TENANCY: every read carries the `installation_id` equality predicate to satisfy the GF-3
+ *     raw-SQL tenancy AST gate. The Kysely instance installs the {@link TenancyPlugin}
+ *     (defense-in-depth; see TENANCY NOTE below).
  *   - There are NO vector columns and NO wall-clock/random in this repo: `created_at`/`updated_at`
  *     default to the server-side SQL `now()` and the conflict branch sets `updated_at = now()` in SQL,
  *     so the #platform clock/random seams are not needed (and the check_clock_random gate is a no-op
  *     here).
  *
- * TENANCY NOTE (parity-faithful): `core.review_walkthroughs` is NOT in the frozen Python tenant-scoped
- * registry (`scripts/check_tenant_scoped_raw_sql.py`) and is NOT a `TenantScoped` ORM model, so it is
- * absent from the ported {@link TENANT_SCOPED_TABLES} registry — which is why the runtime
+ * TENANCY NOTE: `core.review_walkthroughs` is NOT in the tenant-scoped registry and is absent from
+ * the {@link TENANT_SCOPED_TABLES} registry — which is why the runtime
  * `TenancyPlugin` does not hard-refuse a query that omits `installation_id` on THIS table. We still
  * (a) get a plugin-installed Kysely from {@link tenantKysely}, and (b) pass the `installation_id`
  * equality predicate on the `get` read, exactly as the Python repo does — so the moment the table is
- * added to the registry, enforcement is already in place. We deliberately do NOT mutate the
- * verbatim-ported registry here (that is a cross-cutting change outside this repo's scope).
+ * added to the registry, enforcement is already in place.
  *
  * ADR-0062: this repo NO LONGER owns a `pg.Pool`, constructs a `new Kysely(...)`, or memoizes either.
  * It is handed a `Kysely<ReviewWalkthroughsDB>` over the process-wide single pool from
@@ -52,7 +45,7 @@ import { tenantKysely } from "#platform/db/database.js";
 
 import { WalkthroughV1 } from "#contracts/walkthrough.v1.js";
 
-// ─── Read projection (1:1 with the Python `ReviewWalkthroughRow`) ────────────────────────────────
+// ─── Read projection ──────────────────────────────────────────────────────────────────────────────
 
 /** Read projection of one `core.review_walkthroughs` row. */
 export type ReviewWalkthroughRow = {
@@ -120,7 +113,7 @@ export class ReviewWalkthroughsRepo {
   /**
    * Insert-or-update the review's walkthrough, keyed by `review_id`. JSONB written via a TEXT bind +
    * `CAST(… AS jsonb)`; the conflict branch refreshes `installation_id`, `walkthrough`, and
-   * `updated_at = now()` — verbatim with the Python `ON CONFLICT (review_id) DO UPDATE`.
+   * `updated_at = now()`.
    */
   public async upsert(args: {
     reviewId: string;
@@ -145,8 +138,7 @@ export class ReviewWalkthroughsRepo {
   /**
    * Read the walkthrough for a review, scoped to its tenant. Returns `null` when absent or owned by a
    * different tenant. The JSONB column is cast to text so the JSON string reparses through Zod
-   * (byte-faithful; re-applies the contract) — the analogue of Python's `walkthrough::text` +
-   * `WalkthroughV1.model_validate_json(...)`.
+   * (re-applies the contract).
    */
   public async get(args: {
     reviewId: string;

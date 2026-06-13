@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 /**
- * Contracts for the mark-stale-chunks cron (Sub-spec A T13). 1:1 with the frozen Python
+ * Contracts for the mark-stale-chunks cron (Sub-spec A T13).
  * contracts/confluence_sync/stale_v1.py. Both models are `ConfigDict(extra="forbid", frozen=True)` ->
  * `.strict()` (Zod has no frozen analogue at the validation layer; immutability is a runtime concern the
  * port enforces by never mutating parsed results).

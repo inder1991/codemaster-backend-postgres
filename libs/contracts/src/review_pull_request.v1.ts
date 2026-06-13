@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { PublicationOutcome } from "./posted_review.v1.js";
 
-// Zod port of contracts/review_pull_request/payload_v1.py (frozen Python). Parity-validated in
+// Zod port of contracts/review_pull_request/payload_v1.py. Parity-validated in
 // review_pull_request.v1.parity.test.ts.
 //
 // NON-STANDARD layout: the Python contract lives in a versioned FILE (payload_v1.py), not a v1/
@@ -64,13 +64,12 @@ export type ReviewPullRequestPayloadV1 = z.infer<typeof ReviewPullRequestPayload
 
 // ─── ReviewPullRequestResultV1 — the @workflow.run RETURN contract ────────────────────────────────
 //
-// Zod port of the frozen Python `ReviewPullRequestResultV1`
-// (vendor/codemaster-py/codemaster/workflows/review_pull_request.py:417) — the terminal envelope the
+// Zod port of the `ReviewPullRequestResultV1` — the terminal envelope the
 // ReviewPullRequestWorkflow returns to its caller (start_review_for_webhook / the workflow-result
 // persistence / analytics). The Python contract lives in the WORKFLOW module (not contracts/), so this is
 // a port-introduced contract; its constituent `PublicationOutcome` IS parity-validated in posted_review.v1.
 //
-// FIELD-PORT NOTES (1:1 with the Python BaseModel(extra="forbid")):
+// FIELD-PORT NOTES:
 //  - schema_version: Python `int = 1` (PLAIN int, NOT Literal) → z.number().int().default(1) (a literal
 //    would false-reject a future schema_version=2). NOTE: this is the RESULT envelope's own
 //    schema_version (1), distinct from the v2 PAYLOAD envelope above.

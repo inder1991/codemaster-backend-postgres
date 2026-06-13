@@ -4,8 +4,7 @@ import { PrMetaV1 } from "./walkthrough.v1.js";
 
 // ─── PostedCheckRunV1 — the activity RETURN contract ───────────────────────────────────────────
 //
-// The frozen Python `PostedCheckRunV1` (vendor/codemaster-py/codemaster/activities/post_check_run.py)
-// is a `@dataclass(frozen=True, slots=True)` with exactly two fields — `check_run_id: int` +
+// `PostedCheckRunV1` is a `@dataclass(frozen=True, slots=True)` with exactly two fields — `check_run_id: int` +
 // `was_update: bool` — and NO `schema_version` (dataclasses carry none). It is NOT a Pydantic contract.
 //
 // But it CROSSES the Temporal activity boundary (it is the `post_check_run` activity's return value), so
@@ -34,7 +33,7 @@ export type PostedCheckRunV1 = z.infer<typeof PostedCheckRunV1>;
 
 // ─── PostCheckRunInputV1 — the NEW typed-input envelope (CLAUDE.md invariant 11 / ADR-0047 closure) ──
 //
-// The frozen Python `PostCheckRunActivity.post_check_run` dispatches with FIVE positional arguments —
+// `PostCheckRunActivity.post_check_run` dispatches with FIVE positional arguments —
 // `post_check_run(pr_meta, head_sha, summary, owner, repo_name)` — which violates CLAUDE.md invariant 11
 // / ADR-0047 ("every Temporal activity takes EXACTLY ONE positional argument typed as a Pydantic v2
 // BaseModel"). The TS port CLOSES that violation: the activity's single positional input is this

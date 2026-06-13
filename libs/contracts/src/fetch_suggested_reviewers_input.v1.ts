@@ -1,9 +1,8 @@
 import { z } from "zod";
 
 // NEW typed-input envelope introduced DURING the Python→TS port — there is NO Python Pydantic
-// counterpart to diff against. The frozen Python
-// `FetchSuggestedReviewersActivity.fetch_suggested_reviewers`
-// (vendor/codemaster-py/codemaster/activities/fetch_suggested_reviewers.py) dispatches with THREE
+// counterpart to diff against. `FetchSuggestedReviewersActivity.fetch_suggested_reviewers`
+// dispatches with THREE
 // positional arguments — (installation_id, repository_id, pr_id) — which violates CLAUDE.md invariant
 // 11 / ADR-0047 ("every Temporal activity takes EXACTLY ONE positional argument typed as a Pydantic v2
 // BaseModel"). The TS port CLOSES that violation: the activity's single positional input is this

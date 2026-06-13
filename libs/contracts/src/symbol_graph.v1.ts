@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/symbol_graph/v1.py (frozen Python — Sprint 11 S11.1.3 + S11.2.1 + S11.3.1).
+// Zod port of contracts/symbol_graph/v1.py (Sprint 11 S11.1.3 + S11.2.1 + S11.3.1).
 // Parity-validated in symbol_graph.v1.parity.test.ts.
 //
 // Source models / enums ported (every public one):

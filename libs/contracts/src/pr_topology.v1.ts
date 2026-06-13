@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/pr_topology/v1.py::PRTopologyEntryV1 (frozen Python — v8 chunk-locality manifest).
+// Zod port of contracts/pr_topology/v1.py::PRTopologyEntryV1 (v8 chunk-locality manifest).
 // Pydantic ConfigDict(extra="forbid", frozen=True) → .strict() (frozen is a TS-side concern, not wire).
 // chunk_id is a uuid.UUID in Python; Pydantic serializes it to its canonical lowercase string form, so the
 // wire shape is a UUID string. Parity payloads use canonical-lowercase UUIDs (Pydantic lowercases input;

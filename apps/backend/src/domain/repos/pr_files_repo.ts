@@ -1,8 +1,5 @@
 /**
- * PrFilesRepo — 1:1 TypeScript/Kysely port of the frozen Python spine repo
- * `vendor/codemaster-py/codemaster/domain/repos/pr_files_repo.py` (Sprint 21 / S21.DM.9).
- *
- * Async repo over `core.pr_files`. Two public operations, ported method-for-method:
+ * PrFilesRepo — async repo over `core.pr_files` (Sprint 21 / S21.DM.9). Two public operations:
  *
  *   - {@link PostgresPrFilesRepo.upsertFiles} — writes one row per {@link PrFileV1} in the input
  *     tuple. Idempotent via the `(pr_id, file_path)` UNIQUE index (`uq_pr_files_pr_path`) — workflow
@@ -29,13 +26,12 @@
  * must NOT be `destroy()`-ed by a repo, because doing so would end the shared pool out from under every
  * other repo bound to the same DSN.
  *
- * Port fidelity notes:
- *   - `pr_file_id` is a stable UUIDv5 of `(pr_id, file_path)` under a fixed namespace, mirroring the
- *     Python `derive_pr_file_id` — workflow replays produce the same id so the ON CONFLICT clause is
- *     idempotent. Re-authored from `uuid.uuid5` over `node:crypto` (no `uuid` npm dep); the value is
- *     byte-for-byte identical to the Python source (verified against the frozen interpreter).
- *   - `created_at` is taken from the injected {@link Clock} seam, mirroring the Python
- *     `self._clock.now()` — the `check_clock_random` gate forbids a raw `new Date()` here.
+ * Implementation notes:
+ *   - `pr_file_id` is a stable UUIDv5 of `(pr_id, file_path)` under a fixed namespace — workflow
+ *     replays produce the same id so the ON CONFLICT clause is idempotent. Re-authored from
+ *     `node:crypto` (no `uuid` npm dep).
+ *   - `created_at` is taken from the injected {@link Clock} seam — the `check_clock_random` gate
+ *     forbids a raw `new Date()` here.
  */
 
 import { createHash } from "node:crypto";
@@ -74,18 +70,18 @@ type PrFilesDb = {
   "core.pr_files": PrFilesTable;
 };
 
-// ─── Stable per-file UUIDv5 (1:1 with derive_pr_file_id) ─────────────────────
+// ─── Stable per-file UUIDv5 ───────────────────────────────────────────────────
 
 /**
  * uuid5 namespace — stable across replays so the same `(pr_id, file_path)` tuple always maps to the
  * same `pr_file_id`. Workflow retries get idempotency for free; pairs with the `(pr_id, file_path)`
- * UNIQUE constraint. Mirrors `_PR_FILE_UUID5_NAMESPACE` in the frozen Python source.
+ * UNIQUE constraint.
  */
 const PR_FILE_UUID5_NAMESPACE = "8b8c9d12-0a3e-5e0f-9b7e-fc2c3a8d9702";
 
 /**
  * RFC-4122 v5 UUID (SHA-1 of namespace bytes ++ name bytes) in canonical dashed form. Re-authored
- * from Python's `uuid.uuid5` (no `uuid` npm dep; `node:crypto` only); byte-for-byte parity-checked.
+ * from `node:crypto` (no `uuid` npm dep).
  */
 function uuid5(namespaceHex: string, name: string): string {
   const nsBytes = Buffer.from(namespaceHex.replace(/-/g, ""), "hex"); // 16 bytes
@@ -102,8 +98,7 @@ function uuid5(namespaceHex: string, name: string): string {
 
 /**
  * Stable per-file UUID5. Workflow replays produce the same `pr_file_id` so the ON CONFLICT clause
- * makes upsert idempotent. 1:1 with the Python `derive_pr_file_id(pr_id, file_path)` — the name is
- * `f"{pr_id}|{file_path}"`.
+ * makes upsert idempotent. Name: `"{prId}|{filePath}"`.
  */
 export function derivePrFileId(args: { prId: string; filePath: string }): string {
   return uuid5(PR_FILE_UUID5_NAMESPACE, `${args.prId}|${args.filePath}`);
@@ -111,7 +106,7 @@ export function derivePrFileId(args: { prId: string; filePath: string }): string
 
 // ─── Repo Port + Postgres impl ───────────────────────────────────────────────
 
-/** Repo Protocol consumed by `enrich_pr_files_activity` (1:1 with the Python `PrFilesRepoPort`). */
+/** Repo Protocol consumed by `enrich_pr_files_activity`. */
 export type PrFilesRepoPort = {
   upsertFiles(args: {
     prId: string;
@@ -187,7 +182,7 @@ export class PostgresPrFilesRepo implements PrFilesRepoPort {
     }));
 
     // ON CONFLICT (pr_id, file_path) DO UPDATE — picks up status/rename/language changes on retry.
-    // Mirrors the Python EXCLUDED.* SET list exactly (created_at + identity columns are NOT updated).
+    // created_at + identity columns are NOT updated.
     const result = await this.#db
       .insertInto("core.pr_files")
       .values(values)
@@ -202,8 +197,7 @@ export class PostgresPrFilesRepo implements PrFilesRepoPort {
       )
       .executeTakeFirst();
 
-    // `numInsertedOrUpdatedRows` is a bigint; fall back to the row count like the Python
-    // `result.rowcount or len(rows)`.
+    // `numInsertedOrUpdatedRows` is a bigint; fall back to the row count on a falsy value.
     const affected = result.numInsertedOrUpdatedRows;
     return affected === undefined ? values.length : Number(affected);
   }
@@ -214,7 +208,7 @@ export class PostgresPrFilesRepo implements PrFilesRepoPort {
    * Used by `fetch_suggested_reviewers_activity` (the first real consumer of `core.pr_files`).
    * Tenancy-isolated by `installation_id` (the TenancyPlugin enforces the predicate's presence).
    * Ordered for deterministic output; the ranker doesn't depend on order so this is purely a
-   * stability concern. 1:1 with the Python `list_file_paths_for_pr`.
+   * stability concern.
    */
   public async listFilePathsForPr(args: {
     installationId: string;

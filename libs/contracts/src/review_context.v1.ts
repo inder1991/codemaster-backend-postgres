@@ -12,7 +12,7 @@ import { ConsumerHitV1, RemovedOrChangedSymbolV1 } from "./symbol_graph.v1.js";
 import { ReviewFindingV1 } from "./review_findings.v1.js";
 import { ToolStatusV1 } from "./tool_status.v1.js";
 
-// Zod port of contracts/review_context/v1.py::ReviewContextV1 (frozen Python — the LARGEST contract,
+// Zod port of contracts/review_context/v1.py::ReviewContextV1 (the LARGEST contract,
 // ~11 cross-contract deps). Pydantic ConfigDict(extra="forbid", frozen=True) → .strict() (frozen is a
 // TS-side concern, not wire). Parity-validated in review_context.v1.parity.test.ts.
 //

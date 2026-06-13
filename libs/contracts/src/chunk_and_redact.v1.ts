@@ -1,8 +1,8 @@
 import { z } from "zod";
 
 // NEW typed-input envelope introduced DURING the Python→TS port — there is NO Python Pydantic
-// counterpart to diff against. The frozen Python `chunk_and_redact_activity`
-// (vendor/codemaster-py/codemaster/activities/chunk_and_redact.py) dispatches with THREE positional
+// counterpart to diff against. `chunk_and_redact_activity`
+// dispatches with THREE positional
 // arguments — `(workspace_path: str, files: tuple[str, ...], changed_line_ranges: dict[str,
 // tuple[tuple[int, int], ...]])` — which violates CLAUDE.md invariant 11 / ADR-0047 ("every Temporal
 // activity takes EXACTLY ONE positional argument typed as a Pydantic v2 BaseModel"). The TS port
@@ -13,7 +13,7 @@ import { z } from "zod";
 // Because there is no Python contract for this envelope, its parity coverage is round-trip /
 // validation only (accepts a valid payload; `.strict()` rejects unknown keys) — there is no
 // source-of-truth to byte-diff against. The DOWNSTREAM parity (the DiffChunkV1[] the activity
-// returns) is proven against the frozen Python activity via the post-pass parity oracle.
+// returns) is proven against the Python activity via the post-pass parity oracle.
 //
 // Field mapping:
 //  - `workspace_path: str` positional → z.string(). The Python wraps it in `Path(...).resolve()`; the

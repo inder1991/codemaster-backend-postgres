@@ -1,7 +1,7 @@
 import { z } from "zod";
 
-// Zod port of the 4 OutboxDispatcherWorkflow activity-input contracts from the frozen Python
-// `codemaster/activities/outbox.py` (ClaimPendingRowsInput / DispatchRowInput / MarkDispatchedInput /
+// Zod port of the 4 OutboxDispatcherWorkflow activity-input contracts
+// (`codemaster/activities/outbox.py`: ClaimPendingRowsInput / DispatchRowInput / MarkDispatchedInput /
 // MarkAttemptFailedInput). Parity-validated against the live Pydantic oracle in
 // outbox_dispatch.v1.parity.test.ts.
 //
@@ -85,7 +85,7 @@ export type MarkAttemptFailedInputV1 = z.infer<typeof MarkAttemptFailedInputV1>;
  * (PermanentSinkError / UnknownSinkError). Same shape as MarkAttemptFailedInputV1 — `expected_attempts`
  * keeps the R-6 fence so a duplicate settlement is a rowcount=0 no-op, never a double increment.
  *
- * TS-ONLY: the frozen Python outbox never classified permanent failures (its dispatcher burned every
+ * TS-ONLY: the Python outbox never classified permanent failures (its dispatcher burned every
  * attempt through markAttemptFailed), so this model has NO Pydantic counterpart and is deliberately
  * ABSENT from outbox_dispatch.v1.parity.test.ts. It is also NOT registered on the Temporal worker
  * (build_outbox_activities.ts stays at the 4 workflow-proxied activities) — only the Temporal-free

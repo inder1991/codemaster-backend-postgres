@@ -1,7 +1,5 @@
 /**
- * Stale-write guard primitive (AD-4, AD-5; Phase 2 Task 9) — 1:1 TypeScript/Kysely port of the frozen
- * Python `vendor/codemaster-py/codemaster/domain/stale_write_guard.py` (Phase 2.1 stale-write gate
- * part A2 of 3).
+ * Stale-write guard primitive (AD-4, AD-5; Phase 2 Task 9 / Phase 2.1 stale-write gate part A2 of 3).
  *
  * Every durable mutation across the spine MUST validate that its `run_id` still matches
  * `core.pull_request_reviews.current_run_id` before it persists. This is the AD-4 authoritative-pointer
@@ -10,7 +8,7 @@
  * poster, outbox dispatcher, aggregator, summary update) calls the same code path with the same
  * forensic-emit semantics.
  *
- * ## Contract (1:1 with the Python `assert_current_run`)
+ * ## Contract
  *
  * {@link assertCurrentRun}:
  *   - Acquires a `FOR SHARE` read lock on the review row (allows concurrent readers; blocks the
@@ -26,18 +24,14 @@
  *
  * ## Transaction discipline (the open-txn requirement is structural here)
  *
- * The Python source takes an `AsyncSession` and raises `RuntimeError` when `session.in_transaction()`
- * is false — without an open transaction the `FOR SHARE` lock releases at autocommit and the guard
- * degenerates to a TOCTOU check. The TS analogue is structural: {@link assertCurrentRun} accepts a
- * Kysely `Transaction<unknown>` handle (`tx`). Being inside a transaction is therefore guaranteed by
- * the type. We ALSO mirror the Python `RuntimeError` at runtime by rejecting a non-`Transaction`
- * handle, so a caller that passes the bare engine fails loudly the same way the Python caller does
- * when it forgets `async with session.begin():`.
+ * Without an open transaction the `FOR SHARE` lock releases at autocommit and the guard
+ * degenerates to a TOCTOU check. {@link assertCurrentRun} accepts a Kysely `Transaction<unknown>`
+ * handle (`tx`). Being inside a transaction is therefore guaranteed by the type. We ALSO reject a
+ * non-`Transaction` handle at runtime, so a caller that passes the bare engine fails loudly when it
+ * forgets to open a transaction.
  *
  * The `STALE_WRITE_BLOCKED` event INSERT runs on the SAME `tx` the caller's durable write runs on, so
- * the emit and the caller's mutation share transactional fate. The Python primitive does NOT commit;
- * it only `flush()`-es the INSERT so the FK / CHECK constraints trip synchronously inside this
- * function rather than later in opaque caller code. Kysely executes each `sql\`...\`.execute(tx)`
+ * the emit and the caller's mutation share transactional fate. Kysely executes each `sql\`...\`.execute(tx)`
  * statement eagerly against the transaction's connection (there is no client-side statement buffer to
  * flush), so awaiting the INSERT `.execute(tx)` IS the flush — the constraints trip here, before the
  * throw.
@@ -49,15 +43,13 @@
  * `sql\`RELEASE SAVEPOINT sp\`` / `sql\`ROLLBACK TO SAVEPOINT sp\``. This A2 port supplies the
  * STRUCTURE the part-B caller wraps.
  *
- * EMPIRICALLY VERIFIED (against the frozen Python on a real PG): under `persistAggregated`'s
+ * EMPIRICALLY VERIFIED (on a real PG): under `persistAggregated`'s
  * outer-rollback path the `STALE_WRITE_BLOCKED` forensic row does **NOT** survive. RELEASE-savepoint
  * only MERGES the row into the outer transaction; it does not independently commit, so when the
  * `StaleWriteError` propagates out and rolls the outer transaction back, the forensic row is discarded
- * with it. The frozen Python `persist_aggregated` behaves identically (0 rows after rejection). A
- * caller that genuinely needs emit-survives-rollback semantics would have to commit the forensic emit
- * on a SEPARATE connection/transaction — neither this primitive nor the part-B caller does that, and
- * the reference does not either. (The original Python module docstring's "survives the outer rollback"
- * wording is aspirational, not what the code achieves — corrected here to the observed behavior.)
+ * with it. A caller that genuinely needs emit-survives-rollback semantics would have to commit the
+ * forensic emit on a SEPARATE connection/transaction — neither this primitive nor the part-B caller
+ * does that.
  * This primitive itself does not predict the outcome; it only emits + flushes + throws faithfully.
  *
  * The OTel counter is queued through {@link emitAfterCommit} (NOT fired inline), so it only fires when
@@ -85,11 +77,9 @@ import {
 
 import { emitAfterCommit, type PendingEmits } from "../infra/post_commit_emit.js";
 
-// ─── OTel counter (Layer 5 telemetry per AD-5) — name + description verbatim from the Python ────────
+// ─── OTel counter (Layer 5 telemetry per AD-5) ───────────────────────────────────────────────────────
 
-/** 1:1 with the Python `_STALE_WRITE_COUNTER_NAME`. */
 const STALE_WRITE_COUNTER_NAME = "codemaster_review_runs_stale_write_blocked_total";
-/** 1:1 with the Python `_STALE_WRITE_COUNTER_DESCRIPTION` (byte-identical text). */
 const STALE_WRITE_COUNTER_DESCRIPTION =
   "Number of durable writes refused by the AD-4 stale-write guard. " +
   "Labelled by the writer call-site (e.g. " +
@@ -98,9 +88,9 @@ const STALE_WRITE_COUNTER_DESCRIPTION =
   "supersede correctly, OR a cancellation-propagation race exceeding " +
   "the AD-5 SLA window.";
 
-// Cache the instrument at module scope (created once at import) — mirrors the Python lazy-cache that
-// avoids per-emit `create_counter` contention. `getMeter` returns a no-op Meter when no MeterProvider
-// is registered, so creating + adding to this counter is always safe (see metrics.ts).
+// Cache the instrument at module scope (created once at import) to avoid per-emit contention.
+// `getMeter` returns a no-op Meter when no MeterProvider is registered, so creating + adding to
+// this counter is always safe (see metrics.ts).
 const STALE_WRITE_COUNTER: Counter = getMeter("codemaster.review_runs").createCounter(
   STALE_WRITE_COUNTER_NAME,
   { description: STALE_WRITE_COUNTER_DESCRIPTION },
@@ -110,7 +100,7 @@ const STALE_WRITE_COUNTER: Counter = getMeter("codemaster.review_runs").createCo
 //
 // Same seam + bit-twiddling as A1's `_workflow_events_repository.ts::uuid4` (that helper is module-
 // private there, so we mint locally through the SAME sanctioned `SystemRandom.tokenBytes(16)` entry
-// point and set the RFC4122 version (0x4) + variant (0b10) bits). 1:1 in shape with `uuid.uuid4()`.
+// point and set the RFC4122 version (0x4) + variant (0b10) bits).
 
 /** Module-shared CSPRNG seam. `tokenBytes` is the sanctioned crypto-randomness entry point. */
 const RANDOM = new SystemRandom();
@@ -124,7 +114,7 @@ function uuid4(): string {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
 }
 
-// ─── StaleWriteError (1:1 with the Python `class StaleWriteError(Exception)`) ───────────────────────
+// ─── StaleWriteError ─────────────────────────────────────────────────────────────────────────────────
 
 /**
  * Raised by {@link assertCurrentRun} when an incoming durable write would persist against a
@@ -182,7 +172,7 @@ export type AssertCurrentRunArgs = {
  * Validate that `runId` is the authoritative run for `reviewId` (AD-4). Reads
  * `pull_request_reviews.current_run_id` under a `FOR SHARE` lock so it cannot race the supersede
  * `UPDATE` (`FOR UPDATE`). On a mismatch it emits the `STALE_WRITE_BLOCKED` forensic row, queues the
- * OTel counter, and throws. 1:1 with the Python `assert_current_run`.
+ * OTel counter, and throws.
  *
  * @throws {Error}           `tx` is not an open `Transaction` — the `session.in_transaction()`
  *                           `RuntimeError` analogue. Without an open transaction the `FOR SHARE` lock
@@ -193,10 +183,9 @@ export type AssertCurrentRunArgs = {
 export async function assertCurrentRun(args: AssertCurrentRunArgs): Promise<void> {
   const { tx, runId, reviewId, site, pending } = args;
 
-  // Mirror the Python `session.in_transaction()` RuntimeError. A Kysely `Transaction` is structurally
-  // in one; a bare `Kysely` engine is not, so reject it loudly (the analogue of the Python caller
-  // forgetting `async with session.begin():`). Without a txn the FOR SHARE lock releases at autocommit
-  // and the guard degenerates to a TOCTOU check.
+  // A Kysely `Transaction` is structurally in an open transaction; a bare `Kysely` engine is not,
+  // so reject it loudly. Without a txn the FOR SHARE lock releases at autocommit and the guard
+  // degenerates to a TOCTOU check.
   if (!(tx instanceof Transaction)) {
     throw new Error(
       "assertCurrentRun requires an already-open transaction. Pass the Kysely Transaction handle " +
@@ -268,9 +257,9 @@ export async function assertCurrentRun(args: AssertCurrentRunArgs): Promise<void
   });
 
   // Direct raw INSERT (NOT through emitWorkflowEvent): STALE_WRITE_BLOCKED rows carry a NULL
-  // installation_id by design — the Python writes the row directly, bypassing the BF-3 orphan guard,
-  // and audit.workflow_events.installation_id is nullable with no CHECK. The INSERT omits the column
-  // (DB leaves it NULL), so this raw SQL legitimately carries no installation_id token.
+  // installation_id by design — audit.workflow_events.installation_id is nullable with no CHECK, so
+  // the BF-3 orphan guard is deliberately bypassed. The INSERT omits the column (DB leaves it NULL),
+  // so this raw SQL legitimately carries no installation_id token.
   // tenant:exempt reason=stale-write-forensic-emit-null-installation follow_up=PERMANENT-EXEMPTION-workflow-events-seq
   await sql`
     INSERT INTO audit.workflow_events
@@ -282,7 +271,7 @@ export async function assertCurrentRun(args: AssertCurrentRunArgs): Promise<void
   `.execute(tx);
   // Awaiting the INSERT `.execute(tx)` above IS the flush: Kysely runs it eagerly against the
   // transaction connection, so the FK (run_id / review_id) and event_type CHECK trip synchronously
-  // HERE, never later in opaque caller code (mirrors the Python `await session.flush()`).
+  // HERE, never later in opaque caller code.
 
   // BF-15: queue the counter emit behind emitAfterCommit so it only fires on a successful commit of
   // the caller's transaction (the caller drains its PendingEmits after `.execute()` resolves). If the
@@ -302,10 +291,8 @@ export async function assertCurrentRun(args: AssertCurrentRunArgs): Promise<void
 }
 
 /**
- * Deterministic JSON encoding matching the Python `json.dumps(payload, sort_keys=True,
- * separators=(",", ":"))`: recursively sorts object keys and uses compact separators (no spaces), so
- * the persisted JSONB byte-shape is producer-side 1:1 with the frozen source. For the payload here
- * the SORTED top-level key order is `current`, `incoming`, `site`.
+ * Deterministic JSON encoding: recursively sorts object keys and uses compact separators (no spaces).
+ * For the payload here the sorted top-level key order is `current`, `incoming`, `site`.
  */
 function stableJson(value: unknown): string {
   return JSON.stringify(sortKeysDeep(value));

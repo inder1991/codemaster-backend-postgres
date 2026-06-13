@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/tool_findings/v1.py::ToolFindingV1 (frozen Python).
+// Zod port of contracts/tool_findings/v1.py::ToolFindingV1.
 // One static-analysis finding (Semgrep / Trivy) normalised to the codemaster scale.
 // Pydantic ConfigDict(extra="forbid", frozen=True) → .strict() (frozen is a TS-side concern, not wire).
 // Parity-validated in tool_findings.v1.parity.test.ts.

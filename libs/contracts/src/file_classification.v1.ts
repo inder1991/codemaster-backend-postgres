@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/file_classification/v1.py::FileClassificationV1 (frozen Python).
+// Zod port of contracts/file_classification/v1.py::FileClassificationV1.
 // Pydantic ConfigDict(extra="forbid", frozen=True) → .strict() (frozen is a TS-side concern, not wire).
 // `schema_version: int = 1` is a plain int field with default 1 (NOT a Literal in Python — any int is
 // accepted), so it maps to z.number().int().default(1), not z.literal(1).

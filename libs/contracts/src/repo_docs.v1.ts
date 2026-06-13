@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/repo_docs/v1.py (frozen Python — Sprint 10 / S10.2.1).
+// Zod port of contracts/repo_docs/v1.py (Sprint 10 / S10.2.1).
 // Pydantic ConfigDict(extra="forbid", frozen=True) → .strict() (frozen is a TS-side concern, not wire).
 // Parity-validated in repo_docs.v1.parity.test.ts.
 //

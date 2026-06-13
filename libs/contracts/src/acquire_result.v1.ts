@@ -1,8 +1,7 @@
 import { z } from "zod";
 
-// Zod port of the `AcquireResult` Pydantic contract that lives inside the frozen Python module
-// `codemaster.concurrency.pr_mutex` (vendor/codemaster-py/codemaster/concurrency/pr_mutex.py).
-// Parity-validated in acquire_result.v1.parity.test.ts against that exact module/callable.
+// Zod port of the `AcquireResult` Pydantic contract (codemaster.concurrency.pr_mutex).
+// Parity-validated in acquire_result.v1.parity.test.ts.
 //
 // Source model / fields ported (every public one):
 //  - AcquireResult (ConfigDict extra="forbid", frozen=True) → .strict().

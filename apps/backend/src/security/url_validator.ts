@@ -1,8 +1,8 @@
 /**
- * SSRF-safe URL validator for credential-target URLs (Confluence, Qwen, etc.) — 1:1 port of
- * `vendor/codemaster-py/codemaster/security/url_validator.py` (spec v4 §11.1). Applied at the
- * platform-credentials PATCH boundary so a mis-typed or malicious operator URL cannot trigger SSRF against
- * internal services (Vault, Postgres, the K8s API, the cloud metadata endpoint, etc.).
+ * SSRF-safe URL validator for credential-target URLs (Confluence, Qwen, etc.) — spec v4 §11.1.
+ * Applied at the platform-credentials PATCH boundary so a mis-typed or malicious operator URL cannot
+ * trigger SSRF against internal services (Vault, Postgres, the K8s API, the cloud metadata
+ * endpoint, etc.).
  *
  * Divergences from the Python (Node-forced or TS-is-the-safer-side; the parity oracle should treat these as
  * intended, NOT weaken the TS to mirror the weaker Python behavior):
@@ -25,7 +25,7 @@
 
 import { promises as dnsPromises } from "node:dns";
 
-// ───────────── Error hierarchy (1:1 names with the Python classes) ─────────────
+// ───────────── Error hierarchy ─────────────────────────────────────────────────
 
 export class UrlValidationError extends Error {}
 /** URL is syntactically invalid or missing scheme/host. */
@@ -178,8 +178,8 @@ function inCidr(ip: bigint, cidr: Cidr, bits: number): boolean {
 }
 
 /** True if `addr` falls into a denied private/reserved range. Fail-CLOSED: an unparseable address (which a
- *  real resolver never returns) is treated as private/blocked. The IPv4-mapped-IPv6 unwrap mirrors Python's
- *  `ipv4_mapped` defense — an adversarial AAAA record returning ::ffff:10.x must re-check the IPv4 deny-list. */
+ *  real resolver never returns) is treated as private/blocked. The IPv4-mapped-IPv6 unwrap (`ipv4_mapped`
+ *  defense) re-checks the IPv4 deny-list for adversarial AAAA records returning ::ffff:10.x. */
 function isPrivateAddress(addr: string): boolean {
   const v4 = ipv4ToBigInt(addr);
   if (v4 !== null) {
@@ -203,7 +203,7 @@ const defaultResolver: DnsResolver = async (host) => {
 };
 
 /**
- * Validate `url` is safe for outbound HTTP from this service. 1:1 with `validate_external_url`.
+ * Validate `url` is safe for outbound HTTP from this service.
  * Throws MalformedUrlError / HttpsRequiredError / UserInfoNotAllowedError / HostnameNotInAllowlistError /
  * DnsResolutionError / PrivateCidrError on the respective failure; returns a ValidatedUrl on success.
  */

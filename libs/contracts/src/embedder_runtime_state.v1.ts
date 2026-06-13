@@ -1,7 +1,6 @@
 import { z } from "zod";
 
-// Zod port of the frozen Python dataclass `EmbedderRuntimeStateRow`
-// (vendor/codemaster-py/codemaster/embedder/runtime_state_repo.py lines 20-29).
+// Zod port of the `EmbedderRuntimeStateRow` dataclass.
 //
 // DIVERGENCE — NO pyRef JSON parity: the Python source is a PLAIN
 // `@dataclass(frozen=True, slots=True)`, NOT a Pydantic v2 `BaseModel`, so there is no
@@ -24,13 +23,12 @@ import { z } from "zod";
 // shape does not (and cannot, per-field) encode the cross-field invariant — the DB CHECK is the
 // structural backstop, asserted directly in the repo integration test.
 
-/** The retrieval-mode vocabulary (1:1 with the Python `Literal[...]`; spec v4 §8). */
+/** The retrieval-mode vocabulary (spec v4 §8). */
 export const RetrievalMode = z.enum(["fallback", "generation_only"]);
 export type RetrievalMode = z.infer<typeof RetrievalMode>;
 
 /**
- * The singleton `core.embedder_runtime_state` row (1:1 with the frozen Python
- * `EmbedderRuntimeStateRow`).
+ * The singleton `core.embedder_runtime_state` row.
  *
  * `.strict()` mirrors the frozen dataclass's fixed field set (`slots=True`).
  */

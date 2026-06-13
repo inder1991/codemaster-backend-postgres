@@ -3,7 +3,7 @@ import { z } from "zod";
 import { ScoredKnowledgeChunkV1 } from "./knowledge_chunks.v1.js";
 import { DedupedRuleV1 } from "./resolved_guidance.v1.js";
 
-// Zod port of contracts/assembled_prompt/v1.py (frozen Python, Sprint 26 / B-4).
+// Zod port of contracts/assembled_prompt/v1.py (Sprint 26 / B-4).
 // Pydantic ConfigDict(extra="forbid", frozen=True) → .strict() (frozen is a TS-side concern, not wire).
 // Parity-validated in assembled_prompt.v1.parity.test.ts.
 //

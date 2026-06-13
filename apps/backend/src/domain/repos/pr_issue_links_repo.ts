@@ -1,8 +1,6 @@
 /**
- * PostgresLinkedIssuesRepo — 1:1 TS port of the READ slice of the frozen Python
- * `vendor/codemaster-py/codemaster/domain/repos/pr_issue_links_repo.py` consumed by
- * `fetchLinkedIssues` (DM-WIRE T4 / S22.DM.16): the `list_links_for_pr` query wrapped in the
- * session-bound `PostgresLinkedIssuesRepo` class.
+ * PostgresLinkedIssuesRepo — the READ slice consumed by `fetchLinkedIssues` (DM-WIRE T4 / S22.DM.16):
+ * the `list_links_for_pr` query.
  *
  * Single operation:
  *   - {@link PostgresLinkedIssuesRepo.listLinksForPr} — SELECT every link row for one PR, returning the
@@ -11,9 +9,8 @@
  *     `(github_issue_number ASC, source ASC)` so the activity's downstream dedup is deterministic.
  *
  * The producer-side `replace_links` / `derive_pr_issue_link_id` (the webhook-path DELETE-then-INSERT)
- * are NOT consumed by this activity and are deliberately OUT of scope for this port — they belong to the
- * webhook persistence path, ported separately. Only the read slice the consumer needs is ported here
- * (per the task's "port the minimal slice" instruction).
+ * are NOT consumed by this activity — they belong to the webhook persistence path. Only the read slice
+ * the consumer needs is included here.
  *
  * ADR-0062: this repo is handed a `Kysely<PrIssueLinksDb>` over the process-wide single pool from
  * {@link tenantKysely}. {@link PostgresLinkedIssuesRepo.fromDsn} is the default entry point. Pool
@@ -39,18 +36,16 @@ import { uuid5 } from "#platform/randomness.js";
 import type { IssueLink, LinkageKind, LinkageSource } from "#contracts/issue_link.v1.js";
 
 /**
- * uuid5 namespace for `derivePrIssueLinkId` — 1:1 with the frozen Python `_PR_ISSUE_LINK_UUID5_NAMESPACE`
- * (`codemaster/domain/repos/pr_issue_links_repo.py`). MUST NOT change: it is stable across replays so the
- * same `(pr_id, github_issue_number, linkage_kind, source)` tuple always maps to the same
- * `pr_issue_link_id`. Paired with the UNIQUE constraint, this makes the DELETE-then-INSERT idempotent on
- * webhook re-delivery / replay.
+ * uuid5 namespace for `derivePrIssueLinkId`. MUST NOT change: it is stable across replays so the same
+ * `(pr_id, github_issue_number, linkage_kind, source)` tuple always maps to the same `pr_issue_link_id`.
+ * Paired with the UNIQUE constraint, this makes the DELETE-then-INSERT idempotent on webhook re-delivery
+ * / replay.
  */
 export const PR_ISSUE_LINK_UUID5_NAMESPACE = "8d8c9d14-0a3e-5e0f-9b7e-fc2c3a8d9704";
 
 /**
- * Stable per-link UUID5, 1:1 with the Python `derive_pr_issue_link_id`. Used so a PR-edit-after-error does
- * not drift the row id. The name string is `"{prId}|{githubIssueNumber}|{linkageKind}|{source}"` — exactly
- * the Python `f"{pr_id}|{github_issue_number}|{linkage_kind}|{source}"`.
+ * Stable per-link UUID5. Used so a PR-edit-after-error does not drift the row id. The name string is
+ * `"{prId}|{githubIssueNumber}|{linkageKind}|{source}"`.
  */
 export function derivePrIssueLinkId(args: {
   prId: string;
@@ -63,9 +58,9 @@ export function derivePrIssueLinkId(args: {
 }
 
 /**
- * Atomic DELETE-then-INSERT of `core.pr_issue_links` rows for one PR — 1:1 with the frozen Python
- * `replace_links`. Runs inside the CALLER's transaction (`tx`); on outer rollback both writes vanish, so it
- * shares fate with the gh_users + pull_requests + pr_state_transitions chain (ADR-0026 §4).
+ * Atomic DELETE-then-INSERT of `core.pr_issue_links` rows for one PR. Runs inside the CALLER's
+ * transaction (`tx`); on outer rollback both writes vanish, so it shares fate with the gh_users +
+ * pull_requests + pr_state_transitions chain (ADR-0026 §4).
  *
  * Semantics (faithful to Python):
  *   1. `DELETE … WHERE installation_id = :iid AND pr_id = :pid` (tenancy-filtered — REQUIRED so the tenancy
@@ -77,8 +72,7 @@ export function derivePrIssueLinkId(args: {
  *      race safe. `created_at = clock.now()` (ONE read for the whole batch); `pr_issue_link_id` is the
  *      deterministic {@link derivePrIssueLinkId} per row.
  *
- * `inserted` mirrors the Python `insert_result.rowcount or len(links)`: when the DB reports 0 affected rows
- * (all conflicted), it falls back to `links.length` — preserved verbatim for parity.
+ * `inserted`: when the DB reports 0 affected rows (all conflicted), it falls back to `links.length`.
  */
 export async function replaceLinks(
   tx: Kysely<unknown>,
@@ -118,7 +112,7 @@ export async function replaceLinks(
     VALUES ${sql.join(valueTuples, sql`, `)}
     ON CONFLICT (pr_id, github_issue_number, linkage_kind, source) DO NOTHING
   `.execute(tx);
-  // 1:1 with Python `insert_result.rowcount or len(links)` — fall back to links.length on a falsy count.
+  // Fall back to links.length on a falsy count (matches `insert_result.rowcount or len(links)` semantics).
   const inserted = Number(insertResult.numAffectedRows ?? 0n) || links.length;
 
   return { deleted, inserted };
@@ -140,8 +134,8 @@ type PrIssueLinksDb = {
 };
 
 /**
- * The repo Port consumed by `fetchLinkedIssues` (1:1 with the Python `LinkedIssuesPort`). The activity
- * depends on this narrow surface, not the concrete class.
+ * The repo Port consumed by `fetchLinkedIssues`. The activity depends on this narrow surface, not the
+ * concrete class.
  */
 export type LinkedIssuesPort = {
   listLinksForPr(args: {
@@ -173,7 +167,7 @@ export class PostgresLinkedIssuesRepo implements LinkedIssuesPort {
   }
 
   /**
-   * SELECT every link row for one PR, 1:1 with the Python `list_links_for_pr`.
+   * SELECT every link row for one PR.
    *
    * Returns the full `(github_issue_number, linkage_kind, source)` triple per row so the walkthrough
    * assembler has what it needs without a second DB hop. Tenancy-isolated by `installation_id`. Sort by

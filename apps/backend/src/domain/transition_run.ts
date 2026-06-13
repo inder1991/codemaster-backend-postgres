@@ -1,7 +1,5 @@
 /**
- * `transitionRun` lifecycle state-machine primitive — 1:1 TypeScript/Kysely port of the frozen Python
- * spine primitive `vendor/codemaster-py/codemaster/workflow/_lifecycle.py::transition_run`
- * (Phase 4 / Task 1 + Task 5 — R1).
+ * `transitionRun` lifecycle state-machine primitive (Phase 4 / Task 1 + Task 5 — R1).
  *
  * The single primitive every spine worker uses to advance a `core.review_runs.lifecycle_state` and
  * record the transition in `audit.workflow_events` as a `lifecycle_transition` row. This is the
@@ -10,7 +8,7 @@
  * `ANALYZED`, `FINDINGS_PERSISTED`) live as separate `event_type` values on `workflow_events` — they are
  * *events*, not states.
  *
- * ## Five-step protocol (1:1 with the Python)
+ * ## Five-step protocol
  *
  *   1. Validate `fromState` / `toState` ∈ {@link LIFECYCLE_STATES} + `activity` non-empty + `attempt >= 1`
  *      at the boundary — typed errors, not Postgres CHECK violations.
@@ -69,7 +67,7 @@ import { emitAfterCommit, type PendingEmits } from "../infra/post_commit_emit.js
 
 import { CrossInstallationViolation, RepositoriesResolveFailed } from "../workspace/errors.js";
 
-// ─── BF-9 Phase A — cross-installation safety identifiers (1:1 with the Python constants) ────────────
+// ─── BF-9 Phase A — cross-installation safety identifiers ────────────────────────────────────────────
 const BF9_PRIMITIVE_NAME = "transition_run";
 const BF9_KEY_KIND = "run_id";
 
@@ -80,21 +78,21 @@ const BF9_KEY_KIND = "run_id";
 // MeterProvider is registered, so creating + adding to these instruments is always safe.
 const METER = getMeter("codemaster.review_runs");
 
-/** 1:1 with the Python `_runs_failed`. Labelled by {trigger_type, cancel_reason}; NULL → `'none'`. */
+/** Labelled by {trigger_type, cancel_reason}; NULL → `'none'`. */
 const RUNS_FAILED: Counter = METER.createCounter("codemaster_review_runs_failed_total", {
   description:
     "review_runs transitions to FAILED terminal state. " +
     "Labelled by {trigger_type, cancel_reason}; NULL cancel_reason " +
     "is reported as the literal 'none'.",
 });
-/** 1:1 with the Python `_runs_cancelled`. Labelled by {cancel_reason}; NULL → `'unknown'`. */
+/** Labelled by {cancel_reason}; NULL → `'unknown'`. */
 const RUNS_CANCELLED: Counter = METER.createCounter("codemaster_review_runs_cancelled_total", {
   description:
     "review_runs transitions to CANCELLED terminal state. " +
     "Labelled by {cancel_reason}; NULL cancel_reason is reported " +
     "as 'unknown' (distinct from FAILED's 'none' sentinel).",
 });
-/** 1:1 with the Python `_runs_draining`. +1 on CANCELLED; Task 8 emits the matching decrement. */
+/** +1 on CANCELLED; Task 8 emits the matching decrement. */
 const RUNS_DRAINING: UpDownCounter = METER.createUpDownCounter(
   "codemaster_review_runs_draining_total",
   {
@@ -106,9 +104,9 @@ const RUNS_DRAINING: UpDownCounter = METER.createUpDownCounter(
 );
 
 /**
- * Outcome of a {@link transitionRun} call (1:1 with the Python `TransitionOutcome` enum, modeled as a
- * frozen `as const` object + derived union per the repo's no-TS-enum style rule — callers read
- * `TransitionOutcome.APPLIED` and compare against the string value identically).
+ * Outcome of a {@link transitionRun} call (modeled as a frozen `as const` object + derived union per
+ * the repo's no-TS-enum style rule — callers read `TransitionOutcome.APPLIED` and compare against the
+ * string value identically).
  *
  *   - `APPLIED` — the UPDATE advanced the row and the `lifecycle_transition` audit event was emitted.
  *   - `ALREADY_APPLIED` — the current state already equalled `toState` (Temporal at-least-once retry
@@ -123,13 +121,12 @@ export const TransitionOutcome = {
 export type TransitionOutcome = (typeof TransitionOutcome)[keyof typeof TransitionOutcome];
 
 /**
- * `transitionRun` found an unexpected current state (1:1 with the Python `_lifecycle.StateDrift`).
+ * `transitionRun` found an unexpected current state.
  *
  * Distinct from the workspace `StateDrift` (which keys on `workspaceId` and uses a non-nullable
  * `actualState`): the run primitive keys on `runId` and `actualState` is `null` when the run row is
- * MISSING entirely (the Python `actual_state: str | None`). Carries enough lineage signal for the caller
- * to log the drift and exit the activity cleanly. `name` matches the class name so structured logs /
- * `instanceof` discrimination read identically to the Python.
+ * MISSING entirely. Carries enough lineage signal for the caller to log the drift and exit the activity
+ * cleanly.
  */
 export class StateDrift extends Error {
   public readonly runId: string;
@@ -150,16 +147,16 @@ export class StateDrift extends Error {
 }
 
 /**
- * Canonical lifecycle states (1:1 with the Python `LIFECYCLE_STATES` frozenset / the migration
- * `ck_review_runs_lifecycle_state` CHECK). Kept as a `Set` so validation rejects bad values before any
- * SQL round-trip — callers see a typed error, not a Postgres CHECK violation.
+ * Canonical lifecycle states (mirrors the `ck_review_runs_lifecycle_state` CHECK). Kept as a `Set`
+ * so validation rejects bad values before any SQL round-trip — callers see a typed error, not a
+ * Postgres CHECK violation.
  */
 export const LIFECYCLE_STATES: ReadonlySet<string> = new Set<string>([
-  // Active (1:1 with LIFECYCLE_ACTIVE).
+  // Active.
   "PENDING",
   "RUNNING",
   "WAITING_RETRY",
-  // Terminal (1:1 with LIFECYCLE_TERMINAL).
+  // Terminal.
   "COMPLETED",
   "FAILED",
   "CANCELLED",
@@ -167,8 +164,8 @@ export const LIFECYCLE_STATES: ReadonlySet<string> = new Set<string>([
 ]);
 
 /**
- * Terminal state → corresponding timestamp column (1:1 with the Python `_TERMINAL_TIMESTAMP_COLUMNS`).
- * `PARTIAL` is intentionally absent — it is an intermediate-terminal state with no dedicated timestamp
+ * Terminal state → corresponding timestamp column. `PARTIAL` is intentionally absent — it is an
+ * intermediate-terminal state with no dedicated timestamp
  * column; active states (`PENDING` / `RUNNING` / `WAITING_RETRY`) also map to no column. The AD-7
  * forward + inverse CHECKs require these timestamps present when the row is in the corresponding state,
  * so the primitive stamps them in lockstep with the state flip. Keys are validated `toState` values;
@@ -190,7 +187,7 @@ type CurrentRunRow = {
   installation_id: string | null;
 };
 
-/** Arguments for {@link transitionRun}. 1:1 with the Python keyword-only signature. */
+/** Arguments for {@link transitionRun}. */
 export type TransitionRunArgs = {
   /**
    * Open transaction handle. The caller owns the boundary; this neither opens nor commits. A bare
@@ -238,8 +235,8 @@ export type TransitionRunArgs = {
 };
 
 /**
- * Advance `core.review_runs.lifecycle_state` and emit the `lifecycle_transition` event (1:1 with the
- * Python `transition_run`). See the module docstring for the five-step protocol.
+ * Advance `core.review_runs.lifecycle_state` and emit the `lifecycle_transition` event. See the
+ * module docstring for the five-step protocol.
  *
  * @returns {@link TransitionOutcome.APPLIED} when the row was advanced; {@link
  *          TransitionOutcome.ALREADY_APPLIED} when the current state already equalled `toState`.
@@ -283,7 +280,7 @@ export async function transitionRun(args: TransitionRunArgs): Promise<Transition
     throw new Error(`transitionRun: attempt must be >= 1, got ${attempt}`);
   }
 
-  // ── Step 2: assert an OPEN transaction (the Python `session.in_transaction()` RuntimeError). ──
+  // ── Step 2: assert an OPEN transaction (the session.in_transaction() RuntimeError analogue). ──
   if (!(tx instanceof Transaction)) {
     throw new Error(
       "transitionRun requires an already-open transaction. Pass the Kysely Transaction handle from " +
@@ -325,7 +322,7 @@ export async function transitionRun(args: TransitionRunArgs): Promise<Transition
   const cancelReason = currentRow.cancel_reason;
   const actualInstallationId = currentRow.installation_id;
 
-  // ── BF-9 / fail-closed posture (1:1 with the Python branch). ──
+  // ── BF-9 / fail-closed posture. ──
   //   * actual=null — data-integrity break (repositories row missing OR installation_id NULL). Raise
   //     RepositoriesResolveFailed at the resolution site so the operator gets a single triage pivot;
   //     the audit row is never written with installation_id=NULL.
@@ -341,8 +338,8 @@ export async function transitionRun(args: TransitionRunArgs): Promise<Transition
     );
   }
   if (expectedInstallationId === undefined) {
-    // Structured WARN grace-period notice (1:1 with the Python `_LOG.warning`); no logger seam in the
-    // domain layer yet — `console.warn` is the sanctioned stderr surface here.
+    // Structured WARN grace-period notice; no logger seam in the domain layer yet —
+    // `console.warn` is the sanctioned stderr surface here.
     console.warn(
       `cross-installation: ${BF9_PRIMITIVE_NAME} called without expectedInstallationId; ` +
         `Phase B will require it. key_kind=${BF9_KEY_KIND} key_value=${runId}`,
@@ -371,7 +368,7 @@ export async function transitionRun(args: TransitionRunArgs): Promise<Transition
   // terminal timestamp column to land in ONE UPDATE so no constraint observes the row mid-transition.
   // The SET clause is composed from string literals + the static TERMINAL_TIMESTAMP_COLUMNS lookup (keys
   // are validated `toState` values); every value is bound via a parameterised `sql` fragment — no user
-  // input enters the SQL string (mirrors the Python's `noqa: S608` static-composition note). ──
+  // input enters the SQL string. ──
   const setClauses: Array<RawBuilder<unknown>> = [sql`lifecycle_state = ${toState}`];
   const tcol = TERMINAL_TIMESTAMP_COLUMNS.get(toState);
   if (tcol !== undefined) {

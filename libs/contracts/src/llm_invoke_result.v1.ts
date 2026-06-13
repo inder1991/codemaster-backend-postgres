@@ -2,8 +2,7 @@ import { z } from "zod";
 
 import { BlobRef } from "./blob_ref.v1.js";
 
-// Zod port of vendor/codemaster-py/codemaster/integrations/llm/client.py::LlmInvokeResultV1
-// (frozen Python). Parity-validated in test/contracts/llm_invoke_result.v1.parity.test.ts.
+// Zod port of LlmInvokeResultV1. Parity-validated in test/contracts/llm_invoke_result.v1.parity.test.ts.
 //
 // LlmInvokeResultV1 is the structured result of one LlmClient.invoke_model call: the request id, the
 // resolved model, token usage, latency, cost, the archived-payload BlobRef, the first text block's

@@ -4,7 +4,7 @@ import { CodemasterConfigV1 } from "./codemaster_config.v1.js";
 import { KnowledgeChunkV1 } from "./knowledge_chunks.v1.js";
 import { PRContext } from "./pr_context.v1.js";
 
-// Zod port of contracts/retrieve_knowledge/v1.py (frozen Python). Parity-validated in
+// Zod port of contracts/retrieve_knowledge/v1.py. Parity-validated in
 // retrieve_knowledge.v1.parity.test.ts.
 //
 // Wire-contract between the review_pull_request workflow body and the per-chunk

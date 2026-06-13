@@ -4,8 +4,8 @@ import { DiffChunkV1 } from "./diff_chunking.v1.js";
 import { ReviewFindingV1 } from "./review_findings.v1.js";
 
 // NEW typed-input envelope introduced DURING the Python→TS port — there is NO Python Pydantic
-// counterpart to diff against. The frozen Python `CarryForwardActivity.select_carry_forward`
-// (vendor/codemaster-py/codemaster/review/carry_forward.py) dispatches with FOUR positional arguments —
+// counterpart to diff against. `CarryForwardActivity.select_carry_forward`
+// dispatches with FOUR positional arguments —
 // `(parent_findings, current_chunks, changed_line_ranges, parent_review_id)` — which violates
 // CLAUDE.md invariant 11 / ADR-0047 ("every Temporal activity takes EXACTLY ONE positional argument
 // typed as a Pydantic v2 BaseModel"). The TS port CLOSES that violation: the activity's single positional

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Zod port of contracts/retention/v1.py (frozen Python). Parity-validated in
+// Zod port of contracts/retention/v1.py. Parity-validated in
 // retention.v1.parity.test.ts.
 //
 // Pydantic v2 envelopes for the run_id retention janitor. Every model carries
