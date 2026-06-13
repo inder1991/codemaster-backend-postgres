@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   assertDeployReady,
+  DEPLOY_CONTRACT,
   type DeployContract,
   DeployContractError,
   evaluateDeployContract,
@@ -137,6 +138,35 @@ function fakeDeps(over: Partial<{ env: Record<string, string>; files: Record<str
 }
 
 describe("observeDeployState", () => {
+  // P0-A: in openshift mode (no Vault) the field key lives in CODEMASTER_FIELD_ENCRYPTION_KEYSET, not a
+  // Vault-Agent-rendered file. The observer must read the env keyset, else the preflight false-positive
+  // crashes a correctly-provisioned openshift deploy.
+  it("observes field_encryption.keys from the env keyset in openshift mode (no rendered file)", async () => {
+    const observed = await observeDeployState(
+      DEPLOY_CONTRACT,
+      fakeDeps({
+        env: {
+          CODEMASTER_SECRET_SOURCE: "openshift",
+          CODEMASTER_FIELD_ENCRYPTION_KEYSET: '{"current_version":"v1","keys":{"v1":"QUFB"}}',
+        },
+        // no Vault-Agent files rendered — openshift has no agent output
+      }),
+    );
+    expect(observed.secrets["field_encryption.keys"]).toBeDefined();
+  });
+
+  // The vault-agent / file path is unchanged: the rendered file still satisfies the field key.
+  it("observes field_encryption.keys from the rendered file in vault-agent mode", async () => {
+    const observed = await observeDeployState(
+      DEPLOY_CONTRACT,
+      fakeDeps({
+        env: { CODEMASTER_FIELD_KEY_SOURCE: "vault-agent" },
+        files: { codemaster_field_encryption_keys: { keys: '{"current_version":"v1","keys":{}}' } },
+      }),
+    );
+    expect(observed.secrets["field_encryption.keys"]).toBeDefined();
+  });
+
   it("resolves env secrets from env and file-secret keys from the rendered file", async () => {
     const observed = await observeDeployState(FILE_AND_ENV, fakeDeps({
       env: { CODEMASTER_PG_CORE_DSN: "postgresql://x", CODEMASTER_RUNTIME_MODE: "postgres" },

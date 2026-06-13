@@ -54,10 +54,10 @@ import {
 } from "./field_encryption_keys_loader.js";
 
 const VALID_SOURCES = ["env", "vault", "vault-agent", "file"] as const;
-type FieldKeySource = (typeof VALID_SOURCES)[number];
+export type FieldKeySource = (typeof VALID_SOURCES)[number];
 
 /** The env var holding the keyset JSON when source=env (OpenShift Secret injected as env). */
-const FIELD_KEYSET_ENV = "CODEMASTER_FIELD_ENCRYPTION_KEYSET";
+export const FIELD_KEYSET_ENV = "CODEMASTER_FIELD_ENCRYPTION_KEYSET";
 
 /** The boot-time key install failed — the pod MUST NOT run audit-emitting paths without keys in
  *  production; each entrypoint's fail-loud `.catch` exits 1 on this. */
@@ -117,7 +117,7 @@ export async function installFieldKeyRegistryAtBoot(
  * default "vault" when unset, the validated explicit source otherwise; throws
  * {@link FieldKeyBootError} on a garbage value.
  */
-function resolveFieldKeySource(env: NodeJS.ProcessEnv, hasReaderOverride: boolean): FieldKeySource | null {
+export function resolveFieldKeySource(env: NodeJS.ProcessEnv, hasReaderOverride: boolean): FieldKeySource | null {
   const isProduction = env["NODE_ENV"] === "production";
   const rawSource = env["CODEMASTER_FIELD_KEY_SOURCE"];
   if (rawSource === undefined || rawSource === "") {

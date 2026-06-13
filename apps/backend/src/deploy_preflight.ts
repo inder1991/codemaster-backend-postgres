@@ -6,6 +6,12 @@
 // list instead of going Ready-but-dead. evaluateDeployContract is IO-free (inject ObservedState) so
 // it is exhaustively unit-testable; the thin IO wrapper that reads env / queries the DB lives apart.
 
+import {
+  FIELD_KEYSET_ENV,
+  type FieldKeySource,
+  resolveFieldKeySource,
+} from "#backend/security/boot_field_keys.js";
+
 /** Where a secret is delivered to the app: an env var, or a Vault-Agent-rendered file. */
 export type SecretSource = "env" | "file";
 
@@ -284,6 +290,23 @@ export type ObserveDeps = {
   readonly listSchemas: () => Promise<ReadonlyArray<string>>;
 };
 
+/** Resolve the field-key source from the observe deps' env reader, swallowing a garbage-source throw
+ *  (the boot loader fails loud on that separately) → null, which the observer treats as the file path. */
+function resolveFieldKeySourceSafe(env: (name: string) => string | undefined): FieldKeySource | null {
+  try {
+    return resolveFieldKeySource(
+      {
+        NODE_ENV: env("NODE_ENV"),
+        CODEMASTER_FIELD_KEY_SOURCE: env("CODEMASTER_FIELD_KEY_SOURCE"),
+        CODEMASTER_SECRET_SOURCE: env("CODEMASTER_SECRET_SOURCE"),
+      },
+      false,
+    );
+  } catch {
+    return null;
+  }
+}
+
 /** Resolve the {@link ObservedState} the validator judges against. Reads each rendered file at most once. */
 export async function observeDeployState(
   contract: DeployContract,
@@ -302,8 +325,24 @@ export async function observeDeployState(
   // getConfigStatus). Advisory presence here is the env/file/Vault view; DB-set config is layered in
   // by the feature repos (Step 4).
   for (const s of [...contract.secrets, ...contract.advisory]) {
-    if (s.source === "env") {
-      secrets[s.name] = deps.env(s.name);
+    // field_encryption.keys is observed per the RESOLVED field-key source (P0-A), not always as a file:
+    // openshift → the CODEMASTER_FIELD_ENCRYPTION_KEYSET env var; vault → presence-by-VAULT_ADDR (the
+    // SA-auth read happens at boot, not here); vault-agent/file → the rendered file (the declared source).
+    let source: SecretSource = s.source;
+    let envName = s.name;
+    if (s.name === "field_encryption.keys") {
+      const fk = resolveFieldKeySourceSafe(deps.env);
+      if (fk === "env") {
+        source = "env";
+        envName = FIELD_KEYSET_ENV;
+      } else if (fk === "vault") {
+        secrets[s.name] = deps.env("VAULT_ADDR") === undefined ? undefined : "present";
+        continue;
+      }
+      // file / vault-agent / null → fall through to the file branch (s.source is "file")
+    }
+    if (source === "env") {
+      secrets[s.name] = deps.env(envName);
       continue;
     }
     const data = s.fileName === undefined ? null : await readFileOnce(s.fileName);
