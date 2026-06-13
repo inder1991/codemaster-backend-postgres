@@ -84,9 +84,9 @@ describeDb("admin config-status — DB tier (P1)", () => {
     await sql`DELETE FROM core.confluence_settings WHERE scope = 'platform'`.execute(db);
   });
   afterAll(async () => {
-    // Don't leak seeded singleton rows to the next shuffled file (P2 flake #14): a leftover platform
-    // llm row would collide with another file's beforeAll INSERT (ux_llm_provider_settings_scope_role_install),
-    // and a leftover foreign-key-encrypted row would make config-status's decrypt throw (500). Clean broadly.
+    // Don't leak seeded singleton rows to the next shuffled file (P2 flake #14): a leftover platform llm
+    // row would collide with another file's beforeAll INSERT (ux_llm_provider_settings_scope_role_install).
+    // (config-status no longer decrypts — readNonSecret — so a foreign-key row no longer 500s it.) Clean broadly.
     await sql`DELETE FROM core.github_app_settings WHERE scope = 'platform'`.execute(db);
     await sql`DELETE FROM core.llm_provider_settings WHERE scope = 'platform'`.execute(db);
     await sql`DELETE FROM core.confluence_settings WHERE scope = 'platform'`.execute(db);
@@ -114,6 +114,22 @@ describeDb("admin config-status — DB tier (P1)", () => {
       state: "configured",
       source: "db",
     });
+  });
+
+  it("an UNDECRYPTABLE github row (rotated/corrupt key) → config-status still 200 + configured/db, NOT 500", async () => {
+    // The fail-soft fix (review P1): config-status reads presence-only (no decrypt), so a row whose secret
+    // ciphertext can't be decrypted under the current registry must NOT 500 the whole non-blocking checklist.
+    // Insert directly with garbage ciphertext (undecryptable under `reg`); the OLD path decrypted → 500.
+    await sql`INSERT INTO core.github_app_settings
+                (scope, installation_id, app_id, private_key_pem_ciphertext, webhook_secret_ciphertext,
+                 enabled, last_rotated_by_user_id)
+              VALUES ('platform', NULL, '654321', 'kms2:v1:undecryptable-garbage', 'kms2:v1:also-garbage',
+                      true, ${ROTATOR})`.execute(db);
+
+    const items = await statusItems(); // statusItems asserts res.statusCode === 200 internally
+    const github = items.filter((i) => i.key.startsWith("github_app."));
+    expect(github.length).toBeGreaterThan(0);
+    expect(github.every((i) => i.state === "configured" && i.source === "db")).toBe(true);
   });
 
   it("with no DB rows, github_app.* stay pending and llm.provider is pending", async () => {

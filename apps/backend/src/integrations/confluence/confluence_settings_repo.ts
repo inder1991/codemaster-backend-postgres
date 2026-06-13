@@ -68,6 +68,23 @@ export class PostgresConfluenceSettingsRepo {
     };
   }
 
+  /** The non-secret view (base_url + auth_email + enabled), or null when no platform row exists. Does NOT
+   *  decrypt — so it never throws on a rotated-out / corrupt key. Used by config-status + the GET route
+   *  (presence + non-secret fields only), so one undecryptable row can't 500 the whole setup checklist. */
+  public async readNonSecret(): Promise<{ baseUrl: string; authEmail: string | null; enabled: boolean } | null> {
+    // tenant:exempt reason=platform-config follow_up=PERMANENT-EXEMPTION-confluence-settings
+    const result = await sql<{ base_url: string; auth_email: string | null; enabled: boolean }>`
+      SELECT base_url, auth_email, enabled
+        FROM core.confluence_settings
+       WHERE scope = 'platform'
+       LIMIT 1
+    `.execute(this.db);
+    const row = result.rows[0];
+    return row === undefined
+      ? null
+      : { baseUrl: row.base_url, authEmail: row.auth_email, enabled: row.enabled };
+  }
+
   /** UPSERT the platform-scope Confluence creds (token encrypted via the field codec). */
   public async write(args: {
     baseUrl: string;

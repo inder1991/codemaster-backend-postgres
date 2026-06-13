@@ -424,11 +424,15 @@ export async function registerAdminRoutes(
       if (registry === null) {
         return envFileItems;
       }
-      const githubRow = await new PostgresGitHubAppSettingsRepo({ db: opts.db, registry }).read();
-      const confluenceRow = await new PostgresConfluenceSettingsRepo({ db: opts.db, registry }).read();
+      // Presence-only (readNonSecret — no decrypt): a corrupt/rotated-out key must NOT 500 the whole
+      // non-blocking checklist (review P1). configured = a row exists AND is enabled.
+      const githubRow = await new PostgresGitHubAppSettingsRepo({ db: opts.db, registry }).readNonSecret();
+      const confluenceRow = await new PostgresConfluenceSettingsRepo({ db: opts.db, registry }).readNonSecret();
+      const githubConfigured = githubRow !== null && githubRow.enabled;
+      const confluenceConfigured = confluenceRow !== null && confluenceRow.enabled;
       const items = envFileItems.map((it) =>
-        (githubRow !== null && it.key.startsWith("github_app.")) ||
-        (confluenceRow !== null && it.key.startsWith("confluence."))
+        (githubConfigured && it.key.startsWith("github_app.")) ||
+        (confluenceConfigured && it.key.startsWith("confluence."))
           ? { ...it, state: "configured" as const, source: "db" as const }
           : it,
       );
@@ -477,9 +481,11 @@ export async function registerAdminRoutes(
       "/api/admin/github-config",
       { preHandler: requireRole(["platform_owner", "super_admin"]) },
       async () => {
+        // readNonSecret (no decrypt) — the GET returns only app_id/enabled, never the secrets, and must not
+        // 500 on a corrupt/rotated-out key (review P1).
         const repo = new PostgresGitHubAppSettingsRepo({ db: opts.db, registry: requireAuditKeyRegistry() });
-        const cfg = await repo.read();
-        return cfg === null
+        const cfg = await repo.readNonSecret();
+        return cfg === null || !cfg.enabled
           ? { configured: false }
           : { configured: true, appId: cfg.appId, enabled: cfg.enabled };
       },
@@ -553,9 +559,11 @@ export async function registerAdminRoutes(
       "/api/admin/confluence-config",
       { preHandler: requireRole(["platform_owner", "super_admin"]) },
       async () => {
+        // readNonSecret (no decrypt) — the GET returns only base_url/auth_email/enabled, never the token,
+        // and must not 500 on a corrupt/rotated-out key (review P1).
         const repo = new PostgresConfluenceSettingsRepo({ db: opts.db, registry: requireAuditKeyRegistry() });
-        const cfg = await repo.read();
-        return cfg === null
+        const cfg = await repo.readNonSecret();
+        return cfg === null || !cfg.enabled
           ? { configured: false }
           : { configured: true, baseUrl: cfg.baseUrl, authEmail: cfg.authEmail, enabled: cfg.enabled };
       },

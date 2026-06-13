@@ -62,6 +62,21 @@ export class PostgresGitHubAppSettingsRepo {
     };
   }
 
+  /** The non-secret view (app_id + enabled), or null when no platform row exists. Does NOT decrypt — so
+   *  it never throws on a rotated-out / corrupt key. Used by config-status + the GET route (which only need
+   *  presence + the non-secret fields), so one undecryptable row can't 500 the whole setup checklist. */
+  public async readNonSecret(): Promise<{ appId: string; enabled: boolean } | null> {
+    // tenant:exempt reason=platform-config follow_up=PERMANENT-EXEMPTION-github-app-settings
+    const result = await sql<{ app_id: string; enabled: boolean }>`
+      SELECT app_id, enabled
+        FROM core.github_app_settings
+       WHERE scope = 'platform'
+       LIMIT 1
+    `.execute(this.db);
+    const row = result.rows[0];
+    return row === undefined ? null : { appId: row.app_id, enabled: row.enabled };
+  }
+
   /** UPSERT the platform-scope GitHub App creds (secrets encrypted via the field codec). */
   public async write(args: {
     appId: string;
