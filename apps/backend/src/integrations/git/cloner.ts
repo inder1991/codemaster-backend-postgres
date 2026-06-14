@@ -32,12 +32,19 @@ import * as path from "node:path";
 
 import { transportAbortSignal } from "#platform/transport_timeout.js";
 import { type TokenProvider } from "#backend/integrations/github/api_client.js";
+import { resolveGithubWebHost } from "#backend/config/github_host.js";
 
 import { GitCloneFailedError, GitCloneTimeoutError } from "./errors.js";
 
 const DEFAULT_TIMEOUT_SECONDS = 60;
 const HEAD_SHA_RE = /^[0-9a-f]{7,64}$/;
-const REPO_URL_RE = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/;
+// F6b: the allowed clone host is configurable (github.com default OR a GHE web host). Built per-call so a
+// per-deploy GITHUB_WEB_HOST is honored; the host is regex-escaped to keep this an exact-host allowlist.
+function repoUrlPattern(): RegExp {
+  const host = resolveGithubWebHost().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // eslint-disable-next-line security/detect-non-literal-regexp -- host is regex-escaped above; exact-host allowlist
+  return new RegExp(`^https://${host}/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?$`);
+}
 const KILL_TIMEOUT_SECONDS = 5; // SIGKILL grace after SIGTERM
 const REPO_SUBDIR = "repo";
 
@@ -120,8 +127,8 @@ export class GitSubprocessCloner implements GitCloner {
     if (!HEAD_SHA_RE.test(headSha)) {
       throw new Error(`head_sha must be 7-64 hex chars; got '${headSha}'`);
     }
-    if (!REPO_URL_RE.test(repoUrl)) {
-      throw new Error(`repo_url must be an https://github.com/... URL; got '${repoUrl}'`);
+    if (!repoUrlPattern().test(repoUrl)) {
+      throw new Error(`repo_url must be an https://${resolveGithubWebHost()}/... URL; got '${repoUrl}'`);
     }
     if (prNumber !== null && prNumber !== undefined && prNumber <= 0) {
       throw new Error(`pr_number must be a positive integer when supplied; got ${prNumber}`);

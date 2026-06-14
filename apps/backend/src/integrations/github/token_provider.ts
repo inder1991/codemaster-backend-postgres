@@ -62,6 +62,7 @@ import {
   gitHubCredsFromVaultData,
   resolveGitHubCreds,
 } from "#backend/integrations/github/github_config_resolver.js";
+import { resolveGithubApiBase } from "#backend/config/github_host.js";
 import { KeyedMutex } from "#backend/integrations/github/installation_token.js";
 import { getAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
 
@@ -235,7 +236,7 @@ export class GitHubAppTokenProvider {
     clock,
     refreshAtFraction = DEFAULT_REFRESH_FRACTION,
     maxCacheEntries = DEFAULT_MAX_CACHE_ENTRIES,
-    baseUrl = GITHUB_BASE_URL,
+    baseUrl = resolveGithubApiBase(),
   }: GitHubAppTokenProviderOptions) {
     if (appId <= 0 || !Number.isSafeInteger(appId)) {
       throw new Error(`app_id must be a safe-integer >= 1, got ${appId}`);

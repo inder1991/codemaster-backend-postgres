@@ -73,6 +73,7 @@ import { cancellableSleep } from "./clock_async.js";
 import { makeInProcessPorts, type InProcessPortDeps } from "./in_process_ports.js";
 
 import type { ReviewActivityPorts } from "#backend/review/pipeline/activity_ports.js";
+import { resolveGithubWebHost } from "#backend/config/github_host.js";
 import type { GhReviewClient } from "#backend/integrations/github/review_client.js";
 
 /**
@@ -458,7 +459,7 @@ export function runReviewJob(deps: RunReviewJobDeps): JobHandler {
       };
       const ctx: ReviewPipelineContext = {
         repo: {
-          repoUrl: `https://github.com/${payload.gh_owner}/${payload.gh_repo_name}.git`,
+          repoUrl: `https://${resolveGithubWebHost()}/${payload.gh_owner}/${payload.gh_repo_name}.git`,
           changedPaths: [...changedPathsForOrchestrator],
           workspaceHandle: handle,
         },

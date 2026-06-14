@@ -51,6 +51,7 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
+import { resolveGithubWebHost } from "#backend/config/github_host.js";
 import { byteSizeOfDir } from "#backend/integrations/git/byte_size.js";
 import { GitSubprocessCloner } from "#backend/integrations/git/cloner.js";
 import { type TokenProvider } from "#backend/integrations/github/api_client.js";
@@ -218,7 +219,7 @@ export const defaultCacheCloner: CacheGitCloner = {
     });
     await cloner.clone({
       workspace: args.targetDir,
-      repoUrl: `https://github.com/${args.repoFullName}`,
+      repoUrl: `https://${resolveGithubWebHost()}/${args.repoFullName}`,
       headSha: args.headSha,
       installationId: 1, // sentinel: the one-shot tokenProvider ignores it and returns the resolved token.
       paths: [],

@@ -42,6 +42,8 @@ import { z } from "zod";
 import { type Clock, WallClock } from "#platform/clock.js";
 import { transportAbortSignal } from "#platform/transport_timeout.js";
 
+import { resolveGithubApiBase } from "#backend/config/github_host.js";
+
 // ─── Constants ────────────────────────────────────────────────────────────────────────────────
 
 export const DEFAULT_BASE_URL = "https://api.github.com";
@@ -394,7 +396,7 @@ export class GitHubApiClient {
   public constructor({
     tokenProvider,
     http,
-    baseUrl = DEFAULT_BASE_URL,
+    baseUrl = resolveGithubApiBase(),
     timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
     clock,
   }: GitHubApiClientOptions) {

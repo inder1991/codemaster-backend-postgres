@@ -23,11 +23,11 @@
  */
 
 import {
-  DEFAULT_BASE_URL,
   type GitHubHttpClient,
   FetchGitHubHttpClient,
   type TokenProvider,
 } from "#backend/integrations/github/api_client.js";
+import { resolveGithubApiBase } from "#backend/config/github_host.js";
 
 // HTTP status sentinels (mirroring the Python `_HTTP_*` finals used inside `get_issue`).
 const HTTP_NOT_MODIFIED = 304;
@@ -67,7 +67,7 @@ export class GitHubIssueClient {
   readonly #http: GitHubHttpClient;
   readonly #baseUrl: string;
 
-  public constructor({ tokenProvider, http, baseUrl = DEFAULT_BASE_URL, timeoutSeconds }: GitHubIssueClientOptions) {
+  public constructor({ tokenProvider, http, baseUrl = resolveGithubApiBase(), timeoutSeconds }: GitHubIssueClientOptions) {
     this.#tokenProvider = tokenProvider;
     this.#http =
       http ??

@@ -55,6 +55,7 @@
 
 import { type Kysely, sql, type Transaction } from "kysely";
 
+import { resolveGithubWebHost } from "#backend/config/github_host.js";
 import { ActivityError } from "#backend/review/activity_error.js";
 
 import { tenantKysely } from "#platform/db/database.js";
@@ -427,7 +428,8 @@ function deepLink(args: {
   line: number;
 }): string {
   const ref = args.headSha !== "" ? args.headSha : "HEAD";
-  return `https://github.com/${args.owner}/${args.repo}/blob/${ref}/${args.path}#L${args.line}`;
+  // F6b: finding permalinks use the configured web host so they resolve on GHE, not just github.com.
+  return `https://${resolveGithubWebHost()}/${args.owner}/${args.repo}/blob/${ref}/${args.path}#L${args.line}`;
 }
 
 /** One bullet line for a dropped finding. */
