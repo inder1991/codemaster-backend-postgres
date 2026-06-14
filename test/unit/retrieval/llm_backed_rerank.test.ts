@@ -106,6 +106,26 @@ describe("LlmBackedRerankPort", () => {
     );
   });
 
+  // F8 / P1-D: the soft timeout must ABORT the in-flight Bedrock call (via the signal threaded into
+  // invokeModel), not just abandon the promise and let the call run + bill in the background.
+  it("the soft timeout aborts the in-flight invokeModel call (signal passed + aborted)", async () => {
+    let captured: AbortSignal | undefined;
+    const invoke = ((args: { signal?: AbortSignal }): Promise<unknown> => {
+      captured = args.signal;
+      return new Promise<unknown>(() => {}); // never resolves → the timeout wins
+    }) as unknown as () => Promise<unknown>;
+    const port = new LlmBackedRerankPort({
+      cache: cacheReturning(stubClient(invoke)),
+      installationId: "iid",
+      timeoutMs: 15,
+    });
+    await expect(port.rerank({ query: "q", candidates: CANDIDATES })).rejects.toBeInstanceOf(
+      LlmRerankUnavailableError,
+    );
+    expect(captured).toBeInstanceOf(AbortSignal);
+    expect(captured?.aborted).toBe(true);
+  });
+
   it("a COST-CAP breach maps to LlmRerankUnavailableError (NOT re-raised — rerank is optional)", async () => {
     const port = new LlmBackedRerankPort({
       cache: cacheReturning(

@@ -2,9 +2,9 @@
 // RRF-fused candidate in [0,1] for relevance to the query; LlmRerank keeps the top-5.
 //
 // Bounded on three axes the user asked for:
-//   - TIMEOUT: a soft wall-clock bound (Promise.race). On timeout the rerank is abandoned + the call
-//     falls back. NOTE: invokeModel has no AbortSignal seam, so the abandoned call may still complete in
-//     the background (charging its cost) — the bound is on REVIEW LATENCY, not on the in-flight request.
+//   - TIMEOUT: a soft wall-clock bound. The SAME AbortSignal that fires the timeout is threaded into
+//     invokeModel (F8 / P1-D), so on timeout the in-flight Bedrock call is ABORTED — not left running in
+//     the background charging its cost. The bound is now on both review latency AND the request.
 //   - COST CAP: enforced INSIDE invokeModel (BedrockBudgetExceededError). Unlike the curator (which
 //     re-raises it), rerank is optional polish — a cost-cap breach maps to LlmRerankUnavailableError so
 //     LlmRerank.apply falls back to the RRF order instead of failing the review.
@@ -101,13 +101,12 @@ function errMsg(e: unknown): string {
 const TIMED_OUT: unique symbol = Symbol("rerank-timeout");
 
 /**
- * Race `p` against a soft timeout. The timer is the sanctioned {@link transportAbortSignal} seam (the
- * only place `AbortSignal.timeout` is allow-listed by the clock/random gate); here we merely LISTEN to
- * its abort. The timeout branch RESOLVES with {@link TIMED_OUT} (never rejects), so when `p` wins the
- * still-pending timeout settles harmlessly. Throws {@link RerankTimeoutError} when the timeout wins.
+ * Race `p` against a soft timeout driven by `signal` (the caller creates it via {@link transportAbortSignal}
+ * and ALSO passes it into invokeModel, so a timeout cancels the in-flight call — F8 / P1-D). The timeout
+ * branch RESOLVES with {@link TIMED_OUT} (never rejects), so when `p` wins the still-pending timeout settles
+ * harmlessly. Throws {@link RerankTimeoutError} when the signal aborts first.
  */
-async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
-  const signal = transportAbortSignal(ms);
+async function withTimeout<T>(p: Promise<T>, signal: AbortSignal, ms: number): Promise<T> {
   const timeout = new Promise<typeof TIMED_OUT>((resolve) => {
     if (signal.aborted) {
       resolve(TIMED_OUT);
@@ -216,6 +215,9 @@ export class LlmBackedRerankPort implements LlmRerankerPort {
     // Haiku (cheap, fast) for rerank — the curator's secondary model. An explicit override wins (tests).
     const model = this.modelOverride ?? modelForPurpose("analysis_curator");
 
+    // F8 / P1-D: ONE signal drives both the soft-timeout race AND the in-flight invokeModel call, so a
+    // timeout aborts the Bedrock request instead of leaving it to run + bill in the background.
+    const timeoutSignal = transportAbortSignal(this.timeoutMs);
     let result: Awaited<ReturnType<LlmClient["invokeModel"]>>;
     try {
       result = await withTimeout(
@@ -227,6 +229,7 @@ export class LlmBackedRerankPort implements LlmRerankerPort {
           maxTokens: RERANK_MAX_TOKENS,
           purpose: RERANK_PURPOSE,
           installationId: this.installationId,
+          signal: timeoutSignal,
           // de-Temporal Phase 2 (D2 / W2.2 / F9) — ledger this PR-level paid call by PURPOSE, but ONLY when a
           // review_id was threaded in (additive optional). The stable key is review_id + the purpose chunk-key
           // surrogate (purposeChunkId("rerank"), E8) + role + model + prompt hash + RERANK_TOOL_SCHEMA_VERSION.
@@ -246,6 +249,7 @@ export class LlmBackedRerankPort implements LlmRerankerPort {
               }
             : {}),
         }),
+        timeoutSignal,
         this.timeoutMs,
       );
     } catch (e) {
