@@ -10,7 +10,7 @@ import {
   type CostCapEnforcer,
 } from "#backend/cost/enforcer.js";
 import { LlmClient, type LlmSdk } from "#backend/integrations/llm/client.js";
-import { LlmInvocationError, LlmOutputUnsafeError } from "#backend/integrations/llm/errors.js";
+import { LlmInvocationError, LlmOutputUnsafeError, LlmRateLimitError } from "#backend/integrations/llm/errors.js";
 
 import { InMemoryBlobStoreAdapter } from "../../support/llm/cassette_sdk.js";
 
@@ -161,6 +161,22 @@ describe("LlmClient.invokeModel — pure transform", () => {
       clock: new FakeClock(),
     });
     await expect(invoke(client)).rejects.toBeInstanceOf(LlmInvocationError);
+  });
+
+  // F4 / P0-5: a MAPPED SDK subclass (e.g. LlmRateLimitError) must be preserved, not flattened to a generic
+  // LlmInvocationError — else the runner's name-keyed throttle-defer never fires. retryAfterSeconds rides along.
+  it("preserves a mapped SDK subclass (LlmRateLimitError + retryAfterSeconds), not a generic wrap (P0-5)", async () => {
+    const client = new LlmClient({
+      sdk: {
+        async createMessage(): Promise<Record<string, unknown>> {
+          throw new LlmRateLimitError("throttled", { retryAfterSeconds: 30 });
+        },
+      },
+      costCap: new InMemoryCostCapEnforcer({ globalCapCents: 500_000, perOrgCapCents: 100_000 }),
+      blobStore: new InMemoryBlobStoreAdapter(),
+      clock: new FakeClock(),
+    });
+    await expect(invoke(client)).rejects.toMatchObject({ name: "LlmRateLimitError", retryAfterSeconds: 30 });
   });
 });
 

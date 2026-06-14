@@ -16,6 +16,7 @@ import {
 } from "#backend/integrations/llm/client.js";
 import {
   LlmInvocationError,
+  LlmRateLimitError,
   LlmRoleNotConfiguredError,
 } from "#backend/integrations/llm/errors.js";
 import {
@@ -198,6 +199,18 @@ describe("doReview — error paths", () => {
     await expect(doReview(context(), { cache })).rejects.toMatchObject({
       name: "BedrockInvocationError",
       nonRetryable: false,
+    });
+  });
+
+  // F4 / P0-5: a throttle (429) must NOT be flattened to a generic BedrockInvocationError — its class +
+  // retryAfterSeconds must survive so the fan-out aborts (FANOUT_ABORT_CLASS_ERROR_NAMES) and the runner
+  // defers at the hint (THROTTLE_ERROR_NAMES / extractRetryAtHint), instead of running the generic backoff
+  // straight back into the open rate-limit window.
+  it("(c0) rate-limit (429) → re-thrown as LlmRateLimitError with retryAfterSeconds preserved (P0-5)", async () => {
+    const cache = cacheThrowingFromSdk(new LlmRateLimitError("throttled", { retryAfterSeconds: 42 }));
+    await expect(doReview(context(), { cache })).rejects.toMatchObject({
+      name: "LlmRateLimitError",
+      retryAfterSeconds: 42,
     });
   });
 });

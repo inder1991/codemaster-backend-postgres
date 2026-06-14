@@ -21,6 +21,7 @@ import { BedrockBudgetExceededError } from "#backend/cost/enforcer.js";
 import {
   LlmInvocationError,
   LlmOutputUnsafeError,
+  LlmRateLimitError,
   LlmRoleDisabledError,
   LlmRoleNotConfiguredError,
 } from "#backend/integrations/llm/errors.js";
@@ -179,6 +180,13 @@ export async function doReview(
     //     reason still sanitizes.
     if (e instanceof LlmOutputUnsafeError) {
       return sanitizeAndContinue(e, context);
+    }
+    // (c0) P0-5: a throttle (rate-limit) MUST keep its class + retry-after so the fan-out aborts
+    // (FANOUT_ABORT_CLASS_ERROR_NAMES) and the runner defers at the hint (THROTTLE_ERROR_NAMES /
+    // extractRetryAtHint) — NOT flatten to a generic retryable BedrockInvocationError that runs the
+    // exponential backoff straight back into the still-open rate-limit window.
+    if (e instanceof LlmRateLimitError) {
+      throw e;
     }
     // (c) Any other bedrock invocation error → retryable.
     if (e instanceof LlmInvocationError) {

@@ -719,7 +719,16 @@ export class LlmClient {
           routingReason: ROUTING_REASON,
           policyRevision: POLICY_REVISION,
         });
-        throw new LlmInvocationError(`bedrock invocation failed: ${formatErr(e)}`);
+        // P0-5: preserve the TYPED subclass the adapter raised (LlmRateLimitError + retryAfterSeconds,
+        // LlmServerError, …) so the runner's name-keyed classifiers (THROTTLE_ERROR_NAMES /
+        // FANOUT_ABORT_CLASS_ERROR_NAMES) still fire — flattening EVERY fault to a generic
+        // LlmInvocationError defeated all of them (a 429 ran the generic backoff straight back into the
+        // open rate-limit window). All the cleanup above (failure row, cost-cap release, journal settle,
+        // Langfuse) has already run regardless of which error is thrown. Only a genuinely UNMAPPED error
+        // (a raw SDK throwable the adapters didn't classify) gets the generic wrap.
+        throw e instanceof LlmInvocationError
+          ? e
+          : new LlmInvocationError(`bedrock invocation failed: ${formatErr(e)}`);
       }
       // D2 — the SDK call succeeded: this is the ACTUAL billed completion. Emit paid_call (only when
       // ledgering is engaged) so paid_call/miss over time exposes racing duplicate spend (the D2 upgrade
