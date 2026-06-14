@@ -661,7 +661,7 @@ export async function runSupervisedLoops(loops: {
  */
 export async function runBackgroundRunner(
   mode: BackgroundRunnerMode,
-  opts: { loopHealth?: LoopHealthRegistry } = {},
+  opts: { loopHealth?: LoopHealthRegistry; disposeSharedPool?: boolean } = {},
 ): Promise<void> {
   if (mode !== "postgres" && mode !== "shadow") {
     throw new Error(
@@ -779,7 +779,13 @@ export async function runBackgroundRunner(
   // AND crashed — leaves no live timer behind.
   await handles.disposables.disposeAll();
 
-  await disposePool(dsn);
+  // F2 / P0-3: in the combined pod (main.ts) the API + runner SHARE this pool, and main.ts owns its
+  // lifecycle — it disposes the pool LAST, after the HTTP server has drained. Disposing it here would
+  // end the pool while the still-serving API holds it (every in-flight DB request would then throw).
+  // Standalone runner invocation (disposeSharedPool !== false) still disposes it itself.
+  if (opts.disposeSharedPool !== false) {
+    await disposePool(dsn);
+  }
 
   if (crashes.length > 0) {
     // Fail-loud at EXIT: even when the surviving loops drained gracefully on SIGTERM, a run in

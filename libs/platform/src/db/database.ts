@@ -43,6 +43,25 @@ import { TenancyPlugin } from "#platform/db/tenancy_plugin.js";
 const DEFAULT_POOL_MAX = 8;
 
 /**
+ * Resolve the pool's `max`: an explicit `opts.max` wins; else the `CODEMASTER_PG_POOL_MAX` env override
+ * (F2 / P2-1 — the combined pod runs the API + 4 runner loops + the review fan-out off ONE pool, and the
+ * default 8 was never re-sized for that; this is the operator's escape hatch); else {@link DEFAULT_POOL_MAX}.
+ */
+function resolvePoolMax(optsMax: number | undefined): number {
+  if (optsMax !== undefined) {
+    return optsMax;
+  }
+  const raw = process.env["CODEMASTER_PG_POOL_MAX"];
+  if (raw !== undefined && raw !== "") {
+    const n = Number.parseInt(raw, 10);
+    if (Number.isInteger(n) && n > 0) {
+      return n;
+    }
+  }
+  return DEFAULT_POOL_MAX;
+}
+
+/**
  * The ADR-0062 singleton: DSN -> the one `pg.Pool` for that DSN. Module-level so it is shared across
  * every importer in the process. Never reassigned — entries are added by {@link getPool} and removed
  * by {@link disposePool} / {@link disposeAllPools}.
@@ -76,7 +95,7 @@ export function getPool(dsn: string, opts: { max?: number } = {}): Pool {
   if (existing !== undefined) {
     return existing;
   }
-  const pool = new Pool({ connectionString: dsn, max: opts.max ?? DEFAULT_POOL_MAX });
+  const pool = new Pool({ connectionString: dsn, max: resolvePoolMax(opts.max) });
   POOLS.set(dsn, pool);
   return pool;
 }

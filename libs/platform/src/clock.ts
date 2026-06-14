@@ -23,8 +23,9 @@ export type Clock = {
   now(): Date;
   /** Monotonic time in seconds (for measuring durations). */
   monotonic(): number;
-  /** Async sleep. Tests can intercept and advance the clock. */
-  sleep(seconds: number): Promise<void>;
+  /** Async sleep. Tests can intercept and advance the clock. An optional AbortSignal resolves the sleep
+   *  early AND (in {@link WallClock}) clears the underlying timer, so an aborted sleep leaks no live timer. */
+  sleep(seconds: number, signal?: AbortSignal): Promise<void>;
 };
 
 /** Production implementation. Uses real wall and monotonic clocks. */
@@ -38,9 +39,22 @@ export class WallClock implements Clock {
     return performance.now() / 1000;
   }
 
-  public async sleep(seconds: number): Promise<void> {
-    await new Promise<void>((resolve) => {
-      setTimeout(resolve, seconds * 1000);
+  public sleep(seconds: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted === true) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      // `done` fires from EITHER the timer or an abort: it clears the timer (harmless if already fired),
+      // detaches the listener, and resolves once. The timer is .unref()'d so a pending sleep never keeps
+      // the process alive at shutdown (F2 / P2-2 — the old bare setTimeout leaked a live timer per sleep).
+      const done = (): void => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", done);
+        resolve();
+      };
+      const timer = setTimeout(done, seconds * 1000);
+      timer.unref?.();
+      signal?.addEventListener("abort", done, { once: true });
     });
   }
 }
@@ -83,7 +97,9 @@ export class FakeClock implements Clock {
   }
 
   public async sleep(seconds: number): Promise<void> {
-    // Record but do not actually sleep — and do NOT advance. Tests advance the clock explicitly.
+    // Record but do not actually sleep — and do NOT advance. Tests advance the clock explicitly. (The
+    // Clock.sleep signal param is optional, so this narrower signature still satisfies the interface;
+    // FakeClock resolves at once regardless of any signal.)
     this.sleeps.push(seconds);
   }
 

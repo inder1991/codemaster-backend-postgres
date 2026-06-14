@@ -95,3 +95,32 @@ describe("disposePool resets memoization", () => {
     expect(getPool(DSN_B)).not.toBe(b);
   });
 });
+
+// F2 (P2-1): the per-pod pool must be sizable for the combined API + 4 loops + review fan-out, via a
+// CODEMASTER_PG_POOL_MAX env override (the default 8 was never re-sized for the combined process).
+describe("getPool — CODEMASTER_PG_POOL_MAX override (F2 / P2-1)", () => {
+  const KEY = "CODEMASTER_PG_POOL_MAX";
+  const saved = process.env[KEY];
+  afterEach(() => {
+    if (saved === undefined) delete process.env[KEY];
+    else process.env[KEY] = saved;
+  });
+
+  it("honors CODEMASTER_PG_POOL_MAX on pool creation", () => {
+    process.env[KEY] = "24";
+    const pool = getPool("postgresql://u:p@localhost:1/db_poolmax");
+    expect(pool.options.max).toBe(24);
+  });
+
+  it("falls back to the default (8) when the override is unset/garbage", () => {
+    delete process.env[KEY];
+    expect(getPool("postgresql://u:p@localhost:1/db_def1").options.max).toBe(8);
+    process.env[KEY] = "not-a-number";
+    expect(getPool("postgresql://u:p@localhost:1/db_def2").options.max).toBe(8);
+  });
+
+  it("an explicit opts.max still wins over the env override", () => {
+    process.env[KEY] = "24";
+    expect(getPool("postgresql://u:p@localhost:1/db_explicit", { max: 5 }).options.max).toBe(5);
+  });
+});

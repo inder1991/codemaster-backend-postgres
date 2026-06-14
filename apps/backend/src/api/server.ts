@@ -36,8 +36,15 @@ export type RunServerDeps = Pick<
   "postgresCheck" | "vaultCheck" | "dependencyChecks" | "wedgeCheck"
 >;
 
-/** Build the app, register routers, and listen. Resolves when the server is listening. */
-export async function runServer(deps: RunServerDeps = {}): Promise<void> {
+/** A handle to a listening server — `close()` stops accepting connections and drains in-flight requests;
+ *  `address` is the bound base URL (Fastify's listen() return, e.g. `http://0.0.0.0:8080`). */
+export type RunServerHandle = {
+  readonly close: () => Promise<void>;
+  readonly address: string;
+};
+
+/** Build the app, register routers, and listen. Resolves (with a close handle) when the server is listening. */
+export async function runServer(deps: RunServerDeps = {}): Promise<RunServerHandle> {
   const app = buildApp(deps);
 
   // F1·b — POST /v1/github/webhook (verification edge). The secret provider is source-selected per
@@ -180,16 +187,29 @@ export async function runServer(deps: RunServerDeps = {}): Promise<void> {
 
   const port = Number(process.env.CODEMASTER_API_PORT ?? "8080");
   const host = process.env.CODEMASTER_API_HOST ?? "0.0.0.0";
-  await app.listen({ port, host });
+  const address = await app.listen({ port, host });
+  // F2 / P0-3: return a close handle so the composition root (main.ts) can stop accepting HTTP on
+  // SIGTERM (finishing in-flight requests) BEFORE the shared pool is disposed. Pre-fix runServer
+  // returned void, so main.ts had no lever and the listener kept the event loop alive forever.
+  return { close: () => app.close(), address };
 }
 
 // Main-module entrypoint guard — the ESM analogue of `if __name__ == "__main__":` (same pattern as
-// worker/main.ts). When executed directly, run the server and fail loudly on any startup error.
+// worker/main.ts). When executed directly, run the server, register a SIGTERM/SIGINT close so the
+// process exits cleanly, and fail loudly on any startup error.
 if (process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`) {
-  runServer().catch((err: unknown) => {
-    process.stderr.write(
-      `api server FAILED: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
-    );
-    process.exit(1);
-  });
+  runServer()
+    .then((handle) => {
+      const shutdown = (): void => {
+        void handle.close().finally(() => process.exit(0));
+      };
+      process.once("SIGTERM", shutdown);
+      process.once("SIGINT", shutdown);
+    })
+    .catch((err: unknown) => {
+      process.stderr.write(
+        `api server FAILED: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
+      );
+      process.exit(1);
+    });
 }

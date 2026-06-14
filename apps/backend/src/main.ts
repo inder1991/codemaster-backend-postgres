@@ -34,7 +34,7 @@ import { parseRuntimeMode, resolveBootTasks } from "#backend/boot_tasks.js";
 import { LoopHealthRegistry } from "#backend/runner/loop_health.js";
 
 import { WallClock } from "#platform/clock.js";
-import { getPool } from "#platform/db/database.js";
+import { disposeAllPools, getPool } from "#platform/db/database.js";
 
 async function main(): Promise<void> {
   // Resolve the boot composition BEFORE any I/O — a garbage/temporal CODEMASTER_RUNTIME_MODE value
@@ -52,7 +52,9 @@ async function main(): Promise<void> {
   const tasks = resolveBootTasks(process.env, {
     runBackgroundRunner: async (runnerMode) => {
       const { runBackgroundRunner } = await import("#backend/runner/background_runner_main.js");
-      await runBackgroundRunner(runnerMode, { loopHealth });
+      // disposeSharedPool:false — main.ts owns the shared pool's lifecycle (disposed LAST, below), so
+      // the runner must NOT end it mid-shutdown while the API is still draining (F2 / P0-3).
+      await runBackgroundRunner(runnerMode, { loopHealth, disposeSharedPool: false });
     },
   });
 
@@ -114,7 +116,7 @@ async function main(): Promise<void> {
   }
 
   // HTTP API first — app.listen() returns once bound; the server keeps serving on the event loop.
-  await runServer(serverDeps);
+  const server = await runServer(serverDeps);
   console.info(
     `combined backend boot: tasks=[${tasks.map((t) => t.name).join(", ")}] ` +
       `readyz_checks=[${[
@@ -123,9 +125,28 @@ async function main(): Promise<void> {
         "runtime-loops",
       ].join(", ")}]`,
   );
-  // The resolved task blocks for the process lifetime; Promise.all rejects the moment it rejects,
-  // propagating to the fail-loud handler below.
-  await Promise.all(tasks.map((t) => t.run()));
+
+  // F2 / P0-3: main.ts is the SINGLE shutdown owner for the combined pod. On SIGTERM/SIGINT it closes
+  // the HTTP server (stop accepting connections + drain in-flight) — memoized so repeat signals share
+  // one close. The runner registers its OWN signal handler that drains its loops, so Promise.all below
+  // resolves; the pool (shared by API + runner) is disposed LAST, in the finally, once both have
+  // drained. Pre-fix: nothing closed the server, so the event loop never emptied and the process hung
+  // until SIGKILL — while the runner had already disposed the shared pool out from under the live API.
+  let closePromise: Promise<void> | undefined;
+  const closeServer = (): Promise<void> => (closePromise ??= server.close());
+  process.once("SIGTERM", () => void closeServer().catch((e: unknown) => console.error("server close failed:", e)));
+  process.once("SIGINT", () => void closeServer().catch((e: unknown) => console.error("server close failed:", e)));
+
+  try {
+    // The resolved task blocks for the process lifetime; Promise.all rejects the moment it rejects,
+    // propagating to the fail-loud handler below.
+    await Promise.all(tasks.map((t) => t.run()));
+  } finally {
+    // Stop accepting HTTP (idempotent), THEN dispose the shared pool last — so in-flight HTTP + the
+    // draining runner both complete against a live pool.
+    await closeServer().catch((e: unknown) => console.error("server close failed:", e));
+    await disposeAllPools();
+  }
 }
 
 main().catch((err: unknown) => {

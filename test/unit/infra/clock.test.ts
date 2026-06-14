@@ -97,3 +97,30 @@ describe("FakeClock", () => {
     expect(clock.now().toISOString()).toBe("2026-01-01T00:00:00.000Z");
   });
 });
+
+// F2 (P2-2): WallClock.sleep accepts an AbortSignal — an aborted sleep resolves early AND clears its
+// underlying timer (the old bare setTimeout leaked a live timer per sleep, hanging the SIGTERM'd process).
+describe("WallClock.sleep — AbortSignal (F2 / P2-2)", () => {
+  it("resolves immediately when the signal is already aborted (no 10s wait)", async () => {
+    const ac = new AbortController();
+    ac.abort();
+    const t = Date.now();
+    await new WallClock().sleep(10, ac.signal);
+    expect(Date.now() - t).toBeLessThan(200);
+  });
+
+  it("resolves promptly when aborted mid-sleep", async () => {
+    const ac = new AbortController();
+    const t = Date.now();
+    const p = new WallClock().sleep(10, ac.signal);
+    ac.abort();
+    await p;
+    expect(Date.now() - t).toBeLessThan(200);
+  });
+
+  it("still resolves on the timer when no signal is given (short real sleep)", async () => {
+    const t = Date.now();
+    await new WallClock().sleep(0.02);
+    expect(Date.now() - t).toBeGreaterThanOrEqual(10);
+  });
+});
