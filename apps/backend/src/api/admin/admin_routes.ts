@@ -43,7 +43,6 @@ import {
   LlmPurposeAssignmentUpdateV1,
   LlmPurposeModelListV1,
   LlmPurposeModelV1,
-  MemberApproverBodyV1,
   MembersPageV1,
   NotificationRuleCreateRequestV1,
   NotificationRuleDryRunResponseV1,
@@ -160,6 +159,7 @@ import {
 import {
   MemberConcurrentPendingChangeError,
   MemberExpiredApprovalError,
+  MemberCrossTenantForbiddenError,
   MemberRoleChangePendingNotFoundError,
   MemberRoleChangePendingStaleError,
   MemberSelfApprovalError,
@@ -775,7 +775,7 @@ export async function registerAdminRoutes(
         void reply.code(409).send({ detail: e.message });
         return true;
       }
-      if (e instanceof MemberSelfApprovalError) {
+      if (e instanceof MemberSelfApprovalError || e instanceof MemberCrossTenantForbiddenError) {
         void reply.code(403).send({ detail: e.message });
         return true;
       }
@@ -842,16 +842,15 @@ export async function registerAdminRoutes(
         if (!UUID_RE.test(pendingId)) {
           return reply.code(422).send({ detail: "pending_id must be a UUID" });
         }
-        const parsed = MemberApproverBodyV1.safeParse(request.body);
-        if (!parsed.success) {
-          return reply.code(422).send({ detail: "request body failed schema validation" });
-        }
         try {
           const row = await approveRoleChange({
             db: opts.db,
             pendingId,
             installationId: principal.installationId,
-            approverUserId: parsed.data.approver_user_id,
+            // F5 / P0-2: the approver is the AUTHENTICATED caller, NOT a body field — a body-supplied
+            // approver_user_id let a requester approve their own pending change (two-person bypass).
+            approverUserId: principal.userId,
+            callerRole: principal.role,
             now: opts.clock.now(),
             audit: opts.audit,
           });
@@ -872,16 +871,15 @@ export async function registerAdminRoutes(
         if (!UUID_RE.test(pendingId)) {
           return reply.code(422).send({ detail: "pending_id must be a UUID" });
         }
-        const parsed = MemberApproverBodyV1.safeParse(request.body);
-        if (!parsed.success) {
-          return reply.code(422).send({ detail: "request body failed schema validation" });
-        }
         try {
           const row = await rejectRoleChange({
             db: opts.db,
             pendingId,
             installationId: principal.installationId,
-            approverUserId: parsed.data.approver_user_id,
+            // F5 / P0-2: the acting user is the authenticated caller — the recorded approved_by/audit
+            // actor must not be forgeable via a body field (even though reject allows self-cancel).
+            approverUserId: principal.userId,
+            callerRole: principal.role,
             now: opts.clock.now(),
             audit: opts.audit,
           });

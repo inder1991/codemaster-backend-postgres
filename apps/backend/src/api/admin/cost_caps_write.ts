@@ -53,6 +53,11 @@ export class CostCapSelfApprovalError extends Error {
     this.name = "CostCapSelfApprovalError";
   }
 }
+// F5 / P2-14 assessment: NO tenant gate on cost-cap approve/reject. Unlike member role-grants (tenant-
+// scoped), cost-cap management is PLATFORM-scoped by design — a platform_owner operates platform-wide
+// (sessions carry installation_id=null and set per-installation overrides centrally; see
+// admin_cost_caps_write.integration.test.ts). A per-installation override is a billing/spend control set
+// by the platform, not self-managed by each tenant, so there is no cross-tenant boundary to enforce here.
 export class CostCapConcurrentPendingChangeError extends Error {
   public readonly existingPendingChangeId: string;
   public constructor(existingPendingChangeId: string) {

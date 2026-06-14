@@ -24,18 +24,21 @@ import { describeDb, INTEGRATION_DSN } from "../_db.js";
 const NOW = new Date("2026-06-07T12:00:00.000Z");
 const SIGNING_KEY = Buffer.from("test-signing-key-0123456789abcdef");
 const INST = "ad000000-0000-0000-0000-000000000001";
+const INST_OTHER = "ad000000-0000-0000-0000-000000000002"; // a DIFFERENT tenant (cross-tenant tests)
+const OTHER_OWNER = "ad000000-0000-0000-0000-000000000020"; // a platform_owner of INST_OTHER
 const REQ = "ad000000-0000-0000-0000-000000000010"; // requester (cookie user_id)
 const APP = "ad000000-0000-0000-0000-000000000011"; // approver
 const SUBJ_REQ = "ad000000-0000-0000-0000-00000000000a";
 const SUBJ_APP = "ad000000-0000-0000-0000-00000000000b";
 const SUBJ_REJ = "ad000000-0000-0000-0000-00000000000c";
+const SUBJ_XT = "ad000000-0000-0000-0000-00000000000d"; // cross-tenant test subject (distinct, no collision)
 
 let pool: Pool;
 let db: Kysely<unknown>;
 
 async function cleanup(): Promise<void> {
-  await sql`DELETE FROM core.role_grant_pending WHERE subject_id IN (${SUBJ_REQ}, ${SUBJ_APP}, ${SUBJ_REJ})`.execute(db);
-  await sql`DELETE FROM core.role_grants WHERE subject_id IN (${SUBJ_REQ}, ${SUBJ_APP}, ${SUBJ_REJ})`.execute(db);
+  await sql`DELETE FROM core.role_grant_pending WHERE subject_id IN (${SUBJ_REQ}, ${SUBJ_APP}, ${SUBJ_REJ}, ${SUBJ_XT})`.execute(db);
+  await sql`DELETE FROM core.role_grants WHERE subject_id IN (${SUBJ_REQ}, ${SUBJ_APP}, ${SUBJ_REJ}, ${SUBJ_XT})`.execute(db);
   await sql`DELETE FROM core.users WHERE user_id IN (${REQ}, ${APP})`.execute(db);
   await sql`DELETE FROM core.installations WHERE installation_id = ${INST}`.execute(db);
 }
@@ -145,33 +148,36 @@ describeDb("admin members write routes (disposable :5434)", () => {
     expect(created.statusCode).toBe(201);
     const pendingId = created.json<{ pending_id: string }>().pending_id;
 
-    // requester approving their own request → 403 (two-person rule)
+    // F5 / P0-2: the requester approving their OWN request — even with a SPOOFED body approver claiming a
+    // different user — → 403. The body is ignored; the approver is the authenticated session user (REQ),
+    // so the two-person rule holds. Pre-fix this 200'd (the body-controlled approver was the bypass).
     const self = await app.inject({
       method: "POST",
       url: `/api/admin/members/role-changes/${pendingId}/approve`,
       cookies: REQUESTER(),
-      payload: { approver_user_id: REQ },
+      payload: { approver_user_id: APP }, // spoof: claim APP is the approver while the session IS REQ
     });
     expect(self.statusCode).toBe(403);
 
-    // a different approver → 200 applied
+    // F5 / P0-2: the approver identity is the SESSION user, not a body field. A DIFFERENT session
+    // (APP ≠ requester REQ) → 200 applied (legit two-person approval).
     const applied = await app.inject({
       method: "POST",
       url: `/api/admin/members/role-changes/${pendingId}/approve`,
-      cookies: REQUESTER(),
-      payload: { approver_user_id: APP },
+      cookies: cookie("platform_owner", INST, APP),
+      payload: {},
     });
     expect(applied.statusCode).toBe(200);
     expect(applied.json<{ state: string }>().state).toBe("applied");
     const grants = await sql`SELECT 1 FROM core.role_grants WHERE subject_id=${SUBJ_APP} AND installation_id=${INST}`.execute(db);
     expect(grants.rows).toHaveLength(1);
 
-    // re-approve → 409 stale
+    // re-approve (different session again) → 409 stale
     const stale = await app.inject({
       method: "POST",
       url: `/api/admin/members/role-changes/${pendingId}/approve`,
-      cookies: REQUESTER(),
-      payload: { approver_user_id: APP },
+      cookies: cookie("platform_owner", INST, APP),
+      payload: {},
     });
     expect(stale.statusCode).toBe(409);
 
@@ -212,6 +218,48 @@ describeDb("admin members write routes (disposable :5434)", () => {
     expect(rejected.json<{ state: string }>().state).toBe("rejected");
     const grants = await sql`SELECT 1 FROM core.role_grants WHERE subject_id=${SUBJ_REJ}`.execute(db);
     expect(grants.rows).toHaveLength(0);
+
+    // F5 / P0-2: the recorded actor is the SESSION user (REQ), NOT the spoofable body value.
+    const persisted = await sql<{ approved_by_user_id: string }>`
+      SELECT approved_by_user_id FROM core.role_grant_pending WHERE subject_id=${SUBJ_REJ}`.execute(db);
+    expect(persisted.rows[0]?.approved_by_user_id).toBe(REQ);
+    await app.close();
+  });
+
+  // F5 / P2-14: a platform_owner of ANOTHER installation must not approve/reject a pending row of INST —
+  // even knowing its pending_id (the row lookup is PK-only). Mirrors the members READ route's tenancy gate.
+  it("cross-tenant: a foreign-tenant platform_owner cannot approve OR reject another installation's pending change (403)", async () => {
+    const app = await makeApp();
+    const created = await app.inject({
+      method: "POST",
+      url: `/api/admin/members/user/${SUBJ_XT}/role-changes`,
+      cookies: REQUESTER(),
+      payload: { subject_kind: "user", subject_id: SUBJ_XT, role: "reader", action: "grant", scope: "installation" },
+    });
+    expect(created.statusCode).toBe(201);
+    const pendingId = created.json<{ pending_id: string }>().pending_id;
+    const foreign = cookie("platform_owner", INST_OTHER, OTHER_OWNER);
+
+    const approve = await app.inject({
+      method: "POST",
+      url: `/api/admin/members/role-changes/${pendingId}/approve`,
+      cookies: foreign,
+      payload: {},
+    });
+    expect(approve.statusCode).toBe(403);
+
+    const reject = await app.inject({
+      method: "POST",
+      url: `/api/admin/members/role-changes/${pendingId}/reject`,
+      cookies: foreign,
+      payload: {},
+    });
+    expect(reject.statusCode).toBe(403);
+
+    // the pending row is untouched (still pending, not applied/rejected by the foreign tenant)
+    const state = await sql<{ state: string }>`
+      SELECT state FROM core.role_grant_pending WHERE pending_id=${pendingId}`.execute(db);
+    expect(state.rows[0]?.state).toBe("pending");
     await app.close();
   });
 });

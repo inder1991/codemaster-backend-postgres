@@ -22,7 +22,36 @@ import {
   PLATFORM_SCOPE_AUDIT_INSTALLATION_ID,
 } from "#backend/infra/sentinels.js";
 
+import type { Role } from "#backend/api/auth/roles.js";
+
 import type { RoleChangePendingV1, RoleChangeRequestV1 } from "#contracts/admin.v1.js";
+
+/** F5 / P2-14: a non-super_admin caller approving/rejecting a pending change of ANOTHER installation.
+ *  Route → 403 (mirrors the members READ route's tenancy gate — a platform_owner is tenant-scoped). */
+export class MemberCrossTenantForbiddenError extends Error {
+  public constructor(pendingId: string) {
+    super(`pending change ${pendingId} belongs to another installation`);
+    this.name = "MemberCrossTenantForbiddenError";
+  }
+}
+
+/** Reject when a non-super_admin caller acts on a repo-scoped pending row of a different installation.
+ *  Platform-scope rows (installation_id NULL) are NOT tenant-gated here (the route already restricts who
+ *  may act); only super_admin transcends a tenant boundary. */
+function assertSameTenant(args: {
+  rowInstallationId: string | null;
+  callerInstallationId: string;
+  callerRole: Role;
+  pendingId: string;
+}): void {
+  if (
+    args.callerRole !== "super_admin" &&
+    args.rowInstallationId !== null &&
+    args.rowInstallationId !== args.callerInstallationId
+  ) {
+    throw new MemberCrossTenantForbiddenError(args.pendingId);
+  }
+}
 
 /** No row with the given pending_id. Route → 404. */
 export class MemberRoleChangePendingNotFoundError extends Error {
@@ -378,6 +407,7 @@ export async function approveRoleChange(args: {
   pendingId: string;
   installationId: string;
   approverUserId: string;
+  callerRole: Role;
   now: Date;
   audit?: MemberAuditEmitter | undefined;
 }): Promise<RoleChangePendingV1> {
@@ -385,6 +415,12 @@ export async function approveRoleChange(args: {
   if (row === null) {
     throw new MemberRoleChangePendingNotFoundError(args.pendingId);
   }
+  assertSameTenant({
+    rowInstallationId: row.installation_id,
+    callerInstallationId: args.installationId,
+    callerRole: args.callerRole,
+    pendingId: args.pendingId,
+  });
   try {
     checkSelfApproval({ requesterUserId: row.requested_by_user_id, approverUserId: args.approverUserId });
   } catch (e) {
@@ -438,6 +474,7 @@ export async function rejectRoleChange(args: {
   pendingId: string;
   installationId: string;
   approverUserId: string;
+  callerRole: Role;
   now: Date;
   audit?: MemberAuditEmitter | undefined;
 }): Promise<RoleChangePendingV1> {
@@ -445,6 +482,12 @@ export async function rejectRoleChange(args: {
   if (row === null) {
     throw new MemberRoleChangePendingNotFoundError(args.pendingId);
   }
+  assertSameTenant({
+    rowInstallationId: row.installation_id,
+    callerInstallationId: args.installationId,
+    callerRole: args.callerRole,
+    pendingId: args.pendingId,
+  });
   try {
     checkNotExpired({ expiresAt: row.expires_at, now: args.now });
   } catch (e) {
