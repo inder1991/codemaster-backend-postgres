@@ -52,6 +52,7 @@
  */
 
 import {
+  EMBEDDING_DIM,
   type EmbeddingsPort,
   type EmbedRequest,
   EmbeddingsValidationError,
@@ -388,6 +389,17 @@ export class ConfluenceSyncActivities {
       // `[...undefined]` TypeError (under-count).
       if (result.vectors.length !== batch.length) {
         throw new Error(`embed returned ${result.vectors.length} vectors for ${batch.length} texts`);
+      }
+      // F13 / P2-16: validate the vector WIDTH (not just the count). A drifted/misconfigured embedder
+      // returning a non-1024 vector would otherwise fail LATE at the `vector(1024)` column with an opaque
+      // pg cast error, per page, after paying for the embed. Fail loud + actionable here instead.
+      const firstVec = result.vectors[0];
+      if (firstVec !== undefined && firstVec.length !== EMBEDDING_DIM) {
+        throw new Error(
+          `confluence embed: embedder returned a ${firstVec.length}-dim vector but ` +
+            `core.confluence_chunks.embedding is vector(${EMBEDDING_DIM}) (model=${this.modelName}); ` +
+            `check the configured embedder output dimension.`,
+        );
       }
       // `i` is a bounded numeric map index into the now-length-checked `vectors`
       // (vectors.length === texts.length === batch.length) — not an attacker-controlled object key.

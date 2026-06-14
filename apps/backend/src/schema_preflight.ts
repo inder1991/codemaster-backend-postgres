@@ -27,6 +27,8 @@ export const EXPECTED_MIGRATIONS = [
   "0003_auth_secrets",
   // F1 (P0-1): register the 7 pre-partitioned parents with pg_partman so run_maintenance premakes ahead.
   "0004_partman_register",
+  // F13 (P1-K/P2-9): confluence_chunks (space_key) + HNSW(embedding) partial indexes on the live rows.
+  "0005_confluence_indexes",
 ] as const satisfies ReadonlyArray<string>;
 
 /** The DB's applied migration sequence diverges from the image's compiled-in expectation — the pod

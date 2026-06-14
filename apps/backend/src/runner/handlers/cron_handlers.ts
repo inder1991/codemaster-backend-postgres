@@ -269,14 +269,39 @@ async function syncOneConfluenceSpace(
       // Per-PAGE fail-open (F-40): bump the failure counter + continue with the next page. The page_id
       // is already in livePageIds (appended before the try) so reconcile won't soft-delete its chunks.
       stats.pages_failed += 1;
+      // F13 / P2-15 — STRUCTURED + alertable per-page failure (was a plain string warn): a stable event
+      // name + page_id lets an operator alert on a page that fails every cycle (a poison page) instead of
+      // it silently re-failing every 6h forever. (A PERSISTENT cross-cycle consecutive-failure counter that
+      // auto-quarantines after N — needs a confluence_chunks/page failure-count column — is the remaining
+      // piece: FOLLOW-UP-confluence-poison-page-quarantine-ceiling.)
       console.warn(
-        `confluence_ingest: page ${pageRef.page_id} in space ${spaceKey} failed; its chunks stay ` +
-          `protected from reconcile (F-40): ${e instanceof Error ? e.message : String(e)}`,
+        JSON.stringify({
+          event: "confluence_ingest.page_failed",
+          page_id: pageRef.page_id,
+          space_key: spaceKey,
+          error_class: e instanceof Error ? e.name : "unknown",
+          error: e instanceof Error ? e.message : String(e),
+        }),
       );
       continue;
     }
   }
 
+  // F13 / P1-I — empty-live-set guard. reconcile soft-deletes every chunk whose page is NOT in
+  // `live_page_ids`; with an EMPTY list `NOT (page_id = ANY('{}'))` is TRUE for every row → it would WIPE
+  // the whole space's corpus. An empty list here means a genuinely empty space OR (more dangerously) a
+  // transient that surfaced as an empty `results` (Atlassian does this during reindex / permission
+  // propagation) rather than an error. Skip reconcile + WARN rather than flush + thunder-re-embed.
+  if (livePageIds.length === 0) {
+    console.warn(
+      JSON.stringify({
+        event: "confluence_ingest.reconcile_skipped_empty_live_set",
+        space_key: spaceKey,
+        reason: "no live pages this cycle — skipping reconcile to avoid wiping the corpus",
+      }),
+    );
+    return stats;
+  }
   // Reconcile deletions: soft-delete chunks for pages absent this cycle.
   const reconcileOut = await acts.reconcileDeletions({
     schema_version: 1,

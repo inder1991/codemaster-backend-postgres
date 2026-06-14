@@ -284,6 +284,27 @@ describeDb("confluence_ingest handler — multi-step fan-out cron on the backgro
     }
   });
 
+  it("(2b) EMPTY-SET GUARD (F13/P1-I): a space whose fetch returns ZERO pages (NOT an error) must NOT wipe its corpus — reconcile is skipped", async () => {
+    const space = `${SK_PREFIX}EMPTY_SET`;
+    const existingPage = `cingest-empty-${randomUUID()}`;
+    // 0 pages, NO listError → fetch SUCCEEDS empty (a genuinely-empty space, or a transient Atlassian
+    // empty `results` during reindex/permission-propagation). The handler must skip reconcile, not flush.
+    const client = new ScriptedConfluenceClient(new Map([[space, { pages: [] }]]));
+    const embeddings = new RecordingEmbeddingsClient();
+    try {
+      await seedSpace(space);
+      await seedChunk(space, existingPage); // a pre-existing chunk that would be wiped by an empty-set reconcile
+      const r = await runOneIngestJob(client, embeddings);
+      expect(r.outcome).toBe("done");
+      // Pre-fix: `NOT (page_id = ANY('{}'))` is TRUE for every row → the whole space's corpus is soft-deleted.
+      const rows = await chunkRows(space, existingPage);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.deleted_at).toBeNull(); // intact — reconcile was skipped on the empty live set
+    } finally {
+      await cleanupSpace(space);
+    }
+  });
+
   it("(3) F-40 PROOF: a page whose fetch_page_body throws is STILL in live_page_ids → reconcile does NOT soft-delete its pre-existing chunks (a vanished page's chunk IS soft-deleted in the same pass)", async () => {
     const space = `${SK_PREFIX}F40`;
     const goodPage = `cingest-f40-good-${randomUUID()}`;
