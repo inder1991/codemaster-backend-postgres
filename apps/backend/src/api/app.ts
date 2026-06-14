@@ -89,6 +89,25 @@ export function buildApp(deps: BuildAppDeps = {}): FastifyInstance {
     keepAliveTimeout: KEEP_ALIVE_TIMEOUT_MS,
   });
 
+  // Tolerate a body-LESS request that still carries Content-Type: application/json. The admin "Test"
+  // (POST .../test) and "Delete" (DELETE) buttons send that header with no body (every frontend admin
+  // mutation goes through one _mutationHeaders helper), and Fastify's DEFAULT JSON parser 400s an empty
+  // body ("Body cannot be empty when content-type is set to 'application/json'"). Override it: an empty
+  // body parses to `undefined` (the handler runs) — a body-REQUIRED route still rejects undefined via its
+  // own schema (422), and a MALFORMED non-empty body still 400s. Fixes the model-catalog Test + Delete.
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (_req, body: string, done) => {
+    if (body === "") {
+      done(null, undefined);
+      return;
+    }
+    try {
+      done(null, JSON.parse(body));
+    } catch {
+      const err = Object.assign(new Error("Invalid JSON body"), { statusCode: 400 });
+      done(err);
+    }
+  });
+
   // ── K8s PROBE SEMANTICS (CS3.2 — cutover-safety CS3; audit C5/H7/XH11/RT2). The two probes are
   // distinct and NON-INTERCHANGEABLE; getting them wrong causes restart storms during downstream
   // outages:
