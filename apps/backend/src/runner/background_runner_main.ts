@@ -684,7 +684,7 @@ export async function runSupervisedLoops(loops: {
  */
 export async function runBackgroundRunner(
   mode: BackgroundRunnerMode,
-  opts: { loopHealth?: LoopHealthRegistry; disposeSharedPool?: boolean } = {},
+  opts: { loopHealth?: LoopHealthRegistry; disposeSharedPool?: boolean; wireFieldKeyRefresh?: boolean } = {},
 ): Promise<void> {
   if (mode !== "postgres" && mode !== "shadow") {
     throw new Error(
@@ -720,7 +720,12 @@ export async function runBackgroundRunner(
   // W3.7 (EH4): start the 30-min key-rotation refresh loop (only when boot INSTALLED a registry)
   // and hand its dispose to the runner's shared registry — the DISPOSE PHASE below stops it after
   // the loops end, so a SIGTERM'd pod never hangs on the refresh interval sleep.
-  wireFieldKeyRefreshLoop({ installResult: keyInstall, env: process.env, clock, disposables: handles.disposables });
+  // F16 / P2-19: in the combined pod main.ts OWNS the refresh loop (it installed the registry the API path
+  // uses, and wires the loop at the composition root independent of this runner task). It passes
+  // wireFieldKeyRefresh:false so we don't start a SECOND loop. Standalone runner invocation wires its own.
+  if (opts.wireFieldKeyRefresh !== false) {
+    wireFieldKeyRefreshLoop({ installResult: keyInstall, env: process.env, clock, disposables: handles.disposables });
+  }
 
   // CS2.2 FAIL-LOUD boot self-check (closes audit C6/OC4: never enqueue into a table nothing
   // drains): AFTER the runtime is built, BEFORE any loop starts / sink is wired / schedule is

@@ -13,6 +13,12 @@ const CONTRACTS_SCHEMA_VERSION = 1;
 /** 10 MB — the GitHub webhook body cap. Set app-wide so the webhook route can receive up to the cap;
  *  the route enforces the exact 413 boundary itself. */
 export const BODY_LIMIT_BYTES = 10 * 1024 * 1024;
+// F16 / P2-12: bound slow/idle clients (slowloris). Fastify defaults these to 0 (disabled). These cap the
+// time to RECEIVE a request + idle keep-alive — NOT handler execution time, so a legitimately-slow admin
+// handler (e.g. an external-provider probe) is unaffected. keepAlive sits just above a typical 60s LB idle.
+export const REQUEST_TIMEOUT_MS = 30_000;
+export const CONNECTION_TIMEOUT_MS = 30_000;
+export const KEEP_ALIVE_TIMEOUT_MS = 72_000;
 
 /** Health check result (status + latency + error). */
 export type HealthResult = {
@@ -75,7 +81,13 @@ async function snapshotHealth(check: HealthCheck | undefined): Promise<HealthRes
 export function buildApp(deps: BuildAppDeps = {}): FastifyInstance {
   const clock = deps.clock ?? new WallClock();
   const version = deps.version ?? APP_VERSION;
-  const app = Fastify({ logger: false, bodyLimit: BODY_LIMIT_BYTES });
+  const app = Fastify({
+    logger: false,
+    bodyLimit: BODY_LIMIT_BYTES,
+    requestTimeout: REQUEST_TIMEOUT_MS,
+    connectionTimeout: CONNECTION_TIMEOUT_MS,
+    keepAliveTimeout: KEEP_ALIVE_TIMEOUT_MS,
+  });
 
   // ── K8s PROBE SEMANTICS (CS3.2 — cutover-safety CS3; audit C5/H7/XH11/RT2). The two probes are
   // distinct and NON-INTERCHANGEABLE; getting them wrong causes restart storms during downstream

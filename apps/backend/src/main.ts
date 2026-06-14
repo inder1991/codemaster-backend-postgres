@@ -31,10 +31,29 @@ import {
 } from "#backend/api/dependency_checks.js";
 import { FetchVaultHttpClient } from "#backend/adapters/vault_http.js";
 import { parseRuntimeMode, resolveBootTasks } from "#backend/boot_tasks.js";
+import { DisposableRegistry } from "#backend/runner/disposables.js";
 import { LoopHealthRegistry } from "#backend/runner/loop_health.js";
 
 import { WallClock } from "#platform/clock.js";
 import { disposeAllPools, getPool } from "#platform/db/database.js";
+import { transportAbortSignal } from "#platform/transport_timeout.js";
+
+/** F16 / P2-20: race a boot step against a hard deadline. Vault's per-leg retries can compose into a
+ *  ~40-60s SILENT boot stall before fail-loud; this bounds that to one interval. Uses the sanctioned
+ *  transportAbortSignal timer (the clock/random gate forbids a raw setTimeout outside clock.ts). */
+const BOOT_FIELD_KEY_DEADLINE_MS = 30_000;
+async function withBootDeadline<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  const signal = transportAbortSignal(ms);
+  const deadline = new Promise<never>((_resolve, reject) => {
+    const fail = (): void => reject(new Error(`boot deadline: ${what} exceeded ${ms}ms`));
+    if (signal.aborted) {
+      fail();
+      return;
+    }
+    signal.addEventListener("abort", fail, { once: true });
+  });
+  return Promise.race([p, deadline]);
+}
 
 async function main(): Promise<void> {
   // Resolve the boot composition BEFORE any I/O — a garbage/temporal CODEMASTER_RUNTIME_MODE value
@@ -54,7 +73,13 @@ async function main(): Promise<void> {
       const { runBackgroundRunner } = await import("#backend/runner/background_runner_main.js");
       // disposeSharedPool:false — main.ts owns the shared pool's lifecycle (disposed LAST, below), so
       // the runner must NOT end it mid-shutdown while the API is still draining (F2 / P0-3).
-      await runBackgroundRunner(runnerMode, { loopHealth, disposeSharedPool: false });
+      // wireFieldKeyRefresh:false — main.ts owns the field-key refresh loop (F16 / P2-19); the runner
+      // must NOT start a second loop.
+      await runBackgroundRunner(runnerMode, {
+        loopHealth,
+        disposeSharedPool: false,
+        wireFieldKeyRefresh: false,
+      });
     },
   });
 
@@ -110,9 +135,21 @@ async function main(): Promise<void> {
   // encrypted-config paths never observe a null registry (the runner installs it again later as a boot
   // task; this closes that window) and openshift-no-Vault boots with no Vault round-trip. Idempotent;
   // "skipped" in dev/test with no source. Fail-loud: a bad keyset throws here, before serving.
+  // F16 / P2-19: the composition root owns the field-key REFRESH loop (not just the install) — so the API
+  // / auth path's registry is refreshed across a Vault key rotation independent of the runner task reaching
+  // its own wireFieldKeyRefreshLoop (a delayed/crashed runner boot would otherwise leave it stale). The
+  // runner is told (wireFieldKeyRefresh:false in the boot-task thunk) NOT to start a SECOND loop.
+  const rootDisposables = new DisposableRegistry();
   {
     const { installFieldKeyRegistryAtBoot } = await import("#backend/security/boot_field_keys.js");
-    await installFieldKeyRegistryAtBoot(process.env);
+    const { wireFieldKeyRefreshLoop } = await import("#backend/runner/background_runner_main.js");
+    // P2-20: bound the install so a stalled Vault fails loud within a deadline, not a long silent hang.
+    const installResult = await withBootDeadline(
+      installFieldKeyRegistryAtBoot(process.env),
+      BOOT_FIELD_KEY_DEADLINE_MS,
+      "field-encryption key registry install",
+    );
+    wireFieldKeyRefreshLoop({ installResult, env: process.env, clock, disposables: rootDisposables });
   }
 
   // HTTP API first — app.listen() returns once bound; the server keeps serving on the event loop.
@@ -142,9 +179,10 @@ async function main(): Promise<void> {
     // propagating to the fail-loud handler below.
     await Promise.all(tasks.map((t) => t.run()));
   } finally {
-    // Stop accepting HTTP (idempotent), THEN dispose the shared pool last — so in-flight HTTP + the
-    // draining runner both complete against a live pool.
+    // Stop accepting HTTP (idempotent), stop the field-key refresh loop (F16/P2-19), THEN dispose the
+    // shared pool last — so in-flight HTTP + the draining runner both complete against a live pool.
     await closeServer().catch((e: unknown) => console.error("server close failed:", e));
+    await rootDisposables.disposeAll();
     await disposeAllPools();
   }
 }
