@@ -220,6 +220,37 @@ export class PostgresConfluenceChunksRepo {
         }
         upserted += 1;
       }
+
+      // F12 / P1-G + P1-H — WRITE-TIME supersede. chunk_id is version-seeded, so version N inserts NEW rows
+      // and the version<N rows linger with superseded_at IS NULL: retrievable STALE text competing in ANN,
+      // unbounded growth, and dead versions counting against the per-space cap. Retrieval already filters
+      // `superseded_at IS NULL`, so marking prior versions superseded makes the existing read correct with NO
+      // read-path change (F11). GC the now-superseded chunk_embeddings FIRST (no FK/cascade to confluence_chunks),
+      // then mark the rows — same txn as the upsert, so a page edit's supersede is atomic with its new rows.
+      const supersedeNow = this.clock.now();
+      const pageVersions = new Map<string, number>();
+      for (const p of prepared) {
+        const prev = pageVersions.get(p.row.pageId);
+        if (prev === undefined || p.row.version > prev) {
+          pageVersions.set(p.row.pageId, p.row.version);
+        }
+      }
+      for (const [pageId, version] of pageVersions) {
+        // tenant:exempt reason=confluence-platform-wide-post-0063 follow_up=PERMANENT-EXEMPTION-confluence-corpus
+        await sql`
+          DELETE FROM core.chunk_embeddings ce
+           USING core.confluence_chunks cc
+           WHERE ce.chunk_table = 'confluence_chunks' AND ce.chunk_id = cc.chunk_id
+             AND cc.page_id = ${pageId} AND cc.version < ${version} AND cc.superseded_at IS NULL
+        `.execute(tx);
+        // tenant:exempt reason=confluence-platform-wide-post-0063 follow_up=PERMANENT-EXEMPTION-confluence-corpus
+        await sql`
+          UPDATE core.confluence_chunks
+             SET superseded_at = ${supersedeNow}
+           WHERE page_id = ${pageId} AND version < ${version}
+             AND superseded_at IS NULL AND deleted_at IS NULL
+        `.execute(tx);
+      }
     });
 
     return upserted;
@@ -275,14 +306,31 @@ export class PostgresConfluenceChunksRepo {
     livePageIds: ReadonlyArray<string>;
   }): Promise<number> {
     const now = this.clock.now();
-    // tenant:exempt reason=confluence-platform-wide-post-0063 follow_up=PERMANENT-EXEMPTION-confluence-corpus
-    const result = await sql`
-      UPDATE core.confluence_chunks
-         SET deleted_at = ${now}
-       WHERE space_key = ${args.spaceKey}
-         AND deleted_at IS NULL
-         AND NOT (page_id = ANY(${[...args.livePageIds]}::text[]))
-    `.execute(this.db);
-    return Number(result.numAffectedRows ?? 0n);
+    const liveIds = [...args.livePageIds];
+    let softDeleted = 0;
+    await this.db.transaction().execute(async (txTyped) => {
+      const tx = txTyped as unknown as Transaction<unknown>;
+      // F12 / P1-H — GC the dual-write chunk_embeddings FIRST (no FK/cascade to confluence_chunks; otherwise
+      // Phase-C's HNSW index accumulates dead vectors for vanished pages forever). Target the same non-live
+      // pages we're about to soft-delete, same txn so the soft-delete + GC are atomic.
+      // tenant:exempt reason=confluence-platform-wide-post-0063 follow_up=PERMANENT-EXEMPTION-confluence-corpus
+      await sql`
+        DELETE FROM core.chunk_embeddings ce
+         USING core.confluence_chunks cc
+         WHERE ce.chunk_table = 'confluence_chunks' AND ce.chunk_id = cc.chunk_id
+           AND cc.space_key = ${args.spaceKey} AND cc.deleted_at IS NULL
+           AND NOT (cc.page_id = ANY(${liveIds}::text[]))
+      `.execute(tx);
+      // tenant:exempt reason=confluence-platform-wide-post-0063 follow_up=PERMANENT-EXEMPTION-confluence-corpus
+      const result = await sql`
+        UPDATE core.confluence_chunks
+           SET deleted_at = ${now}
+         WHERE space_key = ${args.spaceKey}
+           AND deleted_at IS NULL
+           AND NOT (page_id = ANY(${liveIds}::text[]))
+      `.execute(tx);
+      softDeleted = Number(result.numAffectedRows ?? 0n);
+    });
+    return softDeleted;
   }
 }

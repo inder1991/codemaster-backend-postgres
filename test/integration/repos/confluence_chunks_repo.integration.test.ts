@@ -273,4 +273,50 @@ describeDb("PostgresConfluenceChunksRepo (integration)", () => {
     expect(r.rows[0].embedding_model_name).toBe("qwen3-test");
     expect(r.rows[0].content_sha256).toBe("e".repeat(64));
   });
+
+  // F12 / P1-G + P1-H: a page version bump must SUPERSEDE the prior-version rows (so the existing
+  // `superseded_at IS NULL` retrieval filter stops returning stale text) AND GC their dual-written
+  // chunk_embeddings (no FK/cascade → otherwise the HNSW index keeps dead vectors).
+  it("a version bump supersedes prior-version rows AND GCs their chunk_embeddings", async () => {
+    const v1 = makeRow({ pageId: "p-sup", version: 1, chunkIndex: 0, contentSha256: "1".repeat(64) });
+    await repo.upsertChunks([v1], { activeGeneration: 1, activeModelName: "qwen3-test" });
+    const before = await pool.query(
+      "SELECT 1 FROM core.chunk_embeddings WHERE chunk_table='confluence_chunks' AND chunk_id=$1",
+      [v1.chunkId],
+    );
+    expect(before.rowCount).toBe(1); // v1's embedding exists
+
+    const v2 = makeRow({ pageId: "p-sup", version: 2, chunkIndex: 0, contentSha256: "2".repeat(64) });
+    await repo.upsertChunks([v2], { activeGeneration: 1, activeModelName: "qwen3-test" });
+
+    const rows = await pool.query<{ version: number; superseded_at: Date | null }>(
+      "SELECT version, superseded_at FROM core.confluence_chunks WHERE page_id='p-sup' AND space_key=$1",
+      [TEST_SPACE],
+    );
+    const supBy = new Map(rows.rows.map((x) => [Number(x.version), x.superseded_at]));
+    expect(supBy.get(1)).not.toBeNull(); // v1 superseded
+    expect(supBy.get(2)).toBeNull(); // v2 current
+    const after = await pool.query(
+      "SELECT 1 FROM core.chunk_embeddings WHERE chunk_table='confluence_chunks' AND chunk_id=$1",
+      [v1.chunkId],
+    );
+    expect(after.rowCount).toBe(0); // v1's embedding GC'd
+  });
+
+  it("reconcileDeletions GCs the chunk_embeddings of soft-deleted (non-live) pages", async () => {
+    const row = makeRow({ pageId: "p-rec", version: 1, chunkIndex: 0, contentSha256: "3".repeat(64) });
+    await repo.upsertChunks([row], { activeGeneration: 1, activeModelName: "qwen3-test" });
+    await repo.reconcileDeletions({ spaceKey: TEST_SPACE, livePageIds: ["some-other-live-page"] });
+
+    const d = await pool.query<{ deleted_at: Date | null }>(
+      "SELECT deleted_at FROM core.confluence_chunks WHERE chunk_id=$1",
+      [row.chunkId],
+    );
+    expect(d.rows[0]?.deleted_at).not.toBeNull(); // p-rec soft-deleted
+    const e = await pool.query(
+      "SELECT 1 FROM core.chunk_embeddings WHERE chunk_table='confluence_chunks' AND chunk_id=$1",
+      [row.chunkId],
+    );
+    expect(e.rowCount).toBe(0); // its embedding GC'd
+  });
 });

@@ -230,6 +230,8 @@ read-time (max-version filter). This gates the design of F12–F14.
 | 4 | F15–F16 | No (hygiene) | Independent; batch freely. |
 
 **Open decisions before Phase 2/3:** (1) ~~GitHub Enterprise in scope?~~ **RESOLVED 2026-06-14 — support BOTH:
-GHE now, github.com next year (one configurable host, defaults to github.com). F6-D locked.** (2) Confluence
-write-time supersede vs read-time max-version filter (F11 output). (3) Confluence production retrieval mode —
+GHE now, github.com next year (one configurable host, defaults to github.com). F6-D locked.** (2) ~~Confluence supersede approach?~~ **RESOLVED (F11) — WRITE-TIME supersede: schema already has
+`superseded_at` + the `WHERE superseded_at IS NULL` partial index + retrieval already filters it, so marking
+prior versions `superseded_at` on upsert makes the existing read correct with NO read-path change
+(designed-but-unwired, not a regression); + delete matching `chunk_embeddings` in lockstep.** (3) Confluence production retrieval mode —
 fix `fallback` with a `confluence_chunks` index, or gate the cutover to `generation_only`? (F13).
