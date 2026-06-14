@@ -152,6 +152,32 @@ function buildLifecycleBundle(override: Partial<LifecycleBundle> | undefined): L
  *  misses still renew within the lease window. */
 const MUTEX_RENEW_INTERVAL_S = 20;
 
+/** F7 / P1-C: consecutive TRANSIENT renew errors tolerated before the lease is abandoned fail-closed.
+ *  At MUTEX_RENEW_INTERVAL_S=20s this is ~1 minute of DB trouble — long enough to ride out a blip, short
+ *  enough that a real outage stops paid work under a lease we can no longer vouch for. */
+export const MAX_CONSECUTIVE_MUTEX_RENEW_FAILURES = 3;
+
+/**
+ * Classify one mutex-renew attempt (F7 / P1-C). A renew either returns a boolean (ok=true / definitively
+ * lost=false) or THROWS (a transient DB error). A definitive loss abandons the lease immediately; a
+ * transient error is tolerated up to `maxConsecutiveErrors` IN A ROW, after which the lease can no longer
+ * be vouched for and the review must abort fail-CLOSED — replacing the old blanket `.catch(() => true)`
+ * fail-open that kept paying Bedrock + posting under an unverifiable lease during a DB outage. A success
+ * (or any non-error outcome) resets the transient streak.
+ */
+export function classifyRenewOutcome(args: {
+  errored: boolean;
+  renewedOk: boolean;
+  priorConsecutiveErrors: number;
+  maxConsecutiveErrors: number;
+}): { consecutiveErrors: number; abandon: boolean } {
+  if (!args.errored) {
+    return { consecutiveErrors: 0, abandon: !args.renewedOk };
+  }
+  const consecutiveErrors = args.priorConsecutiveErrors + 1;
+  return { consecutiveErrors, abandon: consecutiveErrors >= args.maxConsecutiveErrors };
+}
+
 export type RunReviewJobDeps = {
   /** The runner repo (verifyPayload + the mutex/run reads). */
   readonly repo: ReviewJobsRepo;
@@ -281,6 +307,7 @@ export function runReviewJob(deps: RunReviewJobDeps): JobHandler {
     // a definitively-lost renewal aborts the composed signal (so downstream side effects stop) AND is the
     // F3 belt to the claim-check's suspenders.
     const renewStop = new AbortController();
+    let consecutiveRenewErrors = 0;
     const renewLoop = (async (): Promise<void> => {
       try {
         while (!renewStop.signal.aborted) {
@@ -288,11 +315,45 @@ export function runReviewJob(deps: RunReviewJobDeps): JobHandler {
           if (renewStop.signal.aborted) {
             break;
           }
-          const renewed = await withMutexTransaction(deps.pool, (client) =>
-            renewPrReviewMutexLease({ client, installationId: payload.installation_id, mutexId }),
-          ).catch(() => true); // transient error fail-open; only a definitive false aborts
-          if (!renewed) {
-            shellAbort.abort(new TerminalCancelError("mutex-lost", new Error("renew loop: lease lost")));
+          // F7 / P1-C: distinguish a DEFINITIVE loss (renew returns false) from a TRANSIENT error (throw).
+          // A definitive loss aborts now; a transient error is tolerated up to N consecutive before the
+          // lease is abandoned fail-CLOSED — NOT the old blanket fail-open that kept paying under a lease
+          // it could no longer verify during a DB outage.
+          let errored = false;
+          let renewedOk = false;
+          try {
+            renewedOk = await withMutexTransaction(deps.pool, (client) =>
+              renewPrReviewMutexLease({ client, installationId: payload.installation_id, mutexId }),
+            );
+          } catch (e) {
+            errored = true;
+            console.warn(
+              JSON.stringify({
+                event: "review.mutex_renew_transient_error",
+                run_id: job.run_id,
+                consecutive: consecutiveRenewErrors + 1,
+                error_class: e instanceof Error ? e.name : "unknown",
+              }),
+            );
+          }
+          const decision = classifyRenewOutcome({
+            errored,
+            renewedOk,
+            priorConsecutiveErrors: consecutiveRenewErrors,
+            maxConsecutiveErrors: MAX_CONSECUTIVE_MUTEX_RENEW_FAILURES,
+          });
+          consecutiveRenewErrors = decision.consecutiveErrors;
+          if (decision.abandon) {
+            shellAbort.abort(
+              new TerminalCancelError(
+                "mutex-lost",
+                new Error(
+                  errored
+                    ? `renew loop: lease unverifiable after ${consecutiveRenewErrors} consecutive transient errors`
+                    : "renew loop: lease lost",
+                ),
+              ),
+            );
             break;
           }
         }
