@@ -45,6 +45,8 @@ export const DEFAULT_EMBEDDER_MODEL = "qwen3-embed-0.6b";
 
 /** Body-union separator (matches aggregation.ts's exact-merge separator). */
 const BODY_SEPARATOR = "\n---\n";
+/** F9 / P2-3: max texts per embed call — the embeddings port (embeddings_port.ts MAX_TEXTS) rejects more. */
+const EMBED_MAX_TEXTS = 128;
 
 /** Severity rank. Unknown severities rank below `nit` via the `-1` default. */
 const SEVERITY_RANK: Readonly<Record<string, number>> = {
@@ -151,13 +153,20 @@ export async function aggregateSemantic(
   const bodies = findings.map((f) => f.body);
   let vectors: ReadonlyArray<ReadonlyArray<number>>;
   try {
-    const req: EmbedRequest = {
-      texts: bodies,
-      model_name: embedderModel,
-      purpose: "review_query",
-    };
-    const result = await embedder.embed(req);
-    vectors = result.vectors;
+    // F9 / P2-3: batch at the embeddings port's MAX_TEXTS (128). A single oversized embed of ALL bodies
+    // throws EmbeddingsValidationError on a large/noisy review (≥128 findings) → the catch below fails open
+    // to exact-only dedup — defeating semantic dedup exactly where it matters most. Batching keeps it on.
+    const collected: Array<ReadonlyArray<number>> = [];
+    for (let i = 0; i < bodies.length; i += EMBED_MAX_TEXTS) {
+      const req: EmbedRequest = {
+        texts: bodies.slice(i, i + EMBED_MAX_TEXTS),
+        model_name: embedderModel,
+        purpose: "review_query",
+      };
+      const result = await embedder.embed(req);
+      collected.push(...result.vectors);
+    }
+    vectors = collected;
   } catch (e) {
     // Python catches `EmbeddingsError` AND a generic `Exception` — both fail-open. The `instanceof`
     // check documents the typed taxonomy; the fall-through covers any other throw (defensive).

@@ -204,10 +204,15 @@ export async function doReview(
     allowedEvidenceIds: evidenceIdsFromContext(context),
   });
 
-  // R-WR4-capture (2026-05-22): per-chunk truncation observability. The Python increments a counter +
-  // WARN-logs on max_tokens; that is observability-only with NO downstream behaviour change — `findings`
-  // returned is unchanged. The counter/log is a pure side-effect (deferred follow-up; see notes), so
-  // the observable return is identical whether or not it fires.
+  // F9 / P2-4: per-chunk truncation observability. When the completion hit max_tokens the chunk's findings
+  // were cut off (structured output truncated → parseWithSkipMalformed silently drops the partial tail), so
+  // a complex chunk silently UNDER-reports. WARN-log it (structured) so a recurring truncation is
+  // diagnosable; the returned `findings` are unchanged (best-effort partial), matching the Python behavior.
+  if (result.stop_reason === "max_tokens") {
+    console.warn(
+      JSON.stringify({ event: "review.chunk_truncated", reason: "max_tokens", findings: findings.length }),
+    );
+  }
 
   return { findings, intents, sanitizationEvent: null };
 }

@@ -746,7 +746,17 @@ export async function orchestrate(ctx: ReviewPipelineContext): Promise<ReviewPip
       // non-retryable classification survives to the shell/workflow terminal-transition path.
       const chunkFailureRatio = chunkFailures.length / Math.max(1, toReview.length);
       if (chunkFailureRatio >= CHUNK_FAILURE_ABORT_THRESHOLD) {
-        throw chunkFailures[0]!.error;
+        // F9 / P2-5: CARRIED findings (from the prior review snapshot) are deliverable and bypass the
+        // fan-out evidence validation by design. When every NEW chunk failed but carried findings exist,
+        // DEGRADE + post the carried set rather than abort and throw it away; re-raise only when there's
+        // nothing carried to deliver.
+        if (selection.carried.length === 0) {
+          throw chunkFailures[0]!.error;
+        }
+        state.degradation.add(
+          `all ${toReview.length} chunks failed review; posting ${selection.carried.length} ` +
+            `carried finding(s) from the prior review`,
+        );
       }
     }
 

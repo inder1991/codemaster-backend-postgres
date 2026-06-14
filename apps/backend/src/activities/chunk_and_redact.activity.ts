@@ -35,7 +35,8 @@
  * Missing / deleted files are skipped.
  */
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 
 import { detectSecrets } from "#backend/redact/secret_detector.js";
@@ -49,6 +50,24 @@ import { ChunkAndRedactInputV1 } from "#contracts/chunk_and_redact.v1.js";
 
 /** Platform path separator (resolved paths use it). Module-level so the traversal check reads cleanly. */
 const pathSep = process.platform === "win32" ? "\\" : "/";
+
+/** F9 / P1-E: per-file byte ceiling. A source file over this is almost certainly generated/minified; reading
+ *  + the synchronous tree-sitter parse of it would block the runner event loop. 2 MiB. */
+const MAX_REVIEWED_FILE_BYTES = 2 * 1024 * 1024;
+/** F9 / P1-F: bytes of the file head sniffed for a NUL byte (the text/binary heuristic). */
+const BINARY_SNIFF_BYTES = 8192;
+
+/** True when the buffer's head contains a NUL byte — the standard cheap binary-file heuristic. */
+function isLikelyBinary(body: Buffer): boolean {
+  const n = Math.min(body.length, BINARY_SNIFF_BYTES);
+  for (let i = 0; i < n; i += 1) {
+    // eslint-disable-next-line security/detect-object-injection -- numeric loop index into a Buffer (0..n)
+    if (body[i] === 0) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /** A file path resolved outside the workspace root. */
 export class WorkspacePathOutsideRootError extends Error {
@@ -168,8 +187,30 @@ export async function doChunkAndRedact(args: {
       continue;
     }
 
+    // F9 / P1-E: skip oversize files BEFORE reading/parsing. The 50k-line cap elsewhere does NOT catch a
+    // large file with few long lines (minified/generated bundles); reading + the SYNCHRONOUS tree-sitter
+    // parse of such a file blocks the single-threaded runner (heartbeats, the mutex-renew loop, every
+    // concurrent job). statSync.size is the cheap pre-read guard.
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- `target` verified under the workspace root above
+    const sizeBytes = statSync(target).size;
+    if (sizeBytes > MAX_REVIEWED_FILE_BYTES) {
+      console.warn(
+        JSON.stringify({ event: "chunk.file_skipped", reason: "oversize", path: relPath, size_bytes: sizeBytes }),
+      );
+      continue;
+    }
+
+    // Read ASYNC (fs.promises) so a large read does not block the event loop (F9 / P1-E).
     // eslint-disable-next-line security/detect-non-literal-fs-filename -- `target` is verified to resolve under the workspace root (traversal check above)
-    const body = readFileSync(target);
+    const body = await readFile(target);
+
+    // F9 / P1-F: skip binary files. A .png/.pdf/.so in the changed set would decode to U+FFFD soup, get
+    // chunked + redacted + sent to the paid LLM (wasted spend + noise). A NUL byte in the head is the
+    // standard cheap text/binary heuristic.
+    if (isLikelyBinary(body)) {
+      console.warn(JSON.stringify({ event: "chunk.file_skipped", reason: "binary", path: relPath }));
+      continue;
+    }
     // eslint-disable-next-line security/detect-object-injection -- relPath indexes a plain wire-record; absence → [] default, not undefined-injection
     const ranges = changedLineRanges[relPath] ?? [];
     const chunker = registry.selectFor(relPath);
