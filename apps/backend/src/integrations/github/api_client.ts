@@ -61,6 +61,7 @@ const HTTP_UNAUTHORIZED = 401;
 const HTTP_FORBIDDEN = 403;
 const HTTP_NOT_FOUND = 404;
 const HTTP_UNPROCESSABLE = 422;
+const HTTP_TOO_MANY_REQUESTS = 429;
 const HTTP_SERVER_ERROR_FLOOR = 500;
 const HTTP_SERVER_ERROR_CEIL = 600;
 
@@ -232,7 +233,10 @@ export class FetchGitHubHttpClient implements GitHubHttpClient {
 // ─── token_provider seam ──────────────────────────────────────────────────────────────────────
 
 /** The injected installation-token source: `(installationId) => Promise<token>`. */
-export type TokenProvider = (installationId: number) => Promise<string>;
+export type TokenProvider = (
+  installationId: number,
+  opts?: { forceRefresh?: boolean },
+) => Promise<string>;
 
 // ─── Rate-limit header parsing (port of rate_limit.parse_rate_limit / parse_retry_after) ───────
 
@@ -280,11 +284,23 @@ export function parseRateLimit(headers: Record<string, string>): RateLimitWindow
 }
 
 /** Parse the `Retry-After` header (seconds form). Returns null if absent/unparseable. */
-export function parseRetryAfter(headers: Record<string, string>): number | null {
+export function parseRetryAfter(headers: Record<string, string>, nowMs?: number): number | null {
   const raw = header(headers, "Retry-After");
   if (raw === undefined) return null;
-  const n = Number.parseInt(raw, 10);
-  return Number.isNaN(n) ? null : n;
+  // delta-seconds form (the common case).
+  if (/^\d+$/.test(raw.trim())) {
+    const n = Number.parseInt(raw, 10);
+    return Number.isNaN(n) ? null : n;
+  }
+  // HTTP-date form (RFC 7231 — GitHub may send it): seconds until that instant, floored at 0. Needs an
+  // injected `nowMs` (the clock gate forbids Date.now() in src); without it the date form is dropped.
+  if (nowMs !== undefined) {
+    const then = Date.parse(raw);
+    if (!Number.isNaN(then)) {
+      return Math.max(0, Math.round((then - nowMs) / 1000));
+    }
+  }
+  return null;
 }
 
 // ─── Inline contracts (mirror contracts/integrations/github_api/v1.py) ─────────────────────────
@@ -425,15 +441,23 @@ export class GitHubApiClient {
           Accept: accept,
           Authorization: `Bearer ${token}`,
           "X-GitHub-Api-Version": GITHUB_API_VERSION,
+          // F6a / P3: an App-identifying UA (GitHub recommends one for abuse-tracking; a bare default
+          // is a soft-block candidate during abuse-mitigation sweeps). Never carries the token.
+          "User-Agent": "codemaster-app",
         },
         json_body: jsonBody,
         ...(signal !== undefined ? { signal } : {}),
       });
 
-      // 401 → refresh the token once (the `attempt_401` latch), then retry.
+      // 401 → refresh the token once (the `attempt_401` latch), then retry. F6a / P1-A: pass
+      // forceRefresh so the provider DISCARDS the cached (revoked/rotated) token and re-mints — a plain
+      // re-call returned the same still-TTL-fresh token, making this a no-op (terminal 401 on revocation).
       if (resp.status === HTTP_UNAUTHORIZED && !attempt401) {
         attempt401 = true;
-        token = await this.tokenProvider(installationId);
+        console.warn(
+          JSON.stringify({ event: "github.request.token_refresh", method, path, installation_id: installationId }),
+        );
+        token = await this.tokenProvider(installationId, { forceRefresh: true });
         continue;
       }
       if (resp.status === HTTP_UNAUTHORIZED) {
@@ -442,21 +466,62 @@ export class GitHubApiClient {
         );
       }
 
+      const nowMs = this.clock.now().getTime();
+
+      // 429 Too Many Requests — GitHub increasingly returns this for secondary limits. Retryable; carry
+      // the Retry-After. (F6a / P1-B — pre-fix a 429 fell through to a non-retryable GitHubClientError.)
+      if (resp.status === HTTP_TOO_MANY_REQUESTS) {
+        const retryAfter = parseRetryAfter(resp.headers, nowMs);
+        console.warn(
+          JSON.stringify({ event: "github.request.rate_limited", method, path, status: 429, retry_after: retryAfter }),
+        );
+        throw new GitHubRateLimitExceeded(`GitHub 429 on ${method} ${path}; retry_after=${retryAfter}s`, {
+          resource: "secondary",
+          resetAt: this.clock.now(),
+          retryAfterSeconds: retryAfter,
+        });
+      }
+
       // 403 secondary-rate-limit → typed rate-limit error carrying Retry-After.
       if (
         resp.status === HTTP_FORBIDDEN &&
         (resp.body_text ?? "").toLowerCase().includes("secondary rate limit")
       ) {
-        const retryAfter = parseRetryAfter(resp.headers);
+        const retryAfter = parseRetryAfter(resp.headers, nowMs);
+        console.warn(
+          JSON.stringify({ event: "github.request.rate_limited", method, path, status: 403, kind: "secondary", retry_after: retryAfter }),
+        );
         throw new GitHubRateLimitExceeded(
           `GitHub secondary rate limit hit; retry_after=${retryAfter}s`,
           { resource: "secondary", resetAt: this.clock.now(), retryAfterSeconds: retryAfter },
         );
       }
 
+      // 403 PRIMARY rate-limit (x-ratelimit-remaining:0 or "api rate limit exceeded") → retryable with the
+      // reset hint, BEFORE the generic non-retryable 403 mapping (F6a / P1-B).
+      if (resp.status === HTTP_FORBIDDEN) {
+        const window = parseRateLimit(resp.headers);
+        const primaryLimited =
+          (window !== null && window.remaining <= 0) ||
+          (resp.body_text ?? "").toLowerCase().includes("api rate limit exceeded");
+        if (primaryLimited) {
+          console.warn(
+            JSON.stringify({ event: "github.request.rate_limited", method, path, status: 403, kind: "primary" }),
+          );
+          throw new GitHubRateLimitExceeded(`GitHub primary rate limit hit on ${method} ${path}`, {
+            resource: window?.resource ?? "core",
+            resetAt: window?.resetAt ?? this.clock.now(),
+            retryAfterSeconds: parseRetryAfter(resp.headers, nowMs),
+          });
+        }
+      }
+
       // 5xx → exponential-backoff retry (sleep then DOUBLE) until exhausted.
       if (resp.status >= HTTP_SERVER_ERROR_FLOOR && resp.status < HTTP_SERVER_ERROR_CEIL) {
         if (attempt < MAX_5XX_RETRIES - 1) {
+          console.warn(
+            JSON.stringify({ event: "github.request.retry_5xx", method, path, status: resp.status, attempt, backoff }),
+          );
           await this.clock.sleep(backoff);
           backoff *= 2;
           continue;
@@ -497,7 +562,7 @@ export class GitHubApiClient {
           {
             resource: window.resource,
             resetAt: window.resetAt,
-            retryAfterSeconds: parseRetryAfter(resp.headers),
+            retryAfterSeconds: parseRetryAfter(resp.headers, nowMs),
           },
         );
       }

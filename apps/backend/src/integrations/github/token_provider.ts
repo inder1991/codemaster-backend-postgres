@@ -308,7 +308,7 @@ export class GitHubAppTokenProvider {
    * single-flight coalescence and emit `github.token.mint`. A non-expired negative-cache entry is
    * THROWN without an HTTP round trip.
    */
-  public async getToken(installationId: number): Promise<string> {
+  public async getToken(installationId: number, opts?: { forceRefresh?: boolean }): Promise<string> {
     // Safe-integer bound: GitHub installation ids are int64 server-side; a value beyond JS's 2^53
     // safe range would address the wrong installation. Fail closed rather than mint under a corrupted
     // id. (The durable fix is to parse ids safe-checked / as strings at the webhook-ingest boundary
@@ -323,19 +323,30 @@ export class GitHubAppTokenProvider {
       throw cachedErr;
     }
 
-    // Positive-cache fast-path.
-    const cachedToken = this.cacheLookup(installationId);
-    if (cachedToken !== null) {
-      return cachedToken;
+    // F6a / P1-A: forceRefresh (the api_client's 401-retry) must DISCARD the cached token and re-mint —
+    // a mid-life revocation/rotation 401s while the cached token is still TTL-fresh, so returning it
+    // (the pre-fix behavior) made the "refresh once" a no-op and surfaced a terminal GitHubAppUnauthorized.
+    const forceRefresh = opts?.forceRefresh === true;
+    if (forceRefresh) {
+      this.cache.delete(installationId);
+    } else {
+      // Positive-cache fast-path.
+      const cachedToken = this.cacheLookup(installationId);
+      if (cachedToken !== null) {
+        return cachedToken;
+      }
     }
 
     // Single-flight: only one mint per installation_id at a time; others wait on the lock then
-    // re-read the cache.
+    // re-read the cache. (On forceRefresh we still single-flight, but skip the cache re-read so a
+    // concurrent stale put can't be handed back.)
     const release = await this.mutex.acquire(installationId);
     try {
-      const reread = this.cacheLookup(installationId);
-      if (reread !== null) {
-        return reread;
+      if (!forceRefresh) {
+        const reread = this.cacheLookup(installationId);
+        if (reread !== null) {
+          return reread;
+        }
       }
       return await this.mint(installationId);
     } finally {
