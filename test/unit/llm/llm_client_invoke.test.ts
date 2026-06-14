@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { FakeClock } from "#platform/clock.js";
 
@@ -9,7 +9,7 @@ import {
   type CostCapDecision,
   type CostCapEnforcer,
 } from "#backend/cost/enforcer.js";
-import { LlmClient, type LlmSdk } from "#backend/integrations/llm/client.js";
+import { LlmClient, warnUnpricedModelOnce, type LlmSdk } from "#backend/integrations/llm/client.js";
 import { LlmInvocationError, LlmOutputUnsafeError, LlmRateLimitError } from "#backend/integrations/llm/errors.js";
 
 import { InMemoryBlobStoreAdapter } from "../../support/llm/cassette_sdk.js";
@@ -56,6 +56,40 @@ async function invoke(client: LlmClient) {
     installationId: TEST_INSTALLATION_ID,
   });
 }
+
+describe("LlmClient.invokeModel — model allow-list removed (preflight is the gate)", () => {
+  it("invokes an off-list model without throwing the (deleted) unsupported-model gate", async () => {
+    const response = {
+      content: [{ type: "text", text: "ok" }],
+      usage: { input_tokens: 10, output_tokens: 5 },
+      stop_reason: "end_turn",
+    };
+    // 'claude-opus-4-8' is NOT in the former BEDROCK_MODELS set — it must still invoke.
+    const result = await newClient(response).invokeModel({
+      role: "primary",
+      model: "claude-opus-4-8",
+      messages: MESSAGES,
+      installationId: TEST_INSTALLATION_ID,
+    });
+    expect(result.content).toBe("ok");
+  });
+});
+
+describe("warnUnpricedModelOnce", () => {
+  it("warns once for an unpriced model, never for a priced one", () => {
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      warnUnpricedModelOnce("claude-sonnet-4-6"); // in the cost maps → no warn
+      const unpriced = "zzz-unpriced-test-model";
+      warnUnpricedModelOnce(unpriced);
+      warnUnpricedModelOnce(unpriced); // dedup → still a single warn
+      expect(spy.mock.calls.filter((c) => String(c[0]).includes(unpriced)).length).toBe(1);
+      expect(spy.mock.calls.some((c) => String(c[0]).includes("claude-sonnet-4-6"))).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
 
 describe("LlmClient.invokeModel — pure transform", () => {
   it("extracts content_text from the first text block + all dict blocks as raw_content_blocks", async () => {

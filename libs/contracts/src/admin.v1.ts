@@ -465,8 +465,9 @@ export const LlmModelV1 = z
   .strict();
 export type LlmModelV1 = z.infer<typeof LlmModelV1>;
 
-/** PUT /api/admin/llm-models body — upsert a catalog model. model_id is guarded against BEDROCK_MODELS at
- *  the route (the engine rejects anything outside that set, regardless of provider). */
+/** PUT /api/admin/llm-models body — upsert a catalog model. model_id is NOT allow-list-gated: any model_id
+ *  is accepted (the admin "Test"/preflight validates it); a collision under another provider → 409 (model_id
+ *  is globally unique). See docs/plans/2026-06-14-llm-model-allowlist.md. */
 export const LlmModelUpsertV1 = z
   .object({
     schema_version: z.literal(1).default(1),
@@ -555,7 +556,7 @@ const LLM_REGION_RE = /^[a-z]{2}-[a-z]+-\d+$/;
  * `LlmProviderConfigUpdateV1`. api_key is the plaintext token (Vault-Transit-encrypted at rest, never
  * returned). Cross-field invariants (superRefine, mirroring the Python model_validator):
  *   - bedrock requires a region; anthropic_direct does not.
- *   - model_id pattern is provider-specific (bedrock: `anthropic.`|`claude-`; anthropic_direct: `claude-`).
+ *   - model_id is NOT pattern-gated (any non-empty <=128-char string) — the live preflight ping validates it.
  */
 export const LlmProviderConfigUpdateV1 = z
   .object({
@@ -569,22 +570,11 @@ export const LlmProviderConfigUpdateV1 = z
   })
   .strict()
   .superRefine((v, ctx) => {
+    // bedrock requires a region. The model_id name-prefix gate is intentionally dropped: the live preflight
+    // ping validates the model, and a static regex cannot express Bedrock cross-region inference-profile
+    // IDs (us./eu./apac.-prefixed). See docs/plans/2026-06-14-llm-model-allowlist.md.
     if (v.provider === "bedrock" && v.region === null) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "region is required for bedrock", path: ["region"] });
-    }
-    if (v.provider === "bedrock" && !/^(anthropic\.|claude-)/.test(v.model_id)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "bedrock model_id must start with 'anthropic.' or 'claude-'",
-        path: ["model_id"],
-      });
-    }
-    if (v.provider === "anthropic_direct" && !/^claude-/.test(v.model_id)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "anthropic_direct model_id must start with 'claude-'",
-        path: ["model_id"],
-      });
     }
   });
 export type LlmProviderConfigUpdateV1 = z.infer<typeof LlmProviderConfigUpdateV1>;
@@ -668,13 +658,13 @@ export type RerankConfigUpdateV1 = z.infer<typeof RerankConfigUpdateV1>;
 /**
  * PUT /api/admin/bedrock-config request body — the LEGACY shim shape (Python: _LegacyBedrockConfigUpdateBody,
  * bedrock_config.py:53-84). NOT a cross-process contract: provider/role are hardcoded by the shim to
- * bedrock/primary; region is REQUIRED (not nullable, unlike LlmProviderConfigUpdateV1); model_id uses the
- * bedrock pattern unconditionally. .strict() ⇔ Python extra="forbid" (a stray provider/role field → 422).
+ * bedrock/primary; region is REQUIRED (not nullable, unlike LlmProviderConfigUpdateV1); model_id is not
+ * pattern-gated (the preflight ping validates it). .strict() ⇔ Python extra="forbid" (a stray field → 422).
  */
 export const LegacyBedrockConfigUpdateBodyV1 = z
   .object({
     schema_version: z.literal(1).default(1),
-    model_id: z.string().min(1).max(128).regex(/^(anthropic\.|claude-)/),
+    model_id: z.string().min(1).max(128),
     region: z.string().min(1).max(32).regex(LLM_REGION_RE),
     api_key: z.string().min(20),
     enabled: z.boolean().default(true),
