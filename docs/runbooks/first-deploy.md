@@ -101,6 +101,9 @@ path "secret/data/codemaster/field-encryption/keys" { capabilities = ["read"] }
 EOF
 
 # 3. Bind the pod's ServiceAccount to a role with that policy.
+#    `codemaster-backend` is the chart's FIXED ServiceAccount name (values `serviceAccount.name`) — it is
+#    release-INDEPENDENT, so this binding stays valid no matter the `helm install` release name. Change it
+#    here ONLY if you override `serviceAccount.name` (e.g. >1 release of this chart in one namespace).
 vault write auth/kubernetes/role/codemaster-backend \
   bound_service_account_names=codemaster-backend \
   bound_service_account_namespaces=<ns> \
@@ -119,6 +122,9 @@ Chart values:
 ```yaml
 secretSource: vault
 vault:
+  mode: external                 # REQUIRED with secretSource=vault: the app reads Vault DIRECTLY via its
+                                 # ServiceAccount (not the agent injector). The chart's coherence guard
+                                 # hard-fails the render otherwise (the default mode is agent).
   addr: https://vault.your-domain:8200
   kubernetes:
     role: codemaster-backend       # the Vault role bound to the pod's ServiceAccount
