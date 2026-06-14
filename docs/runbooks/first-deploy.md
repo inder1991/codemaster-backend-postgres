@@ -142,22 +142,27 @@ Everything else has a safe default. Beyond the `secretSource` block from step 3,
 image:
   repository: <your-registry>/codemaster-backend   # the default is a placeholder
   digest: sha256:...                                # pin in prod
-config:
-  runtime:
-    mode: shadow                                    # START in shadow (step 5)
 ```
 
-## 5. Install in SHADOW mode (safe first deploy)
+`config.runtime.mode` defaults to **`postgres`** (the live runtime), so a normal first install comes up
+live and ready — no override needed. You only set it for a cutover (the shadow callout in step 5).
 
-`shadow` runs the full runtime **observe-only** — no reviews posted, no side effects — so a first
-deploy can't do harm while you confirm wiring:
+## 5. Install
 
 ```bash
 helm install codemaster ./deploy/helm/codemaster-backend -f your-values.yaml
 ```
 
 Migrations run in the app container at startup, before it serves. If Postgres prereqs are missing, the
-pod fails to boot here with a clear error.
+pod fails to boot here with a clear error. A greenfield install comes up **live** (`postgres` mode, the
+default) on an empty database — there's nothing to double-process, so this is safe.
+
+> **Optional — cutting over from an already-running system?** (An existing deployment still claiming jobs
+> / posting reviews, or you want a dark-launch dry run against real data first.) Start in **shadow**: add
+> `config.runtime.mode: shadow` to your values. Shadow runs the full runtime **observe-only** — it
+> migrates, boots, connects, and registers every loop, but suppresses all side effects (no job claiming,
+> no reviews, no outbox drain), so it can't compete with the live system. Validate (step 6), then flip to
+> `postgres` (step 8). For a pure observe with no schema change, also set `migrate.enabled: false`.
 
 ## 6. Validate + log in
 
@@ -182,14 +187,16 @@ subscribe to Pull request events; webhook → `https://<ingress>/<webhook-path>`
 
 ## 8. Go live
 
-Flip the runtime to `postgres` and upgrade:
+A default install is **already live** (`postgres`) — once integrations are configured (step 7), open a PR
+on an installed repo and a review should post within ~1–2 minutes.
+
+**Only if you started in shadow** (the optional cutover path in step 5): flip to `postgres` now — and for
+a clean cutover, scale down the old system first so the two never claim jobs at once.
 
 ```bash
 helm upgrade codemaster ./deploy/helm/codemaster-backend -f your-values.yaml \
   --set config.runtime.mode=postgres
 ```
-
-Open a PR on an installed repo — a review should post within ~1–2 minutes.
 
 ## Cost caps
 
