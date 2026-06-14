@@ -25,6 +25,8 @@ export const EXPECTED_MIGRATIONS = [
   "0002_confluence_settings",
   // Review P0: auto-generated session signing key + CSRF secret (so they aren't operator bootstrap secrets).
   "0003_auth_secrets",
+  // F1 (P0-1): register the 7 pre-partitioned parents with pg_partman so run_maintenance premakes ahead.
+  "0004_partman_register",
 ] as const satisfies ReadonlyArray<string>;
 
 /** The DB's applied migration sequence diverges from the image's compiled-in expectation — the pod

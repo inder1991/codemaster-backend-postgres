@@ -11,7 +11,12 @@ import { WallClock } from "#platform/clock.js";
 
 import { DEFAULT_VAULT_SECRETS_DIR } from "./adapters/vault_file_kv.js";
 import { makeReadVaultKv } from "./config/vault_reader_factory.js";
-import { type ObserveDeps, parseRenderedSecret } from "./deploy_preflight.js";
+import {
+  type ObserveDeps,
+  type PartitionRunwayObservation,
+  parseRenderedSecret,
+  type RunwayObserveDeps,
+} from "./deploy_preflight.js";
 
 /**
  * Build the real preflight IO deps. `db` is any Kysely over the core pool; `secretsDir` defaults to
@@ -53,6 +58,35 @@ export function makeObserveDeps(args: {
         args.db,
       );
       return r.rows.map((row) => row.nspname);
+    },
+  };
+}
+
+/**
+ * Build the runway-check IO deps (F1 / P0-1): the furthest future upper bound per registered pg_partman
+ * parent. A LEFT JOIN so a parent registered in part_config with NO range child (only its *_default)
+ * surfaces as furthestBoundMs=null. The bound is parsed from `FOR VALUES … TO ('<ts>')` — DEFAULT
+ * partitions (whose expr is the literal `DEFAULT`) don't match the pattern and are excluded.
+ */
+export function makeRunwayObserveDeps(args: { db: Kysely<unknown> }): RunwayObserveDeps {
+  return {
+    now: () => new WallClock().now(),
+    listPartitionRunways: async () => {
+      // tenant:exempt reason=cluster-wide-partition-catalog-runway-check follow_up=PERMANENT-EXEMPTION-partition-maintenance
+      const r = await sql<{ parent: string; furthest: string | null }>`
+        SELECT pc.parent_table AS parent,
+               max(substring(pg_get_expr(k.relpartbound, k.oid) FROM 'TO \\(''([^'']+)''')) AS furthest
+          FROM partman.part_config pc
+          JOIN pg_class p ON p.oid = to_regclass(pc.parent_table)
+          LEFT JOIN pg_inherits i ON i.inhparent = p.oid
+          LEFT JOIN pg_class k ON k.oid = i.inhrelid
+                              AND pg_get_expr(k.relpartbound, k.oid) LIKE 'FOR VALUES FROM%'
+         GROUP BY pc.parent_table
+      `.execute(args.db);
+      return r.rows.map<PartitionRunwayObservation>((row) => ({
+        parent: row.parent,
+        furthestBoundMs: row.furthest === null ? null : Date.parse(row.furthest),
+      }));
     },
   };
 }

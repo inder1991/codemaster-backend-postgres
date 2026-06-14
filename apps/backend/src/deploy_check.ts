@@ -7,8 +7,8 @@
 import { Kysely, PostgresDialect } from "kysely";
 import { Pool } from "pg";
 
-import { assertDeployReady, DeployContractError } from "#backend/deploy_preflight.js";
-import { makeObserveDeps } from "#backend/deploy_preflight_io.js";
+import { assertDeployReady, assertPartitionRunwaysHealthy, DeployContractError } from "#backend/deploy_preflight.js";
+import { makeObserveDeps, makeRunwayObserveDeps } from "#backend/deploy_preflight_io.js";
 
 async function main(): Promise<void> {
   const dsn = process.env["CODEMASTER_PG_CORE_DSN"];
@@ -24,8 +24,11 @@ async function main(): Promise<void> {
   });
   try {
     await assertDeployReady(makeObserveDeps({ db }));
+    // F1 (P0-1): registered pg_partman parents must have runway ahead — a stalled run_maintenance is
+    // caught here (operator/CI), not silently at the partition cliff. NOT in the boot path (no crashloop).
+    await assertPartitionRunwaysHealthy(makeRunwayObserveDeps({ db }));
     console.info(
-      "✓ deploy preflight passed — every required secret, Postgres extension, schema, and config value is present.",
+      "✓ deploy preflight passed — secrets, extensions, schemas, config, and partition runways all healthy.",
     );
   } finally {
     await db.destroy();

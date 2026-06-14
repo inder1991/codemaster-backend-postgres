@@ -492,6 +492,76 @@ export function parseRenderedSecret(raw: string): Record<string, string> | null 
   return out;
 }
 
+// ─── Partition runway preflight (F1 / P0-1) ───────────────────────────────────────────────────────
+// pg_partman premakes future partitions only for parents registered in partman.part_config; once a
+// parent's furthest future partition is reached, rows fall into its *_default partition and retention
+// stops. This check (operator/CI deploy:check ONLY — NOT the boot crashloop path) flags a registered
+// parent whose runway is about to lapse, so a stalled run_maintenance is caught before the cliff.
+
+/** Days of remaining partition runway below which a parent is flagged. */
+export const DEFAULT_PARTITION_RUNWAY_MIN_DAYS = 7;
+
+/** A registered pg_partman parent + the upper bound (ms epoch) of its furthest future partition; null
+ *  when the parent has NO range child partition at all (only its *_default). */
+export type PartitionRunwayObservation = {
+  readonly parent: string;
+  readonly furthestBoundMs: number | null;
+};
+
+/**
+ * Flag every registered parent whose furthest future partition is absent or within `minDays` of `nowMs`.
+ * Pure — the catalog query lives in the IO wrapper. Boundary is fail-closed (exactly minDays out → short).
+ */
+export function evaluatePartitionRunways(
+  observations: ReadonlyArray<PartitionRunwayObservation>,
+  nowMs: number,
+  minDays: number,
+): Array<DeployFailure> {
+  const minMs = minDays * 86_400_000;
+  const failures: Array<DeployFailure> = [];
+  for (const o of observations) {
+    if (o.furthestBoundMs === null) {
+      failures.push({
+        what: `partitioned table ${o.parent} has NO future partition`,
+        why: "pg_partman run_maintenance is not premaking partitions; rows will fall into the *_default partition",
+        fix: "ensure the daily partition-maintenance job runs (partman.run_maintenance), then verify part_config",
+      });
+      continue;
+    }
+    if (o.furthestBoundMs - nowMs <= minMs) {
+      const days = Math.floor((o.furthestBoundMs - nowMs) / 86_400_000);
+      failures.push({
+        what: `partitioned table ${o.parent} runway is ${days}d (< ${minDays}d)`,
+        why: "the furthest premade partition is about to be reached; new rows will soon fall into *_default",
+        fix: "run/repair the daily partition-maintenance job (partman.run_maintenance) so it premakes ahead",
+      });
+    }
+  }
+  return failures;
+}
+
+/** IO seam for the runway check: the furthest future partition bound per registered pg_partman parent. */
+export type RunwayObserveDeps = {
+  readonly listPartitionRunways: () => Promise<ReadonlyArray<PartitionRunwayObservation>>;
+  readonly now: () => Date;
+};
+
+/**
+ * Observe + evaluate partition runways; throw {@link DeployContractError} if any registered parent is
+ * within `minDays` of its cliff. Wired into deploy_check (operator/CI) ONLY — never the boot path, so a
+ * stalled maintenance job never crashloops a serving pod.
+ */
+export async function assertPartitionRunwaysHealthy(
+  deps: RunwayObserveDeps,
+  minDays: number = DEFAULT_PARTITION_RUNWAY_MIN_DAYS,
+): Promise<void> {
+  const observations = await deps.listPartitionRunways();
+  const failures = evaluatePartitionRunways(observations, deps.now().getTime(), minDays);
+  if (failures.length > 0) {
+    throw new DeployContractError(failures);
+  }
+}
+
 /** A non-blocking feature-config item's state, for /config-status (never carries the secret value). */
 export type ConfigStatusItem = {
   readonly key: string;

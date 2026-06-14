@@ -6,9 +6,11 @@ import {
   type DeployContract,
   DeployContractError,
   evaluateDeployContract,
+  evaluatePartitionRunways,
   type ObserveDeps,
   observeDeployState,
   type ObservedState,
+  type PartitionRunwayObservation,
 } from "#backend/deploy_preflight.js";
 
 // A minimal contract exercising one required env secret. The real DEPLOY_CONTRACT is the
@@ -320,5 +322,51 @@ describe("getConfigStatus (advisory, non-blocking)", () => {
     const token = status.find((s) => s.key === "confluence.token");
     expect(token?.state).toBe("configured"); // token present
     expect(baseUrl?.state).toBe("pending"); // base_url missing → NOT configured (the provider requires it)
+  });
+});
+
+// F1 (P0-1) — partition runway preflight. evaluatePartitionRunways flags a registered pg_partman parent
+// whose furthest future partition bound is within `minDays` (or absent) — the early-warning that
+// run_maintenance has stopped premaking before rows fall into the *_default partition.
+describe("evaluatePartitionRunways (F1 / P0-1)", () => {
+  const NOW = Date.parse("2026-06-14T00:00:00Z");
+  const day = 86_400_000;
+  const obs = (parent: string, furthestIso: string | null): PartitionRunwayObservation => ({
+    parent,
+    furthestBoundMs: furthestIso === null ? null : Date.parse(furthestIso),
+  });
+
+  it("passes when every parent has a comfortable runway", () => {
+    const failures = evaluatePartitionRunways(
+      [obs("audit.webhook_events", "2026-07-15T00:00:00Z"), obs("audit.audit_events", "2026-11-01T00:00:00Z")],
+      NOW,
+      7,
+    );
+    expect(failures).toHaveLength(0);
+  });
+
+  it("fails for a parent whose furthest partition is within minDays (runway about to lapse)", () => {
+    const failures = evaluatePartitionRunways(
+      [obs("audit.webhook_events", "2026-06-18T00:00:00Z")], // 4 days out, < 7
+      NOW,
+      7,
+    );
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.what).toContain("audit.webhook_events");
+  });
+
+  it("fails for a registered parent with NO future partition (furthest bound absent)", () => {
+    const failures = evaluatePartitionRunways([obs("telemetry.llm_calls", null)], NOW, 7);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.what).toContain("telemetry.llm_calls");
+  });
+
+  it("treats a partition exactly minDays out as still short (boundary, fail-closed)", () => {
+    const failures = evaluatePartitionRunways(
+      [obs("core.diff_snapshots", new Date(NOW + 7 * day).toISOString())],
+      NOW,
+      7,
+    );
+    expect(failures).toHaveLength(1);
   });
 });
