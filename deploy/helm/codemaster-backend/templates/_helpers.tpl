@@ -81,6 +81,31 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- printf "%s-dev-secrets" (include "codemaster-backend.fullname" .) -}}
 {{- end -}}
 
+{{/* App container boot command (one fused container): per-secret-source DSN setup, then schema migration
+     when migrate.enabled, then exec the app. Migrations run INSIDE the app container — NOT a separate
+     Job/init — so the ServiceAccount (a normal resource) is always present and there is no pre-install
+     hook ordering trap. migrate:up is idempotent + advisory-locked (concurrent replicas serialize; a
+     container restart re-runs a cheap no-op). The vault-mode DSN setup mirrors the pre-fusion migrate
+     hook: the separate assign + non-empty test + export is REQUIRED because `export VAR=$(cmd)` always
+     exits 0 (the builtin's status, not the substitution's), which would mask a resolve_dsn failure. */}}
+{{- define "codemaster-backend.bootScript" -}}
+{{- if include "codemaster-backend.usesEnvWrapper" . }}
+set -a
+. {{ .Values.vault.secretsDir }}/runtime-env
+set +a
+{{- else if eq .Values.secretSource "vault" }}
+set -e
+CODEMASTER_PG_CORE_DSN="$(node apps/backend/src/resolve_dsn.js)"
+test -n "$CODEMASTER_PG_CORE_DSN" || { echo "resolve_dsn returned an empty DSN" >&2; exit 1; }
+export CODEMASTER_PG_CORE_DSN
+{{- end }}
+{{- if .Values.migrate.enabled }}
+npm run migrate:up && exec node apps/backend/src/main.js
+{{- else }}
+exec node apps/backend/src/main.js
+{{- end }}
+{{- end -}}
+
 {{/*
 Pod-template annotations: Vault-Agent injection (when vault.mode == "agent").
 Call with a dict: (dict "root" . "onlyEnv" false). onlyEnv=true injects ONLY the

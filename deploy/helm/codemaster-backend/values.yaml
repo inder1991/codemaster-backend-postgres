@@ -32,7 +32,14 @@ replicaCount: 2
 
 serviceAccount:
   create: true
-  name: ""
+  # Pinned, NOT release-derived. Mode B's Vault Kubernetes-auth role binds this exact name via
+  # `bound_service_account_names` (docs/runbooks/first-deploy.md §3) — a contract a Vault admin sets up
+  # BEFORE, and independently of, `helm install` (and its release name). The stock Helm idiom (name: "")
+  # derives the SA from the release name, so `helm install codemaster …` would render
+  # `codemaster-codemaster-backend` and Vault would reject the login → crashloop. Override ONLY to run
+  # more than one release of this chart in ONE namespace — then give each a distinct name AND a matching
+  # Vault binding.
+  name: codemaster-backend
   annotations: {}
   # The pod talks to Postgres/Temporal/Vault, never the K8s API, so the token
   # is not mounted (least privilege). Flip only if you add K8s-API access.
@@ -173,18 +180,11 @@ ingress:
 # Schema migration as a pre-install/pre-upgrade Helm hook. Runs `npm run
 # migrate:up` (node-pg-migrate) against CODEMASTER_PG_CORE_DSN before the
 # rollout. Inherits the same Vault secret injection as the app.
+# Schema migrations run INSIDE the app container at startup (npm run migrate:up, before the app execs) —
+# not a separate Job/init. So this is just an on/off switch: the migrate step shares the app container's
+# resources, and there is no hook/Job to weight or bound. Set false only if you migrate out-of-band.
 migrate:
   enabled: true
-  backoffLimit: 3
-  hookWeight: -5
-  hookDeletePolicy: before-hook-creation,hook-succeeded
-  resources:
-    requests:
-      cpu: 250m
-      memory: 512Mi
-    limits:
-      cpu: "1"
-      memory: 1Gi
 
 # =============================================================================
 # Application configuration (NON-SECRET) -> ConfigMap.

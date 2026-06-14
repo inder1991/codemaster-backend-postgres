@@ -9,7 +9,7 @@ Validate the deploy contract (required secrets + DB extensions/schemas + config)
 Image:      {{ include "codemaster-backend.image" . }}
 Replicas:   {{ if .Values.autoscaling.enabled }}HPA {{ .Values.autoscaling.minReplicas }}–{{ .Values.autoscaling.maxReplicas }}{{ else }}{{ .Values.replicaCount }}{{ end }}
 Secrets:    vault.mode={{ .Values.vault.mode }}
-Migration:  {{ if .Values.migrate.enabled }}ran as a pre-install/pre-upgrade hook (npm run migrate:up){{ else }}DISABLED — run migrations out-of-band{{ end }}
+Migration:  {{ if .Values.migrate.enabled }}runs in the app container at startup (npm run migrate:up, before serving){{ else }}DISABLED — run migrations out-of-band{{ end }}
 
 Reach the API:
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "codemaster-backend.fullname" . }} 8080:{{ .Values.service.port }}

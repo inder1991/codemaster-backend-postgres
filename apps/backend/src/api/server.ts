@@ -136,7 +136,10 @@ export async function runServer(deps: RunServerDeps = {}): Promise<RunServerHand
       now: () => clock.now(),
       newUserId: () => uuid4(),
       warn: (m) => {
-        app.log.warn(m);
+        // app.ts builds Fastify with logger:false, so app.log.warn is a no-op — the default-password
+        // warning would be silently swallowed (the runbook promises a loud warning). Emit via
+        // console.warn, the channel the rest of the boot path (main.ts) uses, so operators see it.
+        console.warn(m);
       },
     });
     await registerAuthRoutes(app, {
