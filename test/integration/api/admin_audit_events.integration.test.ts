@@ -151,6 +151,36 @@ describeDb("admin audit-events (disposable :5434)", () => {
     expect(page2.nextCursor).toBeNull();
   });
 
+  // F3 / P2-7: two events sharing a millisecond (differing only in microseconds) must paginate across the
+  // page seam without skipping one. The old cursor truncated created_at to ms (new Date(...).toISOString()),
+  // so size-1 paging skipped the lower-µs event. The cursor now carries full µs (created_at::text).
+  it("searchAuditEvents: µs page-seam — same-ms/different-µs events paginate without skip (P2-7)", async () => {
+    const HI = "ea0000b1-1111-2222-3333-444444444444"; // .123999 — sorts first (created_at DESC)
+    const LO = "ea0000b2-1111-2222-3333-444444444444"; // .123456 — sorts second
+    await seedEvent(HI, "user", "muset.seam", "2026-06-30T12:10:00.123999Z");
+    await seedEvent(LO, "user", "muset.seam", "2026-06-30T12:10:00.123456Z");
+    try {
+      const seen: Array<string> = [];
+      let cursor: string | null = null;
+      for (let i = 0; i < 5; i += 1) {
+        const page = await searchAuditEvents(db, {
+          role: "platform_owner",
+          callerInstallationId: INST,
+          query: { action: "muset.seam", crossTenant: false },
+          cursor,
+          size: 1,
+          now: NOW,
+        });
+        seen.push(...page.rows.map((r) => r.audit_event_id));
+        cursor = page.nextCursor;
+        if (cursor === null) break;
+      }
+      expect(seen).toEqual([HI, LO]); // both events, in µs order — the lower-µs one is NOT skipped
+    } finally {
+      await sql`DELETE FROM audit.audit_events WHERE audit_event_id IN (${HI}, ${LO})`.execute(db);
+    }
+  });
+
   it("searchAuditEvents: cross-tenant + >30d window refused for non-security_auditor", async () => {
     await expect(
       searchAuditEvents(db, {

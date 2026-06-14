@@ -174,4 +174,46 @@ describeDb("admin findings (disposable :5434)", () => {
     expect(forbidden.statusCode).toBe(403);
     await app.close();
   });
+
+  // F3 / P0-4: findings of one review are bulk-inserted with a SINGLE created_at, so created_at ties are
+  // the COMMON case. The keyset predicate must page the correct side of the tie (review_finding_id ASC
+  // secondary) — the buggy `(created_at, id) < (cursor)` skipped the rest of a tied group, silently
+  // dropping findings. Page through 5 findings sharing one created_at and assert NO drops/dupes.
+  it("listFindings paginates findings sharing one created_at with no drops/dupes (P0-4 tie keyset)", async () => {
+    const TIE_TS = "2026-06-07T12:30:00.000Z";
+    const ids = [
+      "bbbb0001-1111-2222-3333-444444444444",
+      "bbbb0002-1111-2222-3333-444444444444",
+      "bbbb0003-1111-2222-3333-444444444444",
+      "bbbb0004-1111-2222-3333-444444444444",
+      "bbbb0005-1111-2222-3333-444444444444",
+    ];
+    for (const id of ids) {
+      await sql`INSERT INTO core.review_findings
+                  (review_finding_id, installation_id, pr_id, file_path, start_line, end_line, severity,
+                   category, title, body, confidence, created_at)
+                VALUES (${id}, ${INST}, ${PR}, 'src/tie.ts', 1, 2, 'issue', 'bug', 'T', 'B', 0.900, ${TIE_TS})`.execute(db);
+    }
+    try {
+      const seen: Array<string> = [];
+      let cursor: { c: string; f: string } | undefined;
+      for (let page = 0; page < 10; page += 1) {
+        const rows = await listFindings(db, {
+          installationId: INST,
+          filePathSubstring: "tie.ts",
+          limit: 2,
+          ...(cursor ? { cursorCreatedAt: cursor.c, cursorFindingId: cursor.f } : {}),
+        });
+        if (rows.length === 0) break;
+        seen.push(...rows.map((r) => r.review_finding_id));
+        const last = rows[rows.length - 1]!;
+        cursor = { c: last.created_at, f: last.review_finding_id };
+        if (rows.length < 2) break;
+      }
+      expect([...seen].sort()).toEqual([...ids].sort()); // every finding exactly once — no drops
+      expect(new Set(seen).size).toBe(ids.length); // no dupes
+    } finally {
+      await sql`DELETE FROM core.review_findings WHERE file_path = 'src/tie.ts'`.execute(db);
+    }
+  });
 });

@@ -754,7 +754,10 @@ export async function listFindings(
   }
   if (args.cursorCreatedAt != null && args.cursorFindingId != null) {
     conditions.push(
-      sql`(rf.created_at, rf.review_finding_id) < (${args.cursorCreatedAt}, ${args.cursorFindingId})`,
+      // Direction-consistent with ORDER BY created_at DESC, review_finding_id ASC: on a created_at TIE
+      // (the common case — a review's findings share one bulk-insert created_at) continue at id > cursor,
+      // not the row-value `< (cursor)` which paged the WRONG side and silently dropped the tied group (P0-4).
+      sql`(rf.created_at < ${args.cursorCreatedAt} OR (rf.created_at = ${args.cursorCreatedAt} AND rf.review_finding_id > ${args.cursorFindingId}))`,
     );
   }
   const joinClause =
@@ -833,7 +836,11 @@ export async function listPullRequests(
     conditions.push(sql`opened_at < ${args.openedBefore}`);
   }
   if (args.cursorOpenedAt != null && args.cursorPrId != null) {
-    conditions.push(sql`(opened_at, pr_id) < (${args.cursorOpenedAt}, ${args.cursorPrId})`);
+    // Direction-consistent with ORDER BY opened_at DESC, pr_id ASC — continue at pr_id > cursor on an
+    // opened_at tie, not the wrong-side row-value `< (cursor)` (P2-6, same class as P0-4 listFindings).
+    conditions.push(
+      sql`(opened_at < ${args.cursorOpenedAt} OR (opened_at = ${args.cursorOpenedAt} AND pr_id > ${args.cursorPrId}))`,
+    );
   }
   const whereClause = sql.join(conditions, sql` AND `);
 

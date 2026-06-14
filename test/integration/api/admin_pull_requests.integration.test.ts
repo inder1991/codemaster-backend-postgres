@@ -161,4 +161,41 @@ describeDb("admin pull-requests (disposable :5434)", () => {
     expect(forbidden.statusCode).toBe(403);
     await app.close();
   });
+
+  // F3 / P2-6: same wrong-side-of-tie keyset defect as findings. Page through 5 PRs sharing one
+  // opened_at and assert no drops/dupes (the buggy `(opened_at, pr_id) < (cursor)` dropped the tied group).
+  it("listPullRequests paginates PRs sharing one opened_at with no drops/dupes (P2-6 tie keyset)", async () => {
+    const TIE_TS = "2026-06-07T12:45:00.000Z";
+    const ids = [
+      "cccc0001-1111-2222-3333-444444444444",
+      "cccc0002-1111-2222-3333-444444444444",
+      "cccc0003-1111-2222-3333-444444444444",
+      "cccc0004-1111-2222-3333-444444444444",
+      "cccc0005-1111-2222-3333-444444444444",
+    ];
+    for (let i = 0; i < ids.length; i += 1) {
+      await seedPr(ids[i]!, INST, REPO, GHU, 50 + i, 970000000 + i, "open", TIE_TS);
+    }
+    try {
+      const seen: Array<string> = [];
+      let cursor: { o: string; p: string } | undefined;
+      for (let page = 0; page < 10; page += 1) {
+        const rows = await listPullRequests(db, {
+          installationId: INST,
+          openedAfter: TIE_TS, // isolate the tie group (>= TIE_TS; the earlier PRs are well before)
+          limit: 2,
+          ...(cursor ? { cursorOpenedAt: cursor.o, cursorPrId: cursor.p } : {}),
+        });
+        if (rows.length === 0) break;
+        seen.push(...rows.map((r) => r.pr_id));
+        const last = rows[rows.length - 1]!;
+        cursor = { o: last.opened_at, p: last.pr_id };
+        if (rows.length < 2) break;
+      }
+      expect([...seen].sort()).toEqual([...ids].sort());
+      expect(new Set(seen).size).toBe(ids.length);
+    } finally {
+      await sql`DELETE FROM core.pull_requests WHERE pr_id = ANY(${ids}::uuid[])`.execute(db);
+    }
+  });
 });

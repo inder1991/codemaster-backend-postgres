@@ -112,6 +112,8 @@ type AuditDbRow = {
   action: string;
   target_id: string | null;
   occurred_at: Date;
+  /** Full µs-precision timestamptz text (created_at::text) for the keyset cursor — Date truncates to ms. */
+  occurred_at_raw: string;
   before_encrypted: Buffer | null;
   after_encrypted: Buffer | null;
 };
@@ -191,13 +193,16 @@ export async function searchAuditEvents(
   }
   if (args.cursor != null) {
     const { occurredAt, auditEventId } = decodeCursor(args.cursor);
-    conditions.push(sql`(created_at, audit_event_id) < (${occurredAt}, ${auditEventId})`);
+    // occurredAt carries FULL microsecond precision (see the cursor build below); cast it back to
+    // timestamptz so the row-value compare is µs-exact, not ms-truncated (P2-7 page-seam skip).
+    conditions.push(sql`(created_at, audit_event_id) < (${occurredAt}::timestamptz, ${auditEventId})`);
   }
   const where = sql.join(conditions, sql` AND `);
 
   const r = await sql<AuditDbRow>`
     SELECT audit_event_id, installation_id, actor_id AS actor_user_id, action, target_id,
-           created_at AS occurred_at, before AS before_encrypted, after AS after_encrypted
+           created_at AS occurred_at, created_at::text AS occurred_at_raw,
+           before AS before_encrypted, after AS after_encrypted
     FROM audit.audit_events
     WHERE ${where}
     ORDER BY created_at DESC, audit_event_id DESC
@@ -210,7 +215,9 @@ export async function searchAuditEvents(
   let nextCursor: string | null = null;
   if (hasMore && emitted.length > 0) {
     const last = emitted[emitted.length - 1]!;
-    nextCursor = encodeCursor(new Date(last.occurred_at).toISOString(), last.audit_event_id);
+    // Carry the FULL µs-precision created_at text — `new Date(...).toISOString()` truncated to ms, so a
+    // page seam between two events sharing a millisecond (differing only in µs) skipped one (P2-7).
+    nextCursor = encodeCursor(last.occurred_at_raw, last.audit_event_id);
   }
   return { rows, nextCursor };
 }
