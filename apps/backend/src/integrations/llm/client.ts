@@ -971,9 +971,19 @@ export class LlmClient {
         today: isoDate(this.clock.now()),
         estimatedCents: args.estimated,
       });
-    } catch {
-      // Defense in depth — a release failure may over-count the daily total by `estimated` for this
-      // call, but must not mask the original SDK error. Mirrors the Python warning-and-continue.
+    } catch (e) {
+      // F15 / P2-11 — a release failure leaks `estimated` cents into cost_daily that never settle, drifting
+      // the effective cap DOWN until the day-rollover (the reconciler heals the journal, not cost_daily). It
+      // must not mask the original SDK error, but it must NOT be silent either: emit a structured WARN so the
+      // drift is observable/alertable (was a bare swallow). Mirrors the Python warning-and-continue.
+      console.warn(
+        JSON.stringify({
+          event: "llm.cost_cap_release_failed",
+          installation_id: args.installationId,
+          leaked_estimated_cents: args.estimated,
+          error_class: e instanceof Error ? e.name : "unknown",
+        }),
+      );
     }
   }
 

@@ -37,6 +37,19 @@ type RawStateRow = {
   updated_by_email: string | null;
 };
 
+/** F15 / P2-10: a singleton UPDATE that matched 0 rows means the singleton row is MISSING (e.g. a botched
+ *  restore). Without this, a config-version bump / activate becomes a SILENT no-op — workers never see the
+ *  bump and the ≤30s propagation SLA fails silently. Fail closed, like `get()` does on a missing row. */
+export function assertSingletonUpdated(result: { readonly numAffectedRows?: bigint }, op: string): void {
+  if (Number(result.numAffectedRows ?? 0n) !== 1) {
+    throw new Error(
+      `embedder_runtime_state.${op}: expected to update exactly 1 singleton row, updated ` +
+        `${result.numAffectedRows ?? 0n} — the singleton is missing; failing closed so a config bump is ` +
+        `never a silent no-op`,
+    );
+  }
+}
+
 /** Accessor for the singleton `core.embedder_runtime_state` row. */
 export class PostgresEmbedderRuntimeStateRepo {
   private readonly db: Kysely<unknown>;
@@ -84,7 +97,7 @@ export class PostgresEmbedderRuntimeStateRepo {
     await this.db.transaction().execute(async (txTyped) => {
       const tx = txTyped as unknown as Transaction<unknown>;
       // tenant:exempt reason=embedder-platform-wide follow_up=PERMANENT-EXEMPTION-embedder
-      await sql`
+      const r = await sql`
         UPDATE core.embedder_runtime_state
            SET pending_generation = ${args.generationId},
                pending_model_name = ${args.modelName},
@@ -93,6 +106,7 @@ export class PostgresEmbedderRuntimeStateRepo {
                updated_by_email = ${args.updatedByEmail}
          WHERE singleton = true
       `.execute(tx);
+      assertSingletonUpdated(r, "setPending");
     });
   }
 
@@ -104,7 +118,7 @@ export class PostgresEmbedderRuntimeStateRepo {
     await this.db.transaction().execute(async (txTyped) => {
       const tx = txTyped as unknown as Transaction<unknown>;
       // tenant:exempt reason=embedder-platform-wide follow_up=PERMANENT-EXEMPTION-embedder
-      await sql`
+      const r = await sql`
         UPDATE core.embedder_runtime_state
            SET pending_generation = NULL,
                pending_model_name = NULL,
@@ -113,6 +127,7 @@ export class PostgresEmbedderRuntimeStateRepo {
                updated_by_email = ${args.updatedByEmail}
          WHERE singleton = true
       `.execute(tx);
+      assertSingletonUpdated(r, "clearPending");
     });
   }
 
@@ -128,7 +143,7 @@ export class PostgresEmbedderRuntimeStateRepo {
     await this.db.transaction().execute(async (txTyped) => {
       const tx = txTyped as unknown as Transaction<unknown>;
       // tenant:exempt reason=embedder-platform-wide follow_up=PERMANENT-EXEMPTION-embedder
-      await sql`
+      const r = await sql`
         UPDATE core.embedder_runtime_state
            SET active_generation = ${args.generationId},
                active_model_name = ${args.modelName},
@@ -139,6 +154,7 @@ export class PostgresEmbedderRuntimeStateRepo {
                updated_by_email = ${args.updatedByEmail}
          WHERE singleton = true
       `.execute(tx);
+      assertSingletonUpdated(r, "activate");
     });
   }
 

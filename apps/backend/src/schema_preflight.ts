@@ -29,6 +29,8 @@ export const EXPECTED_MIGRATIONS = [
   "0004_partman_register",
   // F13 (P1-K/P2-9): confluence_chunks (space_key) + HNSW(embedding) partial indexes on the live rows.
   "0005_confluence_indexes",
+  // F15 (P2-8): (created_at) WHERE state='pending' index for the global outbox drain's ORDER BY.
+  "0006_outbox_pending_created_at_index",
 ] as const satisfies ReadonlyArray<string>;
 
 /** The DB's applied migration sequence diverges from the image's compiled-in expectation — the pod
