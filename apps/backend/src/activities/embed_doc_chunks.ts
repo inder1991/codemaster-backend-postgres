@@ -35,6 +35,19 @@ import { uuid5 } from "#platform/randomness.js";
 const BATCH_SIZE = 128;
 const EMBED_PURPOSE = "in_repo_doc";
 
+/** F10 / P1-J: the configured embedder returned a vector whose dim ≠ the vector(1024) column. Fail loud +
+ *  actionable rather than silently skipping every chunk (which empties the knowledge index with no signal). */
+export class EmbedDimensionMismatchError extends Error {
+  public constructor(actual: number, expected: number, model: string) {
+    super(
+      `embedder returned a ${actual}-dim vector but core.knowledge_chunks.embedding is vector(${expected}) ` +
+        `(model=${model}); the doc-chunk write path requires the platform ${expected}-dim model — check ` +
+        `CODEMASTER_EMBEDDINGS_PROVIDER / the configured embedder output dimension.`,
+    );
+    this.name = "EmbedDimensionMismatchError";
+  }
+}
+
 /**
  * Stable surrogate id for a chunk slot. Computed deterministically from the natural key so
  * re-embedding the same key keeps the same id — review comments cite this as the locator and the
@@ -113,10 +126,17 @@ export async function embedDocChunks(args: {
     batch.forEach((c, i) => {
       // eslint-disable-next-line security/detect-object-injection -- bounded numeric index into a same-length array (port invariant len(vectors)===len(texts))
       const vec = result.vectors[i];
-      if (vec === undefined || vec.length !== EMBEDDING_DIM) {
-        // Defensive — embed-service contract violation. Log + skip; don't corrupt the index with a
-        // zero-padded / wrong-shape vector.
+      if (vec === undefined) {
+        // Count contract violation (len(vectors) !== len(texts)) — defensive skip of the missing slot.
         return;
+      }
+      if (vec.length !== EMBEDDING_DIM) {
+        // F10 / P1-J: a wrong-dim vector cannot go into the vector(1024) column. The pre-fix code SILENTLY
+        // skipped it (return), so a misconfigured embedder emptied the index with NO signal. Fail LOUD with
+        // an actionable message — every vector will be wrong (systematic), so one clear throw beats N silent
+        // skips. (The dim here is the COLUMN's, intentionally fixed; only the dim-agnostic cosine-merge path
+        // is exempt from the 1024 check — embeddings_port.ts — NOT this pgvector WRITE path.)
+        throw new EmbedDimensionMismatchError(vec.length, EMBEDDING_DIM, modelName);
       }
       const newHash = chunkHashes.get(chunkKeyToStr(c.relative_path, c.chunk_index));
       if (newHash === undefined) {
