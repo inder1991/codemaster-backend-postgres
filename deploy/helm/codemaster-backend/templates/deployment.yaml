@@ -91,16 +91,15 @@ spec:
         - name: backend
           image: {{ include "codemaster-backend.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          {{- if include "codemaster-backend.usesEnvWrapper" . }}
-          # Agent mode: source the Vault-rendered env-file (PG DSN etc.) then exec.
+          # Fused boot (one container): per-secret-source DSN setup -> schema migration (migrate.enabled)
+          # -> exec the app. Migrations run here, NOT in a separate Job/init, so the ServiceAccount (a
+          # normal resource) is always present — the pre-install-hook ordering trap is gone. migrate:up is
+          # idempotent + advisory-locked (concurrent replicas serialize; a restart re-runs a cheap no-op).
+          # NOTE: migration time counts against the startup-probe budget (size it to cover worst-case).
           command: ["/bin/sh", "-c"]
           args:
             - |
-              set -a
-              . {{ .Values.vault.secretsDir }}/runtime-env
-              set +a
-              exec node apps/backend/src/main.js
-          {{- end }}
+              {{- include "codemaster-backend.bootScript" . | trim | nindent 14 }}
           {{- if gt (int .Values.preStopSleepSeconds) 0 }}
           lifecycle:
             preStop:

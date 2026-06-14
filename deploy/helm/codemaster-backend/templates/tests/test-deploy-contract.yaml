@@ -24,7 +24,7 @@ metadata:
 spec:
   restartPolicy: Never
   serviceAccountName: {{ include "codemaster-backend.serviceAccountName" . }}
-  # secretSource=vault resolves the DSN from Vault via SA-auth (same as the app + migrate Job), so the SA JWT
+  # secretSource=vault resolves the DSN from Vault via SA-auth (same as the app), so the SA JWT
   # must mount — else helm test false-fails on a valid SA-auth deploy.
   automountServiceAccountToken: {{ if eq .Values.secretSource "vault" }}true{{ else }}{{ .Values.serviceAccount.automountServiceAccountToken }}{{ end }}
   {{- with .Values.image.pullSecrets }}
@@ -47,7 +47,7 @@ spec:
           exec node apps/backend/src/deploy_check.js
       {{- else if eq .Values.secretSource "vault" }}
       # vault SA-auth: resolve the DSN from Vault (the pod's SA login) before deploy_check — same preamble as
-      # the migrate Job + the app, so the check validates the SAME contract the real pod sees (review P1).
+      # the app's boot, so the check validates the SAME contract the real pod sees (review P1).
       # `set -e` + separate assign/export + non-empty check so a resolve_dsn failure isn't masked by
       # `export VAR=$(cmd)` always exiting 0 (review P1).
       command: ["/bin/sh", "-c"]
@@ -68,7 +68,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       envFrom:
-        # Same ConfigMap the app + migrate Job read — so the check sees CODEMASTER_SECRET_SOURCE + VAULT_ADDR
+        # Same ConfigMap the app reads — so the check sees CODEMASTER_SECRET_SOURCE + VAULT_ADDR
         # + the SA-auth selectors (for resolve_dsn) + the PG DSN parts (openshift), NOT a hand-picked subset
         # that could diverge from the real pod and pass/fail a different contract (review P1).
         - configMapRef:

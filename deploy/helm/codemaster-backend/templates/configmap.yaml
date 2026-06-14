@@ -4,11 +4,11 @@ field-encryption keys, auth secrets, embedder/Langfuse keys) are NEVER here —
 they come from Vault (see _helpers.tpl + the deployment).
 */ -}}
 {{- /* Coherence guard (review P1): secretSource=vault means the app reads Vault DIRECTLY via ServiceAccount
-   auth. That is mutually exclusive with the agent injector (vault.mode=agent — renders secrets to env/files)
-   and the dev static token (vault.mode=token). Mixing them makes the migrate Job and the app resolve the DB
-   DSN from DIFFERENT sources — you could migrate one database and run against another. Reject at render. */ -}}
+   auth — mutually exclusive with the agent injector (vault.mode=agent, which renders secrets to env/files)
+   and the dev static token (vault.mode=token). Mixing the two would deliver the DB DSN by two contradictory
+   mechanisms (the boot wrapper sourcing an agent file vs. the app SA-authing). Reject at render. */ -}}
 {{- if and (eq .Values.secretSource "vault") (ne .Values.vault.mode "external") -}}
-{{- fail (printf "secretSource=vault requires vault.mode=external (got vault.mode=%s). secretSource=vault has the app read Vault directly via its ServiceAccount; vault.mode=agent/token inject/render the DSN separately, so the migrate Job and the app would resolve the DB from DIFFERENT sources (migrate one database, run against another). Set vault.mode=external." .Values.vault.mode) -}}
+{{- fail (printf "secretSource=vault requires vault.mode=external (got vault.mode=%s). secretSource=vault has the app read Vault directly via its ServiceAccount; vault.mode=agent/token inject/render secrets a different way, so the two would deliver the DB DSN by contradictory mechanisms. Set vault.mode=external." .Values.vault.mode) -}}
 {{- end -}}
 apiVersion: v1
 kind: ConfigMap

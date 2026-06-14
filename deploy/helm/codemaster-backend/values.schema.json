@@ -97,11 +97,7 @@
     "migrate": {
       "type": "object",
       "properties": {
-        "enabled": { "type": "boolean" },
-        "backoffLimit": { "type": "integer", "minimum": 0 },
-        "hookWeight": { "type": ["integer", "string"] },
-        "hookDeletePolicy": { "type": "string" },
-        "resources": { "type": "object" }
+        "enabled": { "type": "boolean" }
       }
     },
     "config": {

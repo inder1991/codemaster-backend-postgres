@@ -180,18 +180,11 @@ ingress:
 # Schema migration as a pre-install/pre-upgrade Helm hook. Runs `npm run
 # migrate:up` (node-pg-migrate) against CODEMASTER_PG_CORE_DSN before the
 # rollout. Inherits the same Vault secret injection as the app.
+# Schema migrations run INSIDE the app container at startup (npm run migrate:up, before the app execs) —
+# not a separate Job/init. So this is just an on/off switch: the migrate step shares the app container's
+# resources, and there is no hook/Job to weight or bound. Set false only if you migrate out-of-band.
 migrate:
   enabled: true
-  backoffLimit: 3
-  hookWeight: -5
-  hookDeletePolicy: before-hook-creation,hook-succeeded
-  resources:
-    requests:
-      cpu: 250m
-      memory: 512Mi
-    limits:
-      cpu: "1"
-      memory: 1Gi
 
 # =============================================================================
 # Application configuration (NON-SECRET) -> ConfigMap.

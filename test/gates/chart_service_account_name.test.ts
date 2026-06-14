@@ -5,7 +5,7 @@
 // `codemaster-backend`), or Mode B breaks: pre-fix the name was release-derived (fullname), so
 // `helm install codemaster …` produced `codemaster-codemaster-backend`, which the Vault role rejected
 // → pod login 403 → boot crashloop. This gate pins the name so that drift can never silently return.
-// The Deployment, migrate Job and helm-test pod all resolve the SAME helper, so one assertion guards all.
+// The Deployment and the helm-test pod resolve the SAME helper, so one assertion guards both.
 
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";

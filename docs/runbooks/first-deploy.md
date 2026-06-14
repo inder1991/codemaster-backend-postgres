@@ -36,9 +36,9 @@ every advisory lock the app takes is transaction-scoped (`pg_try_advisory_xact_l
 commit/rollback — so the pool can hand the connection to another client between transactions.
 
 > Migrations are an up-only sequence: a **fused baseline** (`migrations/0001_baseline.sql`) plus the
-> incremental migrations after it (currently `0002_confluence_settings`, `0003_auth_secrets`). The
-> pre-install migrate Job applies ALL pending migrations; the runtime refuses to boot unless the full set
-> is applied (the schema preflight). On a fresh DB this is one `migrate:up` that applies them in order.
+> incremental migrations after it (currently `0002_confluence_settings`, `0003_auth_secrets`). The app
+> container applies ALL pending migrations at startup (before serving); the runtime refuses to boot unless
+> the full set is applied (the schema preflight). On a fresh DB this is one `migrate:up` that applies them in order.
 
 ## 2. Generate the field-encryption key
 
@@ -131,8 +131,8 @@ vault:
   kvMount: secret                  # the KV-v2 mount the bootstrap secrets live under
 ```
 
-The chart mounts the SA token automatically in this mode, and the migrate Job resolves the DSN from
-Vault (via `resolve_dsn`) before running migrations.
+The chart mounts the SA token automatically in this mode, and the app container resolves the DSN from
+Vault (via `resolve_dsn`) and runs migrations at startup, before serving.
 
 ## 4. Set the REQUIRED Helm overrides
 
@@ -156,8 +156,8 @@ deploy can't do harm while you confirm wiring:
 helm install codemaster ./deploy/helm/codemaster-backend -f your-values.yaml
 ```
 
-The migrate Job runs first (pre-install hook). If Postgres prereqs are missing, it fails here with a
-clear error.
+Migrations run in the app container at startup, before it serves. If Postgres prereqs are missing, the
+pod fails to boot here with a clear error.
 
 ## 6. Validate + log in
 
