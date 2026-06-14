@@ -32,6 +32,10 @@ import {
 import { ensureScheduledJobs } from "./cron_schedules.js";
 import { DisposableRegistry } from "./disposables.js";
 import { HandlerRegistry } from "./handler_registry.js";
+import {
+  makeLazyConfluenceChunkClient,
+  makeLazyConfluenceEmbeddings,
+} from "./handlers/_confluence_page_sync.js";
 import { registerCronHandlers } from "./handlers/cron_handlers.js";
 import { registerEventHandlers } from "./handlers/event_handlers.js";
 import { LoopHealthRegistry } from "./loop_health.js";
@@ -256,12 +260,31 @@ export function buildBackgroundRunner(deps: BackgroundRunnerDeps): BackgroundRun
   // partition maintenance prefers CODEMASTER_PG_MAINT_DSN; the workspace release activity reads
   // CODEMASTER_WORKSPACE_ROOT), exactly as under their Temporal dispatch, and the retention PR-closer
   // builds its deferred-Vault GitHub client on first use.
-  registerCronHandlers(registry, { disposables });
+  // F14 / P2-18: build ONE shared lazy Confluence chunk client (its ConfluenceTokenProvider refresh loop +
+  // Vault reader) + embeddings, injected into BOTH the cron (confluence_ingest) and event
+  // (trigger_page_resync) handlers. Without this each register*Handlers builds its OWN → two refresh loops,
+  // double the Vault read/login cadence, and two token caches that can diverge across a rotation. The shared
+  // client's dispose is registered ONCE so the SIGTERM dispose phase stops the single loop.
+  const sharedConfluenceClient = makeLazyConfluenceChunkClient();
+  disposables.register({
+    name: "confluence.shared_chunk_client",
+    dispose: sharedConfluenceClient.dispose,
+  });
+  const sharedConfluenceEmbeddings = makeLazyConfluenceEmbeddings();
+  registerCronHandlers(registry, {
+    disposables,
+    confluenceClient: sharedConfluenceClient.client,
+    confluenceEmbeddings: sharedConfluenceEmbeddings,
+  });
   // W3d.1: the 3 reconcile/repair EVENT-DRIVEN job_types (reconcile_installation /
   // reconcile_repositories / repair_installation_repositories). The next wave's outbox
   // temporal_workflow_start cutover routes the producers' workflow_type strings onto these via
   // workflow_job_map.ts.
-  registerEventHandlers(registry, { disposables });
+  registerEventHandlers(registry, {
+    disposables,
+    confluenceClient: sharedConfluenceClient.client,
+    confluenceEmbeddings: sharedConfluenceEmbeddings,
+  });
 
   const runnerArgs = {
     repo,

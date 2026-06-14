@@ -155,7 +155,7 @@ describe("buildBackgroundRunner — the shared dispose registry (#10)", () => {
     outboxMaxAttempts: 5,
   };
 
-  it("(4) registers the two default lazy Confluence clients; disposing a never-used runner is a clean no-op", async () => {
+  it("(4) registers ONE SHARED lazy Confluence client injected into both handler sets (F14/P2-18); disposing a never-used runner is a clean no-op", async () => {
     // buildBackgroundRunner performs NO I/O (the pg pool is lazy) — a never-connected pool suffices.
     const pool = new Pool({ connectionString: "postgresql://unused:unused@127.0.0.1:1/unused" });
     const db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) });
@@ -163,13 +163,10 @@ describe("buildBackgroundRunner — the shared dispose registry (#10)", () => {
       const handles = buildBackgroundRunner({ db, clock: new FakeClock(), config: TEST_CONFIG });
 
       expect(handles.disposables).toBeInstanceOf(DisposableRegistry);
-      // The two composition-root default lazy clients that own a token-refresh loop once built:
-      // cron_handlers' confluence_ingest client, then event_handlers' trigger_page_resync client
-      // (registration order = registerCronHandlers before registerEventHandlers).
-      expect(handles.disposables.registeredNames()).toEqual([
-        "confluence_ingest.confluence_chunk_client",
-        "trigger_page_resync.confluence_chunk_client",
-      ]);
+      // F14 / P2-18: ONE shared lazy chunk client (a single token-refresh loop + Vault reader) is built at
+      // the composition root and injected into BOTH registerCronHandlers + registerEventHandlers — so there
+      // is exactly ONE registered dispose, not one per handler (which doubled the loops + Vault cadence).
+      expect(handles.disposables.registeredNames()).toEqual(["confluence.shared_chunk_client"]);
 
       // The DISPOSE PHASE on an idle runner (no job ever built the lazy clients) must resolve
       // cleanly WITHOUT constructing anything (no Vault env vars exist in this unit test — a

@@ -103,6 +103,9 @@ const EMBED_BATCH_SIZE = 128;
 const MIN_EMBED_CHARS = 256;
 /** Purpose label routing Confluence chunk embeds through the correct metering bucket. */
 const EMBED_PURPOSE = "confluence_chunk";
+/** F14 / P2-17: hard ceiling on fetch_space_pages pagination steps — a backstop against a non-advancing /
+ *  cycling cursor (and a pathologically large space) so the loop can never spin forever. */
+const MAX_FETCH_PAGE_ITERATIONS = 10_000;
 
 // ─── Narrow injected ports (the exact slice each method needs) ───────────────────────────────────
 
@@ -216,6 +219,7 @@ export class ConfluenceSyncActivities {
     const parsed = FetchSpacePagesInputV1.parse(input);
     const refs: Array<PageRef> = [];
     let cursor: string | null = null;
+    let iterations = 0;
     for (;;) {
       const pageList = await this.client.listPages({ spaceKey: parsed.space_key, cursor });
       for (const summary of pageList.items) {
@@ -226,10 +230,25 @@ export class ConfluenceSyncActivities {
           version: summary.version,
         });
       }
-      if (pageList.next_cursor === null || pageList.next_cursor === "") {
+      const next = pageList.next_cursor;
+      // F14 / P2-17 (partial — the non-advancing-cursor guard): stop on end-of-pages OR a cursor that did
+      // NOT advance (a buggy/hostile endpoint echoing the same cursor would otherwise loop forever), and cap
+      // total iterations as belt-and-suspenders. NOTE: this still accumulates ALL refs in memory and
+      // re-fetches from scratch each cycle on abort — a streaming/checkpoint-resume (persist the cursor as
+      // job state) + a per-cycle page cap is the remaining work, and the cap is UNSAFE without resume (a
+      // capped-out page absent from live_page_ids would be soft-deleted by reconcile).
+      // FOLLOW-UP-confluence-fetch-checkpoint-resume.
+      if (next === null || next === "" || next === cursor) {
         break;
       }
-      cursor = pageList.next_cursor;
+      iterations += 1;
+      if (iterations >= MAX_FETCH_PAGE_ITERATIONS) {
+        throw new Error(
+          `fetch_space_pages: ${parsed.space_key} exceeded ${MAX_FETCH_PAGE_ITERATIONS} pagination steps — ` +
+            `aborting (non-advancing/cycling cursor or a pathologically large space)`,
+        );
+      }
+      cursor = next;
     }
     return { schema_version: 1, pages: refs };
   }
