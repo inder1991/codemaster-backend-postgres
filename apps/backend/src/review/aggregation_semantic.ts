@@ -30,6 +30,7 @@
  */
 
 import {
+  DEFAULT_EMBEDDER_MODEL_NAME,
   EmbeddingsError,
   type EmbedRequest,
   type EmbeddingsPort,
@@ -40,8 +41,8 @@ import type { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
 /** Cosine-similarity merge threshold (Python `SEMANTIC_MERGE_THRESHOLD = 0.92`). */
 export const SEMANTIC_MERGE_THRESHOLD = 0.92;
 
-/** Default platform model id for the body-embed batch (Python `embedder_model="qwen3-embed-0.6b"`). */
-export const DEFAULT_EMBEDDER_MODEL = "qwen3-embed-0.6b";
+/** Default platform model id for the body-embed batch — the single source (was a copy of the literal). */
+export const DEFAULT_EMBEDDER_MODEL = DEFAULT_EMBEDDER_MODEL_NAME;
 
 /** Body-union separator (matches aggregation.ts's exact-merge separator). */
 const BODY_SEPARATOR = "\n---\n";

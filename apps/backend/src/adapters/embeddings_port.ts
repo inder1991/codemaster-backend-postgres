@@ -190,6 +190,18 @@ export function resolveEmbeddingDim(env: NodeJS.ProcessEnv = process.env): numbe
 export const EMBEDDING_DIM = resolveEmbeddingDim();
 
 /**
+ * The platform default embedder model id — the SINGLE source for the model-name HINT the legacy/Qwen
+ * embed paths put in `EmbedRequest.model_name` (previously copy-pasted as `"qwen3-embed-0.6b"` across the
+ * worker/runner wiring). NOTE: with the DB-backed embedder this is only a FALLBACK request hint — the
+ * ResolvingEmbeddingsAdapter ignores `EmbedRequest.model_name` and sends + stamps the configured model,
+ * and the AUTHORITATIVE persisted provenance is `core.embedder_runtime_state.active_model_name` (set on
+ * the admin `/test` promotion) which the dual-write reads via `getActiveModelName()`. So this constant
+ * never drives what model is actually used or recorded for the DB embedder — it is the one place the
+ * legacy default lives.
+ */
+export const DEFAULT_EMBEDDER_MODEL_NAME = "qwen3-embed-0.6b";
+
+/**
  * Deterministic dev/test {@link EmbeddingsPort}. Records every call and returns a reproducible
  * synthetic vector per input text. Wired ONLY via the `stub://recording` DSN sentinel in
  * {@link resolveEmbeddingsConsumer} (dev environments without a real embedder); NEVER on a

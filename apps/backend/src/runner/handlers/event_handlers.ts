@@ -17,7 +17,7 @@ import {
   type IsEnabled,
   SyncCodeOwnersActivity,
 } from "#backend/activities/sync_code_owners.activity.js";
-import type { EmbeddingsPort } from "#backend/adapters/embeddings_port.js";
+import { DEFAULT_EMBEDDER_MODEL_NAME, type EmbeddingsPort } from "#backend/adapters/embeddings_port.js";
 import { PostgresCodeOwnersRepo } from "#backend/domain/repos/code_owners_repo.js";
 import { readCodeOwnersV1Enabled } from "#backend/ingest/_code_owners_v1_flag.js";
 import { PostgresKnowledgeChunkRepo } from "#backend/domain/repos/knowledge_chunks_repo.js";
@@ -211,7 +211,7 @@ const CODEOWNERS_LOOKUP_PATHS = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEO
 /** The platform embed model name the refresh holder is constructed with — byte-1:1 with the
  *  Temporal composition root (build_activities.ts wires the SAME "qwen3-embed-0.6b" the confluence
  *  chunk_and_embed / embed_query path uses). */
-const REFRESH_EMBED_MODEL_NAME = "qwen3-embed-0.6b";
+const REFRESH_EMBED_MODEL_NAME = DEFAULT_EMBEDDER_MODEL_NAME;
 
 /**
  * A {@link CodeOwnersFilePort} that builds the REAL Vault-token-backed GitHubApiClient on first
