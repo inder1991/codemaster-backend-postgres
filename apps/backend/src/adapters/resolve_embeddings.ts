@@ -23,12 +23,14 @@ import {
   resolveEffectiveEmbedderConfig,
 } from "#backend/adapters/effective_embedder_config.js";
 import { ResolvingEmbeddingsAdapter } from "#backend/adapters/resolving_embeddings_adapter.js";
-import type {
-  EmbedderEffectiveDbConfig,
-  EmbedderSettingsNonSecret,
+import {
+  type EmbedderEffectiveDbConfig,
+  type EmbedderSettingsNonSecret,
+  PostgresEmbedderProviderSettingsRepo,
 } from "#backend/integrations/embedder/embedder_provider_settings_repo.js";
 import { OpenAICompatibleEmbeddingsAdapter } from "#backend/integrations/openai_compat/adapter.js";
 import { QwenEmbeddingsConsumer } from "#backend/integrations/qwen/consumer.js";
+import { getAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
 
 /** The DB-backed embedder config reads the ResolvingEmbeddingsAdapter needs (the settings repo satisfies
  *  this structurally). When supplied, the worker embeds through the DB-validated > env > none resolver. */
@@ -43,6 +45,42 @@ export type ResolveEmbeddingsDeps = {
   embedderConfigPort?: EmbedderConfigReadPort;
   env?: NodeJS.ProcessEnv;
 };
+
+/**
+ * The runtime embedder for a composition root: the DB-backed ResolvingEmbeddingsAdapter when the
+ * field-codec registry is installed (production), else the legacy env-only selection. ONE place for the
+ * registry-gated DB-vs-env decision so EVERY runtime — the review pipeline (build_activities), the
+ * background-runner INGEST handlers (confluence_ingest / refresh_semantic_docs), and the ANN-fallback —
+ * embeds with the SAME UI-saved model. Otherwise the corpus could be ingested with one model and queried
+ * with another (silent retrieval breakage), which is exactly what wiring only build_activities missed.
+ */
+export function resolveRuntimeEmbedder(args: { dsn: string }): EmbeddingsPort {
+  const registry = getAuditKeyRegistry();
+  return registry !== null
+    ? resolveEmbeddingsConsumer({
+        embedderConfigPort: PostgresEmbedderProviderSettingsRepo.fromDsn({ dsn: args.dsn, registry }),
+      })
+    : resolveEmbeddingsConsumer();
+}
+
+/**
+ * A LAZY {@link resolveRuntimeEmbedder}: resolves the runtime embedder on the FIRST embed (not at
+ * construction), so a composition root that must stay bootable in DSN-less / pre-registry contexts (the
+ * background runner) does not eagerly read the registry/env or fail-loud at build time. By first embed
+ * (a real ingest job) the boot path has installed the field-key registry, so the DB path is selected.
+ */
+export function makeLazyRuntimeEmbedder(args: { dsn?: string | undefined } = {}): EmbeddingsPort {
+  let memo: EmbeddingsPort | undefined;
+  return {
+    async embed(req) {
+      if (memo === undefined) {
+        const dsn = args.dsn ?? process.env["CODEMASTER_PG_CORE_DSN"];
+        memo = dsn !== undefined && dsn !== "" ? resolveRuntimeEmbedder({ dsn }) : resolveEmbeddingsConsumer();
+      }
+      return memo.embed(req);
+    },
+  };
+}
 
 /** Map the repo's non-secret view to the digest parts the adapter cache keys on (never the plaintext key). */
 function nonSecretToDigestParts(ns: EmbedderSettingsNonSecret | null): EffectiveConfigDigestParts | null {

@@ -182,7 +182,6 @@ import { PostgresConfluenceChunksRepo } from "#backend/domain/repos/confluence_c
 import { PostgresConfluencePageApprovalsRepo } from "#backend/domain/repos/confluence_page_approvals_repo.js";
 import { makeLazyEmbedderCache } from "#backend/adapters/embedder_cache.js";
 import { DEFAULT_EMBEDDER_MODEL_NAME } from "#backend/adapters/embeddings_port.js";
-import { PostgresEmbedderProviderSettingsRepo } from "#backend/integrations/embedder/embedder_provider_settings_repo.js";
 import { ConfluenceClient } from "#backend/integrations/confluence/client.js";
 import { makeResolvingConfluenceReader } from "#backend/integrations/confluence/confluence_config_resolver.js";
 import { ConfluenceTokenProvider } from "#backend/integrations/confluence/token_provider.js";
@@ -210,7 +209,7 @@ import { RefreshSemanticDocsActivity } from "#backend/activities/refresh_semanti
 import { PostgresKnowledgeChunkRepo } from "#backend/domain/repos/knowledge_chunks_repo.js";
 import { type TokenProvider } from "#backend/integrations/github/api_client.js";
 
-import { resolveEmbeddingsConsumer } from "#backend/adapters/resolve_embeddings.js";
+import { resolveRuntimeEmbedder } from "#backend/adapters/resolve_embeddings.js";
 
 import { FetchGitHubHttpClient } from "#backend/integrations/github/api_client.js";
 import { GitSubprocessCloner } from "#backend/integrations/git/cloner.js";
@@ -225,7 +224,7 @@ import { LlmClient } from "#backend/integrations/llm/client.js";
 import { LlmCredentialsProvider } from "#backend/integrations/llm/credentials_provider.js";
 import { LlmInvocationLedger } from "#backend/integrations/llm/invocation_ledger.js";
 import { PostgresLlmProviderSettingsRepo } from "#backend/integrations/llm/llm_provider_settings_repo.js";
-import { getAuditKeyRegistry, requireAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
+import { requireAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
 
 import {
   type LlmClientCacheLike,
@@ -715,20 +714,10 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
   // installation id from its typed input; the cloner + fix-prompt seam mint per-call. One pod serves all orgs.
 
   // The real platform embedder, shared by the aggregate semantic-merge stage, the embed_query activity, and
-  // the retrieve-knowledge ANN port. Phase 7: when the field-codec registry is installed (production boot),
-  // wire the DB-backed config port so the worker embeds with the UI-saved model (the ResolvingEmbeddings
-  // Adapter: DB-validated > env > disabled). Without a registry (dev/tests) it falls back to the env-only
-  // selection unchanged — no behavior change for any caller that hasn't installed the keyset.
-  const embedderRegistry = getAuditKeyRegistry();
-  const embedder =
-    embedderRegistry !== null
-      ? resolveEmbeddingsConsumer({
-          embedderConfigPort: PostgresEmbedderProviderSettingsRepo.fromDsn({
-            dsn,
-            registry: embedderRegistry,
-          }),
-        })
-      : resolveEmbeddingsConsumer();
+  // the retrieve-knowledge ANN port. resolveRuntimeEmbedder gives the DB-backed ResolvingEmbeddingsAdapter
+  // when the field-codec registry is installed (production), else the legacy env-only selection — the SAME
+  // helper the background-runner ingest path + the ANN-fallback use, so corpus + query embed identically.
+  const embedder = resolveRuntimeEmbedder({ dsn });
 
   // Bound-method activity holders — the real embedder threads into all three.
   // `.aggregateFindings` / `.embedQuery` / `.retrieveKnowledge`

@@ -72,7 +72,7 @@ import { GitHubApiClient } from "#backend/integrations/github/api_client.js";
 import { GitHubApiReviewClient, type GhReviewClient } from "#backend/integrations/github/review_client.js";
 import { FetchGitHubHttpClient } from "#backend/integrations/github/api_client.js";
 import { GitHubAppTokenProvider } from "#backend/integrations/github/token_provider.js";
-import { resolveEmbeddingsConsumer } from "#backend/adapters/resolve_embeddings.js";
+import { makeLazyRuntimeEmbedder } from "#backend/adapters/resolve_embeddings.js";
 
 import {
   type ClientFactory,
@@ -364,7 +364,9 @@ export function makeInProcessPorts(deps: InProcessPortDeps, signal: AbortSignal)
   let retrieveMemo: ReturnType<typeof buildRetrieveKnowledgeActivity> | undefined;
   const retrieve = (): ReturnType<typeof buildRetrieveKnowledgeActivity> => {
     retrieveMemo ??= buildRetrieveKnowledgeActivity({
-      embedder: resolveEmbeddingsConsumer(),
+      // The DB-backed runtime embedder (lazy): the ANN-fallback self-embeds the query only when
+      // embed_query's override is absent; it must use the SAME UI-saved model as embed_query, not env-only.
+      embedder: makeLazyRuntimeEmbedder(),
       rerankCache: strictCache(),
       rerankResolver: getPurposeResolver(),
     });
