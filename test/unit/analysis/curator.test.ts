@@ -12,6 +12,7 @@ import {
   LlmRoleNotConfiguredError,
 } from "#backend/integrations/llm/errors.js";
 import type { LlmClientCacheLike } from "#backend/analysis/curator.js";
+import type { PurposeModelResolverLike } from "#backend/llm/purpose_model_resolver.js";
 
 import { InMemoryBlobStoreAdapter } from "../../support/llm/cassette_sdk.js";
 
@@ -311,6 +312,30 @@ describe("AnalysisCurator — fail-open on unexpected error", () => {
     expect(result.findings).toHaveLength(1);
     expect(result.findings[0]!.title).toBe("trivy: cve");
     expect(result.curator_skipped).toBe(true);
+  });
+});
+
+describe("AnalysisCurator — purpose resolver drives model selection", () => {
+  it("resolves model via injected resolver (not static seed) when resolver is provided", async () => {
+    const SENTINEL = "sentinel-analysis_curator";
+    let capturedModel: string | undefined;
+    const sdk: LlmSdk = {
+      async createMessage(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+        capturedModel = args["model"] as string;
+        return curateResponse([CURATE_INPUT]);
+      },
+    };
+    const client = new LlmClient({
+      sdk,
+      costCap: new InMemoryCostCapEnforcer({ globalCapCents: 500_000, perOrgCapCents: 100_000 }),
+      blobStore: new InMemoryBlobStoreAdapter(),
+      clock: new FakeClock(),
+    });
+    const cache: LlmClientCacheLike = { async forRole() { return client; } };
+    const resolver: PurposeModelResolverLike = { resolve: async () => SENTINEL };
+    const curator = new AnalysisCurator({ cache, resolver });
+    await curator.curate([finding()], { prMeta: prMeta() });
+    expect(capturedModel).toBe(SENTINEL);
   });
 });
 

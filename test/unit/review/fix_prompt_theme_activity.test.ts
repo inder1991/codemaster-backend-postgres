@@ -17,6 +17,7 @@ import {
   extractThemes,
   renderFixPromptComment,
 } from "#backend/review/fix_prompt/fix_prompt_theme_activity.js";
+import type { PurposeModelResolverLike } from "#backend/llm/purpose_model_resolver.js";
 import { buildFixPromptDeterministic, severityTruncate } from "#backend/review/fix_prompt/fix_prompt_builder.js";
 
 import { InMemoryBlobStoreAdapter } from "../../support/llm/cassette_sdk.js";
@@ -269,6 +270,38 @@ describe("buildFixPrompt — additive LLM theme synthesis", () => {
     });
     expect(record.generation_mode).toBe("deterministic_fallback");
     expect(record.prompt).toBe(deterministicBase());
+  });
+});
+
+describe("buildFixPrompt — purpose resolver drives model selection", () => {
+  it("resolves model via injected resolver (not static seed) when resolver is provided", async () => {
+    const SENTINEL = "sentinel-fix_prompt";
+    let capturedModel: string | undefined;
+    const sdk: LlmSdk = {
+      async createMessage(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+        capturedModel = args["model"] as string;
+        return themesResponse("## Cross-cutting patterns\nTest.");
+      },
+    };
+    const client = new LlmClient({
+      sdk,
+      costCap: new InMemoryCostCapEnforcer({ globalCapCents: 500_000, perOrgCapCents: 100_000 }),
+      blobStore: new InMemoryBlobStoreAdapter(),
+      clock: new FakeClock(),
+    });
+    const cache: LlmClientCacheLike = { async forRole() { return client; } };
+    const resolver: PurposeModelResolverLike = { resolve: async () => SENTINEL };
+    const agg = aggregated([finding({ title: "x" })]);
+    await buildFixPrompt({
+      reviewId: REVIEW_ID,
+      aggregated: agg,
+      prNumber: 77,
+      installationId: INSTALLATION_ID,
+      cache,
+      resolver,
+      clock: FIXED_CLOCK,
+    });
+    expect(capturedModel).toBe(SENTINEL);
   });
 });
 

@@ -43,6 +43,7 @@ import {
   buildFixPrompt,
   renderFixPromptComment,
 } from "#backend/review/fix_prompt/fix_prompt_theme_activity.js";
+import type { PurposeModelResolverLike } from "#backend/llm/purpose_model_resolver.js";
 
 import { FixPromptActivityResultV1 } from "#contracts/fix_prompt_activity_result.v1.js";
 import type { GenerateFixPromptInputV1 } from "#contracts/generate_fix_prompt.v1.js";
@@ -110,17 +111,20 @@ export class FixPromptActivities {
   private readonly repo: FixPromptRepo;
   private readonly gh: FixPromptIssueCommentClient;
   private readonly clock: Clock;
+  private readonly resolver: PurposeModelResolverLike | undefined;
 
   public constructor(args: {
     cache: LlmClientCacheLike;
     repo: FixPromptRepo;
     gh: FixPromptIssueCommentClient;
     clock: Clock;
+    resolver?: PurposeModelResolverLike;
   }) {
     this.cache = args.cache;
     this.repo = args.repo;
     this.gh = args.gh;
     this.clock = args.clock;
+    this.resolver = args.resolver;
   }
 
   /**
@@ -169,6 +173,7 @@ export class FixPromptActivities {
       installationId: payload.installation_id,
       cache: this.cache,
       clock: this.clock,
+      ...(this.resolver !== undefined ? { resolver: this.resolver } : {}),
     });
 
     await this.repo.persist(record, { installationId: payload.installation_id });

@@ -39,6 +39,7 @@ import type { BedrockRerankOverrideResolver } from "#backend/retrieval/bedrock_r
 import type { Bm25Retriever } from "#backend/retrieval/bm25_retriever.js";
 import type { HybridRetriever } from "#backend/retrieval/hybrid_retriever.js";
 import { LlmBackedRerankPort, type RerankLlmCacheLike } from "#backend/retrieval/llm_backed_rerank.js";
+import type { PurposeModelResolverLike } from "#backend/llm/purpose_model_resolver.js";
 import { LlmRerank } from "#backend/retrieval/llm_rerank.js";
 import type { KnowledgeChunkV1, KnowledgeQueryV1 } from "#contracts/knowledge_chunks.v1.js";
 import type {
@@ -73,6 +74,11 @@ export type RetrieveKnowledgeActivityOptions = {
    * a rerank fault must never fail the review.
    */
   bedrockRerankResolver?: BedrockRerankOverrideResolver;
+  /**
+   * Optional purpose-model resolver for the LLM-backed reranker. When wired, the per-invocation
+   * rerank port resolves its model from the DB-backed resolver instead of the static seed.
+   */
+  resolver?: PurposeModelResolverLike;
 };
 
 /** Read the `CODEMASTER_LLM_RERANK_ENABLED` rollout flag (default OFF) — operator-flippable, replay-safe. */
@@ -97,6 +103,7 @@ export function buildRerankOverride(args: {
    * plumbed through, the {@link LlmBackedRerankPort} ledgers the call keyed by purposeChunkId("rerank").
    */
   reviewId?: string;
+  resolver?: PurposeModelResolverLike;
 }): LlmRerank | undefined {
   if (!args.enabled || args.cache === undefined) {
     return undefined;
@@ -107,6 +114,7 @@ export function buildRerankOverride(args: {
       installationId: args.installationId,
       // exactOptionalPropertyTypes: only set `reviewId` when it is actually present (absent → no ledgering).
       ...(args.reviewId !== undefined ? { reviewId: args.reviewId } : {}),
+      ...(args.resolver !== undefined ? { resolver: args.resolver } : {}),
     }),
   });
 }
@@ -126,6 +134,7 @@ export class RetrieveKnowledgeActivity {
   private readonly hybrid: HybridRetriever | undefined;
   private readonly rerankCache: RerankLlmCacheLike | undefined;
   private readonly bedrockRerankResolver: BedrockRerankOverrideResolver | undefined;
+  private readonly resolver: PurposeModelResolverLike | undefined;
 
   public constructor({
     bm25Retriever,
@@ -134,6 +143,7 @@ export class RetrieveKnowledgeActivity {
     hybridRetriever,
     rerankCache,
     bedrockRerankResolver,
+    resolver,
   }: RetrieveKnowledgeActivityOptions) {
     this.bm25 = bm25Retriever;
     this.ann = annRetriever;
@@ -141,6 +151,7 @@ export class RetrieveKnowledgeActivity {
     this.hybrid = hybridRetriever;
     this.rerankCache = rerankCache;
     this.bedrockRerankResolver = bedrockRerankResolver;
+    this.resolver = resolver;
   }
 
   /**
@@ -303,6 +314,7 @@ export class RetrieveKnowledgeActivity {
         enabled: rerankEnabled(),
         cache: this.rerankCache,
         installationId: query.installation_id,
+        ...(this.resolver !== undefined ? { resolver: this.resolver } : {}),
       });
     const result = await this.hybrid.retrieve(query, rerankOverride);
 

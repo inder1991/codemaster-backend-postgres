@@ -35,7 +35,7 @@ import { createHash } from "node:crypto";
 
 import { purposeChunkId } from "#backend/integrations/llm/invocation_ledger.js";
 import { buildSystemPrompt } from "#backend/llm/review_prompt.js";
-import { modelForPurpose } from "#backend/llm/model_router.js";
+import { staticPurposeModelResolver, type PurposeModelResolverLike } from "#backend/llm/purpose_model_resolver.js";
 import { wrapUntrusted } from "#backend/security/trust_tier_wrapping.js";
 
 import type { LlmClient } from "#backend/integrations/llm/client.js";
@@ -167,6 +167,7 @@ export class AnalysisCurator {
   private readonly cache: LlmClientCacheLike;
   private readonly modelOverride: string | undefined;
   private readonly policyRevision: number;
+  private readonly resolver: PurposeModelResolverLike;
 
   public constructor(args: {
     cache: LlmClientCacheLike;
@@ -174,10 +175,12 @@ export class AnalysisCurator {
     // claude-haiku-4-5) by default. An explicit model= still overrides (eval / tests).
     model?: string;
     policyRevision?: number;
+    resolver?: PurposeModelResolverLike;
   }) {
     this.cache = args.cache;
     this.modelOverride = args.model;
     this.policyRevision = args.policyRevision ?? 0;
+    this.resolver = args.resolver ?? staticPurposeModelResolver;
   }
 
   /**
@@ -259,7 +262,7 @@ export class AnalysisCurator {
     ];
     // ADR-0060 step 0: source the curator model from the central purpose→model seed
     // (analysis_curator → claude-haiku-4-5). An explicit override wins (eval / tests).
-    const model = this.modelOverride ?? modelForPurpose("analysis_curator");
+    const model = this.modelOverride ?? (await this.resolver.resolve("analysis_curator"));
 
     const result = await llmClient.invokeModel({
       role,

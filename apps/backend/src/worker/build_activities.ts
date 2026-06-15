@@ -185,6 +185,8 @@ import { ConfluenceClient } from "#backend/integrations/confluence/client.js";
 import { makeResolvingConfluenceReader } from "#backend/integrations/confluence/confluence_config_resolver.js";
 import { ConfluenceTokenProvider } from "#backend/integrations/confluence/token_provider.js";
 import { tenantKysely } from "#platform/db/database.js";
+import { PurposeModelResolver } from "#backend/llm/purpose_model_resolver.js";
+import { PostgresPurposeModelReadRepo } from "#backend/llm/purpose_model_repo.js";
 
 import { GitHubIssueClient } from "#backend/integrations/github/issue_client.js";
 import { PostgresLinkedIssuesRepo } from "#backend/domain/repos/pr_issue_links_repo.js";
@@ -723,7 +725,8 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
   // walkthrough, fix-prompt, AND (E) the retrieve_knowledge per-invocation LLM reranker (default-off behind
   // CODEMASTER_LLM_RERANK_ENABLED — wired here so an operator can enable it without a code change).
   const llmCache = makeLazyLlmClientCache(dsn);
-  const retrieveKnowledgeActivity = buildRetrieveKnowledgeActivity({ embedder, rerankCache: llmCache });
+  const purposeResolver = new PurposeModelResolver({ repo: new PostgresPurposeModelReadRepo({ db: tenantKysely(dsn) }) });
+  const retrieveKnowledgeActivity = buildRetrieveKnowledgeActivity({ embedder, rerankCache: llmCache, rerankResolver: purposeResolver });
   // W2.4 (XH13) — the once-per-review retrieval short-circuit probe (cheap EXISTS pair over the shared
   // ADR-0062 pool). The orchestrator dispatches it BEFORE the chunk fan-out and fail-opens to "no
   // short-circuit" when it errors; arrow property → stays bound when destructured into the map.
@@ -743,7 +746,7 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
   // role-keyed; the walkthrough resolves `forRole("primary")` then selects `modelForPurpose("walkthrough")`
   // — claude-opus, distinct from the review role's sonnet — inside the activity body, exactly like
   // bedrockReviewChunk). `.generateWalkthrough` is an arrow property so it stays bound when destructured.
-  const walkthroughActivities = new WalkthroughActivities({ cache: llmCache });
+  const walkthroughActivities = new WalkthroughActivities({ cache: llmCache, resolver: purposeResolver });
 
   // ── Stage-4 bound-method holders (fetch_linked_issues + fetch_suggested_reviewers) ──
   // Both read tenancy-scoped tables off the core DSN (lazy pool — no connection at construction). The
@@ -778,6 +781,7 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     repo: FixPromptRepo.fromDsn(dsn),
     gh: makeLazyFixPromptIssueClient(),
     clock,
+    resolver: purposeResolver,
   });
 
   // ── static_analysis bound-method holder (REAL runner orchestration) ──
@@ -798,6 +802,7 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     curatorCache: llmCache,
     deadlineSeconds: TIER1_STATIC_ANALYSIS_SECONDS,
     clock,
+    curatorResolver: purposeResolver,
   });
 
   // ── #4 manifest fetch + parse bound-method holders ──
@@ -959,9 +964,9 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
     // activity is genuinely 1-arg (the latent 2-arg-crash fix). Deps resolve lazily on first dispatch.
     cloneRepoIntoWorkspace: async (req: Parameters<typeof cloneRepoIntoWorkspace>[0]) =>
       cloneRepoIntoWorkspace(req, await resolveClonerDeps()),
-    // bedrockReviewChunk(context, { cache }) — curry the real ledger-wired LlmClientCache.
+    // bedrockReviewChunk(context, { cache, resolver }) — curry the real ledger-wired LlmClientCache + resolver.
     bedrockReviewChunk: (context: Parameters<typeof bedrockReviewChunk>[0]) =>
-      bedrockReviewChunk(context, { cache: llmCache }),
+      bedrockReviewChunk(context, { cache: llmCache, resolver: purposeResolver }),
     // ── Stage-5 (arbitration apply + tool-run record + fix-prompt) ──
     // applyArbitrationActivity / recordToolRuns self-wire their repos from CODEMASTER_PG_CORE_DSN (1-arg →
     // registered bare). generateFixPrompt is the FixPromptActivities bound arrow property (shared LLM cache +

@@ -27,7 +27,7 @@ import { transportAbortSignal } from "#platform/transport_timeout.js";
 import { BedrockBudgetExceededError } from "#backend/cost/enforcer.js";
 import type { LlmClient } from "#backend/integrations/llm/client.js";
 import { purposeChunkId } from "#backend/integrations/llm/invocation_ledger.js";
-import { modelForPurpose } from "#backend/llm/model_router.js";
+import { staticPurposeModelResolver, type PurposeModelResolverLike } from "#backend/llm/purpose_model_resolver.js";
 import { LlmRerankUnavailableError, type LlmRerankerPort } from "#backend/retrieval/llm_rerank.js";
 
 import type { KnowledgeChunkV1 } from "#contracts/knowledge_chunks.v1.js";
@@ -176,6 +176,8 @@ export class LlmBackedRerankPort implements LlmRerankerPort {
   // with the Temporal-legacy path (invoke, no replay) — back-compat with no ledgering.
   private readonly reviewId: string | undefined;
 
+  private readonly resolver: PurposeModelResolverLike;
+
   public constructor(args: {
     cache: RerankLlmCacheLike;
     installationId: string;
@@ -183,12 +185,14 @@ export class LlmBackedRerankPort implements LlmRerankerPort {
     modelOverride?: string;
     /** de-Temporal Phase 2 (D2) — additive optional; absent → no ledgering (back-compat). */
     reviewId?: string;
+    resolver?: PurposeModelResolverLike;
   }) {
     this.cache = args.cache;
     this.installationId = args.installationId;
     this.timeoutMs = args.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.modelOverride = args.modelOverride;
     this.reviewId = args.reviewId;
+    this.resolver = args.resolver ?? staticPurposeModelResolver;
   }
 
   public async rerank(args: {
@@ -213,7 +217,7 @@ export class LlmBackedRerankPort implements LlmRerankerPort {
       { role: "user", content: buildRerankUserMessage(query, candidates) },
     ];
     // Haiku (cheap, fast) for rerank — the curator's secondary model. An explicit override wins (tests).
-    const model = this.modelOverride ?? modelForPurpose("analysis_curator");
+    const model = this.modelOverride ?? (await this.resolver.resolve("analysis_curator"));
 
     // F8 / P1-D: ONE signal drives both the soft-timeout race AND the in-flight invokeModel call, so a
     // timeout aborts the Bedrock request instead of leaving it to run + bill in the background.

@@ -24,6 +24,7 @@ import {
   doReview,
   type LlmClientCacheLike,
 } from "#backend/review/review_activity.js";
+import type { PurposeModelResolverLike } from "#backend/llm/purpose_model_resolver.js";
 
 import { InMemoryBlobStoreAdapter } from "../../support/llm/cassette_sdk.js";
 
@@ -272,6 +273,29 @@ describe("doReview — output-safety sanitize-and-continue", () => {
       name: "BedrockOutputUnsafeError",
       nonRetryable: true,
     });
+  });
+});
+
+describe("doReview — purpose resolver drives model selection", () => {
+  it("resolves model via injected resolver (not static seed) when resolver is provided", async () => {
+    const SENTINEL = "sentinel-review_finding";
+    let capturedModel: string | undefined;
+    const sdk: LlmSdk = {
+      async createMessage(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+        capturedModel = args["model"] as string;
+        return { content: [], usage: { input_tokens: 10, output_tokens: 5 }, stop_reason: "end_turn" };
+      },
+    };
+    const client = new LlmClient({
+      sdk,
+      costCap: new InMemoryCostCapEnforcer({ globalCapCents: 500_000, perOrgCapCents: 100_000 }),
+      blobStore: new InMemoryBlobStoreAdapter(),
+      clock: new FakeClock(),
+    });
+    const cache: LlmClientCacheLike = { async forRole() { return client; } };
+    const resolver: PurposeModelResolverLike = { resolve: async () => SENTINEL };
+    await doReview(context(), { cache, resolver });
+    expect(capturedModel).toBe(SENTINEL);
   });
 });
 

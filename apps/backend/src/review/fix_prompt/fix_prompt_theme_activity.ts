@@ -31,7 +31,7 @@ import { type Clock, WallClock } from "#platform/clock.js";
 
 import type { LlmClient } from "#backend/integrations/llm/client.js";
 import { purposeChunkId } from "#backend/integrations/llm/invocation_ledger.js";
-import { modelForPurpose } from "#backend/llm/model_router.js";
+import { staticPurposeModelResolver, type PurposeModelResolverLike } from "#backend/llm/purpose_model_resolver.js";
 
 import {
   MAX_FIX_PROMPT_CHARS,
@@ -154,6 +154,7 @@ export async function buildFixPrompt(args: {
   installationId: string;
   cache: LlmClientCacheLike;
   clock?: Clock;
+  resolver?: PurposeModelResolverLike;
 }): Promise<FixPromptV1> {
   const clock = args.clock ?? new WallClock();
   const [included, truncated] = severityTruncate(args.aggregated.findings, {
@@ -172,7 +173,8 @@ export async function buildFixPrompt(args: {
     // ADR-0060 step 0: source the fix_prompt model from the central purpose→model seed (claude-sonnet-4-6).
     // The DB-backed async resolve merges DB rows over the seed (out of scope here — no DB in this slice);
     // the pure seed resolver IS the unconfigured fallback (matches the Python `resolve_model_for_purpose`).
-    const model = modelForPurpose("fix_prompt");
+    const resolver = args.resolver ?? staticPurposeModelResolver;
+    const model = await resolver.resolve("fix_prompt");
     const messages: Array<LlmMessage> = [
       { role: "system", content: THEME_SYSTEM_PROMPT },
       { role: "user", content: base },

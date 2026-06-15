@@ -56,6 +56,7 @@ import type { ConfluenceRetrievalPort } from "#backend/retrieval/confluence_sour
 import { HybridRetriever } from "#backend/retrieval/hybrid_retriever.js";
 import { IdentityRerankPort, LlmRerank } from "#backend/retrieval/llm_rerank.js";
 import type { RerankLlmCacheLike } from "#backend/retrieval/llm_backed_rerank.js";
+import type { PurposeModelResolverLike } from "#backend/llm/purpose_model_resolver.js";
 import { type RerankEnv, parseRerankEnv } from "#backend/retrieval/rerank_config.js";
 
 import { MIN_COSINE_SIMILARITY_FLOOR } from "#backend/retrieval/constants.js";
@@ -196,6 +197,12 @@ export type BuildRetrieveKnowledgeActivityOptions = {
    * (admin row > Helm env > default) is DISABLED unless an operator opted in.
    */
   bedrockRerankResolver?: BedrockRerankOverrideResolver;
+  /**
+   * Optional purpose-model resolver for the LLM-backed reranker. Threaded to
+   * {@link RetrieveKnowledgeActivity}; when wired, the per-invocation rerank port resolves its model
+   * from the DB-backed resolver instead of the static seed.
+   */
+  rerankResolver?: PurposeModelResolverLike;
 };
 
 /**
@@ -216,6 +223,7 @@ export function buildRetrieveKnowledgeActivity({
   topK = 5,
   rerankCache,
   bedrockRerankResolver,
+  rerankResolver,
 }: BuildRetrieveKnowledgeActivityOptions): RetrieveKnowledgeActivity {
   const bm25Retriever = new Bm25Retriever({ port: buildBm25Port() });
   const annRetriever = new AnnRetriever({
@@ -245,5 +253,6 @@ export function buildRetrieveKnowledgeActivity({
     // the admin API or the Helm config.rerank block). The injected seam wins in tests.
     bedrockRerankResolver:
       bedrockRerankResolver ?? buildBedrockRerankResolverFromDsn(resolveCoreDsn()),
+    ...(rerankResolver !== undefined ? { resolver: rerankResolver } : {}),
   });
 }

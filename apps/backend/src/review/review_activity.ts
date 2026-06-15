@@ -27,7 +27,7 @@ import {
 } from "#backend/integrations/llm/errors.js";
 import type { LlmClient } from "#backend/integrations/llm/client.js";
 import { buildSystemPrompt, REVIEW_TOOL_SCHEMA, ARBITRATION_INTENT_TOOL_SCHEMA } from "#backend/llm/review_prompt.js";
-import { modelForPurpose } from "#backend/llm/model_router.js";
+import { staticPurposeModelResolver, type PurposeModelResolverLike } from "#backend/llm/purpose_model_resolver.js";
 import { buildCachedReviewPrompt } from "#backend/review/prompt_builder.js";
 import { parseWithSkipMalformed } from "#backend/review/chunk_response_parser.js";
 import { redactText } from "#backend/redact/output_redaction.js";
@@ -85,7 +85,7 @@ export type DoReviewResult = {
  */
 export async function doReview(
   context: ReviewContextV1,
-  args: { cache: LlmClientCacheLike; model?: string },
+  args: { cache: LlmClientCacheLike; model?: string; resolver?: PurposeModelResolverLike },
 ): Promise<DoReviewResult> {
   const role = "primary";
 
@@ -108,7 +108,8 @@ export async function doReview(
   // ADR-0060 step 0: resolve the review_finding model from the central seed unless overridden. The
   // DB-backed async resolve_model_for_purpose merges DB rows over the seed (out of scope — no DB in
   // this slice); the pure seed resolver IS the unconfigured fallback, which is the cassette behavior.
-  const resolvedModel = args.model ?? modelForPurpose("review_finding");
+  const resolver = args.resolver ?? staticPurposeModelResolver;
+  const resolvedModel = args.model ?? (await resolver.resolve("review_finding"));
 
   // W2.2 (prompt caching) — CACHE-ORDERED assembly: everything byte-stable across the N chunk calls
   // of one review comes FIRST (system prompt, then the PR-level user prefix), the per-chunk suffix
@@ -281,9 +282,12 @@ function sanitizeAndContinue(e: LlmOutputUnsafeError, context: ReviewContextV1):
  */
 export async function bedrockReviewChunk(
   context: ReviewContextV1,
-  args: { cache: LlmClientCacheLike },
+  args: { cache: LlmClientCacheLike; resolver?: PurposeModelResolverLike },
 ): Promise<ReviewChunkResponseV1> {
-  const { findings, intents, sanitizationEvent } = await doReview(context, { cache: args.cache });
+  const { findings, intents, sanitizationEvent } = await doReview(context, {
+    cache: args.cache,
+    ...(args.resolver !== undefined ? { resolver: args.resolver } : {}),
+  });
   return ReviewChunkResponseV1.parse({
     findings,
     arbitration_intents: intents,
