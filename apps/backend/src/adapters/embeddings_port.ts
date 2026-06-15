@@ -136,16 +136,40 @@ export class EmbeddingsValidationError extends EmbeddingsError {
 
 // ─── Test/dev implementation ─────────────────────────────────────────────────────────────────────
 
+/** pgvector HNSW/ivfflat indexes on the `vector` type cap at 2000 dimensions. */
+export const MAX_HNSW_VECTOR_DIM = 2000;
+
 /**
- * Embedding dimensionality of the platform model (1024). Used by the deterministic
- * {@link RecordingEmbeddingsClient} and by the platform-model pgvector column width.
- *
- * NOTE: the live OpenAI-compat / Ollama path returns the PROVIDER's dimensionality (qwen3-embedding
- * on Ollama is 4096-dim). The aggregation merge uses cosine similarity, which is dim-agnostic, so it
- * MUST NOT assert `vector.length === EMBEDDING_DIM`. Only the platform-model pgvector write path
- * (a later slice) cares about this exact width.
+ * Pure: resolve the deploy-time embedding dimension from `CODEMASTER_EMBEDDING_DIMENSION`
+ * (default 1024). Validated to 1..{@link MAX_HNSW_VECTOR_DIM} — a native >2000 model must
+ * Matryoshka-truncate its output (or wait for the `halfvec` day-2 path).
  */
-export const EMBEDDING_DIM = 1024;
+export function resolveEmbeddingDim(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.CODEMASTER_EMBEDDING_DIMENSION;
+  if (raw === undefined || raw.trim() === "") {
+    return 1024;
+  }
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > MAX_HNSW_VECTOR_DIM) {
+    throw new Error(
+      `CODEMASTER_EMBEDDING_DIMENSION must be an integer in 1..${MAX_HNSW_VECTOR_DIM} ` +
+        `(pgvector caps HNSW vector indexes at ${MAX_HNSW_VECTOR_DIM}; for a larger native dim, ` +
+        `Matryoshka-truncate the model output or use the halfvec day-2 path). Got: ${raw}`,
+    );
+  }
+  return n;
+}
+
+/**
+ * Embedding dimensionality of the configured platform model (default 1024). Used by the deterministic
+ * {@link RecordingEmbeddingsClient} and by the platform-model pgvector column width. The pgvector column
+ * width (migration 0007) and `CODEMASTER_EMBEDDING_DIMENSION` MUST agree — both derive from this env.
+ *
+ * NOTE: the live OpenAI-compat / Ollama path returns the PROVIDER's dimensionality. The aggregation merge
+ * uses cosine similarity, which is dim-agnostic, so it MUST NOT assert `vector.length === EMBEDDING_DIM`.
+ * Only the platform-model pgvector write path cares about this exact width.
+ */
+export const EMBEDDING_DIM = resolveEmbeddingDim();
 
 /**
  * Deterministic dev/test {@link EmbeddingsPort}. Records every call and returns a reproducible
