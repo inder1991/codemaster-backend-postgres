@@ -12,6 +12,12 @@
 // purpose resolver cannot ride it. We use a plain monotonic-clock TTL instead — model enable/disable and
 // /test validation mutate core.llm_models WITHOUT touching core.llm_purpose_model, so a purpose-table-only
 // freshness signal would miss them; a TTL bounds staleness across both tables uniformly.
+//
+// LIFECYCLE (where the cache actually lives): the Temporal worker builds ONE instance per process
+// (build_activities.ts, inside buildActivities) so the TTL cache is reused across every dispatch. The
+// de-Temporal runner (in_process_ports.ts) builds it once PER JOB — matching that path's per-job
+// LLM-client-cache lifecycle — so the cache de-dupes the N chunk reads within a job, but each job's first
+// resolve() per purpose re-reads core.llm_purpose_model. Both are bounded and fail-open.
 
 import { type Clock, WallClock } from "#platform/clock.js";
 
@@ -50,6 +56,9 @@ export class PurposeModelResolver implements PurposeModelResolverLike {
   // resolve() falls through to the seed. `null` until the first (re)fetch.
   private cache: Map<string, string> | null = null;
   private lastFetchSeconds = Number.NEGATIVE_INFINITY;
+  // Single-flight guard: concurrent resolve() calls that all see a cold/stale cache share ONE repo read
+  // instead of fanning out N identical queries (the cold-start thundering herd).
+  private inflight: Promise<void> | null = null;
 
   public constructor(args: { repo: PurposeModelReadRepo; clock?: Clock; ttlMs?: number }) {
     this.repo = args.repo;
@@ -68,6 +77,23 @@ export class PurposeModelResolver implements PurposeModelResolverLike {
     if (this.cache !== null && nowSeconds - this.lastFetchSeconds < this.ttlSeconds) {
       return;
     }
+    // Single-flight: if a refresh is already running, join it rather than starting a second query.
+    if (this.inflight !== null) {
+      await this.inflight;
+      return;
+    }
+    this.inflight = this.doRefresh(nowSeconds);
+    try {
+      await this.inflight;
+    } finally {
+      this.inflight = null;
+    }
+  }
+
+  /** Read core.llm_purpose_model + rebuild the valid-pins cache. NEVER rejects — a read error fails open to
+   *  the static seed (empty cache). lastFetchSeconds is set up front so a persistently-erroring DB is
+   *  retried at most once per TTL window, not per call. */
+  private async doRefresh(nowSeconds: number): Promise<void> {
     this.lastFetchSeconds = nowSeconds;
     try {
       const rows = await this.repo.listPurposeModelsWithState();
@@ -79,8 +105,6 @@ export class PurposeModelResolver implements PurposeModelResolverLike {
       }
       this.cache = next;
     } catch {
-      // Fail-open: any read error → resolve from the static seed until the next TTL window. We already set
-      // lastFetchSeconds, so a persistently-erroring DB is retried at most once per TTL, not per call.
       this.cache = new Map<string, string>();
     }
   }

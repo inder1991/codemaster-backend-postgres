@@ -2,8 +2,8 @@ import { z } from "zod";
 
 import { LlmPurposeV1 } from "./llm_routing.v1.js";
 
-// Zod port of contracts/admin/v1.py — the admin-console read contracts. `.strict()` (Pydantic
-// extra="forbid"). Batch 1: orgs filter + dashboard summary.
+// Admin-console API contracts (zod, `.strict()` = no extra keys). Originally ported from the retired
+// Python contracts/admin/v1.py; that Python tree is gone (de-Temporal), so this is now the source of truth.
 
 /** Per-service health row in the dashboard summary (Pydantic __contract_internal__; no schema_version). */
 export const ServiceHealthV1 = z
