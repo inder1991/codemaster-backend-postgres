@@ -28,10 +28,17 @@ import {
   MAX_FILES_PER_RUNNER,
   MAX_RAW_PER_TOOL,
   TIER1_SOFT_BARRIER_SECONDS,
+  buildStaticAnalysisActivity,
 } from "#backend/activities/static_analysis.activity.js";
 import type { CuratorPort } from "#backend/activities/static_analysis.activity.js";
 import { DEFAULT_TIMEOUT_SECONDS } from "#backend/analysis/in_worker_runner.js";
+import type { LlmClientCacheLike } from "#backend/analysis/curator.js";
 import type { AnalysisRunner, RunnerRunInput } from "#backend/analysis/runner_port.js";
+import { LlmClient, type LlmSdk } from "#backend/integrations/llm/client.js";
+import { InMemoryCostCapEnforcer } from "#backend/cost/enforcer.js";
+import type { PurposeModelResolverLike } from "#backend/llm/purpose_model_resolver.js";
+import { InMemoryBlobStoreAdapter } from "../../support/llm/cassette_sdk.js";
+import { CURATE_TOOL_NAME } from "#backend/analysis/curator_schema.js";
 
 import { AnalysisFindingV1 } from "#contracts/analysis_findings.v1.js";
 import { ReviewFindingV1 } from "#contracts/review_findings.v1.js";
@@ -392,5 +399,111 @@ describe("StaticAnalysisActivity (real runner orchestration)", () => {
 
     expect(() => StaticAnalysisResultV1.parse(result)).not.toThrow();
     expect(result.schema_version).toBe(1);
+  });
+});
+
+// ─── TEST 3: buildStaticAnalysisActivity threads curatorResolver to the AnalysisCurator ─────────
+//
+// Proves the factory passes curatorResolver down to AnalysisCurator — a future edit dropping
+// curatorResolver from the AnalysisCurator constructor call must fail this test.
+//
+// Strategy: build a fake LlmClientCacheLike whose returned LlmClient captures the `model` arg
+// passed by AnalysisCurator to invokeModel. Wire a sentinel resolver. Drive the curator path by
+// supplying a non-empty file list with a finding in the changed range. Assert captured model ===
+// sentinel.
+
+describe("buildStaticAnalysisActivity — curatorResolver is threaded to AnalysisCurator", () => {
+  it("invokeModel receives model === sentinel-curator when curatorResolver returns it", async () => {
+    const SENTINEL = "sentinel-curator";
+    let capturedModel: string | undefined;
+
+    // SDK that captures the model and returns a minimal valid curate response (one promoted finding).
+    const capturingSdk: LlmSdk = {
+      async createMessage(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+        capturedModel = args["model"] as string;
+        return {
+          content: [
+            {
+              type: "tool_use",
+              id: "t0",
+              name: CURATE_TOOL_NAME,
+              input: {
+                file: "a.ts",
+                start_line: 5,
+                end_line: 5,
+                severity: "issue",
+                category: "bug",
+                title: "Sentinel promoted",
+                body: "a body",
+                confidence: 0.8,
+              },
+            },
+          ],
+          usage: { input_tokens: 10, output_tokens: 5 },
+          stop_reason: "tool_use",
+        };
+      },
+    };
+
+    const client = new LlmClient({
+      sdk: capturingSdk,
+      costCap: new InMemoryCostCapEnforcer({ globalCapCents: 500_000, perOrgCapCents: 100_000 }),
+      blobStore: new InMemoryBlobStoreAdapter(),
+      clock: new FakeClock(),
+    });
+
+    const curatorCache: LlmClientCacheLike = {
+      async forRole() {
+        return client;
+      },
+    };
+
+    const curatorResolver: PurposeModelResolverLike = {
+      resolve: async () => SENTINEL,
+    };
+
+    // Minimal real runners that emit one eslint finding on `a.ts` so the curator path runs.
+    // NOTE: `.ts` files are routed to eslint; `.py` files are routed to ruff. Use `.ts` so the
+    // eslint runner fires and emits the finding, which then goes through the curator.
+    const eslintFinding = AnalysisFindingV1.parse({
+      finding_id: "00000000-0000-4000-8000-000000000001",
+      tool: "eslint",
+      rule_id: "no-unused-vars",
+      file: "a.ts",
+      start_line: 5,
+      end_line: 5,
+      severity_raw: "warning",
+      message: "Unused variable",
+      fix_suggestion: null,
+    });
+
+    const ruffRunner: AnalysisRunner = { name: "ruff", async run() { return []; } };
+    const eslintRunner: AnalysisRunner = { name: "eslint", async run() { return [eslintFinding]; } };
+    const gitleaksRunner: AnalysisRunner = { name: "gitleaks", async run() { return []; } };
+
+    const activity = buildStaticAnalysisActivity({
+      runners: { ruff: ruffRunner, eslint: eslintRunner, gitleaks: gitleaksRunner },
+      curatorCache,
+      curatorResolver,
+      deadlineSeconds: 30,
+      clock: new FakeClock(),
+    });
+
+    await activity.staticAnalysis(
+      StaticAnalysisInputV1.parse({
+        workspace_path: "/tmp/ws",
+        sandbox_files: ["a.ts"],
+        changed_line_ranges: { "a.ts": [[1, 100]] },
+        pr_meta: {
+          pr_id: "0123abcd-4567-89ab-cdef-0123456789ab",
+          installation_id: "0123abcd-4567-89ab-cdef-0123456789ac",
+          repo: "octo/widgets",
+          pr_title: "Add the thing",
+          pr_description: "A change that adds the thing.",
+        },
+      }),
+    );
+
+    expect(capturedModel).toBe(SENTINEL);
   });
 });

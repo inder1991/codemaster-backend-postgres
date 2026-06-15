@@ -55,6 +55,7 @@ import type { Clock } from "#platform/clock.js";
 
 import { AnalysisCurator } from "#backend/analysis/curator.js";
 import type { LlmClientCacheLike } from "#backend/analysis/curator.js";
+import type { PurposeModelResolverLike } from "#backend/llm/purpose_model_resolver.js";
 import { filterToChangedLines } from "#backend/analysis/promotion.js";
 import type { AnalysisRunner } from "#backend/analysis/runner_port.js";
 import {
@@ -301,10 +302,11 @@ export function buildStaticAnalysisActivity(args: {
   curatorCache: LlmClientCacheLike;
   deadlineSeconds: number;
   clock: Clock;
+  curatorResolver?: PurposeModelResolverLike;
 }): StaticAnalysisActivity {
   return new StaticAnalysisActivity({
     runners: args.runners,
-    curator: new AnalysisCurator({ cache: args.curatorCache }),
+    curator: new AnalysisCurator({ cache: args.curatorCache, ...(args.curatorResolver !== undefined ? { resolver: args.curatorResolver } : {}) }),
     deadlineSeconds: args.deadlineSeconds,
     clock: args.clock,
   });

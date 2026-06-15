@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { LlmCredentialsTestV1, LlmProviderConfigUpdateV1 } from "#contracts/admin.v1.js";
+import { LegacyBedrockConfigUpdateBodyV1, LlmCredentialsTestV1, LlmProviderConfigUpdateV1 } from "#contracts/admin.v1.js";
 
 const KEY = "sk-ant-0123456789abcdef"; // ≥20 chars
 
@@ -46,7 +46,21 @@ describe("LlmProviderConfigUpdateV1 cross-field invariants", () => {
     expect(r.success).toBe(false);
   });
 
-  it("rejects a bedrock model_id without the anthropic./claude- prefix", () => {
+  // The model_id name-prefix gate is DROPPED — the live preflight ping is the validator, and a static
+  // regex cannot express Bedrock cross-region inference-profile IDs (us./eu./apac.-prefixed).
+  it("accepts a region-prefixed bedrock inference-profile model_id (us.anthropic.…)", () => {
+    expect(
+      LlmProviderConfigUpdateV1.safeParse({
+        provider: "bedrock",
+        role: "primary",
+        model_id: "us.anthropic.claude-sonnet-4-6-v1:0",
+        region: "us-east-1",
+        api_key: KEY,
+      }).success,
+    ).toBe(true);
+  });
+
+  it("accepts an arbitrary bedrock model_id with a region (prefix gate dropped; preflight is the gate)", () => {
     expect(
       LlmProviderConfigUpdateV1.safeParse({
         provider: "bedrock",
@@ -55,19 +69,19 @@ describe("LlmProviderConfigUpdateV1 cross-field invariants", () => {
         region: "us-east-1",
         api_key: KEY,
       }).success,
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  it("rejects an anthropic_direct model_id that is not claude-prefixed", () => {
+  it("accepts an arbitrary anthropic_direct model_id (prefix gate dropped; preflight is the gate)", () => {
     expect(
       LlmProviderConfigUpdateV1.safeParse({
         provider: "anthropic_direct",
         role: "primary",
-        model_id: "anthropic.claude-sonnet-4-6", // anthropic. prefix is bedrock-only
+        model_id: "anthropic.claude-sonnet-4-6",
         region: null,
         api_key: KEY,
       }).success,
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("rejects a short api_key (<20 chars) and a malformed region", () => {
@@ -104,5 +118,17 @@ describe("LlmCredentialsTestV1 cross-field invariants (model-less)", () => {
 
   it("rejects bedrock without region", () => {
     expect(LlmCredentialsTestV1.safeParse({ provider: "bedrock", region: null, api_key: KEY }).success).toBe(false);
+  });
+});
+
+describe("LegacyBedrockConfigUpdateBodyV1 (deprecated shim)", () => {
+  it("accepts a region-prefixed Bedrock inference-profile model_id (prefix gate dropped)", () => {
+    expect(
+      LegacyBedrockConfigUpdateBodyV1.safeParse({
+        model_id: "us.anthropic.claude-sonnet-4-6-v1:0",
+        region: "us-east-1",
+        api_key: KEY,
+      }).success,
+    ).toBe(true);
   });
 });

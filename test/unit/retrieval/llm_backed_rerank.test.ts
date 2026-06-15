@@ -163,6 +163,24 @@ describe("LlmBackedRerankPort", () => {
   });
 });
 
+describe("LlmBackedRerankPort — purpose resolver drives model selection", () => {
+  it("uses model from injected resolver when no modelOverride", async () => {
+    const SENTINEL = "sentinel-analysis_curator-rerank";
+    let capturedModel: string | undefined;
+    const invoke = async (args: { model?: string }): Promise<unknown> => {
+      capturedModel = args.model;
+      return scoresResult([0.5, 0.5]);
+    };
+    const port = new LlmBackedRerankPort({
+      cache: cacheReturning(stubClient(invoke as unknown as () => Promise<unknown>)),
+      installationId: "iid",
+      resolver: { resolve: async () => SENTINEL },
+    });
+    await port.rerank({ query: "q", candidates: CANDIDATES });
+    expect(capturedModel).toBe(SENTINEL);
+  });
+});
+
 describe("LlmBackedRerankPort composed with LlmRerank.apply", () => {
   it("a timeout falls back to the RRF order with degraded=true (rerank flake never fails the review)", async () => {
     const port = new LlmBackedRerankPort({

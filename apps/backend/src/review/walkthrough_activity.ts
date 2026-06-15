@@ -37,7 +37,7 @@ import type { LlmClient } from "#backend/integrations/llm/client.js";
 import { BedrockBudgetExceededError } from "#backend/cost/enforcer.js";
 import { purposeChunkId } from "#backend/integrations/llm/invocation_ledger.js";
 import { buildSystemPrompt } from "#backend/llm/review_prompt.js";
-import { modelForPurpose } from "#backend/llm/model_router.js";
+import { staticPurposeModelResolver, type PurposeModelResolverLike } from "#backend/llm/purpose_model_resolver.js";
 import { wrapUntrusted } from "#backend/security/trust_tier_wrapping.js";
 import { redactText } from "#backend/redact/output_redaction.js";
 
@@ -263,7 +263,7 @@ export async function doGenerateWalkthrough(
     linkedIssues: ReadonlyArray<LinkedIssueV1>;
     suggestedReviewers: ReadonlyArray<string>;
   },
-  deps: { cache: LlmClientCacheLike },
+  deps: { cache: LlmClientCacheLike; resolver?: PurposeModelResolverLike },
 ): Promise<WalkthroughV1> {
   const { prMeta, aggregated, linkedIssues, suggestedReviewers } = args;
   const role = "primary";
@@ -289,7 +289,8 @@ export async function doGenerateWalkthrough(
   // ADR-0060 step 0: source the walkthrough model from the central purpose→model seed (claude-opus-4-7,
   // distinct from the review role's sonnet). The DB-backed async resolve merges DB rows over the seed
   // (out of scope here — no DB in this slice); the pure seed resolver IS the unconfigured fallback.
-  const walkthroughModel = modelForPurpose("walkthrough");
+  const resolver = deps.resolver ?? staticPurposeModelResolver;
+  const walkthroughModel = await resolver.resolve("walkthrough");
 
   let sanitizationEvent: OutputSafetySanitizationEventV1 | null = null;
   let rawBlocks: ReadonlyArray<Record<string, unknown>>;
@@ -408,9 +409,11 @@ export async function doGenerateWalkthrough(
  */
 export class WalkthroughActivities {
   private readonly cache: LlmClientCacheLike;
+  private readonly resolver: PurposeModelResolverLike | undefined;
 
-  public constructor({ cache }: { cache: LlmClientCacheLike }) {
+  public constructor({ cache, resolver }: { cache: LlmClientCacheLike; resolver?: PurposeModelResolverLike }) {
     this.cache = cache;
+    this.resolver = resolver;
   }
 
   public readonly generateWalkthrough = async (
@@ -423,7 +426,7 @@ export class WalkthroughActivities {
         linkedIssues: input.linked_issues,
         suggestedReviewers: input.suggested_reviewers,
       },
-      { cache: this.cache },
+      { cache: this.cache, ...(this.resolver !== undefined ? { resolver: this.resolver } : {}) },
     );
   };
 }

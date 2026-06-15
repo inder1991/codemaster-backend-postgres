@@ -9,11 +9,10 @@ import { z } from "zod";
 // (codemaster/integrations/llm/purpose_model.py → ported to #backend/llm/model_router.ts) and the
 // catalog.
 //
-// Python `class LlmPurposeV1(StrEnum)` → z.enum over the .value strings. Membership semantics:
-// `LlmPurposeV1(value)` returns the member for a valid value and raises ValueError otherwise; the
-// z.enum parses valid → the string and throws on invalid, matching byte-for-byte (see
-// test/contracts/llm_routing.v1.parity.test.ts). Order preserved to match the frozen declaration
-// order so any vocabulary drift is caught by the snapshot assertion.
+// `LlmPurposeV1` is a z.enum over the .value strings: it parses a valid value → the string and throws on
+// invalid. The vocabulary MUST stay byte-identical to the core.llm_purpose_model CHECK constraint in
+// migrations/0001_baseline.sql — a drift there silently re-introduces a 500 when the admin GET parses an
+// out-of-vocabulary pin. A vocabulary-invariant unit test guards this (and the executable-subset ⊂ seed).
 
 export const LLM_PURPOSE_LITERALS = [
   "review_summary",

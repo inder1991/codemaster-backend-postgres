@@ -89,6 +89,12 @@ import { buildActivities } from "#backend/worker/build_activities.js";
 
 import { type Clock, WallClock } from "#platform/clock.js";
 import { type Random, SystemRandom } from "#platform/randomness.js";
+import { tenantKysely } from "#platform/db/database.js";
+import {
+  PurposeModelResolver,
+  type PurposeModelResolverLike,
+} from "#backend/llm/purpose_model_resolver.js";
+import { PostgresPurposeModelReadRepo } from "#backend/llm/purpose_model_repo.js";
 
 import { applyInProcessRetry, type PortRetrySeams } from "./retry_policies.js";
 import { TerminalCancelError } from "./review_job_runner.js";
@@ -345,9 +351,14 @@ export function makeInProcessPorts(deps: InProcessPortDeps, signal: AbortSignal)
     }
     return strictCacheMemo;
   };
+  let purposeResolverMemo: PurposeModelResolverLike | undefined;
+  const getPurposeResolver = (): PurposeModelResolverLike => {
+    purposeResolverMemo ??= new PurposeModelResolver({ repo: new PostgresPurposeModelReadRepo({ db: tenantKysely(dsn) }) });
+    return purposeResolverMemo;
+  };
   let walkthroughMemo: WalkthroughActivities | undefined;
   const walkthrough = (): WalkthroughActivities => {
-    walkthroughMemo ??= new WalkthroughActivities({ cache: strictCache() });
+    walkthroughMemo ??= new WalkthroughActivities({ cache: strictCache(), resolver: getPurposeResolver() });
     return walkthroughMemo;
   };
   let retrieveMemo: ReturnType<typeof buildRetrieveKnowledgeActivity> | undefined;
@@ -355,6 +366,7 @@ export function makeInProcessPorts(deps: InProcessPortDeps, signal: AbortSignal)
     retrieveMemo ??= buildRetrieveKnowledgeActivity({
       embedder: resolveEmbeddingsConsumer(),
       rerankCache: strictCache(),
+      rerankResolver: getPurposeResolver(),
     });
     return retrieveMemo;
   };
@@ -371,6 +383,7 @@ export function makeInProcessPorts(deps: InProcessPortDeps, signal: AbortSignal)
       // orchestrator's authoritative deadline preempts a hung tool here exactly as in build_activities.
       deadlineSeconds: TIER1_SOFT_BARRIER_SECONDS,
       clock: new WallClock(),
+      curatorResolver: getPurposeResolver(),
     });
     return staticMemo;
   };
@@ -381,6 +394,7 @@ export function makeInProcessPorts(deps: InProcessPortDeps, signal: AbortSignal)
       repo: FixPromptRepo.fromDsn(dsn),
       gh: makeLazyFixPromptIssueClient(),
       clock: new WallClock(),
+      resolver: getPurposeResolver(),
     });
     return fixPromptMemo;
   };
@@ -465,7 +479,7 @@ export function makeInProcessPorts(deps: InProcessPortDeps, signal: AbortSignal)
     selectCarryForward: pick("selectCarryForward", baseFn("selectCarryForward")),
     embedQuery: pick("embedQuery", baseFn("embedQuery")),
     retrieveKnowledge: pick("retrieveKnowledge", (input) => retrieve().retrieveKnowledge(input)),
-    reviewChunk: pick("reviewChunk", (context) => bedrockReviewChunk(context, { cache: strictCache() })),
+    reviewChunk: pick("reviewChunk", (context) => bedrockReviewChunk(context, { cache: strictCache(), resolver: getPurposeResolver() })),
     dedupFindings: pick("dedupFindings", baseFn("dedupFindings")),
     aggregate: pick("aggregate", baseFn("aggregateFindings")),
     persistReviewFindings: pick("persistReviewFindings", baseFn("persistReviewFindings")),

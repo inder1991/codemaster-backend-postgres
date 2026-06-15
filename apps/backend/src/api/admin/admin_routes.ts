@@ -175,9 +175,9 @@ import {
   listByPr,
 } from "#backend/api/admin/retrieval_aggregate_read.js";
 import {
-  BEDROCK_MODELS,
   RERANK_MODELS,
   deleteModel,
+  deletePurposeModel,
   readRerankSettings,
   setValidation,
   upsertModel,
@@ -2331,22 +2331,42 @@ export async function registerAdminRoutes(
           return reply.code(422).send({ detail: "request body failed schema validation" });
         }
         const b = parsed.data;
-        // ADR-0060 guardrail: reject at config time a model the engine can't invoke (provider-agnostic).
-        if (!BEDROCK_MODELS.has(b.model_id)) {
-          return reply.code(422).send({
+        // No model allow-list (ADR-0060 guardrail removed): any model_id is accepted — the admin
+        // "Test"/preflight ping validates it. See docs/plans/2026-06-14-llm-model-allowlist.md.
+        // model_id is GLOBALLY unique (uq_llm_models_model_id; purpose-routing FKs it), so a collision
+        // under a DIFFERENT provider is a clean 409 — pre-check for the message AND catch the 23505 race
+        // (two concurrent adds can both pass the pre-check; the unique index is the source of truth).
+        const conflict409 = (existingProvider: string) =>
+          reply.code(409).send({
             detail: {
-              code: "llm_model_not_supported",
-              message: `model '${b.model_id}' is not in the engine's accepted set ${JSON.stringify([...BEDROCK_MODELS].sort())}`,
+              code: "llm_model_id_taken",
+              message: `model_id '${b.model_id}' is already registered under provider '${existingProvider}'`,
+              provider: existingProvider,
             },
           });
+        const clash = (await listLlmModels(opts.db)).find(
+          (m) => m.model_id === b.model_id && m.provider !== b.provider,
+        );
+        if (clash !== undefined) {
+          return conflict409(clash.provider);
         }
-        await upsertModel(opts.db, {
-          provider: b.provider,
-          modelId: b.model_id,
-          displayName: b.display_name,
-          enabled: b.enabled,
-          createdByUserId: principal.userId,
-        });
+        try {
+          await upsertModel(opts.db, {
+            provider: b.provider,
+            modelId: b.model_id,
+            displayName: b.display_name,
+            enabled: b.enabled,
+            createdByUserId: principal.userId,
+          });
+        } catch (e) {
+          // SQLSTATE 23505 = unique_violation; here it can only be uq_llm_models_model_id (the PK
+          // (provider, model_id) is handled by ON CONFLICT). Re-read the race-winner's provider for the body.
+          if ((e as { code?: unknown }).code === "23505") {
+            const winner = (await listLlmModels(opts.db)).find((m) => m.model_id === b.model_id);
+            return conflict409(winner?.provider ?? "another provider");
+          }
+          throw e;
+        }
         // Re-read so the response reflects persisted status (untested on a fresh row — preflight is /test).
         const row = (await listLlmModels(opts.db)).find(
           (m) => m.provider === b.provider && m.model_id === b.model_id,
@@ -2471,6 +2491,22 @@ export async function registerAdminRoutes(
           updatedByUserId: principal.userId,
         });
         return reply.code(200).send(LlmPurposeModelV1.parse({ purpose: body.purpose, model_id: body.model_id }));
+      },
+    );
+
+    scope.delete(
+      "/api/admin/llm-purpose-routing/:purpose",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        // Reset a purpose to the platform default. The :purpose param is NOT enum-validated — a legacy /
+        // no-longer-executable pin (e.g. cost_estimate from an older UI) must still be clearable; a
+        // non-existent assignment → 404.
+        const params = request.params as { purpose: string };
+        const deleted = await deletePurposeModel(opts.db, { purpose: params.purpose });
+        if (!deleted) {
+          return reply.code(404).send({ detail: `no routing assignment for purpose: ${params.purpose}` });
+        }
+        return reply.code(204).send();
       },
     );
 

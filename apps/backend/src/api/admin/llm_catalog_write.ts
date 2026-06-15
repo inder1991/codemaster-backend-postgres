@@ -2,14 +2,6 @@
 
 import { type Kysely, sql } from "kysely";
 
-/** The engine's accepted model set (mirrors integrations/llm/client.ts BEDROCK_MODELS). A catalog upsert
- *  is rejected for any model_id outside this set, regardless of provider — the engine can't invoke it. */
-export const BEDROCK_MODELS: ReadonlySet<string> = new Set([
-  "claude-opus-4-7",
-  "claude-sonnet-4-6",
-  "claude-haiku-4-5-20251001",
-]);
-
 /** Insert or update a catalog model. On conflict (provider, model_id) refreshes display_name + enabled +
  *  updated_at; validation columns + created_by_user_id are left untouched on the update branch. */
 export async function upsertModel(
@@ -55,10 +47,24 @@ export async function upsertPurposeModel(
   `.execute(db);
 }
 
+/** DELETE a purpose routing row by purpose ("reset to platform default"). Returns true iff a row was
+ *  deleted (route maps false→404). No FK risk — the FK is purpose_model.model_id → llm_models, so removing
+ *  a purpose row is always allowed. */
+export async function deletePurposeModel(
+  db: Kysely<unknown>,
+  args: { purpose: string },
+): Promise<boolean> {
+  const r = await sql<{ purpose: string }>`
+    DELETE FROM core.llm_purpose_model WHERE purpose = ${args.purpose}
+    RETURNING purpose
+  `.execute(db);
+  return r.rows.length > 0;
+}
+
 // ─── W1.3 RH9 — the optional Bedrock re-ranker's platform-singleton config (core.rerank_settings) ───
 
-/** The Bedrock RERANK-API models the engine can invoke (the rerank analogue of {@link BEDROCK_MODELS}).
- *  A PUT /api/admin/rerank-config naming any other model_id is rejected — the adapter only speaks the
+/** The Bedrock RERANK-API models the engine can invoke (a fixed allow-list, unlike the chat-model catalog
+ *  which now accepts any model_id). A PUT /api/admin/rerank-config naming any other model_id is rejected — the adapter only speaks the
  *  Cohere/Amazon rerank request shapes. Single-sourced from the retrieval-side config contract so the
  *  admin PUT, the env parse, and the adapter can never disagree on the accepted set. */
 export { RERANK_MODELS } from "#backend/retrieval/rerank_config.js";

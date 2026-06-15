@@ -110,16 +110,6 @@ export class LedgerRequiredError extends Error {
   }
 }
 
-// ─── documented model set (BEDROCK_MODELS) ─────────────────────────────────────────────────────────
-
-/** Documented model set. Adding a model requires an ADR + cost-cap coverage review. */
-export const BEDROCK_MODELS = [
-  "claude-opus-4-7",
-  "claude-sonnet-4-6",
-  "claude-haiku-4-5-20251001",
-] as const;
-export type BedrockModel = (typeof BEDROCK_MODELS)[number];
-
 // ─── cost estimation (rough) ────────────────────────────────────────────────────────────────────────
 
 const USD_CENTS_PER_PROMPT_TOKEN: ReadonlyMap<string, number> = new Map([
@@ -132,6 +122,18 @@ const USD_CENTS_PER_COMPLETION_TOKEN: ReadonlyMap<string, number> = new Map([
   ["claude-sonnet-4-6", 0.0015],
   ["claude-haiku-4-5-20251001", 0.000125],
 ]);
+
+// Any model is usable (the allow-list gate was removed; the admin "Test"/preflight validates a model).
+// Warn ONCE per process if a model has no pricing entry — its spend under-counts at the 1-cent floor.
+// Keyed off BOTH maps so future drift stays visible. Data-driven pricing is the tracked follow-up
+// (docs/plans/2026-06-14-llm-model-allowlist.md).
+const _unpricedModelWarned = new Set<string>();
+export function warnUnpricedModelOnce(model: string): void {
+  if (USD_CENTS_PER_PROMPT_TOKEN.has(model) && USD_CENTS_PER_COMPLETION_TOKEN.has(model)) return;
+  if (_unpricedModelWarned.has(model)) return;
+  _unpricedModelWarned.add(model);
+  console.warn(`LLM model '${model}' has no pricing entry — cost under-counts (1-cent floor); FOLLOW-UP: data-driven pricing.`);
+}
 
 /** Coarse pre-call estimate — true cost computed post-response. Mirrors `_estimate_cents_pre_call`. */
 function estimateCentsPreCall(model: string, promptChars: number): number {
@@ -434,7 +436,7 @@ export class LlmClient {
    */
   public async invokeModel(args: {
     role: "primary" | "secondary";
-    model: BedrockModel | null;
+    model: string | null;
     messages: Array<LlmMessage>;
     maxTokens?: number;
     purpose?: string;
@@ -513,9 +515,9 @@ export class LlmClient {
       );
     }
     const model: string = args.model;
-    if (!(BEDROCK_MODELS as ReadonlyArray<string>).includes(model)) {
-      throw new TypeError(`unsupported model: ${pyReprStr(model)}`);
-    }
+    // No allow-list gate: any model is usable (verified by the admin "Test"/preflight). Warn once if the
+    // model lacks a pricing entry (cost under-counts at the floor) — docs/plans/2026-06-14-llm-model-allowlist.md.
+    warnUnpricedModelOnce(model);
 
     const requestId = this.uuid4();
     const promptChars = args.messages.reduce((acc, m) => acc + m.content.length, 0);
@@ -1237,11 +1239,6 @@ function formatErr(e: unknown): string {
     return `${e.name}: ${e.message === "" ? "<empty>" : e.message}`;
   }
   return String(e);
-}
-
-/** Python `repr()` of a str: single-quoted, `\`→`\\`, `'`→`\'`. */
-function pyReprStr(value: string): string {
-  return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
 }
 
 // Re-export the budget error so callers `import { BedrockBudgetExceededError } from "./client.js"` —

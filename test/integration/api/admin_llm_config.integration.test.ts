@@ -197,6 +197,29 @@ describeDb("admin llm-config (disposable :5434)", () => {
     }
   });
 
+  it("PUT llm-provider-config: accepts a region-prefixed Bedrock inference-profile model_id (us.anthropic.…)", async () => {
+    // gate 4: the model_id prefix gate was dropped; the (stubbed) preflight is the validator. Proves the
+    // region-prefixed shape survives parse → preflight → DB write → response.
+    const vault = new InMemoryVault();
+    const app = await makeAppWithVault({ vault, ok: true });
+    const PROFILE = "us.anthropic.claude-sonnet-4-6-v1:0";
+    try {
+      const res = await app.inject({
+        method: "PUT",
+        url: "/api/admin/llm-provider-config",
+        cookies: superCookie(),
+        payload: { ...PUT_BODY, model_id: PROFILE },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json<{ model_id: string }>().model_id).toBe(PROFILE);
+      const row = await sql<{ model_id: string }>`SELECT model_id FROM core.llm_provider_settings WHERE scope='platform' AND role='secondary'`.execute(db);
+      expect(row.rows[0]!.model_id).toBe(PROFILE);
+    } finally {
+      await deleteSecondary();
+      await app.close();
+    }
+  });
+
   it("PUT llm-provider-config: EL1 — a secondary write with NO primary row still 200s with the secondary's metadata", async () => {
     const vault = new InMemoryVault();
     const app = await makeAppWithVault({ vault, ok: true });

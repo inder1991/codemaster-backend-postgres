@@ -13,6 +13,7 @@ import {
   doGenerateWalkthrough,
   type LlmClientCacheLike,
 } from "#backend/review/walkthrough_activity.js";
+import type { PurposeModelResolverLike } from "#backend/llm/purpose_model_resolver.js";
 
 import { InMemoryBlobStoreAdapter } from "../../support/llm/cassette_sdk.js";
 
@@ -332,6 +333,32 @@ describe("doGenerateWalkthrough — secret-leaked sanitize-and-continue", () => 
     expect(ev.redacted_text).not.toContain("AKIAREALKEY12345678X");
     expect(ev.original_text).toBe(unsafeText);
     expect(ev.request_id).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});
+
+describe("doGenerateWalkthrough — purpose resolver drives model selection", () => {
+  it("resolves model via injected resolver (not static seed) when resolver is provided", async () => {
+    const SENTINEL = "sentinel-walkthrough";
+    let capturedModel: string | undefined;
+    const sdk: LlmSdk = {
+      async createMessage(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+        capturedModel = args["model"] as string;
+        return walkthroughBlock({ tldr: "Resolver test." });
+      },
+    };
+    const client = new LlmClient({
+      sdk,
+      costCap: new InMemoryCostCapEnforcer({ globalCapCents: 500_000, perOrgCapCents: 100_000 }),
+      blobStore: new InMemoryBlobStoreAdapter(),
+      clock: new FakeClock(),
+    });
+    const cache: LlmClientCacheLike = { async forRole() { return client; } };
+    const resolver: PurposeModelResolverLike = { resolve: async () => SENTINEL };
+    await doGenerateWalkthrough(
+      { ...BASE_ARGS, prMeta: prMeta(), aggregated: aggregated([finding()]) },
+      { cache, resolver },
+    );
+    expect(capturedModel).toBe(SENTINEL);
   });
 });
 
