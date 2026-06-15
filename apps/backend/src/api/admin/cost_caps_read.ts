@@ -40,13 +40,25 @@ export async function buildCostCapsPage(db: Kysely<unknown>, now: Date): Promise
   );
   const globalRow = s.rows.find((r) => r.scope === "global");
   const perOrgRow = s.rows.find((r) => r.scope === "per_org_default");
-  if (globalRow === undefined || perOrgRow === undefined) {
-    throw new CostCapSettingsMissingError();
+  // Unconfigured platform (no rows yet) → settings:null, a valid 200 "needs setup" state (the UI offers a
+  // first-time config form). NOT a 500 — a missing singleton is an expected greenfield posture, not a fault.
+  // (The WRITE/approve path still throws CostCapSettingsMissingError: you cannot APPROVE a change against a
+  // cap that doesn't exist yet — initial config goes through initializeCostCapSettings instead.)
+  let settings: CostCapPageV1["settings"] = null;
+  if (globalRow !== undefined && perOrgRow !== undefined) {
+    const moreRecent =
+      new Date(globalRow.updated_at).getTime() >= new Date(perOrgRow.updated_at).getTime()
+        ? globalRow
+        : perOrgRow;
+    settings = {
+      schema_version: 1,
+      global_cap_cents: Number(globalRow.cap_cents),
+      per_org_default_cap_cents: Number(perOrgRow.cap_cents),
+      hard_ceiling_cents: HARD_CEILING_CENTS,
+      updated_at: iso(moreRecent.updated_at),
+      updated_by_user_id: moreRecent.updated_by_user_id,
+    };
   }
-  const moreRecent =
-    new Date(globalRow.updated_at).getTime() >= new Date(perOrgRow.updated_at).getTime()
-      ? globalRow
-      : perOrgRow;
 
   // (2) active (non-expired) overrides, name resolved via COALESCE.
   const o = await sql<{
@@ -124,14 +136,7 @@ export async function buildCostCapsPage(db: Kysely<unknown>, now: Date): Promise
 
   return {
     schema_version: 1,
-    settings: {
-      schema_version: 1,
-      global_cap_cents: Number(globalRow.cap_cents),
-      per_org_default_cap_cents: Number(perOrgRow.cap_cents),
-      hard_ceiling_cents: HARD_CEILING_CENTS,
-      updated_at: iso(moreRecent.updated_at),
-      updated_by_user_id: moreRecent.updated_by_user_id,
-    },
+    settings,
     overrides,
     todays_spend_global_cents: spend,
     todays_projected_global_cents: projected,

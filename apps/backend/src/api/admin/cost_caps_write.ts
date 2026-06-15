@@ -72,6 +72,14 @@ export class CostCapInvalidRequestError extends Error {
     this.name = "CostCapInvalidRequestError";
   }
 }
+/** Raised when initializeCostCapSettings is called but both scope rows already exist (→ 409). The first-time
+ *  bootstrap is a direct write; once configured, modifications must go through the two-person change flow. */
+export class CostCapAlreadyConfiguredError extends Error {
+  public constructor() {
+    super("cost caps are already configured; use the change-request flow to modify them");
+    this.name = "CostCapAlreadyConfiguredError";
+  }
+}
 // (CostCapSettingsMissingError is imported from cost_caps_read + re-exported above — one shared class.)
 
 // ─── Lowering-grace (pure) ──────────────────────────────────────────────────────────────────────────
@@ -265,12 +273,62 @@ async function rejectChange(
   return row;
 }
 
-// ─── Orchestration (request / approve / reject) ──────────────────────────────────────────────────────
+// ─── Orchestration (initialize / request / approve / reject) ─────────────────────────────────────────
 
 const AUDIT_REQUEST = "cost_cap.change.requested";
 const AUDIT_APPLY = "cost_cap.change.applied";
 const AUDIT_REJECT = "cost_cap.change.rejected";
 const AUDIT_TARGET_KIND = "cost_cap_pending_change";
+const AUDIT_INIT = "cost_cap.settings.initialized";
+const AUDIT_SETTINGS_TARGET_KIND = "cost_cap_settings";
+
+/**
+ * First-time (bootstrap) configuration of the global + per_org_default caps. A DIRECT write — the two-person
+ * change flow cannot run until these rows exist (approveCostCapChange reads the current cap and throws
+ * CostCapSettingsMissingError when it is absent). Refused with CostCapAlreadyConfiguredError once BOTH rows
+ * exist; thereafter all modifications go through requestCostCapChange (two-person). Idempotent on the partial
+ * case: ON CONFLICT (scope) DO NOTHING fills only the missing scope row and NEVER overwrites an existing cap,
+ * so this path can never silently weaken a configured cap.
+ */
+export async function initializeCostCapSettings(args: {
+  db: Kysely<unknown>;
+  globalCapCents: number;
+  perOrgDefaultCapCents: number;
+  installationId: string;
+  actorUserId: string;
+  now: Date;
+  audit?: CostCapAuditEmitter | undefined;
+}): Promise<void> {
+  await args.db.transaction().execute(async (tx) => {
+    // FOR UPDATE locks any existing scope row so a concurrent init/approve serialises against this tx.
+    const existing = await sql<{ scope: string }>`
+      SELECT scope FROM core.cost_cap_settings WHERE scope IN ('global', 'per_org_default') FOR UPDATE
+    `.execute(tx);
+    const have = new Set(existing.rows.map((r) => r.scope));
+    if (have.has("global") && have.has("per_org_default")) {
+      throw new CostCapAlreadyConfiguredError();
+    }
+    await sql`
+      INSERT INTO core.cost_cap_settings (scope, cap_cents, updated_at, updated_by_user_id)
+      VALUES ('global', ${args.globalCapCents}, ${args.now}, ${args.actorUserId}),
+             ('per_org_default', ${args.perOrgDefaultCapCents}, ${args.now}, ${args.actorUserId})
+      ON CONFLICT (scope) DO NOTHING
+    `.execute(tx);
+  });
+  await args.audit?.({
+    actorUserId: args.actorUserId,
+    installationId: args.installationId,
+    action: AUDIT_INIT,
+    targetKind: AUDIT_SETTINGS_TARGET_KIND,
+    targetId: "settings",
+    before: null,
+    after: {
+      global_cap_cents: args.globalCapCents,
+      per_org_default_cap_cents: args.perOrgDefaultCapCents,
+    },
+    now: args.now,
+  });
+}
 
 export async function requestCostCapChange(args: {
   db: Kysely<unknown>;

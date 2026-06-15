@@ -106,7 +106,9 @@ export type CostCapPendingChangeV1 = z.infer<typeof CostCapPendingChangeV1>;
 export const CostCapPageV1 = z
   .object({
     schema_version: z.literal(1).default(1),
-    settings: CostCapSettingsV1,
+    // null when the platform has never been configured (no 'global'/'per_org_default' rows yet) — the UI
+    // renders a first-time setup form instead of the governance dashboard. Once configured it is never null.
+    settings: CostCapSettingsV1.nullable(),
     overrides: z.array(CostCapOverrideV1),
     todays_spend_global_cents: z.number().int().min(0),
     todays_projected_global_cents: z.number().int().min(0),
@@ -130,6 +132,19 @@ export const CostCapChangeRequestV1 = z
   })
   .strict();
 export type CostCapChangeRequestV1 = z.infer<typeof CostCapChangeRequestV1>;
+
+/** PUT /api/admin/cost-caps/settings — FIRST-TIME (bootstrap) configuration of the two scope caps. A direct
+ *  super_admin/platform_owner write: the two-person change flow can't run until these rows exist (approve
+ *  reads the current cap). Refused with 409 once configured — thereafter changes go through the two-person
+ *  flow (CostCapChangeRequestV1). */
+export const CostCapSettingsInitV1 = z
+  .object({
+    schema_version: z.literal(1).default(1),
+    global_cap_cents: z.number().int().min(0).max(COST_CAP_HARD_CEILING_CENTS),
+    per_org_default_cap_cents: z.number().int().min(0).max(COST_CAP_HARD_CEILING_CENTS),
+  })
+  .strict();
+export type CostCapSettingsInitV1 = z.infer<typeof CostCapSettingsInitV1>;
 
 // ─── Knowledge (learnings; tenant-scoped; in-memory keyset) ──────────────────────────────────────
 
