@@ -40,6 +40,7 @@ import { PLATFORM_SCOPE_AUDIT_INSTALLATION_ID } from "#backend/infra/sentinels.j
 import {
   AUDIT_AFTER_AAD,
   decryptAuditJsonBytea,
+  resetAuditKeyRegistryForTesting,
   setAuditKeyRegistry,
 } from "#backend/security/audit_field_codec.js";
 
@@ -107,6 +108,10 @@ afterEach(async () => {
 
 afterAll(async () => {
   if (INTEGRATION_DSN) await cleanup();
+  // Reset the GLOBAL field-key registry so it doesn't leak to later files — once the runtime embedder is
+  // registry-gated (resolveRuntimeEmbedder), a leaked registry routes a later runner-ingest test onto the
+  // DB embedder path, polluting shared state across the serial suite.
+  resetAuditKeyRegistryForTesting();
   await db?.destroy();
 });
 
