@@ -34,6 +34,9 @@ export const EXPECTED_MIGRATIONS = [
   // Greenfield: record the deployed embedding dimension on the runtime-state singleton (default 1024);
   // CODEMASTER_EMBEDDING_DIMENSION drives the runtime EMBEDDING_DIM + the (pre-ingest) column resize.
   "0007_active_embedding_dimension",
+  // UI-editable embedder creds + model: the core.embedder_provider_settings singleton (field-codec
+  // ciphertext); resolved DB-validated > env > none at use-time. Parity with confluence/github/llm creds.
+  "0008_embedder_provider_settings",
 ] as const satisfies ReadonlyArray<string>;
 
 /** The DB's applied migration sequence diverges from the image's compiled-in expectation — the pod
