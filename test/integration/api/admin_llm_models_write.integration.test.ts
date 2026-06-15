@@ -3,10 +3,11 @@
  * Postgres (localhost:5434 — NEVER the cluster). Runs ONLY when CODEMASTER_PG_CORE_DSN is set. super_admin
  * only. (POST /test is deferred — it needs the Vault-decrypt seam + a live provider ping.)
  *
- * Schema reality: uq_llm_models_model_id makes model_id GLOBALLY unique, and the dev catalog seeds all 3
- * legacy models under anthropic_direct. PUT accepts ANY model_id (the allow-list gate was removed — the
- * preflight Test validates the model); a model_id already registered under another provider → 409. We
- * update claude-haiku (no dependent purpose) and restore it; DELETE targets our own seeded model_ids.
+ * Schema reality: uq_llm_models_model_id makes model_id GLOBALLY unique. PUT accepts ANY model_id (the
+ * allow-list gate was removed — the preflight Test validates the model); a model_id already registered
+ * under another provider → 409. This test seeds ALL the models it needs and relies on NO migration-seeded
+ * catalog rows: an anthropic_direct model (M_UPD) for the upsert-EXISTING case + two bedrock models for the
+ * DELETE cases, all torn down in afterAll.
  */
 
 import { Kysely, PostgresDialect, sql } from "kysely";
@@ -25,7 +26,7 @@ import { describeDb, INTEGRATION_DSN } from "../_db.js";
 
 const NOW = new Date("2026-06-07T12:00:00.000Z");
 const SIGNING_KEY = Buffer.from("test-signing-key-0123456789abcdef");
-const HAIKU = "claude-haiku-4-5-20251001"; // BEDROCK_MODELS, seeded under anthropic_direct, no dependent purpose
+const M_UPD = "itest-llmw-upd"; // test-owned anthropic_direct model backing the upsert-EXISTING case (no seed reliance)
 const M_DEL = "itest-llmw-del";
 const M_DEP = "itest-llmw-dep";
 const M_OFF = "itest-llmw-offlist"; // off-list id created by the PUT-accepts-any case; cleaned up
@@ -33,11 +34,10 @@ const DEP_PURPOSE = "cost_estimate"; // READ test only asserts purpose-sort, nev
 
 let pool: Pool;
 let db: Kysely<unknown>;
-let origHaiku: { display_name: string | null; enabled: boolean } | null = null;
 
 async function cleanup(): Promise<void> {
   await sql`DELETE FROM core.llm_purpose_model WHERE purpose = ${DEP_PURPOSE}`.execute(db);
-  await sql`DELETE FROM core.llm_models WHERE model_id IN (${M_DEL}, ${M_DEP}, ${M_OFF})`.execute(db);
+  await sql`DELETE FROM core.llm_models WHERE model_id IN (${M_UPD}, ${M_DEL}, ${M_DEP}, ${M_OFF})`.execute(db);
 }
 
 beforeAll(async () => {
@@ -45,20 +45,14 @@ beforeAll(async () => {
   pool = new Pool({ connectionString: INTEGRATION_DSN, max: 4 });
   db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) });
   await cleanup();
-  const orig = await sql<{ display_name: string | null; enabled: boolean }>`
-    SELECT display_name, enabled FROM core.llm_models WHERE provider = 'anthropic_direct' AND model_id = ${HAIKU}
-  `.execute(db);
-  origHaiku = orig.rows[0] ?? null;
-  // own deletable models (non-BEDROCK ids; seeded directly, bypassing the PUT BEDROCK guard)
-  await sql`INSERT INTO core.llm_models (provider, model_id, enabled) VALUES ('bedrock', ${M_DEL}, true), ('bedrock', ${M_DEP}, true)`.execute(db);
+  // Seed ALL models this test needs — no reliance on migration seed rows. M_UPD (anthropic_direct) backs
+  // the upsert-EXISTING assertion; M_DEL/M_DEP (bedrock) back the DELETE cases.
+  await sql`INSERT INTO core.llm_models (provider, model_id, enabled)
+            VALUES ('anthropic_direct', ${M_UPD}, true), ('bedrock', ${M_DEL}, true), ('bedrock', ${M_DEP}, true)`.execute(db);
 });
 
 afterAll(async () => {
   if (INTEGRATION_DSN) {
-    if (origHaiku !== null) {
-      await sql`UPDATE core.llm_models SET display_name = ${origHaiku.display_name}, enabled = ${origHaiku.enabled}
-                WHERE provider = 'anthropic_direct' AND model_id = ${HAIKU}`.execute(db);
-    }
     await cleanup();
   }
   await db?.destroy();
@@ -94,10 +88,10 @@ describeDb("admin llm-models write routes (disposable :5434)", () => {
       method: "PUT",
       url: "/api/admin/llm-models",
       cookies: SA(),
-      payload: { provider: "anthropic_direct", model_id: HAIKU, display_name: "Test Haiku", enabled: true },
+      payload: { provider: "anthropic_direct", model_id: M_UPD, display_name: "Test Updated", enabled: true },
     });
     expect(updated.statusCode).toBe(200);
-    expect(updated.json<{ model_id: string; display_name: string }>()).toMatchObject({ model_id: HAIKU, display_name: "Test Haiku" });
+    expect(updated.json<{ model_id: string; display_name: string }>()).toMatchObject({ model_id: M_UPD, display_name: "Test Updated" });
 
     // No allow-list gate: an off-list model_id is accepted (the preflight Test validates the model).
     const off = await app.inject({ method: "PUT", url: "/api/admin/llm-models", cookies: SA(), payload: { provider: "bedrock", model_id: M_OFF, enabled: true } });
@@ -109,7 +103,7 @@ describeDb("admin llm-models write routes (disposable :5434)", () => {
     expect(clash.statusCode).toBe(409);
     expect(clash.json<{ detail: { code: string } }>().detail.code).toBe("llm_model_id_taken");
 
-    expect((await app.inject({ method: "PUT", url: "/api/admin/llm-models", cookies: cookie("reader"), payload: { provider: "anthropic_direct", model_id: HAIKU } })).statusCode).toBe(403);
+    expect((await app.inject({ method: "PUT", url: "/api/admin/llm-models", cookies: cookie("reader"), payload: { provider: "anthropic_direct", model_id: M_UPD } })).statusCode).toBe(403);
     expect((await app.inject({ method: "PUT", url: "/api/admin/llm-models", cookies: SA(), payload: { provider: "bedrock" } })).statusCode).toBe(422);
     await app.close();
   });
