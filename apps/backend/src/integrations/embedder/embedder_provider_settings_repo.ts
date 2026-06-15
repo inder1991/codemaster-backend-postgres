@@ -237,6 +237,10 @@ export class PostgresEmbedderProviderSettingsRepo {
     expectedRevision: number;
   }): Promise<boolean> {
     // tenant:exempt reason=platform-config follow_up=PERMANENT-EXEMPTION-embedder-provider-settings
+    // CAS on config_revision: a concurrent successful /test promote BUMPS config_revision (review
+    // promote-tx-1), so a late-finishing FAILED probe of the (now-stale) revision misses here → the route
+    // 409s instead of clobbering the just-promoted validation='ok' back to 'failed'. A legitimate
+    // sequential re-test that fails (no concurrent promote → revision unchanged) still records 'failed'.
     const r = await sql`
       UPDATE core.embedder_provider_settings
          SET last_validation_status = ${args.status}, last_validation_error = ${args.error},

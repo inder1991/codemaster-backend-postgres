@@ -774,27 +774,12 @@ export async function registerAdminRoutes(
           db: opts.db,
           registry: requireAuditKeyRegistry(),
         });
-        // PUT-time greenfield guard (review #1): if this PUT would CHANGE the embedding contract (model)
-        // and the corpus is NON-greenfield, reject it BEFORE writeSecret overwrites the working config +
-        // resets validation. Otherwise the runtime would go disabled and /test could only 409 — stranding
-        // the admin with no active config. v1 is greenfield: the model is chosen before ingest; changing it
-        // on a live corpus is the day-2 re-embed path.
-        if (
-          await embedderContractChangeOnNonGreenfield(opts.db, {
-            modelName: body.model_name,
-            provider: "openai_compat",
-            dimension: EMBEDDING_DIM,
-          })
-        ) {
-          return reply.code(409).send({
-            detail:
-              "cannot change the embedder model once content is ingested (the day-2 re-embed path); the " +
-              "current config is left unchanged",
-          });
-        }
         // D2-val: a pure enable/disable toggle (base_url + model unchanged, no new key) KEEPS the prior
         // validation — disabling then re-enabling a tested config must NOT force a re-test. Any actual
-        // config change goes through writeSecret, which re-stages + resets validation.
+        // config change goes through writeSecret, which re-stages + resets validation. Classified FIRST so
+        // the greenfield guard below can SKIP it (review PG-1): the guard compares against the ACTIVE
+        // generation, which diverges from the settings row after a day-2 re-embed activation — so a guard
+        // run on an enable-only toggle (which echoes back the stale settings model) would wrongly 409.
         const existing = await repo.readNonSecret();
         const enableOnlyChange =
           existing !== null &&
@@ -802,6 +787,24 @@ export async function registerAdminRoutes(
           body.base_url === existing.baseUrl &&
           body.model_name === existing.modelName &&
           body.enabled !== existing.enabled;
+        // PUT-time greenfield guard (review #1): a model change on a non-greenfield corpus is rejected
+        // BEFORE writeSecret overwrites the working config + resets validation (otherwise the runtime goes
+        // disabled and /test can only 409 — stranding the admin). Skipped for an enable-only toggle, which
+        // is never a contract change. v1 is greenfield: the model is chosen before ingest.
+        if (
+          !enableOnlyChange &&
+          (await embedderContractChangeOnNonGreenfield(opts.db, {
+            modelName: body.model_name,
+            provider: "openai_compat",
+            dimension: EMBEDDING_DIM,
+          }))
+        ) {
+          return reply.code(409).send({
+            detail:
+              "cannot change the embedder model once content is ingested (the day-2 re-embed path); the " +
+              "current config is left unchanged",
+          });
+        }
         if (enableOnlyChange) {
           await repo.updateEnabled({ enabled: body.enabled });
         } else {

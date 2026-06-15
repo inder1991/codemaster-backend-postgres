@@ -90,16 +90,20 @@ describe("resolveEffectiveEmbedderConfig", () => {
     expect(await resolveEffectiveEmbedderConfig(deps({ readDbConfig: async () => null }))).toBeNull();
   });
 
-  it("FAIL-CLOSED on a DB read error: null, and env is NOT consulted (D2-val)", async () => {
-    const cfg = await resolveEffectiveEmbedderConfig(
-      deps({
-        readDbConfig: async () => {
-          throw new Error("connection refused");
-        },
-        env: ENV_SET,
-      }),
-    );
-    expect(cfg).toBeNull();
+  it("a DB read error PROPAGATES (not swallowed to null, env NOT consulted) so the adapter can map it to a connectivity-class error (rr-1)", async () => {
+    // null would be indistinguishable from no-config and the legacy-env fallback would mask the outage by
+    // embedding with the env model. The throw makes the adapter surface connectivity → retrieval lexical /
+    // ingest fail-closed, never the env model.
+    await expect(
+      resolveEffectiveEmbedderConfig(
+        deps({
+          readDbConfig: async () => {
+            throw new Error("connection refused");
+          },
+          env: ENV_SET,
+        }),
+      ),
+    ).rejects.toThrow(/connection refused/);
   });
 });
 

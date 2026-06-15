@@ -182,4 +182,23 @@ describeDb("promoteValidatedEmbedderConfig (integration)", () => {
       }),
     ).rejects.toBeInstanceOf(EmbedderProvenanceError);
   });
+
+  it("promote BUMPS config_revision so a late failed-validation write of the stale revision CAS-misses (promote-tx-1)", async () => {
+    const rev = await stage("mxbai-embed-large");
+    await promoteValidatedEmbedderConfig(db, {
+      expectedRevision: rev,
+      modelName: "mxbai-embed-large",
+      provider: "openai_compat",
+      expectedDimension: 1024,
+      actorEmail: ACTOR,
+    });
+    // validation is now 'ok' AND config_revision moved past the probed revision.
+    expect((await repo.readNonSecret())!.lastValidationStatus).toBe("ok");
+    expect((await repo.readForResolve())!.configRevision).toBeGreaterThan(rev);
+    // A late-finishing FAILED /test of the OLD revision must NOT clobber the just-promoted 'ok'.
+    expect(
+      await repo.writeValidationResult({ status: "failed", error: "stale", expectedRevision: rev }),
+    ).toBe(false);
+    expect((await repo.readNonSecret())!.lastValidationStatus).toBe("ok");
+  });
 });
