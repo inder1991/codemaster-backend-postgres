@@ -562,6 +562,69 @@ export async function assertPartitionRunwaysHealthy(
   }
 }
 
+/** The observed embedding-dimension state: the configured EMBEDDING_DIM and the DB's recorded widths. */
+export type EmbeddingDimensionObservation = {
+  readonly configuredDim: number;
+  readonly activeGenerationDim: number | null;
+  readonly activeEmbeddingDimension: number | null;
+  readonly columnDims: ReadonlyArray<{ readonly column: string; readonly dim: number }>;
+};
+
+/**
+ * Flag any disagreement between the configured EMBEDDING_DIM and the DB's recorded widths (the active
+ * generation's embedding_dimension, embedder_runtime_state.active_embedding_dimension, and every pgvector
+ * column typmod). Pure — the catalog queries live in the IO wrapper. Catches a missed/partial
+ * `set-embedding-dimension` at deploy:check time instead of as a lazy runtime failure in retrieval.
+ */
+export function evaluateEmbeddingDimension(obs: EmbeddingDimensionObservation): Array<DeployFailure> {
+  const failures: Array<DeployFailure> = [];
+  const fix =
+    "set CODEMASTER_EMBEDDING_DIMENSION and run `npm run set-embedding-dimension -- <dim>` against the " +
+    "owner DSN BEFORE ingesting (greenfield); env, active generation, and columns must agree";
+  if (obs.activeGenerationDim !== null && obs.activeGenerationDim !== obs.configuredDim) {
+    failures.push({
+      what: `active generation embeds at ${obs.activeGenerationDim}-dim but CODEMASTER_EMBEDDING_DIMENSION=${obs.configuredDim}`,
+      why: "the embedder cache rejects an active generation whose dimension != the configured EMBEDDING_DIM — retrieval fails",
+      fix,
+    });
+  }
+  if (obs.activeEmbeddingDimension !== null && obs.activeEmbeddingDimension !== obs.configuredDim) {
+    failures.push({
+      what: `embedder_runtime_state.active_embedding_dimension=${obs.activeEmbeddingDimension} != EMBEDDING_DIM ${obs.configuredDim}`,
+      why: "the recorded corpus width disagrees with the configured dimension",
+      fix,
+    });
+  }
+  for (const c of obs.columnDims) {
+    if (c.dim !== obs.configuredDim) {
+      failures.push({
+        what: `pgvector column ${c.column} is vector(${c.dim}) but EMBEDDING_DIM=${obs.configuredDim}`,
+        why: "writing a configured-width vector into a different-width column fails with a dimension mismatch",
+        fix,
+      });
+    }
+  }
+  return failures;
+}
+
+/** IO seam for the embedding-dimension check: the configured dim + the DB's recorded widths. */
+export type EmbeddingDimensionObserveDeps = {
+  readonly observeEmbeddingDimension: () => Promise<EmbeddingDimensionObservation>;
+};
+
+/**
+ * Observe + evaluate embedding-dimension consistency; throw {@link DeployContractError} on any mismatch.
+ * Wired into deploy_check (operator/CI) like the runway check — NOT the boot path (no crashloop).
+ */
+export async function assertEmbeddingDimensionConsistent(
+  deps: EmbeddingDimensionObserveDeps,
+): Promise<void> {
+  const failures = evaluateEmbeddingDimension(await deps.observeEmbeddingDimension());
+  if (failures.length > 0) {
+    throw new DeployContractError(failures);
+  }
+}
+
 /** A non-blocking feature-config item's state, for /config-status (never carries the secret value). */
 export type ConfigStatusItem = {
   readonly key: string;

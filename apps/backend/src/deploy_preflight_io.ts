@@ -12,11 +12,13 @@ import { WallClock } from "#platform/clock.js";
 import { DEFAULT_VAULT_SECRETS_DIR } from "./adapters/vault_file_kv.js";
 import { makeReadVaultKv } from "./config/vault_reader_factory.js";
 import {
+  type EmbeddingDimensionObserveDeps,
   type ObserveDeps,
   type PartitionRunwayObservation,
   parseRenderedSecret,
   type RunwayObserveDeps,
 } from "./deploy_preflight.js";
+import { EMBEDDING_DIM } from "#backend/adapters/embeddings_port.js";
 
 /**
  * Build the real preflight IO deps. `db` is any Kysely over the core pool; `secretsDir` defaults to
@@ -87,6 +89,45 @@ export function makeRunwayObserveDeps(args: { db: Kysely<unknown> }): RunwayObse
         parent: row.parent,
         furthestBoundMs: row.furthest === null ? null : Date.parse(row.furthest),
       }));
+    },
+  };
+}
+
+/** Build the embedding-dimension observation: the configured EMBEDDING_DIM + the DB's recorded widths. */
+export function makeEmbeddingDimensionObserveDeps(args: {
+  db: Kysely<unknown>;
+}): EmbeddingDimensionObserveDeps {
+  return {
+    observeEmbeddingDimension: async () => {
+      // tenant:exempt reason=platform-singleton-embedder-dimension-preflight follow_up=PERMANENT-EXEMPTION-embedder-dimension
+      const st = await sql<{ active_gen_dim: number | null; active_embedding_dimension: number | null }>`
+        SELECT g.embedding_dimension AS active_gen_dim,
+               s.active_embedding_dimension AS active_embedding_dimension
+          FROM core.embedder_runtime_state s
+          LEFT JOIN core.embedding_generations g ON g.generation_id = s.active_generation
+         WHERE s.singleton = true
+      `.execute(args.db);
+      // pgvector stores the dimension directly in atttypmod (-1 = unconstrained).
+      const cols = await sql<{ col: string; dim: number }>`
+        SELECT format('%s.%s.%s', n.nspname, c.relname, a.attname) AS col, a.atttypmod AS dim
+          FROM pg_attribute a
+          JOIN pg_class c ON c.oid = a.attrelid
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          JOIN pg_type t ON t.oid = a.atttypid
+         WHERE t.typname = 'vector' AND a.atttypmod > 0
+           AND (n.nspname, c.relname, a.attname) IN (
+             ('core', 'chunk_embeddings', 'embedding'),
+             ('core', 'knowledge_chunks', 'vector'),
+             ('core', 'confluence_chunks', 'embedding'),
+             ('cache', 'cache_embeddings', 'embedding')
+           )
+      `.execute(args.db);
+      return {
+        configuredDim: EMBEDDING_DIM,
+        activeGenerationDim: st.rows[0]?.active_gen_dim ?? null,
+        activeEmbeddingDimension: st.rows[0]?.active_embedding_dimension ?? null,
+        columnDims: cols.rows.map((r) => ({ column: r.col, dim: r.dim })),
+      };
     },
   };
 }
