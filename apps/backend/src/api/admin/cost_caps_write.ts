@@ -291,11 +291,11 @@ const COST_CAP_INIT_LOCK_KEY = 4_270_010_001;
 /**
  * First-time (bootstrap) configuration of the global + per_org_default caps. A DIRECT write — the two-person
  * change flow cannot run until these rows exist (approveCostCapChange reads the current cap and throws
- * CostCapSettingsMissingError when it is absent). Refused with CostCapAlreadyConfiguredError once BOTH rows
- * exist; thereafter all modifications go through requestCostCapChange (two-person). NOT idempotent (a second
- * call once configured is a 409, by design). Concurrent calls are serialised by an advisory lock; ON CONFLICT
- * (scope) DO NOTHING additionally guards the (practically-unreachable) partial-config case so an existing cap
- * is never silently overwritten/weakened.
+ * CostCapSettingsMissingError when it is absent). EMPTY-TABLE ONLY: refused with CostCapAlreadyConfiguredError
+ * if ANY scope row already exists (so a success always inserts BOTH requested values fresh — the audit event
+ * can never claim a value that wasn't written, and an existing cap is never partial-filled/overwritten).
+ * Thereafter all modifications go through requestCostCapChange (two-person). NOT idempotent (a second call is
+ * a 409, by design). Concurrent calls are serialised by an advisory lock so exactly one bootstraps.
  */
 export async function initializeCostCapSettings(args: {
   db: Kysely<unknown>;
@@ -312,8 +312,10 @@ export async function initializeCostCapSettings(args: {
     const existing = await sql<{ scope: string }>`
       SELECT scope FROM core.cost_cap_settings WHERE scope IN ('global', 'per_org_default')
     `.execute(tx);
-    const have = new Set(existing.rows.map((r) => r.scope));
-    if (have.has("global") && have.has("per_org_default")) {
+    // Bootstrap is empty-table only: ANY existing scope row → 409 (don't partial-fill, don't overwrite). This
+    // keeps the audit below honest — a success always wrote both requested values fresh. Partial state (one
+    // row) is unreachable in normal operation (approve only UPDATEs; nothing deletes a single row).
+    if (existing.rows.length > 0) {
       throw new CostCapAlreadyConfiguredError();
     }
     await sql`
