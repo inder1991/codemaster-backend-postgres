@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import {
   type EmbedResult,
   type EmbeddingsPort,
+  EmbedderDisabledError,
   EmbeddingsConnectivityError,
   EmbeddingsRateLimitedError,
   RecordingEmbeddingsClient,
@@ -121,6 +122,25 @@ describe("AnnRetriever", () => {
 
     expect(out.degraded).toBe(true);
     expect(out.degradation_reason).toBe("embed service rate-limited");
+    expect(out.items).toHaveLength(0);
+  });
+
+  it("returns a degraded-empty envelope when NO embedder is configured (7-8 retrieval fail-soft)", async () => {
+    const retriever = new AnnRetriever({
+      port: new InMemoryAnnPort({ rows: [] }),
+      embeddings: new FailingEmbeddings(new EmbedderDisabledError("no embedder configured")),
+      modelName: "m",
+    });
+    const query = KnowledgeQueryV1.parse({
+      query: "anything",
+      installation_id: INSTALLATION_ID,
+      repo_id: REPO_ID,
+    });
+
+    const out = await retriever.retrieve(query);
+
+    expect(out.degraded).toBe(true);
+    expect(out.degradation_reason).toBe("no embedder configured");
     expect(out.items).toHaveLength(0);
   });
 

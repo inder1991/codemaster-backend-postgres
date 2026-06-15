@@ -18,8 +18,45 @@ import {
   type EmbeddingsPort,
   RecordingEmbeddingsClient,
 } from "#backend/adapters/embeddings_port.js";
+import {
+  type EffectiveConfigDigestParts,
+  resolveEffectiveEmbedderConfig,
+} from "#backend/adapters/effective_embedder_config.js";
+import { ResolvingEmbeddingsAdapter } from "#backend/adapters/resolving_embeddings_adapter.js";
+import type {
+  EmbedderEffectiveDbConfig,
+  EmbedderSettingsNonSecret,
+} from "#backend/integrations/embedder/embedder_provider_settings_repo.js";
 import { OpenAICompatibleEmbeddingsAdapter } from "#backend/integrations/openai_compat/adapter.js";
 import { QwenEmbeddingsConsumer } from "#backend/integrations/qwen/consumer.js";
+
+/** The DB-backed embedder config reads the ResolvingEmbeddingsAdapter needs (the settings repo satisfies
+ *  this structurally). When supplied, the worker embeds through the DB-validated > env > none resolver. */
+export type EmbedderConfigReadPort = {
+  readForResolve(): Promise<EmbedderEffectiveDbConfig | null>;
+  readNonSecret(): Promise<EmbedderSettingsNonSecret | null>;
+};
+
+/** Optional deps for {@link resolveEmbeddingsConsumer}. With `embedderConfigPort` the worker uses the
+ *  DB-backed ResolvingEmbeddingsAdapter; without it, the legacy env-only selection runs unchanged. */
+export type ResolveEmbeddingsDeps = {
+  embedderConfigPort?: EmbedderConfigReadPort;
+  env?: NodeJS.ProcessEnv;
+};
+
+/** Map the repo's non-secret view to the digest parts the adapter cache keys on (never the plaintext key). */
+function nonSecretToDigestParts(ns: EmbedderSettingsNonSecret | null): EffectiveConfigDigestParts | null {
+  return ns === null
+    ? null
+    : {
+        baseUrl: ns.baseUrl,
+        modelName: ns.modelName,
+        keyPresent: ns.keyPresent,
+        lastRotatedAt: ns.lastRotatedAt,
+        enabled: ns.enabled,
+        validationStatus: ns.lastValidationStatus,
+      };
+}
 
 // Env var names + provider tokens.
 const EMBED_PROVIDER_ENV = "CODEMASTER_EMBEDDINGS_PROVIDER";
@@ -42,7 +79,21 @@ const STUB_RECORDING_DSN = "stub://recording";
  * Static env access (no dynamic indexing) keeps the object-injection sink closed, mirroring the other
  * `fromEnv` constructors in this tree.
  */
-export function resolveEmbeddingsConsumer(): EmbeddingsPort {
+export function resolveEmbeddingsConsumer(deps?: ResolveEmbeddingsDeps): EmbeddingsPort {
+  // DB-backed path (Phase 5): when a config port is wired, the worker embeds through the
+  // ResolvingEmbeddingsAdapter — DB-validated > env(openai_compat) > disabled — so the UI-saved model is
+  // what's used + recorded. The legacy env-only selection below is reached only WITHOUT a port (tests,
+  // and the platform-team Qwen path), keeping every existing caller's behavior unchanged.
+  if (deps?.embedderConfigPort !== undefined) {
+    const port = deps.embedderConfigPort;
+    const env = deps.env ?? process.env;
+    return new ResolvingEmbeddingsAdapter({
+      resolveConfig: () =>
+        resolveEffectiveEmbedderConfig({ readDbConfig: () => port.readForResolve(), env }),
+      readDigestParts: async () => nonSecretToDigestParts(await port.readNonSecret()),
+    });
+  }
+
   const provider = (process.env["CODEMASTER_EMBEDDINGS_PROVIDER"] ?? EMBED_PROVIDER_PLATFORM).trim();
   if (!VALID_EMBED_PROVIDERS.includes(provider)) {
     throw new Error(
