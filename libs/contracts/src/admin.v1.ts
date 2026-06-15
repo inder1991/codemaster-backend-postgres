@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { LlmPurposeV1 } from "./llm_routing.v1.js";
+
 // Zod port of contracts/admin/v1.py — the admin-console read contracts. `.strict()` (Pydantic
 // extra="forbid"). Batch 1: orgs filter + dashboard summary.
 
@@ -484,21 +486,14 @@ export const LlmModelListV1 = z
   .strict();
 export type LlmModelListV1 = z.infer<typeof LlmModelListV1>;
 
-/** One purpose→model assignment in GET /api/admin/llm-purpose-routing.
- *  The enum carries 7 values (see Python contract); the DB CHECK also admits 'fix_prompt'
- *  (8th) — a row with that value would fail validation identically to the Python (parity preserved). */
+/** One purpose→model assignment in GET /api/admin/llm-purpose-routing. The purpose reuses the full
+ *  8-value LlmPurposeV1 vocabulary (matching the DB CHECK, incl 'fix_prompt'), so the GET never throws on
+ *  any DB-valid row — a 'fix_prompt' pin or a legacy non-executable row both parse. (The WRITE contract
+ *  LlmPurposeAssignmentUpdateV1 is the strict one — only executable purposes.) */
 export const LlmPurposeModelV1 = z
   .object({
     schema_version: z.literal(1).default(1),
-    purpose: z.enum([
-      "review_summary",
-      "review_finding",
-      "chat_reply",
-      "walkthrough",
-      "redaction_check",
-      "cost_estimate",
-      "analysis_curator",
-    ]),
+    purpose: LlmPurposeV1,
     model_id: z.string().min(1).max(128),
   })
   .strict();
@@ -512,20 +507,23 @@ export const LlmPurposeModelListV1 = z
   .strict();
 export type LlmPurposeModelListV1 = z.infer<typeof LlmPurposeModelListV1>;
 
-/** PUT /api/admin/llm-purpose-routing body — assign one purpose to a catalog model. The purpose enum is
- *  the 7-value LlmPurposeV1 vocabulary (it OMITS 'fix_prompt' which the DB CHECK admits — faithful drift). */
+/** The purposes the runtime resolver actually consumes (the curator + reranker share 'analysis_curator').
+ *  Only these are assignable via the Job Routing UI/API — assigning any other purpose would persist a
+ *  no-op pin no consumer reads. */
+export const EXECUTABLE_LLM_PURPOSES = [
+  "review_finding",
+  "walkthrough",
+  "analysis_curator",
+  "fix_prompt",
+] as const;
+
+/** PUT /api/admin/llm-purpose-routing body — assign one EXECUTABLE purpose to a catalog model. Restricted
+ *  to EXECUTABLE_LLM_PURPOSES so the API cannot persist a no-op pin. (GET + DELETE accept the full
+ *  LlmPurposeV1 vocabulary so they can read/clear any DB-valid row, including legacy non-executable ones.) */
 export const LlmPurposeAssignmentUpdateV1 = z
   .object({
     schema_version: z.literal(1).default(1),
-    purpose: z.enum([
-      "review_summary",
-      "review_finding",
-      "chat_reply",
-      "walkthrough",
-      "redaction_check",
-      "cost_estimate",
-      "analysis_curator",
-    ]),
+    purpose: z.enum(EXECUTABLE_LLM_PURPOSES),
     model_id: z.string().min(1).max(128),
   })
   .strict();

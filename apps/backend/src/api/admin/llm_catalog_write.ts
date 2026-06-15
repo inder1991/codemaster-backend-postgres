@@ -47,6 +47,20 @@ export async function upsertPurposeModel(
   `.execute(db);
 }
 
+/** DELETE a purpose routing row by purpose ("reset to platform default"). Returns true iff a row was
+ *  deleted (route maps false→404). No FK risk — the FK is purpose_model.model_id → llm_models, so removing
+ *  a purpose row is always allowed. */
+export async function deletePurposeModel(
+  db: Kysely<unknown>,
+  args: { purpose: string },
+): Promise<boolean> {
+  const r = await sql<{ purpose: string }>`
+    DELETE FROM core.llm_purpose_model WHERE purpose = ${args.purpose}
+    RETURNING purpose
+  `.execute(db);
+  return r.rows.length > 0;
+}
+
 // ─── W1.3 RH9 — the optional Bedrock re-ranker's platform-singleton config (core.rerank_settings) ───
 
 /** The Bedrock RERANK-API models the engine can invoke (a fixed allow-list, unlike the chat-model catalog

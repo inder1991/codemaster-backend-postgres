@@ -29,7 +29,7 @@ let pool: Pool;
 let db: Kysely<unknown>;
 
 async function cleanup(): Promise<void> {
-  await sql`DELETE FROM core.llm_purpose_model WHERE purpose = ${PURPOSE}`.execute(db);
+  await sql`DELETE FROM core.llm_purpose_model WHERE purpose IN (${PURPOSE}, 'fix_prompt')`.execute(db);
   await sql`DELETE FROM core.llm_models WHERE model_id IN (${M_OK}, ${M_DIS}, ${M_UNVAL})`.execute(db);
 }
 
@@ -100,6 +100,22 @@ describeDb("admin llm-purpose-routing write (disposable :5434)", () => {
     expect((await app.inject({ method: "PUT", url: URL, cookies: SA(), payload: { purpose: "bogus", model_id: M_OK } })).statusCode).toBe(422);
     // super_admin only → reader 403
     expect((await app.inject({ method: "PUT", url: URL, cookies: cookie("reader"), payload: { purpose: PURPOSE, model_id: M_OK } })).statusCode).toBe(403);
+    await app.close();
+  });
+
+  it("GET tolerates a fix_prompt pin (no 500); PUT rejects a non-executable purpose; DELETE clears (204 then 404)", async () => {
+    const app = await makeApp();
+    // fix_prompt IS executable → assignable to a validated model.
+    expect((await app.inject({ method: "PUT", url: URL, cookies: SA(), payload: { purpose: "fix_prompt", model_id: M_OK } })).statusCode).toBe(200);
+    // GET must not 500 on the fix_prompt row (regression: the old 7-value GET enum omitted fix_prompt).
+    const get = await app.inject({ method: "GET", url: URL, cookies: SA() });
+    expect(get.statusCode).toBe(200);
+    expect(get.json<{ assignments: Array<{ purpose: string }> }>().assignments.map((a) => a.purpose)).toContain("fix_prompt");
+    // a non-executable purpose is rejected by the WRITE contract → 422.
+    expect((await app.inject({ method: "PUT", url: URL, cookies: SA(), payload: { purpose: "cost_estimate", model_id: M_OK } })).statusCode).toBe(422);
+    // DELETE clears the pin → 204, then 404.
+    expect((await app.inject({ method: "DELETE", url: `${URL}/fix_prompt`, cookies: SA() })).statusCode).toBe(204);
+    expect((await app.inject({ method: "DELETE", url: `${URL}/fix_prompt`, cookies: SA() })).statusCode).toBe(404);
     await app.close();
   });
 });

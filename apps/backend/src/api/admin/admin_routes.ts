@@ -177,6 +177,7 @@ import {
 import {
   RERANK_MODELS,
   deleteModel,
+  deletePurposeModel,
   readRerankSettings,
   setValidation,
   upsertModel,
@@ -2490,6 +2491,22 @@ export async function registerAdminRoutes(
           updatedByUserId: principal.userId,
         });
         return reply.code(200).send(LlmPurposeModelV1.parse({ purpose: body.purpose, model_id: body.model_id }));
+      },
+    );
+
+    scope.delete(
+      "/api/admin/llm-purpose-routing/:purpose",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        // Reset a purpose to the platform default. The :purpose param is NOT enum-validated — a legacy /
+        // no-longer-executable pin (e.g. cost_estimate from an older UI) must still be clearable; a
+        // non-existent assignment → 404.
+        const params = request.params as { purpose: string };
+        const deleted = await deletePurposeModel(opts.db, { purpose: params.purpose });
+        if (!deleted) {
+          return reply.code(404).send({ detail: `no routing assignment for purpose: ${params.purpose}` });
+        }
+        return reply.code(204).send();
       },
     );
 
