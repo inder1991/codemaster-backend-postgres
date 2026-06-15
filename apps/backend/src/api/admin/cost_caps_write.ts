@@ -281,14 +281,21 @@ const AUDIT_REJECT = "cost_cap.change.rejected";
 const AUDIT_TARGET_KIND = "cost_cap_pending_change";
 const AUDIT_INIT = "cost_cap.settings.initialized";
 const AUDIT_SETTINGS_TARGET_KIND = "cost_cap_settings";
+// Fixed key for pg_advisory_xact_lock — serialises first-time cost-cap initialization cluster-wide. FOR
+// UPDATE can't lock rows that don't exist yet, so on an EMPTY table two concurrent bootstraps would both
+// pass the existence check and the loser's INSERT would silently no-op (ON CONFLICT DO NOTHING) while still
+// returning 200 with the winner's values. The advisory lock makes init mutually exclusive: the loser blocks
+// until the winner commits, then sees both rows and gets a clean 409.
+const COST_CAP_INIT_LOCK_KEY = 4_270_010_001;
 
 /**
  * First-time (bootstrap) configuration of the global + per_org_default caps. A DIRECT write — the two-person
  * change flow cannot run until these rows exist (approveCostCapChange reads the current cap and throws
  * CostCapSettingsMissingError when it is absent). Refused with CostCapAlreadyConfiguredError once BOTH rows
- * exist; thereafter all modifications go through requestCostCapChange (two-person). Idempotent on the partial
- * case: ON CONFLICT (scope) DO NOTHING fills only the missing scope row and NEVER overwrites an existing cap,
- * so this path can never silently weaken a configured cap.
+ * exist; thereafter all modifications go through requestCostCapChange (two-person). NOT idempotent (a second
+ * call once configured is a 409, by design). Concurrent calls are serialised by an advisory lock; ON CONFLICT
+ * (scope) DO NOTHING additionally guards the (practically-unreachable) partial-config case so an existing cap
+ * is never silently overwritten/weakened.
  */
 export async function initializeCostCapSettings(args: {
   db: Kysely<unknown>;
@@ -300,9 +307,10 @@ export async function initializeCostCapSettings(args: {
   audit?: CostCapAuditEmitter | undefined;
 }): Promise<void> {
   await args.db.transaction().execute(async (tx) => {
-    // FOR UPDATE locks any existing scope row so a concurrent init/approve serialises against this tx.
+    // Serialise ALL concurrent init attempts (see COST_CAP_INIT_LOCK_KEY) — released at tx commit/rollback.
+    await sql`SELECT pg_advisory_xact_lock(${COST_CAP_INIT_LOCK_KEY})`.execute(tx);
     const existing = await sql<{ scope: string }>`
-      SELECT scope FROM core.cost_cap_settings WHERE scope IN ('global', 'per_org_default') FOR UPDATE
+      SELECT scope FROM core.cost_cap_settings WHERE scope IN ('global', 'per_org_default')
     `.execute(tx);
     const have = new Set(existing.rows.map((r) => r.scope));
     if (have.has("global") && have.has("per_org_default")) {
@@ -344,6 +352,13 @@ export async function requestCostCapChange(args: {
   }
   if (b.target_kind !== "per_org_override" && b.target_id !== null) {
     throw new CostCapInvalidRequestError(`target_kind='${b.target_kind}' does not accept a target_id`);
+  }
+  // A change can only be APPROVED once the settings rows exist (approveCostCapChange reads the current cap
+  // and throws when it's absent). Refuse a request on an UNCONFIGURED platform so we never create an
+  // un-approvable orphan pending change — bootstrap via initializeCostCapSettings first.
+  const caps = await getCurrentCaps(args.db);
+  if (caps.global === null || caps.perOrgDefault === null) {
+    throw new CostCapSettingsMissingError();
   }
   const expiresAt = b.expires_at === null ? null : new Date(b.expires_at);
   if (expiresAt !== null && expiresAt.getTime() <= args.now.getTime()) {

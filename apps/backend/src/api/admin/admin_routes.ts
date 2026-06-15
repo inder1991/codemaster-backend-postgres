@@ -1749,6 +1749,10 @@ export async function registerAdminRoutes(
           if (e instanceof CostCapInvalidRequestError) {
             return reply.code(400).send({ detail: e.message });
           }
+          if (e instanceof CostCapSettingsMissingError) {
+            // Platform not configured yet — bootstrap via PUT /api/admin/cost-caps/settings first.
+            return reply.code(409).send({ detail: e.message });
+          }
           if (e instanceof CostCapConcurrentPendingChangeError) {
             return reply.code(409).send({ detail: { existing_pending_change_id: e.existingPendingChangeId } });
           }

@@ -140,6 +140,36 @@ describeDb("admin cost-caps first-time config (disposable :5434)", () => {
     await app.close();
   });
 
+  it("PUT .../settings: concurrent first-time inits → exactly one 200 + one 409 (advisory-lock serialised)", async () => {
+    const app = await makeApp();
+    // Two operators bootstrap simultaneously on the empty table. Without serialisation BOTH would 200 and
+    // one write would be silently lost (ON CONFLICT DO NOTHING). The advisory lock guarantees a single winner.
+    const [a, b] = await Promise.all([
+      app.inject({ method: "PUT", url: SETTINGS_URL, cookies: cookie("platform_owner"), payload: initBody(800000, 200000) }),
+      app.inject({ method: "PUT", url: SETTINGS_URL, cookies: cookie("platform_owner"), payload: initBody(900000, 300000) }),
+    ]);
+    expect([a.statusCode, b.statusCode].sort()).toEqual([200, 409]);
+    // The persisted cap is the winner's value — a real write, never a lost one.
+    const row = await sql<{ cap_cents: string | number }>`
+      SELECT cap_cents FROM core.cost_cap_settings WHERE scope = 'global'
+    `.execute(db);
+    expect([800000, 900000]).toContain(Number(row.rows[0]!.cap_cents));
+    await app.close();
+  });
+
+  it("POST .../changes: 409 on an unconfigured platform (no un-approvable orphan pending change)", async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/admin/cost-caps/changes",
+      cookies: cookie("platform_owner"),
+      payload: { schema_version: 1, target_kind: "global", target_id: null, new_cap_cents: 700000, expires_at: null },
+    });
+    // 409 = the guard fired BEFORE insertPendingChange (no orphan row created); must bootstrap first.
+    expect(res.statusCode).toBe(409);
+    await app.close();
+  });
+
   it("PUT .../settings: 422 when a cap exceeds the hard ceiling", async () => {
     const app = await makeApp();
     const res = await app.inject({
