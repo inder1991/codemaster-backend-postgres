@@ -237,6 +237,19 @@ import { PostgresLlmProviderSettingsRepo } from "#backend/integrations/llm/llm_p
 import { getAuditKeyRegistry, requireAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
 import { PostgresGitHubAppSettingsRepo } from "#backend/integrations/github/github_app_settings_repo.js";
 import { PostgresConfluenceSettingsRepo } from "#backend/integrations/confluence/confluence_settings_repo.js";
+import { PostgresEmbedderProviderSettingsRepo } from "#backend/integrations/embedder/embedder_provider_settings_repo.js";
+import {
+  type EmbedderProbeConfig,
+  type EmbedderProbeResult,
+} from "#backend/adapters/embedder_probe.js";
+import { EMBEDDING_DIM } from "#backend/adapters/embeddings_port.js";
+import {
+  EmbedderConfigChangedError,
+  EmbedderNotGreenfieldError,
+  EmbedderProvenanceError,
+  promoteValidatedEmbedderConfig,
+} from "#backend/api/admin/embedder_config_promote.js";
+import { EmbedderConfigV1, PutEmbedderConfigRequestV1 } from "#contracts/embedder_config.v1.js";
 import { PostgresOutboxRepo } from "#backend/domain/repos/outbox_repo.js";
 import { type GetPreflightValidator } from "#backend/integrations/llm/preflight_validator.js";
 import { PLATFORM_SCOPE_AUDIT_INSTALLATION_ID } from "#backend/infra/sentinels.js";
@@ -335,6 +348,12 @@ function coerceBoolQueryParam(raw: string | undefined): boolean | "invalid" {
   return "invalid";
 }
 
+/** The embedder /test probe seam: tests the STAGED config (decrypted) against the real embedder. Production
+ *  wires probeEmbedder (real fetch); tests inject a stub. */
+export type EmbedderProbePort = {
+  probe(config: EmbedderProbeConfig): Promise<EmbedderProbeResult>;
+};
+
 export type AdminRoutesOptions = {
   db: Kysely<unknown>;
   signingKey: Buffer | Uint8Array;
@@ -361,6 +380,9 @@ export type AdminRoutesOptions = {
   /** Injected platform-credential probe factory. Undefined → the platform-credentials PATCH/test routes 503.
    *  Real Confluence/Qwen probe adapters deferred; tests inject a stub. */
   getPlatformCredentialProbe?: GetPlatformCredentialProbe;
+  /** Injected embedder /test probe. Undefined → POST /api/admin/embedder-config/test returns 503.
+   *  Production wires probeEmbedder (real fetch transport); tests inject a stub. */
+  getEmbedderProbe?: () => EmbedderProbePort;
   /** Resolves an actor user_id → email for the credential-rotation + page-approval audit (P0-1). Defaults to
    *  the shim resolver. */
   userEmailResolver?: UserEmailResolverPort;
@@ -681,6 +703,178 @@ export async function registerAdminRoutes(
             ? "Connected to Confluence."
             : `Confluence connectivity failed${result.errorCode ? ` (${result.errorCode})` : ""}${result.errorDetail ? `: ${result.errorDetail}` : ""}`,
         });
+      },
+    );
+
+    // ─── Embedder config (Phase 6) ────────────────────────────────────────────────────────────────
+    // DB-backed embedder creds + model (field-codec ciphertext) replacing the Vault `embedder.qwen` path.
+    // GET (platform_owner+) NEVER returns the api key (key_present only); PUT (super_admin) STAGES the
+    // config + resets validation; POST /test probes the STAGED config and, on success, PROMOTES it via the
+    // r7 CAS/lock/greenfield/provenance transaction. The base_url is super_admin-configured infra (an
+    // in-cluster Ollama/vLLM on a private network, plain http) so it is intentionally NOT SSRF/private-CIDR
+    // blocked — parity with confluence-config (D8: http + private universal).
+    scope.get(
+      "/api/admin/embedder-config",
+      { preHandler: requireRole(["platform_owner", "super_admin"]) },
+      async () => {
+        const repo = new PostgresEmbedderProviderSettingsRepo({
+          db: opts.db,
+          registry: requireAuditKeyRegistry(),
+        });
+        const cfg = await repo.readNonSecret();
+        return EmbedderConfigV1.parse({
+          provider: "openai_compat",
+          base_url: cfg?.baseUrl ?? null,
+          model_name: cfg?.modelName ?? null,
+          key_present: cfg?.keyPresent ?? false,
+          enabled: cfg?.enabled ?? false,
+          last_validation_status: cfg?.lastValidationStatus ?? null,
+          last_validation_error: cfg?.lastValidationError ?? null,
+          last_validated_at: cfg?.lastValidatedAt?.toISOString() ?? null,
+          last_rotated_at: cfg?.lastRotatedAt?.toISOString() ?? null,
+          last_rotated_by: cfg?.lastRotatedBy ?? null,
+          updated_at: cfg?.updatedAt?.toISOString() ?? null,
+        });
+      },
+    );
+    scope.put(
+      "/api/admin/embedder-config",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const parsed = PutEmbedderConfigRequestV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        const body = parsed.data;
+        if (!/^https?:\/\//.test(body.base_url)) {
+          return reply.code(422).send({ detail: "base_url must be an http(s) URL" });
+        }
+        const principal = request.authPrincipal!;
+        const actorEmail = await (opts.userEmailResolver ?? shimUserEmailResolver).resolveEmail(
+          principal.userId,
+        );
+        const repo = new PostgresEmbedderProviderSettingsRepo({
+          db: opts.db,
+          registry: requireAuditKeyRegistry(),
+        });
+        // api_key TRI-STATE: absent → keep; null → clear (keyless); string → set. A keyless embedder is
+        // valid, so (unlike confluence) the INITIAL config does NOT require a key.
+        const key =
+          body.api_key === undefined
+            ? ({ kind: "keep" } as const)
+            : body.api_key === null
+              ? ({ kind: "clear" } as const)
+              : ({ kind: "set", plaintext: body.api_key } as const);
+        await repo.writeSecret({
+          baseUrl: body.base_url,
+          modelName: body.model_name,
+          enabled: body.enabled,
+          key,
+          rotatedBy: actorEmail,
+        });
+        await opts.audit?.({
+          actorUserId: principal.userId,
+          installationId: principal.installationId,
+          action: "embedder_settings.staged",
+          targetKind: "embedder_provider_settings",
+          targetId: "platform",
+          before: null,
+          after: {
+            base_url: body.base_url,
+            model_name: body.model_name,
+            enabled: body.enabled,
+            key_changed: body.api_key !== undefined,
+          },
+          now: opts.clock.now(),
+        });
+        return reply.code(200).send({ ok: true });
+      },
+    );
+    // POST /test: probe the STAGED config; on success PROMOTE it (the r7 transaction). 200 even on probe
+    // failure (the body carries ok:false + the reason); 409 on a CAS/greenfield/provenance conflict.
+    scope.post(
+      "/api/admin/embedder-config/test",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        if (opts.getEmbedderProbe === undefined) {
+          return reply
+            .code(503)
+            .send({ detail: "embedder /test not available in this deployment (probe unwired)" });
+        }
+        const repo = new PostgresEmbedderProviderSettingsRepo({
+          db: opts.db,
+          registry: requireAuditKeyRegistry(),
+        });
+        const staged = await repo.readForResolve();
+        const ns = await repo.readNonSecret();
+        if (staged === null || ns === null) {
+          return reply
+            .code(422)
+            .send({ detail: "no embedder config saved — PUT a base_url + model before testing" });
+        }
+        const token = ns.updatedAt;
+        const result = await opts.getEmbedderProbe().probe({
+          baseUrl: staged.baseUrl,
+          apiKey: staged.apiKey,
+          modelName: staged.modelName,
+        });
+        const principal = request.authPrincipal!;
+        if (!result.ok) {
+          await repo.writeValidationResult({ status: "failed", error: result.detail });
+          // A returned-but-wrong width → dimension_mismatch; no vector at all → connectivity/auth.
+          const error = result.dimension !== null ? "dimension_mismatch" : "connectivity_error";
+          return reply.code(200).send(
+            TestPlatformCredentialsResponseV1.parse({
+              ok: false,
+              error,
+              error_detail: result.detail,
+              latency_ms: null,
+              detected_dimension: result.dimension,
+              corpus_dimension: EMBEDDING_DIM,
+            }),
+          );
+        }
+        const actorEmail = await (opts.userEmailResolver ?? shimUserEmailResolver).resolveEmail(
+          principal.userId,
+        );
+        try {
+          await promoteValidatedEmbedderConfig(opts.db, {
+            expectedToken: token,
+            modelName: staged.modelName,
+            provider: "openai_compat",
+            expectedDimension: EMBEDDING_DIM,
+            actorEmail,
+          });
+        } catch (e) {
+          if (
+            e instanceof EmbedderConfigChangedError ||
+            e instanceof EmbedderNotGreenfieldError ||
+            e instanceof EmbedderProvenanceError
+          ) {
+            return reply.code(409).send({ detail: e.message });
+          }
+          throw e;
+        }
+        await opts.audit?.({
+          actorUserId: principal.userId,
+          installationId: principal.installationId,
+          action: "embedder_settings.promoted",
+          targetKind: "embedder_provider_settings",
+          targetId: "platform",
+          before: null,
+          after: { model_name: staged.modelName, dimension: EMBEDDING_DIM },
+          now: opts.clock.now(),
+        });
+        return reply.code(200).send(
+          TestPlatformCredentialsResponseV1.parse({
+            ok: true,
+            error: null,
+            error_detail: null,
+            latency_ms: null,
+            detected_dimension: result.dimension,
+            corpus_dimension: EMBEDDING_DIM,
+          }),
+        );
       },
     );
 

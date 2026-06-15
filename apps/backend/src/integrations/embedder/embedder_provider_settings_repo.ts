@@ -217,6 +217,26 @@ export class PostgresEmbedderProviderSettingsRepo {
   }
 
   /**
+   * Record a /test outcome on the staged row WITHOUT touching updated_at (the CAS token stays stable) or
+   * the config fields. The SUCCESS path goes through promoteValidatedEmbedderConfig (which sets 'ok' under
+   * the lock + CAS); this is the FAILED path so the admin sees WHY in the GET/config-status. Returns true
+   * iff a row existed.
+   */
+  public async writeValidationResult(args: {
+    status: EmbedderValidationStatus;
+    error: string | null;
+  }): Promise<boolean> {
+    // tenant:exempt reason=platform-config follow_up=PERMANENT-EXEMPTION-embedder-provider-settings
+    const r = await sql`
+      UPDATE core.embedder_provider_settings
+         SET last_validation_status = ${args.status}, last_validation_error = ${args.error},
+             last_validated_at = now()
+       WHERE singleton = true
+    `.execute(this.db);
+    return (r.numAffectedRows ?? 0n) > 0n;
+  }
+
+  /**
    * Toggle enabled WITHOUT touching validation / key / base_url / model — bumps updated_at only (D2-val:
    * an enable toggle KEEPS the prior validation, unlike a config write which resets it). Returns true iff
    * a row existed.
