@@ -6,9 +6,9 @@
 // embed service itself controls). Temporal retries are safe; double-emit just produces duplicate OTel
 // histogram records, no state change.
 //
-// ── 1024-dim guard ──
-// The platform-model contract is EMBEDDING_DIM = 1024 (the pgvector `core.knowledge_chunks.vector`
-// column width). This activity defensively rejects a wrong-shape vector — a contract violation from the
+// ── dimension guard ──
+// The platform-model contract is EMBEDDING_DIM (CODEMASTER_EMBEDDING_DIMENSION, default 1024 — the pgvector
+// `core.knowledge_chunks.vector` column width). This activity defensively rejects a wrong-shape vector — a contract violation from the
 // embed service — rather than returning it and poisoning the downstream ANN cosine search.
 //
 // ── Purpose alignment (W1.3 — RL-appendix embed-mode) ──

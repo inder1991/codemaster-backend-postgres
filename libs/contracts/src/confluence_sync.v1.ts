@@ -162,7 +162,8 @@ export const ChunkAndEmbedInputV1 = z
 export type ChunkAndEmbedInputV1 = z.infer<typeof ChunkAndEmbedInputV1>;
 
 // EmbeddedChunkV1 — one embedded chunk produced by chunk_and_embed_activity. `embedding` is a bare-float
-// vector of EXACTLY 1024 elements (min_length=1024, max_length=1024) — see FLOAT NOTE in the header.
+// vector; the contract is dimension-agnostic (min_length=1) — the configured EMBEDDING_DIM is enforced at
+// the pgvector WRITE path, not here. See FLOAT NOTE in the header.
 export const EmbeddedChunkV1 = z
   .object({
     schema_version: z.number().int().default(1),
