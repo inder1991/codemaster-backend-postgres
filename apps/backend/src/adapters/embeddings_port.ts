@@ -134,6 +134,24 @@ export class EmbeddingsValidationError extends EmbeddingsError {
   }
 }
 
+/**
+ * No embedder is configured: the DB resolver returned no validated config and there is no env fallback
+ * (the ResolvingEmbeddingsAdapter throws this from {@link EmbeddingsPort.embed}). A SIBLING of
+ * {@link EmbeddingsError}, deliberately NOT a subclass of {@link EmbeddingsConnectivityError} (6-8/7-8):
+ *   - the RETRIEVAL/QUERY path catches it EXPLICITLY and degrades to lexical-only (same UX as a
+ *     connectivity blip — a query must still return results);
+ *   - the INGEST path does NOT catch it, so it propagates and FAILS-CLOSED — an ingest must never write
+ *     zero/garbage-width vectors when no embedder is configured.
+ * Keeping it a sibling (not a connectivity subclass) is what makes the ingest sites fail-closed even
+ * though they may catch connectivity for transient blips.
+ */
+export class EmbedderDisabledError extends EmbeddingsError {
+  public constructor(message: string) {
+    super(message);
+    this.name = "EmbedderDisabledError";
+  }
+}
+
 // ─── Test/dev implementation ─────────────────────────────────────────────────────────────────────
 
 /** pgvector HNSW/ivfflat indexes on the `vector` type cap at 2000 dimensions. */
