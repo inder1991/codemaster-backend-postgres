@@ -15,7 +15,10 @@
 // FAIL-LOUD posture: construction throws when the chosen provider's required env vars are missing.
 
 import {
+  type EmbedRequest,
+  type EmbedResult,
   type EmbeddingsPort,
+  EmbedderDisabledError,
   RecordingEmbeddingsClient,
 } from "#backend/adapters/embeddings_port.js";
 import {
@@ -56,11 +59,48 @@ export type ResolveEmbeddingsDeps = {
  */
 export function resolveRuntimeEmbedder(args: { dsn: string }): EmbeddingsPort {
   const registry = getAuditKeyRegistry();
-  return registry !== null
-    ? resolveEmbeddingsConsumer({
-        embedderConfigPort: PostgresEmbedderProviderSettingsRepo.fromDsn({ dsn: args.dsn, registry }),
-      })
-    : resolveEmbeddingsConsumer();
+  if (registry === null) {
+    // No field-key registry → cannot read DB creds; the legacy env-only selection is the whole story.
+    return resolveEmbeddingsConsumer();
+  }
+  // DB-config > FULL legacy env > disabled. The ResolvingEmbeddingsAdapter covers DB-validated +
+  // openai_compat-env; when it has nothing (no DB row, no CODEMASTER_EMBEDDER_* env) it throws
+  // EmbedderDisabledError, and we fall back to the FULL legacy resolveEmbeddingsConsumer() — which ALSO
+  // honors the platform/Qwen DSN (incl. the stub://recording dev sentinel). So an env-configured
+  // deployment keeps working with the registry installed, and EmbedderDisabledError only surfaces when
+  // there is genuinely NO embedder anywhere (then retrieval fails-soft, ingest fails-closed).
+  const dbAdapter = resolveEmbeddingsConsumer({
+    embedderConfigPort: PostgresEmbedderProviderSettingsRepo.fromDsn({ dsn: args.dsn, registry }),
+  });
+  return new DbThenLegacyEnvEmbedder(dbAdapter);
+}
+
+/** DB-backed embedder with a legacy-env fallback: on EmbedderDisabledError (no DB row + no openai_compat
+ *  env), delegate to the full env-based resolveEmbeddingsConsumer() (platform/Qwen, openai_compat, or the
+ *  recording stub). If THAT is also unconfigured (fail-loud), re-throw the original EmbedderDisabledError
+ *  so the documented fail-soft / fail-closed handling still fires. The legacy factory is injectable for
+ *  tests; production defaults to resolveEmbeddingsConsumer. */
+export class DbThenLegacyEnvEmbedder implements EmbeddingsPort {
+  private legacy: EmbeddingsPort | undefined;
+  public constructor(
+    private readonly db: EmbeddingsPort,
+    private readonly makeLegacy: () => EmbeddingsPort = () => resolveEmbeddingsConsumer(),
+  ) {}
+  public async embed(req: EmbedRequest): Promise<EmbedResult> {
+    try {
+      return await this.db.embed(req);
+    } catch (e) {
+      if (!(e instanceof EmbedderDisabledError)) {
+        throw e;
+      }
+      try {
+        this.legacy ??= this.makeLegacy();
+      } catch {
+        throw e; // legacy env not configured either → genuinely no embedder
+      }
+      return this.legacy.embed(req);
+    }
+  }
 }
 
 /**

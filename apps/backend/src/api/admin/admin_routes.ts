@@ -236,9 +236,14 @@ import {
   EmbedderConfigChangedError,
   EmbedderNotGreenfieldError,
   EmbedderProvenanceError,
+  embedderContractChangeOnNonGreenfield,
   promoteValidatedEmbedderConfig,
 } from "#backend/api/admin/embedder_config_promote.js";
-import { EmbedderConfigV1, PutEmbedderConfigRequestV1 } from "#contracts/embedder_config.v1.js";
+import {
+  ConfigStatusV1,
+  EmbedderConfigV1,
+  PutEmbedderConfigRequestV1,
+} from "#contracts/embedder_config.v1.js";
 import { PostgresOutboxRepo } from "#backend/domain/repos/outbox_repo.js";
 import { type GetPreflightValidator } from "#backend/integrations/llm/preflight_validator.js";
 import { PLATFORM_SCOPE_AUDIT_INSTALLATION_ID } from "#backend/infra/sentinels.js";
@@ -505,7 +510,9 @@ export async function registerAdminRoutes(
     scope.get(
       "/api/admin/config-status",
       { preHandler: requireRole(["platform_operator", "platform_owner", "super_admin"]) },
-      async () => ({ items: await configStatusProvider() }),
+      // Parse through the versioned contract at the boundary so the emitted states/sources are validated
+      // against ConfigStatusItemV1 (not raw provider output).
+      async () => ConfigStatusV1.parse({ items: await configStatusProvider() }),
     );
 
     // GitHub App config (UI-editable; go-live Step 4b). Secrets are stored field-codec-encrypted; GET
@@ -767,6 +774,24 @@ export async function registerAdminRoutes(
           db: opts.db,
           registry: requireAuditKeyRegistry(),
         });
+        // PUT-time greenfield guard (review #1): if this PUT would CHANGE the embedding contract (model)
+        // and the corpus is NON-greenfield, reject it BEFORE writeSecret overwrites the working config +
+        // resets validation. Otherwise the runtime would go disabled and /test could only 409 — stranding
+        // the admin with no active config. v1 is greenfield: the model is chosen before ingest; changing it
+        // on a live corpus is the day-2 re-embed path.
+        if (
+          await embedderContractChangeOnNonGreenfield(opts.db, {
+            modelName: body.model_name,
+            provider: "openai_compat",
+            dimension: EMBEDDING_DIM,
+          })
+        ) {
+          return reply.code(409).send({
+            detail:
+              "cannot change the embedder model once content is ingested (the day-2 re-embed path); the " +
+              "current config is left unchanged",
+          });
+        }
         // D2-val: a pure enable/disable toggle (base_url + model unchanged, no new key) KEEPS the prior
         // validation — disabling then re-enabling a tested config must NOT force a re-test. Any actual
         // config change goes through writeSecret, which re-stages + resets validation.
@@ -847,11 +872,19 @@ export async function registerAdminRoutes(
         const principal = request.authPrincipal!;
         if (!result.ok) {
           // CAS-guarded so a concurrent re-stage isn't mislabeled 'failed' with this probe's stale error.
-          await repo.writeValidationResult({
+          const recorded = await repo.writeValidationResult({
             status: "failed",
             error: result.detail,
             expectedRevision: revision,
           });
+          if (!recorded) {
+            // The config changed during the probe — this failure is for a config that's no longer staged.
+            // Same 409 as the success-path CAS miss (don't return a stale ok:false 200).
+            return reply.code(409).send({
+              detail:
+                "the embedder config changed during validation — re-run /test against the current config",
+            });
+          }
           return reply.code(200).send(
             TestPlatformCredentialsResponseV1.parse({
               ok: false,

@@ -40,10 +40,16 @@ export class EmbedderProvenanceError extends Error {
   }
 }
 
-/** The four pgvector corpus tables + the generation baseline that define "greenfield" (mirrors the
- *  set-embedding-dimension one-shot guard: a model/dimension change once ingest exists is the day-2
- *  re-embed path, not this one). */
-async function assertEmbedderGreenfield(trx: Transaction<unknown>): Promise<void> {
+type GreenfieldCounts = {
+  corpus: number;
+  activeGeneration: number;
+  pendingGeneration: number | null;
+  generationCount: number;
+};
+
+/** Read the four pgvector corpus tables + the generation baseline that define "greenfield" (mirrors the
+ *  set-embedding-dimension one-shot guard). Works on a pool Kysely OR a transaction. */
+async function embedderGreenfieldCounts(executor: Kysely<unknown>): Promise<GreenfieldCounts> {
   // tenant:exempt reason=platform-singleton-embedder-greenfield-gate follow_up=PERMANENT-EXEMPTION-embedder
   const counts = await sql<{
     knowledge_chunks: number;
@@ -62,23 +68,62 @@ async function assertEmbedderGreenfield(trx: Transaction<unknown>): Promise<void
       (SELECT active_generation::int FROM core.embedder_runtime_state WHERE singleton = true)  AS active_generation,
       (SELECT pending_generation::int FROM core.embedder_runtime_state WHERE singleton = true) AS pending_generation,
       (SELECT count(*)::int FROM core.embedding_generations)                    AS generation_count
-  `.execute(trx);
+  `.execute(executor);
   const c = counts.rows[0]!;
-  const corpus =
-    c.knowledge_chunks + c.confluence_chunks + c.chunk_embeddings + c.cache_embeddings;
-  if (
-    corpus > 0 ||
-    c.active_generation !== 1 ||
-    c.pending_generation !== null ||
-    c.generation_count !== 1
-  ) {
+  return {
+    corpus: c.knowledge_chunks + c.confluence_chunks + c.chunk_embeddings + c.cache_embeddings,
+    activeGeneration: c.active_generation,
+    pendingGeneration: c.pending_generation,
+    generationCount: c.generation_count,
+  };
+}
+
+function isGreenfield(c: GreenfieldCounts): boolean {
+  return c.corpus === 0 && c.activeGeneration === 1 && c.pendingGeneration === null && c.generationCount === 1;
+}
+
+async function assertEmbedderGreenfield(trx: Transaction<unknown>): Promise<void> {
+  const c = await embedderGreenfieldCounts(trx);
+  if (!isGreenfield(c)) {
     throw new EmbedderNotGreenfieldError(
       `refusing to change the embedding model/dimension on a non-greenfield corpus ` +
-        `(vector rows=${corpus}, active_generation=${c.active_generation}, ` +
-        `pending_generation=${String(c.pending_generation)}, generations=${c.generation_count}). ` +
+        `(vector rows=${c.corpus}, active_generation=${c.activeGeneration}, ` +
+        `pending_generation=${String(c.pendingGeneration)}, generations=${c.generationCount}). ` +
         `Changing the model once content is ingested is the day-2 re-embed path, not /test.`,
     );
   }
+}
+
+/**
+ * PUT-time guard (review #1): would adopting `modelName`/`provider`/`dimension` CHANGE the active
+ * embedding contract, and is the corpus greenfield? The route uses this to REJECT a contract-changing PUT
+ * BEFORE writeSecret overwrites the working config (which would reset validation → disable the embedder,
+ * after which /test can only 409 — leaving no active config). A re-stage of the SAME contract, or any
+ * change on a greenfield corpus, is allowed.
+ */
+export async function embedderContractChangeOnNonGreenfield(
+  db: Kysely<unknown>,
+  args: { modelName: string; provider: "openai_compat"; dimension: number },
+): Promise<boolean> {
+  const counts = await embedderGreenfieldCounts(db);
+  if (isGreenfield(counts)) {
+    return false; // greenfield → any model is fine (this is the pre-ingest configuration phase)
+  }
+  // Non-greenfield: only a contract CHANGE vs the active generation is blocked (a re-stage is allowed).
+  // tenant:exempt reason=embedder-platform-wide follow_up=PERMANENT-EXEMPTION-embedder
+  const gen = await sql<{ model_name: string; provider_name: string; embedding_dimension: number }>`
+    SELECT g.model_name, g.provider_name, g.embedding_dimension
+      FROM core.embedding_generations g
+      JOIN core.embedder_runtime_state s ON s.active_generation = g.generation_id
+     WHERE s.singleton = true
+  `.execute(db);
+  const g = gen.rows[0];
+  return (
+    g === undefined ||
+    g.model_name !== args.modelName ||
+    g.provider_name !== args.provider ||
+    g.embedding_dimension !== args.dimension
+  );
 }
 
 export type PromoteValidatedEmbedderConfigArgs = {

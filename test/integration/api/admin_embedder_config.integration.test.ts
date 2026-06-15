@@ -228,28 +228,87 @@ describeDb("admin embedder-config (disposable)", () => {
     await wired.close();
   });
 
-  it("POST /test: a model change on a NON-greenfield corpus → 409 at the HTTP layer (not 500)", async () => {
-    // A second generation makes the corpus non-greenfield; a contract change must then 409.
+  const insertSecondGen = async (): Promise<void> => {
     await new PostgresEmbeddingGenerationsRepo({ db: db! }).insertNew({
-      modelName: "qwen3-embed-0.6b",
+      modelName: "mxbai-embed-large",
       embeddingDimension: 1024,
       generationLabel: null,
       generationReason: null,
       createdByEmail: "admin@example.com",
       createdFromGeneration: 1,
     });
+  };
+
+  it("PUT: a model change on a non-greenfield corpus → 409 BEFORE overwriting the WORKING config (#1)", async () => {
+    const app = await makeApp({ ok: true });
+    // 1. greenfield: configure + validate model-a (promote → active generation = model-a)
+    await app.inject({
+      method: "PUT",
+      url: "/api/admin/embedder-config",
+      cookies: cookie("super_admin"),
+      payload: { base_url: "http://e/v1", model_name: "model-a", api_key: "sk-a" },
+    });
+    await app.inject({ method: "POST", url: "/api/admin/embedder-config/test", cookies: cookie("super_admin") });
+    // 2. corpus becomes non-greenfield
+    await insertSecondGen();
+    // 3. PUT a DIFFERENT model → 409, and model-a is left intact + still validated (NOT disabled)
+    const put = await app.inject({
+      method: "PUT",
+      url: "/api/admin/embedder-config",
+      cookies: cookie("super_admin"),
+      payload: { base_url: "http://e/v1", model_name: "model-b" },
+    });
+    expect(put.statusCode).toBe(409);
+    const get = await app.inject({ method: "GET", url: "/api/admin/embedder-config", cookies: cookie("super_admin") });
+    expect(get.json()).toMatchObject({ model_name: "model-a", last_validation_status: "ok" });
+    await app.close();
+  });
+
+  it("PUT: re-saving the SAME model on a non-greenfield corpus is allowed (not a contract change)", async () => {
     const app = await makeApp({ ok: true });
     await app.inject({
       method: "PUT",
       url: "/api/admin/embedder-config",
       cookies: cookie("super_admin"),
-      payload: { base_url: "http://e/v1", model_name: "a-different-model", api_key: "sk-x" },
+      payload: { base_url: "http://e/v1", model_name: "model-a", api_key: "sk-a" },
     });
-    const test = await app.inject({
-      method: "POST",
-      url: "/api/admin/embedder-config/test",
+    await app.inject({ method: "POST", url: "/api/admin/embedder-config/test", cookies: cookie("super_admin") });
+    await insertSecondGen();
+    // same model (e.g. editing the base_url) → no contract change → allowed
+    const put = await app.inject({
+      method: "PUT",
+      url: "/api/admin/embedder-config",
       cookies: cookie("super_admin"),
+      payload: { base_url: "http://e2/v1", model_name: "model-a" },
     });
+    expect(put.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it("POST /test: a concurrent re-stage during a FAILED probe → 409 (not a stale ok:false 200) (#3)", async () => {
+    // A probe that bumps config_revision (simulating a concurrent PUT) THEN fails → the failed-write CAS
+    // misses → the route must 409, not stamp the new config 'failed' / return a stale 200.
+    const app = buildApp({});
+    const racingProbe: EmbedderProbePort = {
+      probe: async () => {
+        await pool!.query("UPDATE core.embedder_provider_settings SET config_revision = config_revision + 1");
+        return { ok: false, detail: "boom", dimension: null, code: "connectivity_error" };
+      },
+    };
+    await registerAdminRoutes(app, {
+      db: db!,
+      signingKey: SIGNING_KEY,
+      clock: new FakeClock({ now: NOW }),
+      getEmbedderProbe: () => racingProbe,
+    });
+    await app.ready();
+    await app.inject({
+      method: "PUT",
+      url: "/api/admin/embedder-config",
+      cookies: cookie("super_admin"),
+      payload: { base_url: "http://e/v1", model_name: "mxbai-embed-large", api_key: "sk-x" },
+    });
+    const test = await app.inject({ method: "POST", url: "/api/admin/embedder-config/test", cookies: cookie("super_admin") });
     expect(test.statusCode).toBe(409);
     await app.close();
   });
