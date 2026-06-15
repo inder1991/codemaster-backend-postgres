@@ -7,6 +7,10 @@ import { probeEmbedder } from "#backend/adapters/embedder_probe.js";
 import { makePgAuditEmitter } from "#backend/api/admin/audit_emit_adapter.js";
 import { registerAdminRoutes } from "#backend/api/admin/admin_routes.js";
 import { OutboxPageResyncDispatcher } from "#backend/api/admin/page_resync_dispatcher.js";
+import {
+  makeConfluenceValidator,
+  makePlatformCredentialProbe,
+} from "#backend/integrations/confluence/confluence_validator_real.js";
 import { getPreflightValidator } from "#backend/integrations/llm/preflight_validator_real.js";
 import { registerAuthRoutes } from "#backend/api/auth/auth_routes.js";
 import { makeAuthSecretsProvider } from "#backend/api/auth/auth_secrets_provider.js";
@@ -166,10 +170,11 @@ export async function runServer(deps: RunServerDeps = {}): Promise<RunServerHand
     });
     // D2 — admin READ + WRITE endpoints, behind the same makeRequireRole gate + signing key. vault +
     // getPreflightValidator make the LLM credential-rotation routes (llm-provider-config / bedrock-config /
-    // llm-models test) LIVE; the Confluence-validator + platform-credential-probe seams stay unwired (those
-    // routes 503) pending their real, live-tested external adapters. pageResyncDispatcher (W4c.2 #5) makes
-    // approval revocation enqueue the trigger_page_resync outbox row (revocation → outbox → (cutover) →
-    // background job) instead of silently skipping the resync.
+    // llm-models test) LIVE; getConfluenceValidator + getPlatformCredentialProbe make the add-Confluence-
+    // space CREATE route and the confluence-config/test connectivity probe LIVE (were 503 — the real,
+    // live-tested external adapters now landed: confluence_validator_real.ts). pageResyncDispatcher
+    // (W4c.2 #5) makes approval revocation enqueue the trigger_page_resync outbox row (revocation → outbox
+    // → (cutover) → background job) instead of silently skipping the resync.
     await registerAdminRoutes(app, {
       db: coreDb,
       signingKey,
@@ -177,6 +182,13 @@ export async function runServer(deps: RunServerDeps = {}): Promise<RunServerHand
       registry,
       vault,
       getPreflightValidator,
+      // Add-Confluence-space CREATE (integrations_write): validates space-reachability BEFORE persisting.
+      // validateSpace reads the ACTIVE decrypted creds itself (the DB tier — PostgresConfluenceSettingsRepo
+      // over {coreDb, registry}), exactly as the ingest sync resolves them; it receives NO creds.
+      getConfluenceValidator: () => makeConfluenceValidator({ db: coreDb, registry }),
+      // confluence-config/test connectivity probe (testConfluence builds from the BODY creds) + the
+      // shared embedder /test probe (testQwen → probeEmbedder). clock measures latencyMs.
+      getPlatformCredentialProbe: () => makePlatformCredentialProbe({ clock }),
       pageResyncDispatcher: new OutboxPageResyncDispatcher({ db: coreDb }),
       // Embedder /test (Phase 7): the real embed-probe over the production fetch transport — POST
       // /api/admin/embedder-config/test validates the staged config + (on success) promotes it.
