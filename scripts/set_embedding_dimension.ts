@@ -40,6 +40,24 @@ export function validateDim(raw: string | number | undefined): number {
   return n;
 }
 
+/** Refuse to resize unless the DB is a fresh greenfield BASELINE — only the seed generation (id 1),
+ *  active, with no pending generation. (Empty vector tables alone are not enough: a pending generation
+ *  can exist before any chunk is ingested.) */
+export function assertGreenfieldBaseline(state: {
+  activeGeneration: number;
+  pendingGeneration: number | null;
+  generationCount: number;
+}): void {
+  if (state.activeGeneration !== 1 || state.pendingGeneration !== null || state.generationCount !== 1) {
+    throw new Error(
+      `refusing to resize: not a greenfield baseline ` +
+        `(active_generation=${state.activeGeneration}, pending_generation=${String(state.pendingGeneration)}, ` +
+        `generations=${state.generationCount}) — a dimension change once generations exist is the day-2 ` +
+        `re-embed path, not this one-shot.`,
+    );
+  }
+}
+
 /** Pure: the ordered DDL/DML to resize the corpus to `dim`. */
 export function buildResizeStatements(dim: number): ReadonlyArray<string> {
   const out: Array<string> = [];
@@ -75,6 +93,17 @@ export async function setEmbeddingDimension(deps: { pool: Pool; dim: number }): 
       );
     }
   }
+  const st = await pool.query<{ active_generation: number; pending_generation: number | null }>(
+    // active_generation/pending_generation are bigint — pg returns those as strings; cast to int.
+    `SELECT active_generation::int AS active_generation, pending_generation::int AS pending_generation
+       FROM core.embedder_runtime_state WHERE singleton = true`,
+  );
+  const gc = await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM core.embedding_generations`);
+  assertGreenfieldBaseline({
+    activeGeneration: st.rows[0]?.active_generation ?? -1,
+    pendingGeneration: st.rows[0]?.pending_generation ?? null,
+    generationCount: gc.rows[0]?.n ?? -1,
+  });
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
