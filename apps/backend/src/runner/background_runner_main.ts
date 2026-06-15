@@ -30,12 +30,11 @@ import {
   type BackgroundRunOutcome,
 } from "./background_runner.js";
 import { ensureScheduledJobs } from "./cron_schedules.js";
+import { makeLazyRuntimeEmbedder } from "#backend/adapters/resolve_embeddings.js";
+
 import { DisposableRegistry } from "./disposables.js";
 import { HandlerRegistry } from "./handler_registry.js";
-import {
-  makeLazyConfluenceChunkClient,
-  makeLazyConfluenceEmbeddings,
-} from "./handlers/_confluence_page_sync.js";
+import { makeLazyConfluenceChunkClient } from "./handlers/_confluence_page_sync.js";
 import { registerCronHandlers } from "./handlers/cron_handlers.js";
 import { registerEventHandlers } from "./handlers/event_handlers.js";
 import { LoopHealthRegistry } from "./loop_health.js";
@@ -270,7 +269,12 @@ export function buildBackgroundRunner(deps: BackgroundRunnerDeps): BackgroundRun
     name: "confluence.shared_chunk_client",
     dispose: sharedConfluenceClient.dispose,
   });
-  const sharedConfluenceEmbeddings = makeLazyConfluenceEmbeddings();
+  // The corpus-ingest embedder MUST be the SAME DB-backed runtime embedder the review/query side uses
+  // (resolveRuntimeEmbedder) — otherwise confluence_ingest / refresh_semantic_docs write the corpus with
+  // the env model while queries embed with the UI-saved DB model, silently breaking semantic retrieval.
+  // Lazy so buildBackgroundRunner stays bootable in DSN-less contexts (resolves on first embed, by which
+  // point boot has installed the field-key registry → the DB path).
+  const sharedConfluenceEmbeddings = makeLazyRuntimeEmbedder({ dsn: deps.dsn });
   registerCronHandlers(registry, {
     disposables,
     confluenceClient: sharedConfluenceClient.client,
@@ -284,6 +288,9 @@ export function buildBackgroundRunner(deps: BackgroundRunnerDeps): BackgroundRun
     disposables,
     confluenceClient: sharedConfluenceClient.client,
     confluenceEmbeddings: sharedConfluenceEmbeddings,
+    // refresh_semantic_docs must embed with the SAME DB-backed model as ingest + query (else the refreshed
+    // in-repo-doc corpus is in a different vector space than the queries that search it).
+    refreshEmbeddings: sharedConfluenceEmbeddings,
   });
 
   const runnerArgs = {

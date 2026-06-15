@@ -17,7 +17,7 @@ import {
   type IsEnabled,
   SyncCodeOwnersActivity,
 } from "#backend/activities/sync_code_owners.activity.js";
-import type { EmbeddingsPort } from "#backend/adapters/embeddings_port.js";
+import { DEFAULT_EMBEDDER_MODEL_NAME, type EmbeddingsPort } from "#backend/adapters/embeddings_port.js";
 import { PostgresCodeOwnersRepo } from "#backend/domain/repos/code_owners_repo.js";
 import { readCodeOwnersV1Enabled } from "#backend/ingest/_code_owners_v1_flag.js";
 import { PostgresKnowledgeChunkRepo } from "#backend/domain/repos/knowledge_chunks_repo.js";
@@ -42,9 +42,9 @@ import type { HandlerRegistry } from "../handler_registry.js";
 import {
   buildConfluenceSyncActivities,
   makeLazyConfluenceChunkClient,
-  makeLazyConfluenceEmbeddings,
   syncOneConfluencePage,
 } from "./_confluence_page_sync.js";
+import { makeLazyRuntimeEmbedder } from "#backend/adapters/resolve_embeddings.js";
 
 // Phase 3d W3d.1 + W3d.2 + Phase 3e.3: job_type → handler ADAPTERS for the 6 EVENT-DRIVEN workflows
 // migrated off Temporal — the 3 auto-registration thin proxies (reconcile.workflow.ts:
@@ -211,7 +211,7 @@ const CODEOWNERS_LOOKUP_PATHS = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEO
 /** The platform embed model name the refresh holder is constructed with — byte-1:1 with the
  *  Temporal composition root (build_activities.ts wires the SAME "qwen3-embed-0.6b" the confluence
  *  chunk_and_embed / embed_query path uses). */
-const REFRESH_EMBED_MODEL_NAME = "qwen3-embed-0.6b";
+const REFRESH_EMBED_MODEL_NAME = DEFAULT_EMBEDDER_MODEL_NAME;
 
 /**
  * A {@link CodeOwnersFilePort} that builds the REAL Vault-token-backed GitHubApiClient on first
@@ -452,8 +452,9 @@ export function registerEventHandlers(registry: HandlerRegistry, deps: EventHand
       return deps.refreshEmbeddings;
     }
     if (refreshEmbedderMemo === undefined) {
-      const { resolveEmbeddingsConsumer } = await import("#backend/adapters/resolve_embeddings.js");
-      refreshEmbedderMemo = resolveEmbeddingsConsumer();
+      // DB-backed runtime embedder (DB-config > legacy env > disabled) so refresh_semantic_docs embeds the
+      // in-repo-doc corpus with the SAME UI-saved model as ingest + query.
+      refreshEmbedderMemo = makeLazyRuntimeEmbedder();
     }
     return refreshEmbedderMemo;
   };
@@ -552,7 +553,7 @@ export function registerEventHandlers(registry: HandlerRegistry, deps: EventHand
     });
     resyncConfluenceClient = lazyClient.client;
   }
-  const resyncConfluenceEmbeddings = deps.confluenceEmbeddings ?? makeLazyConfluenceEmbeddings();
+  const resyncConfluenceEmbeddings = deps.confluenceEmbeddings ?? makeLazyRuntimeEmbedder();
   registry.register("trigger_page_resync", async (payload, signal, handlerDeps) => {
     const parsed = TriggerPageResyncInputV1.parse(payload);
     const dsn = requireDsn(deps, "trigger_page_resync");

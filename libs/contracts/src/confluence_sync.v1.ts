@@ -162,7 +162,8 @@ export const ChunkAndEmbedInputV1 = z
 export type ChunkAndEmbedInputV1 = z.infer<typeof ChunkAndEmbedInputV1>;
 
 // EmbeddedChunkV1 — one embedded chunk produced by chunk_and_embed_activity. `embedding` is a bare-float
-// vector of EXACTLY 1024 elements (min_length=1024, max_length=1024) — see FLOAT NOTE in the header.
+// vector; the contract is dimension-agnostic (min_length=1) — the configured EMBEDDING_DIM is enforced at
+// the pgvector WRITE path, not here. See FLOAT NOTE in the header.
 export const EmbeddedChunkV1 = z
   .object({
     schema_version: z.number().int().default(1),
@@ -175,8 +176,9 @@ export const EmbeddedChunkV1 = z
     // heading_path: tuple[str, ...] = Field(default=(), max_length=10).
     heading_path: z.array(z.string()).max(10).default([]),
     token_count: z.number().int().gte(0),
-    // embedding: tuple[float, ...] = Field(min_length=1024, max_length=1024).
-    embedding: z.array(z.number()).min(1024).max(1024),
+    // embedding: dimension-agnostic at the contract boundary; the configured width (EMBEDDING_DIM /
+    // CODEMASTER_EMBEDDING_DIMENSION) is enforced at the pgvector WRITE path, not here.
+    embedding: z.array(z.number()).min(1),
     // bedrock_reused_from_cache: bool = False (Audit P0-4).
     bedrock_reused_from_cache: z.boolean().default(false),
   })

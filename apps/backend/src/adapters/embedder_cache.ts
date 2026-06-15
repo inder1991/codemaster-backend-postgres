@@ -35,6 +35,8 @@
 import { PostgresEmbedderRuntimeStateRepo } from "#backend/domain/repos/embedder_runtime_state_repo.js";
 import { PostgresEmbeddingGenerationsRepo } from "#backend/domain/repos/embedding_generations_repo.js";
 
+import { EMBEDDING_DIM } from "#backend/adapters/embeddings_port.js";
+
 import type { Clock } from "#platform/clock.js";
 import { tenantKysely } from "#platform/db/database.js";
 
@@ -45,8 +47,9 @@ import type { EmbedderRuntimeStateRowV1, RetrievalMode } from "#contracts/embedd
 /** v4 §11.5 ≤30s SLA = 15s refresh TTL. */
 const REFRESH_TTL_SECONDS = 15.0;
 
-/** v4 §4.4 platform invariant: every active generation must embed at 1024 dimensions. */
-export const PLATFORM_EMBEDDING_DIMENSION = 1024;
+/** v4 §4.4 platform invariant: every active generation must embed at the CONFIGURED dimension
+ *  (= EMBEDDING_DIM / CODEMASTER_EMBEDDING_DIMENSION, default 1024). Single source of truth. */
+export const PLATFORM_EMBEDDING_DIMENSION = EMBEDDING_DIM;
 
 // ─── Errors ──────────────────────────────────────────────────────────────────────────────────────
 

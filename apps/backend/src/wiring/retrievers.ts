@@ -39,7 +39,7 @@
 import { RetrieveKnowledgeActivity } from "#backend/activities/retrieve_knowledge.activity.js";
 import { PostgresConfluenceRetrieval } from "#backend/adapters/postgres_confluence_retrieval.js";
 import { makeLazyEmbedderCache } from "#backend/adapters/embedder_cache.js";
-import { type EmbeddingsPort } from "#backend/adapters/embeddings_port.js";
+import { DEFAULT_EMBEDDER_MODEL_NAME, type EmbeddingsPort } from "#backend/adapters/embeddings_port.js";
 import { readRerankSettings } from "#backend/api/admin/llm_catalog_write.js";
 import { PostgresLlmProviderSettingsRepo } from "#backend/integrations/llm/llm_provider_settings_repo.js";
 import { requireAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
@@ -219,7 +219,7 @@ export type BuildRetrieveKnowledgeActivityOptions = {
  */
 export function buildRetrieveKnowledgeActivity({
   embedder,
-  modelName = "qwen3-embed-0.6b",
+  modelName = DEFAULT_EMBEDDER_MODEL_NAME,
   topK = 5,
   rerankCache,
   bedrockRerankResolver,

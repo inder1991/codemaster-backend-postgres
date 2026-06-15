@@ -3,6 +3,7 @@
 // register onto the app here as they land in subsequent slices.
 
 import { VaultHttpPort } from "#backend/adapters/vault_http.js";
+import { probeEmbedder } from "#backend/adapters/embedder_probe.js";
 import { makePgAuditEmitter } from "#backend/api/admin/audit_emit_adapter.js";
 import { registerAdminRoutes } from "#backend/api/admin/admin_routes.js";
 import { OutboxPageResyncDispatcher } from "#backend/api/admin/page_resync_dispatcher.js";
@@ -177,6 +178,9 @@ export async function runServer(deps: RunServerDeps = {}): Promise<RunServerHand
       vault,
       getPreflightValidator,
       pageResyncDispatcher: new OutboxPageResyncDispatcher({ db: coreDb }),
+      // Embedder /test (Phase 7): the real embed-probe over the production fetch transport — POST
+      // /api/admin/embedder-config/test validates the staged config + (on success) promotes it.
+      getEmbedderProbe: () => ({ probe: (config) => probeEmbedder(config) }),
       // W4.7 / EC4 — mounts the CSRF double-submit verification hook on the admin scope.
       csrfSecret,
       // W4.7 / EH7 — the CONCRETE audit emitter: every admin write's `opts.audit?.(...)` now lands a

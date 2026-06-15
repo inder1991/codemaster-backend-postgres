@@ -25,6 +25,7 @@
 
 import {
   type EmbeddingsPort,
+  EmbedderDisabledError,
   EmbeddingsConnectivityError,
   EmbeddingsRateLimitedError,
 } from "#backend/adapters/embeddings_port.js";
@@ -93,6 +94,11 @@ export class AnnRetriever {
         }
         if (e instanceof EmbeddingsRateLimitedError) {
           return degraded("embed service rate-limited");
+        }
+        if (e instanceof EmbedderDisabledError) {
+          // 7-8: the RETRIEVAL path fails-soft — a query must still return BM25-only results when no
+          // embedder is configured (the ingest path, by contrast, lets this propagate and fail-closed).
+          return degraded("no embedder configured");
         }
         throw e;
       }

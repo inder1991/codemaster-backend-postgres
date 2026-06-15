@@ -12,6 +12,7 @@ import { KeyRegistry, makeKeySet } from "#platform/crypto/key_registry.js";
 import { buildApp } from "#backend/api/app.js";
 import { registerAdminRoutes } from "#backend/api/admin/admin_routes.js";
 import { PostgresGitHubAppSettingsRepo } from "#backend/integrations/github/github_app_settings_repo.js";
+import { PostgresEmbedderProviderSettingsRepo } from "#backend/integrations/embedder/embedder_provider_settings_repo.js";
 import {
   resetAuditKeyRegistryForTesting,
   setAuditKeyRegistry,
@@ -82,6 +83,7 @@ describeDb("admin config-status — DB tier (P1)", () => {
     await sql`DELETE FROM core.github_app_settings WHERE scope = 'platform'`.execute(db);
     await sql`DELETE FROM core.llm_provider_settings WHERE scope = 'platform'`.execute(db);
     await sql`DELETE FROM core.confluence_settings WHERE scope = 'platform'`.execute(db);
+    await sql`DELETE FROM core.embedder_provider_settings`.execute(db);
   });
   afterAll(async () => {
     // Don't leak seeded singleton rows to the next shuffled file (P2 flake #14): a leftover platform llm
@@ -90,6 +92,7 @@ describeDb("admin config-status — DB tier (P1)", () => {
     await sql`DELETE FROM core.github_app_settings WHERE scope = 'platform'`.execute(db);
     await sql`DELETE FROM core.llm_provider_settings WHERE scope = 'platform'`.execute(db);
     await sql`DELETE FROM core.confluence_settings WHERE scope = 'platform'`.execute(db);
+    await sql`DELETE FROM core.embedder_provider_settings`.execute(db);
     resetAuditKeyRegistryForTesting();
     await db?.destroy();
   });
@@ -151,5 +154,51 @@ describeDb("admin config-status — DB tier (P1)", () => {
       true,
     );
     expect(items.find((i) => i.key === "llm.provider")?.state).toBe("pending");
+  });
+
+  it("embedder.provider reflects the saved state: validated→configured, failed→invalid+detail, disabled, staged→pending (6b)", async () => {
+    const repo = new PostgresEmbedderProviderSettingsRepo({ db, registry: reg });
+    const stage = async (): Promise<number> => {
+      await repo.writeSecret({
+        baseUrl: "http://embedder.local:8080/v1",
+        modelName: "mxbai-embed-large",
+        enabled: true,
+        key: { kind: "set", plaintext: "sk-x" },
+        rotatedBy: "admin@example.com",
+      });
+      return (await repo.readForResolve())!.configRevision;
+    };
+    const embedderItem = async (): Promise<ConfigItem & { detail?: string }> =>
+      (await statusItems()).find((i) => i.key === "embedder.provider") as ConfigItem & { detail?: string };
+
+    // staged but never tested → pending
+    const rev = await stage();
+    expect(await embedderItem()).toMatchObject({ state: "pending", source: "db" });
+
+    // validation ok → configured (writeValidationResult is CAS-guarded on the revision)
+    await repo.writeValidationResult({ status: "ok", error: null, expectedRevision: rev });
+    expect(await embedderItem()).toMatchObject({ state: "configured", source: "db" });
+
+    // validation failed → invalid + the detail
+    await repo.writeValidationResult({
+      status: "failed",
+      error: "EmbeddingsConnectivityError: unreachable",
+      expectedRevision: rev,
+    });
+    expect(await embedderItem()).toMatchObject({
+      state: "invalid",
+      source: "db",
+      detail: "EmbeddingsConnectivityError: unreachable",
+    });
+
+    // disabled (enabled=false) → disabled
+    await repo.updateEnabled({ enabled: false });
+    expect(await embedderItem()).toMatchObject({ state: "disabled", source: "db" });
+  });
+
+  it("with no embedder row (and no env), embedder.provider is pending/none", async () => {
+    const item = (await statusItems()).find((i) => i.key === "embedder.provider");
+    // CODEMASTER_EMBEDDER_BASE_URL/MODEL_NAME are unset in the test env → pending/none.
+    expect(item).toMatchObject({ state: "pending", source: "none" });
   });
 });

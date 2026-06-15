@@ -22,7 +22,7 @@ import {
   type ConfluenceChunkClient,
 } from "#backend/activities/confluence_sync.activity.js";
 import { makeLazyEmbedderCache } from "#backend/adapters/embedder_cache.js";
-import type { EmbeddingsPort } from "#backend/adapters/embeddings_port.js";
+import { DEFAULT_EMBEDDER_MODEL_NAME, type EmbeddingsPort } from "#backend/adapters/embeddings_port.js";
 import { PostgresConfluenceChunksRepo } from "#backend/domain/repos/confluence_chunks_repo.js";
 import { PostgresConfluencePageApprovalsRepo } from "#backend/domain/repos/confluence_page_approvals_repo.js";
 
@@ -33,7 +33,7 @@ import type { UpsertChunksOutputV1 } from "#contracts/confluence_sync.v1.js";
 
 /** The model name every confluence chunk embed routes through — byte-identical with the Temporal
  *  composition root's wiring (build_activities.ts) and the event_handlers REFRESH_EMBED_MODEL_NAME. */
-export const CONFLUENCE_EMBED_MODEL_NAME = "qwen3-embed-0.6b";
+export const CONFLUENCE_EMBED_MODEL_NAME = DEFAULT_EMBEDDER_MODEL_NAME;
 
 /**
  * The narrow ConfluenceTokenProvider slice the disposable lazy builder drives: start/stop the

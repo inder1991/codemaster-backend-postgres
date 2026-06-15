@@ -181,6 +181,7 @@ import { MarkStaleChunksActivity } from "#backend/activities/mark_stale_chunks.a
 import { PostgresConfluenceChunksRepo } from "#backend/domain/repos/confluence_chunks_repo.js";
 import { PostgresConfluencePageApprovalsRepo } from "#backend/domain/repos/confluence_page_approvals_repo.js";
 import { makeLazyEmbedderCache } from "#backend/adapters/embedder_cache.js";
+import { DEFAULT_EMBEDDER_MODEL_NAME } from "#backend/adapters/embeddings_port.js";
 import { ConfluenceClient } from "#backend/integrations/confluence/client.js";
 import { makeResolvingConfluenceReader } from "#backend/integrations/confluence/confluence_config_resolver.js";
 import { ConfluenceTokenProvider } from "#backend/integrations/confluence/token_provider.js";
@@ -208,7 +209,7 @@ import { RefreshSemanticDocsActivity } from "#backend/activities/refresh_semanti
 import { PostgresKnowledgeChunkRepo } from "#backend/domain/repos/knowledge_chunks_repo.js";
 import { type TokenProvider } from "#backend/integrations/github/api_client.js";
 
-import { resolveEmbeddingsConsumer } from "#backend/adapters/resolve_embeddings.js";
+import { resolveRuntimeEmbedder } from "#backend/adapters/resolve_embeddings.js";
 
 import { FetchGitHubHttpClient } from "#backend/integrations/github/api_client.js";
 import { GitSubprocessCloner } from "#backend/integrations/git/cloner.js";
@@ -712,15 +713,17 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
   // GitHub-touching activity (clone, post, check-run, fix-prompt, pr-description) resolves the per-PR numeric
   // installation id from its typed input; the cloner + fix-prompt seam mint per-call. One pod serves all orgs.
 
-  // The real platform embedder (Qwen / OpenAI-compat per ADR-0059; fail-loud on missing env). Shared by
-  // the aggregate semantic-merge stage, the embed_query activity, and the retrieve-knowledge ANN port.
-  const embedder = resolveEmbeddingsConsumer();
+  // The real platform embedder, shared by the aggregate semantic-merge stage, the embed_query activity, and
+  // the retrieve-knowledge ANN port. resolveRuntimeEmbedder gives the DB-backed ResolvingEmbeddingsAdapter
+  // when the field-codec registry is installed (production), else the legacy env-only selection — the SAME
+  // helper the background-runner ingest path + the ANN-fallback use, so corpus + query embed identically.
+  const embedder = resolveRuntimeEmbedder({ dsn });
 
   // Bound-method activity holders — the real embedder threads into all three.
   // `.aggregateFindings` / `.embedQuery` / `.retrieveKnowledge`
   // are arrow properties, so they stay bound when destructured into the map (Temporal registers the value).
   const aggregateActivity = new AggregateFindingsActivity({ embedder });
-  const embedQueryActivity = new EmbedQueryActivity({ embeddings: embedder, modelName: "qwen3-embed-0.6b" });
+  const embedQueryActivity = new EmbedQueryActivity({ embeddings: embedder, modelName: DEFAULT_EMBEDDER_MODEL_NAME });
   // The lazy real LLM cache (deferred-Vault pattern; built on first forRole). Shared by bedrockReviewChunk,
   // walkthrough, fix-prompt, AND (E) the retrieve_knowledge per-invocation LLM reranker (default-off behind
   // CODEMASTER_LLM_RERANK_ENABLED — wired here so an operator can enable it without a code change).
@@ -839,7 +842,7 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
   const confluenceSyncActivities = new ConfluenceSyncActivities({
     client: makeLazyConfluenceClient(),
     embeddings: embedder,
-    modelName: "qwen3-embed-0.6b",
+    modelName: DEFAULT_EMBEDDER_MODEL_NAME,
     chunkEmbeddingLookup: confluenceChunksRepo,
     chunksWriter: confluenceChunksRepo,
     approvalsReader: confluencePageApprovalsRepo,
@@ -885,7 +888,7 @@ export function buildActivities(): Record<string, (input: never) => Promise<unkn
   const refreshSemanticDocsActivity = new RefreshSemanticDocsActivity({
     embeddings: embedder,
     chunkRepo: PostgresKnowledgeChunkRepo.fromDsn(dsn),
-    modelName: "qwen3-embed-0.6b",
+    modelName: DEFAULT_EMBEDDER_MODEL_NAME,
   });
 
   return {

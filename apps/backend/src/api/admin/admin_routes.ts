@@ -51,8 +51,6 @@ import {
   NotificationRuleV1,
   OrgsListV1,
   PagesListPageV1,
-  PatchPlatformCredentialsRequestV1,
-  PlatformCredentialsMetaV1,
   ProposalListPageV1,
   QuarantinedChunksPageV1,
   PullRequestListResponseV1,
@@ -217,26 +215,35 @@ import {
   type PageResyncDispatcherPort,
 } from "#backend/api/admin/confluence_pages_write.js";
 import { type GetConfluenceValidator } from "#backend/integrations/confluence/confluence_validator.js";
-import { PostgresPlatformCredentialsMetaRepo } from "#backend/api/admin/platform_credentials_repo.js";
 import {
   type GetPlatformCredentialProbe,
   type UserEmailResolverPort,
   shimUserEmailResolver,
 } from "#backend/api/admin/platform_credentials_probe.js";
-import {
-  getCredential,
-  patchCredential,
-  PlatformCredentialError,
-  type PlatformCredentialKey,
-  type PlatformCredentialsDeps,
-  testCredential,
-} from "#backend/api/admin/platform_credentials_write.js";
 import { type DnsResolver } from "#backend/security/url_validator.js";
 import { type VaultPort } from "#backend/adapters/vault_port.js";
 import { PostgresLlmProviderSettingsRepo } from "#backend/integrations/llm/llm_provider_settings_repo.js";
 import { getAuditKeyRegistry, requireAuditKeyRegistry } from "#backend/security/audit_field_codec.js";
 import { PostgresGitHubAppSettingsRepo } from "#backend/integrations/github/github_app_settings_repo.js";
 import { PostgresConfluenceSettingsRepo } from "#backend/integrations/confluence/confluence_settings_repo.js";
+import { PostgresEmbedderProviderSettingsRepo } from "#backend/integrations/embedder/embedder_provider_settings_repo.js";
+import {
+  type EmbedderProbeConfig,
+  type EmbedderProbeResult,
+} from "#backend/adapters/embedder_probe.js";
+import { EMBEDDING_DIM } from "#backend/adapters/embeddings_port.js";
+import {
+  EmbedderConfigChangedError,
+  EmbedderNotGreenfieldError,
+  EmbedderProvenanceError,
+  embedderContractChangeOnNonGreenfield,
+  promoteValidatedEmbedderConfig,
+} from "#backend/api/admin/embedder_config_promote.js";
+import {
+  ConfigStatusV1,
+  EmbedderConfigV1,
+  PutEmbedderConfigRequestV1,
+} from "#contracts/embedder_config.v1.js";
 import { PostgresOutboxRepo } from "#backend/domain/repos/outbox_repo.js";
 import { type GetPreflightValidator } from "#backend/integrations/llm/preflight_validator.js";
 import { PLATFORM_SCOPE_AUDIT_INSTALLATION_ID } from "#backend/infra/sentinels.js";
@@ -319,21 +326,11 @@ function optStr(value: unknown): string | null {
   return typeof value === "string" && value !== "" ? value : null;
 }
 
-/** Coerce a boolean query param the way FastAPI/pydantic-v2 does — absent → false; truthy/falsy token sets
- *  (case-insensitive) → the bool; any other present value → "invalid" (the route 422s). */
-function coerceBoolQueryParam(raw: string | undefined): boolean | "invalid" {
-  if (raw === undefined) {
-    return false;
-  }
-  const v = raw.toLowerCase();
-  if (["true", "1", "yes", "on", "t", "y"].includes(v)) {
-    return true;
-  }
-  if (["false", "0", "no", "off", "f", "n"].includes(v)) {
-    return false;
-  }
-  return "invalid";
-}
+/** The embedder /test probe seam: tests the STAGED config (decrypted) against the real embedder. Production
+ *  wires probeEmbedder (real fetch); tests inject a stub. */
+export type EmbedderProbePort = {
+  probe(config: EmbedderProbeConfig): Promise<EmbedderProbeResult>;
+};
 
 export type AdminRoutesOptions = {
   db: Kysely<unknown>;
@@ -361,6 +358,9 @@ export type AdminRoutesOptions = {
   /** Injected platform-credential probe factory. Undefined → the platform-credentials PATCH/test routes 503.
    *  Real Confluence/Qwen probe adapters deferred; tests inject a stub. */
   getPlatformCredentialProbe?: GetPlatformCredentialProbe;
+  /** Injected embedder /test probe. Undefined → POST /api/admin/embedder-config/test returns 503.
+   *  Production wires probeEmbedder (real fetch transport); tests inject a stub. */
+  getEmbedderProbe?: () => EmbedderProbePort;
   /** Resolves an actor user_id → email for the credential-rotation + page-approval audit (P0-1). Defaults to
    *  the shim resolver. */
   userEmailResolver?: UserEmailResolverPort;
@@ -380,7 +380,9 @@ export type AdminRoutesOptions = {
   /** Provider for GET /api/admin/config-status — the non-blocking feature-config (LLM/GitHub/Confluence)
    *  state for the UI setup-checklist. Defaults to observing env/Vault/DB via the deploy contract;
    *  tests inject a stub. Never returns secret VALUES — only presence/source. */
-  configStatusProvider?: () => Promise<ReadonlyArray<{ key: string; state: string; source: string; gates?: string }>>;
+  configStatusProvider?: () => Promise<
+    ReadonlyArray<{ key: string; state: string; source: string; gates?: string; detail?: string }>
+  >;
 };
 
 /** The static dashboard summary (1:1 with the shipped Python: _HealthyProbe for the 4 services +
@@ -434,11 +436,14 @@ export async function registerAdminRoutes(
         row === null ? null : row.enabled ? "configured" : "disabled";
       const githubDb = dbState(githubRow);
       const confluenceDb = dbState(confluenceRow);
-      const items = envFileItems.map((it) => {
-        const db =
-          it.key.startsWith("github_app.") ? githubDb : it.key.startsWith("confluence.") ? confluenceDb : null;
-        return db === null ? it : { ...it, state: db, source: "db" as const };
-      });
+      // Widened element type so the embedder item below can carry state:'invalid' + an optional detail
+      // (6-10) — the env/file items only ever use configured|disabled|pending.
+      const items: Array<{ key: string; state: string; source: string; gates?: string; detail?: string }> =
+        envFileItems.map((it) => {
+          const db =
+            it.key.startsWith("github_app.") ? githubDb : it.key.startsWith("confluence.") ? confluenceDb : null;
+          return db === null ? it : { ...it, state: db, source: "db" as const };
+        });
       const llmRoles = await new PostgresLlmProviderSettingsRepo({
         db: opts.db,
         registry,
@@ -450,6 +455,38 @@ export async function registerAdminRoutes(
         source: llmRoles.length > 0 ? "db" : "none",
         gates: "LLM provider for reviews (no reviews until configured)",
       });
+      // Embedder (Phase 6b): DB-backed model/creds. configured = enabled + validation='ok'; disabled =
+      // enabled=false; invalid = enabled but the last /test failed (carries the detail, 6-10); pending =
+      // staged-but-untested OR (no DB row) the env bootstrap if set, else unconfigured. Gates semantic
+      // retrieval — queries degrade to lexical-only until an embedder is configured + tested.
+      const embedderGate = "Embedding model for semantic retrieval (degrades to lexical-only until tested)";
+      const embedderRow = await new PostgresEmbedderProviderSettingsRepo({ db: opts.db, registry }).readNonSecret();
+      if (embedderRow === null) {
+        const envConfigured =
+          (process.env["CODEMASTER_EMBEDDER_BASE_URL"] ?? "").trim() !== "" &&
+          (process.env["CODEMASTER_EMBEDDER_MODEL_NAME"] ?? "").trim() !== "";
+        items.push({
+          key: "embedder.provider",
+          state: envConfigured ? "configured" : "pending",
+          source: envConfigured ? "env" : "none",
+          gates: embedderGate,
+        });
+      } else if (!embedderRow.enabled) {
+        items.push({ key: "embedder.provider", state: "disabled", source: "db", gates: embedderGate });
+      } else if (embedderRow.lastValidationStatus === "ok") {
+        items.push({ key: "embedder.provider", state: "configured", source: "db", gates: embedderGate });
+      } else if (embedderRow.lastValidationStatus === "failed") {
+        items.push({
+          key: "embedder.provider",
+          state: "invalid",
+          source: "db",
+          gates: embedderGate,
+          ...(embedderRow.lastValidationError !== null ? { detail: embedderRow.lastValidationError } : {}),
+        });
+      } else {
+        // staged but never /tested (validation null) → pending.
+        items.push({ key: "embedder.provider", state: "pending", source: "db", gates: embedderGate });
+      }
       return items;
     });
 
@@ -473,7 +510,9 @@ export async function registerAdminRoutes(
     scope.get(
       "/api/admin/config-status",
       { preHandler: requireRole(["platform_operator", "platform_owner", "super_admin"]) },
-      async () => ({ items: await configStatusProvider() }),
+      // Parse through the versioned contract at the boundary so the emitted states/sources are validated
+      // against ConfigStatusItemV1 (not raw provider output).
+      async () => ConfigStatusV1.parse({ items: await configStatusProvider() }),
     );
 
     // GitHub App config (UI-editable; go-live Step 4b). Secrets are stored field-codec-encrypted; GET
@@ -681,6 +720,223 @@ export async function registerAdminRoutes(
             ? "Connected to Confluence."
             : `Confluence connectivity failed${result.errorCode ? ` (${result.errorCode})` : ""}${result.errorDetail ? `: ${result.errorDetail}` : ""}`,
         });
+      },
+    );
+
+    // ─── Embedder config (Phase 6) ────────────────────────────────────────────────────────────────
+    // DB-backed embedder creds + model (field-codec ciphertext) replacing the Vault `embedder.qwen` path.
+    // GET (platform_owner+) NEVER returns the api key (key_present only); PUT (super_admin) STAGES the
+    // config + resets validation; POST /test probes the STAGED config and, on success, PROMOTES it via the
+    // r7 CAS/lock/greenfield/provenance transaction. The base_url is super_admin-configured infra (an
+    // in-cluster Ollama/vLLM on a private network, plain http) so it is intentionally NOT SSRF/private-CIDR
+    // blocked — parity with confluence-config (D8: http + private universal).
+    scope.get(
+      "/api/admin/embedder-config",
+      { preHandler: requireRole(["platform_owner", "super_admin"]) },
+      async () => {
+        const repo = new PostgresEmbedderProviderSettingsRepo({
+          db: opts.db,
+          registry: requireAuditKeyRegistry(),
+        });
+        const cfg = await repo.readNonSecret();
+        return EmbedderConfigV1.parse({
+          provider: "openai_compat",
+          base_url: cfg?.baseUrl ?? null,
+          model_name: cfg?.modelName ?? null,
+          key_present: cfg?.keyPresent ?? false,
+          enabled: cfg?.enabled ?? false,
+          last_validation_status: cfg?.lastValidationStatus ?? null,
+          last_validation_error: cfg?.lastValidationError ?? null,
+          last_validated_at: cfg?.lastValidatedAt?.toISOString() ?? null,
+          last_rotated_at: cfg?.lastRotatedAt?.toISOString() ?? null,
+          last_rotated_by: cfg?.lastRotatedBy ?? null,
+          updated_at: cfg?.updatedAt?.toISOString() ?? null,
+        });
+      },
+    );
+    scope.put(
+      "/api/admin/embedder-config",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        const parsed = PutEmbedderConfigRequestV1.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
+        const body = parsed.data;
+        if (!/^https?:\/\//.test(body.base_url)) {
+          return reply.code(422).send({ detail: "base_url must be an http(s) URL" });
+        }
+        const principal = request.authPrincipal!;
+        const actorEmail = await (opts.userEmailResolver ?? shimUserEmailResolver).resolveEmail(
+          principal.userId,
+        );
+        const repo = new PostgresEmbedderProviderSettingsRepo({
+          db: opts.db,
+          registry: requireAuditKeyRegistry(),
+        });
+        // PUT-time greenfield guard (review #1): if this PUT would CHANGE the embedding contract (model)
+        // and the corpus is NON-greenfield, reject it BEFORE writeSecret overwrites the working config +
+        // resets validation. Otherwise the runtime would go disabled and /test could only 409 — stranding
+        // the admin with no active config. v1 is greenfield: the model is chosen before ingest; changing it
+        // on a live corpus is the day-2 re-embed path.
+        if (
+          await embedderContractChangeOnNonGreenfield(opts.db, {
+            modelName: body.model_name,
+            provider: "openai_compat",
+            dimension: EMBEDDING_DIM,
+          })
+        ) {
+          return reply.code(409).send({
+            detail:
+              "cannot change the embedder model once content is ingested (the day-2 re-embed path); the " +
+              "current config is left unchanged",
+          });
+        }
+        // D2-val: a pure enable/disable toggle (base_url + model unchanged, no new key) KEEPS the prior
+        // validation — disabling then re-enabling a tested config must NOT force a re-test. Any actual
+        // config change goes through writeSecret, which re-stages + resets validation.
+        const existing = await repo.readNonSecret();
+        const enableOnlyChange =
+          existing !== null &&
+          body.api_key === undefined &&
+          body.base_url === existing.baseUrl &&
+          body.model_name === existing.modelName &&
+          body.enabled !== existing.enabled;
+        if (enableOnlyChange) {
+          await repo.updateEnabled({ enabled: body.enabled });
+        } else {
+          // api_key TRI-STATE: absent → keep; null → clear (keyless); string → set. A keyless embedder is
+          // valid, so (unlike confluence) the INITIAL config does NOT require a key.
+          const key =
+            body.api_key === undefined
+              ? ({ kind: "keep" } as const)
+              : body.api_key === null
+                ? ({ kind: "clear" } as const)
+                : ({ kind: "set", plaintext: body.api_key } as const);
+          await repo.writeSecret({
+            baseUrl: body.base_url,
+            modelName: body.model_name,
+            enabled: body.enabled,
+            key,
+            rotatedBy: actorEmail,
+          });
+        }
+        await opts.audit?.({
+          actorUserId: principal.userId,
+          installationId: principal.installationId,
+          action: "embedder_settings.staged",
+          targetKind: "embedder_provider_settings",
+          targetId: "platform",
+          before: null,
+          after: {
+            base_url: body.base_url,
+            model_name: body.model_name,
+            enabled: body.enabled,
+            key_changed: body.api_key !== undefined,
+          },
+          now: opts.clock.now(),
+        });
+        return reply.code(200).send({ ok: true });
+      },
+    );
+    // POST /test: probe the STAGED config; on success PROMOTE it (the r7 transaction). 200 even on probe
+    // failure (the body carries ok:false + the reason); 409 on a CAS/greenfield/provenance conflict.
+    scope.post(
+      "/api/admin/embedder-config/test",
+      { preHandler: requireRole(["super_admin"]) },
+      async (request, reply) => {
+        if (opts.getEmbedderProbe === undefined) {
+          return reply
+            .code(503)
+            .send({ detail: "embedder /test not available in this deployment (probe unwired)" });
+        }
+        const repo = new PostgresEmbedderProviderSettingsRepo({
+          db: opts.db,
+          registry: requireAuditKeyRegistry(),
+        });
+        // ONE read yields BOTH the probed config AND its CAS revision — so a concurrent PUT between the
+        // read and the promote moves config_revision and the promotion CAS correctly fails (it can't make
+        // the probe validate config A while the CAS guards config B's revision).
+        const staged = await repo.readForResolve();
+        if (staged === null) {
+          return reply
+            .code(422)
+            .send({ detail: "no embedder config saved — PUT a base_url + model before testing" });
+        }
+        const revision = staged.configRevision;
+        const result = await opts.getEmbedderProbe().probe({
+          baseUrl: staged.baseUrl,
+          apiKey: staged.apiKey,
+          modelName: staged.modelName,
+        });
+        const principal = request.authPrincipal!;
+        if (!result.ok) {
+          // CAS-guarded so a concurrent re-stage isn't mislabeled 'failed' with this probe's stale error.
+          const recorded = await repo.writeValidationResult({
+            status: "failed",
+            error: result.detail,
+            expectedRevision: revision,
+          });
+          if (!recorded) {
+            // The config changed during the probe — this failure is for a config that's no longer staged.
+            // Same 409 as the success-path CAS miss (don't return a stale ok:false 200).
+            return reply.code(409).send({
+              detail:
+                "the embedder config changed during validation — re-run /test against the current config",
+            });
+          }
+          return reply.code(200).send(
+            TestPlatformCredentialsResponseV1.parse({
+              ok: false,
+              error: result.code,
+              error_detail: result.detail,
+              latency_ms: null,
+              detected_dimension: result.dimension,
+              corpus_dimension: EMBEDDING_DIM,
+            }),
+          );
+        }
+        const actorEmail = await (opts.userEmailResolver ?? shimUserEmailResolver).resolveEmail(
+          principal.userId,
+        );
+        try {
+          await promoteValidatedEmbedderConfig(opts.db, {
+            expectedRevision: revision,
+            modelName: staged.modelName,
+            provider: "openai_compat",
+            expectedDimension: EMBEDDING_DIM,
+            actorEmail,
+          });
+        } catch (e) {
+          if (
+            e instanceof EmbedderConfigChangedError ||
+            e instanceof EmbedderNotGreenfieldError ||
+            e instanceof EmbedderProvenanceError
+          ) {
+            return reply.code(409).send({ detail: e.message });
+          }
+          throw e;
+        }
+        await opts.audit?.({
+          actorUserId: principal.userId,
+          installationId: principal.installationId,
+          action: "embedder_settings.promoted",
+          targetKind: "embedder_provider_settings",
+          targetId: "platform",
+          before: null,
+          after: { model_name: staged.modelName, dimension: EMBEDDING_DIM },
+          now: opts.clock.now(),
+        });
+        return reply.code(200).send(
+          TestPlatformCredentialsResponseV1.parse({
+            ok: true,
+            error: null,
+            error_detail: null,
+            latency_ms: null,
+            detected_dimension: result.dimension,
+            corpus_dimension: EMBEDDING_DIM,
+          }),
+        );
       },
     );
 
@@ -2067,88 +2323,12 @@ export async function registerAdminRoutes(
       },
     );
 
-    // ─── Platform credentials (Vault KV-backed: confluence + embedder/qwen) ────────────────────────
-    // 1:1 with platform_credentials.py. platform_owner+. GET (meta only — never the secret) / PATCH
-    // (probe-first-then-write, ?force=true override) / POST /test (probe the existing Vault credential).
-    // 503 when the vault/probe seam is unwired at the composition root.
-    // Confluence is INTENTIONALLY absent here: its single write path is the DB-backed /api/admin/confluence-
-    // config (canonical, like GitHub). Keeping a second Vault-writing UI for Confluence would silent-shadow
-    // the DB row (the runtime resolver is DB > env > Vault), so this route serves embedder.qwen ONLY. Vault
-    // remains a READ fallback for direct-seeded Confluence deployments (the resolver's Vault tier).
-    const PLATFORM_CRED_ROUTES: ReadonlyArray<{ key: PlatformCredentialKey; segment: string }> = [
-      { key: "embedder.qwen", segment: "embedder/qwen" },
-    ];
-    for (const { key, segment } of PLATFORM_CRED_ROUTES) {
-      const base = `/api/admin/platform-credentials/${segment}`;
-      scope.get(base, { preHandler: requireRole(["platform_owner", "super_admin"]) }, async (_request, reply) => {
-        if (opts.vault === undefined) {
-          return reply.code(503).send({ detail: "platform-credentials not configured (vault unwired)" });
-        }
-        const meta = await getCredential(
-          { vault: opts.vault, metaRepo: new PostgresPlatformCredentialsMetaRepo(opts.db) },
-          key,
-        );
-        return reply.code(200).send(PlatformCredentialsMetaV1.parse(meta));
-      });
-
-      scope.patch(base, { preHandler: requireRole(["platform_owner", "super_admin"]) }, async (request, reply) => {
-        const principal = request.authPrincipal!;
-        const parsed = PatchPlatformCredentialsRequestV1.safeParse(request.body);
-        if (!parsed.success) {
-          return reply.code(422).send({ detail: "request body failed schema validation" });
-        }
-        // FastAPI parses the `force: bool` query param before the handler — a non-boolean token 422s.
-        const force = coerceBoolQueryParam((request.query as { force?: string }).force);
-        if (force === "invalid") {
-          return reply.code(422).send({ detail: "force query param must be a boolean" });
-        }
-        if (opts.vault === undefined || opts.getPlatformCredentialProbe === undefined) {
-          return reply.code(503).send({ detail: "platform-credentials write not configured (vault + probe unwired)" });
-        }
-        const deps: PlatformCredentialsDeps = {
-          db: opts.db,
-          vault: opts.vault,
-          probe: opts.getPlatformCredentialProbe(),
-          metaRepo: new PostgresPlatformCredentialsMetaRepo(opts.db),
-          userEmailResolver: opts.userEmailResolver ?? shimUserEmailResolver,
-          clock: opts.clock,
-          audit: opts.audit,
-          ...(opts.dnsResolver ? { dnsResolver: opts.dnsResolver } : {}),
-        };
-        try {
-          const meta = await patchCredential(deps, key, parsed.data, principal.userId, force);
-          return reply.code(200).send(PlatformCredentialsMetaV1.parse(meta));
-        } catch (err) {
-          if (err instanceof PlatformCredentialError) {
-            return reply.code(422).send({ error: err.errorCode, msg: err.msg });
-          }
-          throw err;
-        }
-      });
-
-      scope.post(`${base}/test`, { preHandler: requireRole(["platform_owner", "super_admin"]) }, async (_request, reply) => {
-        if (opts.vault === undefined || opts.getPlatformCredentialProbe === undefined) {
-          return reply.code(503).send({ detail: "platform-credentials probe not configured" });
-        }
-        try {
-          const res = await testCredential(
-            {
-              vault: opts.vault,
-              probe: opts.getPlatformCredentialProbe(),
-              metaRepo: new PostgresPlatformCredentialsMetaRepo(opts.db),
-              clock: opts.clock,
-            },
-            key,
-          );
-          return reply.code(200).send(TestPlatformCredentialsResponseV1.parse(res));
-        } catch (err) {
-          if (err instanceof PlatformCredentialError) {
-            return reply.code(422).send({ error: err.errorCode, msg: err.msg });
-          }
-          throw err;
-        }
-      });
-    }
+    // ─── Platform credentials (Vault KV) — REMOVED (Phase 6c / D5) ─────────────────────────────────
+    // The Vault-backed `embedder.qwen` PATCH/GET/test routes were the ONLY entries here (Confluence had
+    // already moved to its DB-backed /api/admin/confluence-config). They are superseded by the DB-backed
+    // /api/admin/embedder-config (this file, above): the runtime resolver is DB > env, so a Vault-written
+    // embedder credential had NO runtime effect — keeping the route would be a silent-no-op config trap.
+    // The shared probe seam (opts.getPlatformCredentialProbe) is retained — confluence-config/test uses it.
 
     scope.get(
       "/api/admin/notification-rules",

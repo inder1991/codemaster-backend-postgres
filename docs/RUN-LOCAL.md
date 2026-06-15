@@ -83,6 +83,29 @@ CODEMASTER_AUTH_ROUTES_ENABLED=false      # OFF ⇒ no Vault needed to boot
 
 > A ready-to-copy template lives at `.env.example`. `.env` is git-ignored.
 
+## Embedding dimension (set ONCE, before ingesting)
+
+Pick the embedder dimension **before** ingesting any content. `CODEMASTER_EMBEDDING_DIMENSION` (default
+`1024`) drives the runtime `EMBEDDING_DIM`; for a **non-1024** model you also run a one-shot to size the
+(empty) pgvector columns to match. Both read the same number, so they always agree:
+
+| Model | Dimension | Steps (before ingesting) |
+|---|---|---|
+| `mxbai-embed-large`, `bge-large`, `qwen3-embed-0.6b` | 1024 | nothing (default) |
+| `nomic-embed-text` | 768 | 1. `CODEMASTER_EMBEDDING_DIMENSION=768` (runtime)  ·  2. size the empty columns once: `CODEMASTER_PG_CORE_DSN=<owner-dsn> npm run set-embedding-dimension -- 768` |
+| native >2000 (e.g. `qwen3-embedding-8B` @ 4096) | >2000 | **not supported** — see below |
+
+`npm run set-embedding-dimension -- <N>` resizes the four `vector` columns (+ their HNSW indexes) and
+records `<N>` on the active generation; it **refuses to run against a non-empty corpus** (greenfield only).
+Use the OWNER/migration DSN — it runs DDL.
+
+pgvector's HNSW index caps at **2000 dimensions**, so a native >2000 model must either be configured to
+output ≤2000 (Matryoshka truncation — most models support it), or wait for the `halfvec` follow-up.
+
+Changing the dimension **after** content is ingested is NOT supported here (it would orphan every stored
+vector) — that is the day-2 blue/green re-embed project (see
+`docs/superpowers/plans/2026-06-15-flexible-embedding-dimension-greenfield.md`, Appendix).
+
 ---
 
 ## 3. Migrate + run

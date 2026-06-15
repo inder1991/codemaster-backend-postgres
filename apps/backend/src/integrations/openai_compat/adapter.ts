@@ -90,7 +90,11 @@ function openaiBodyToEmbedResult(body: unknown): EmbedResult {
 
 export type OpenAICompatibleEmbeddingsAdapterOptions = {
   baseUrl: string;
-  apiKey: string;
+  /**
+   * The bearer token, or `null` for a KEYLESS embedder (a sidecar Ollama / in-cluster vLLM that needs no
+   * auth). `null` → the `Authorization` header is OMITTED entirely; an empty `Bearer ` would be wrong.
+   */
+  apiKey: string | null;
   modelName: string;
   http?: EmbeddingsHttpClient;
   timeoutSeconds?: number;
@@ -99,7 +103,7 @@ export type OpenAICompatibleEmbeddingsAdapterOptions = {
 /** OpenAI Embeddings API wire-format {@link EmbeddingsPort} impl. */
 export class OpenAICompatibleEmbeddingsAdapter implements EmbeddingsPort {
   private readonly baseUrl: string;
-  private readonly apiKey: string;
+  private readonly apiKey: string | null;
   private readonly fixedModelName: string;
   private readonly http: EmbeddingsHttpClient;
 
@@ -126,7 +130,9 @@ export class OpenAICompatibleEmbeddingsAdapter implements EmbeddingsPort {
     const url = `${this.baseUrl}/v1/embeddings`;
     // The construction-time model is authoritative; req.model_name is IGNORED (per ADR-0059).
     const jsonBody = { model: this.fixedModelName, input: [...req.texts] };
-    const headers = { Authorization: `Bearer ${this.apiKey}` };
+    // Keyless (apiKey === null) → OMIT Authorization entirely; an empty `Bearer ` would be a wrong header.
+    const headers: Record<string, string> =
+      this.apiKey === null ? {} : { Authorization: `Bearer ${this.apiKey}` };
 
     let resp;
     try {

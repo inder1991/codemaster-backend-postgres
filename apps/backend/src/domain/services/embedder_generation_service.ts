@@ -18,6 +18,8 @@ import type { PostgresEmbeddingGenerationsRepo } from "#backend/domain/repos/emb
 import type { PostgresEmbedderRuntimeStateRepo } from "#backend/domain/repos/embedder_runtime_state_repo.js";
 import type { EmbeddingGenerationRowV1 } from "#contracts/embedding_generation.v1.js";
 
+import { EMBEDDING_DIM } from "#backend/adapters/embeddings_port.js";
+
 // ─── Errors ───────────────────────────────────────────────────────────────────────────────────────────
 export class GenerationServiceError extends Error {}
 
@@ -70,8 +72,21 @@ export class EmbeddingDimensionInvariantError extends GenerationServiceError {
   }
 }
 
-const PLATFORM_EMBEDDING_DIMENSION = 1024;
 const DEFAULT_GC_RETENTION_DAYS = 30;
+
+/** Resolve a new generation's embedding dimension: defaults to the configured {@link EMBEDDING_DIM}; a
+ *  requested dimension that differs is rejected (single-dimension-per-platform — switching the dimension
+ *  is the day-2 re-embed path, not a per-generation choice). */
+export function resolveGenerationDimension(requested: number | undefined): number {
+  const dim = requested ?? EMBEDDING_DIM;
+  if (dim !== EMBEDDING_DIM) {
+    throw new EmbeddingDimensionInvariantError(
+      `embedding_dimension=${dim}; only the configured ${EMBEDDING_DIM} is supported on this platform ` +
+        "(set CODEMASTER_EMBEDDING_DIMENSION + run `set-embedding-dimension`; multi-dim is the day-2 path).",
+    );
+  }
+  return dim;
+}
 
 /** Coverage-gap report for the active generation (v4 §8 Phase B). */
 export type CoverageResult = {
@@ -114,13 +129,7 @@ export class EmbedderGenerationService {
     preprocessingVersion?: string;
     normalizationVersion?: string;
   }): Promise<EmbeddingGenerationRowV1> {
-    const dim = args.embeddingDimension ?? PLATFORM_EMBEDDING_DIMENSION;
-    if (dim !== PLATFORM_EMBEDDING_DIMENSION) {
-      throw new EmbeddingDimensionInvariantError(
-        `embedding_dimension=${dim}; only ${PLATFORM_EMBEDDING_DIMENSION} is supported on this platform. ` +
-          "See FOLLOW-UP-embedder-multi-dimension-support.",
-      );
-    }
+    const dim = resolveGenerationDimension(args.embeddingDimension);
     const state = await this.stateRepo.get();
     if (state.pending_generation !== null) {
       throw new PendingGenerationInFlightError(

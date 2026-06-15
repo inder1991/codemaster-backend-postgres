@@ -134,18 +134,72 @@ export class EmbeddingsValidationError extends EmbeddingsError {
   }
 }
 
+/**
+ * No embedder is configured: the DB resolver returned no validated config and there is no env fallback
+ * (the ResolvingEmbeddingsAdapter throws this from {@link EmbeddingsPort.embed}). A SIBLING of
+ * {@link EmbeddingsError}, deliberately NOT a subclass of {@link EmbeddingsConnectivityError} (6-8/7-8):
+ *   - the RETRIEVAL/QUERY path catches it EXPLICITLY and degrades to lexical-only (same UX as a
+ *     connectivity blip — a query must still return results);
+ *   - the INGEST path does NOT catch it, so it propagates and FAILS-CLOSED — an ingest must never write
+ *     zero/garbage-width vectors when no embedder is configured.
+ * Keeping it a sibling (not a connectivity subclass) is what makes the ingest sites fail-closed even
+ * though they may catch connectivity for transient blips.
+ */
+export class EmbedderDisabledError extends EmbeddingsError {
+  public constructor(message: string) {
+    super(message);
+    this.name = "EmbedderDisabledError";
+  }
+}
+
 // ─── Test/dev implementation ─────────────────────────────────────────────────────────────────────
 
+/** pgvector HNSW/ivfflat indexes on the `vector` type cap at 2000 dimensions. */
+export const MAX_HNSW_VECTOR_DIM = 2000;
+
 /**
- * Embedding dimensionality of the platform model (1024). Used by the deterministic
- * {@link RecordingEmbeddingsClient} and by the platform-model pgvector column width.
- *
- * NOTE: the live OpenAI-compat / Ollama path returns the PROVIDER's dimensionality (qwen3-embedding
- * on Ollama is 4096-dim). The aggregation merge uses cosine similarity, which is dim-agnostic, so it
- * MUST NOT assert `vector.length === EMBEDDING_DIM`. Only the platform-model pgvector write path
- * (a later slice) cares about this exact width.
+ * Pure: resolve the deploy-time embedding dimension from `CODEMASTER_EMBEDDING_DIMENSION`
+ * (default 1024). Validated to 1..{@link MAX_HNSW_VECTOR_DIM} — a native >2000 model must
+ * Matryoshka-truncate its output (or wait for the `halfvec` day-2 path).
  */
-export const EMBEDDING_DIM = 1024;
+export function resolveEmbeddingDim(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.CODEMASTER_EMBEDDING_DIMENSION;
+  if (raw === undefined || raw.trim() === "") {
+    return 1024;
+  }
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > MAX_HNSW_VECTOR_DIM) {
+    throw new Error(
+      `CODEMASTER_EMBEDDING_DIMENSION must be an integer in 1..${MAX_HNSW_VECTOR_DIM} ` +
+        `(pgvector caps HNSW vector indexes at ${MAX_HNSW_VECTOR_DIM}; for a larger native dim, ` +
+        `Matryoshka-truncate the model output or use the halfvec day-2 path). Got: ${raw}`,
+    );
+  }
+  return n;
+}
+
+/**
+ * Embedding dimensionality of the configured platform model (default 1024). Used by the deterministic
+ * {@link RecordingEmbeddingsClient} and by the platform-model pgvector column width. The pgvector column
+ * width (migration 0007) and `CODEMASTER_EMBEDDING_DIMENSION` MUST agree — both derive from this env.
+ *
+ * NOTE: the live OpenAI-compat / Ollama path returns the PROVIDER's dimensionality. The aggregation merge
+ * uses cosine similarity, which is dim-agnostic, so it MUST NOT assert `vector.length === EMBEDDING_DIM`.
+ * Only the platform-model pgvector write path cares about this exact width.
+ */
+export const EMBEDDING_DIM = resolveEmbeddingDim();
+
+/**
+ * The platform default embedder model id — the SINGLE source for the model-name HINT the legacy/Qwen
+ * embed paths put in `EmbedRequest.model_name` (previously copy-pasted as `"qwen3-embed-0.6b"` across the
+ * worker/runner wiring). NOTE: with the DB-backed embedder this is only a FALLBACK request hint — the
+ * ResolvingEmbeddingsAdapter ignores `EmbedRequest.model_name` and sends + stamps the configured model,
+ * and the AUTHORITATIVE persisted provenance is `core.embedder_runtime_state.active_model_name` (set on
+ * the admin `/test` promotion) which the dual-write reads via `getActiveModelName()`. So this constant
+ * never drives what model is actually used or recorded for the DB embedder — it is the one place the
+ * legacy default lives.
+ */
+export const DEFAULT_EMBEDDER_MODEL_NAME = "qwen3-embed-0.6b";
 
 /**
  * Deterministic dev/test {@link EmbeddingsPort}. Records every call and returns a reproducible

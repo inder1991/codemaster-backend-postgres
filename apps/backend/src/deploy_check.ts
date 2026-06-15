@@ -7,8 +7,17 @@
 import { Kysely, PostgresDialect } from "kysely";
 import { Pool } from "pg";
 
-import { assertDeployReady, assertPartitionRunwaysHealthy, DeployContractError } from "#backend/deploy_preflight.js";
-import { makeObserveDeps, makeRunwayObserveDeps } from "#backend/deploy_preflight_io.js";
+import {
+  assertDeployReady,
+  assertEmbeddingDimensionConsistent,
+  assertPartitionRunwaysHealthy,
+  DeployContractError,
+} from "#backend/deploy_preflight.js";
+import {
+  makeEmbeddingDimensionObserveDeps,
+  makeObserveDeps,
+  makeRunwayObserveDeps,
+} from "#backend/deploy_preflight_io.js";
 
 async function main(): Promise<void> {
   const dsn = process.env["CODEMASTER_PG_CORE_DSN"];
@@ -27,8 +36,12 @@ async function main(): Promise<void> {
     // F1 (P0-1): registered pg_partman parents must have runway ahead — a stalled run_maintenance is
     // caught here (operator/CI), not silently at the partition cliff. NOT in the boot path (no crashloop).
     await assertPartitionRunwaysHealthy(makeRunwayObserveDeps({ db }));
+    // Greenfield dimension consistency: EMBEDDING_DIM must match the active generation dimension, the
+    // recorded active_embedding_dimension, and every pgvector column width — catches a missed/partial
+    // set-embedding-dimension here (operator/CI) instead of as a lazy runtime failure in retrieval.
+    await assertEmbeddingDimensionConsistent(makeEmbeddingDimensionObserveDeps({ db }));
     console.info(
-      "✓ deploy preflight passed — secrets, extensions, schemas, config, and partition runways all healthy.",
+      "✓ deploy preflight passed — secrets, extensions, schemas, config, partition runways, and embedding dimension all healthy.",
     );
   } finally {
     await db.destroy();

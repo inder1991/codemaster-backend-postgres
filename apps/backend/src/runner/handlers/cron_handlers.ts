@@ -40,9 +40,9 @@ import type { HandlerRegistry } from "../handler_registry.js";
 import {
   buildConfluenceSyncActivities,
   makeLazyConfluenceChunkClient,
-  makeLazyConfluenceEmbeddings,
   syncOneConfluencePage,
 } from "./_confluence_page_sync.js";
+import { makeLazyRuntimeEmbedder } from "#backend/adapters/resolve_embeddings.js";
 
 // Phase 3b W3b.1 + W3b.2 + Phase 3d W3d.1 + Phase 3e W3e.1 + W3e.2: job_type → handler ADAPTERS for
 // the 7 crons migrated off Temporal Schedules — the 2 INTERVAL crons (mutex_janitor every 5min +
@@ -339,10 +339,9 @@ export type CronHandlersDeps = {
    *  root's makeLazyConfluenceClient (build_activities.ts). */
   readonly confluenceClient?: ConfluenceChunkClient;
   /** OPTIONAL embeddings port for the confluence_ingest chunk embeds (integration tests inject the
-   *  deterministic RecordingEmbeddingsClient). Omitted in prod — the env-selected platform embedder
-   *  (resolveEmbeddingsConsumer, ADR-0059) resolved LAZILY on the FIRST embed call + memoized
-   *  ({@link makeLazyConfluenceEmbeddings}), so a runner without embedder env vars still boots AND
-   *  runs empty (zero-space / zero-page) cycles green. */
+   *  deterministic RecordingEmbeddingsClient). Omitted in prod — the DB-backed runtime embedder
+   *  ({@link makeLazyRuntimeEmbedder}: DB-config > legacy env > disabled) resolved LAZILY on the FIRST
+   *  embed call, so a runner without a configured embedder still boots AND runs empty cycles green. */
   readonly confluenceEmbeddings?: EmbeddingsPort;
   /** OPTIONAL dispose registry (W4c.2 #10): the composition root (buildBackgroundRunner) threads its
    *  shared registry so the DEFAULT lazy Confluence client's token-refresh loop gets a dispose
@@ -627,7 +626,10 @@ export function registerCronHandlers(registry: HandlerRegistry, deps: CronHandle
     });
     confluenceClient = lazyClient.client;
   }
-  const confluenceEmbeddings = deps.confluenceEmbeddings ?? makeLazyConfluenceEmbeddings();
+  // Default to the DB-backed runtime embedder (DB-config > legacy env > disabled), NOT the env-only one,
+  // so confluence_ingest embeds the corpus with the SAME UI-saved model the queries use even when no
+  // explicit embedder dep is injected (defense-in-depth — the runner passes one, but a default must be safe).
+  const confluenceEmbeddings = deps.confluenceEmbeddings ?? makeLazyRuntimeEmbedder();
   registry.register("confluence_ingest", async (payload, signal, handlerDeps) => {
     ConfluenceIngestCronInput.parse(payload);
     const dsn = deps.dsn ?? process.env.CODEMASTER_PG_CORE_DSN;

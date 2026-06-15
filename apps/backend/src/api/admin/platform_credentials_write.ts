@@ -7,6 +7,7 @@ import { type Kysely } from "kysely";
 import { type Clock } from "#platform/clock.js";
 
 import { type VaultPort, VaultPathNotFound } from "#backend/adapters/vault_port.js";
+import { EMBEDDING_DIM } from "#backend/adapters/embeddings_port.js";
 import {
   bumpEmbedderConfigVersion,
   type PostgresPlatformCredentialsMetaRepo,
@@ -36,7 +37,7 @@ import type {
 
 export type PlatformCredentialKey = "confluence" | "embedder.qwen";
 
-const CORPUS_DIMENSION = 1024; // v4 §4.4 Qwen invariant
+const CORPUS_DIMENSION = EMBEDDING_DIM; // configured platform dimension (was hardcoded 1024)
 
 /** A 422 the route serializes as `{ error: errorCode, msg }`. */
 export class PlatformCredentialError extends Error {
