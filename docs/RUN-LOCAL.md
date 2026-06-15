@@ -85,15 +85,19 @@ CODEMASTER_AUTH_ROUTES_ENABLED=false      # OFF ⇒ no Vault needed to boot
 
 ## Embedding dimension (set ONCE, before ingesting)
 
-The corpus pgvector columns are sized at deploy time by **`CODEMASTER_EMBEDDING_DIMENSION`** (default
-`1024`). Set it to match your embedder model's output dimension **before** ingesting any content — the
-SAME value sizes the columns (migration `0007`) and drives the runtime `EMBEDDING_DIM`, so they must agree:
+Pick the embedder dimension **before** ingesting any content. `CODEMASTER_EMBEDDING_DIMENSION` (default
+`1024`) drives the runtime `EMBEDDING_DIM`; for a **non-1024** model you also run a one-shot to size the
+(empty) pgvector columns to match. Both read the same number, so they always agree:
 
-| Model | Dimension | Set |
+| Model | Dimension | Steps (before ingesting) |
 |---|---|---|
 | `mxbai-embed-large`, `bge-large`, `qwen3-embed-0.6b` | 1024 | nothing (default) |
-| `nomic-embed-text` | 768 | `CODEMASTER_EMBEDDING_DIMENSION=768` |
-| native >2000 (e.g. `qwen3-embedding-8B` @ 4096) | >2000 | **not supported** by this path |
+| `nomic-embed-text` | 768 | 1. `CODEMASTER_EMBEDDING_DIMENSION=768` (runtime)  ·  2. size the empty columns once: `CODEMASTER_PG_CORE_DSN=<owner-dsn> npm run set-embedding-dimension -- 768` |
+| native >2000 (e.g. `qwen3-embedding-8B` @ 4096) | >2000 | **not supported** — see below |
+
+`npm run set-embedding-dimension -- <N>` resizes the four `vector` columns (+ their HNSW indexes) and
+records `<N>` on the active generation; it **refuses to run against a non-empty corpus** (greenfield only).
+Use the OWNER/migration DSN — it runs DDL.
 
 pgvector's HNSW index caps at **2000 dimensions**, so a native >2000 model must either be configured to
 output ≤2000 (Matryoshka truncation — most models support it), or wait for the `halfvec` follow-up.
