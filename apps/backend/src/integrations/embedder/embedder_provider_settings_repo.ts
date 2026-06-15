@@ -33,6 +33,10 @@ export type EmbedderEffectiveDbConfig = {
   readonly apiKey: string | null;
   readonly enabled: boolean;
   readonly validationStatus: EmbedderValidationStatus | null;
+  /** The exact-comparison CAS token (bumped on every config write). The /test route captures this from
+   *  the SAME read that yields the probed config, so a concurrent PUT can't make the probe validate config
+   *  A while the promotion CAS guards config B's revision. */
+  readonly configRevision: number;
 };
 
 /** The non-secret view for the GET route + config-status (never decrypts — one undecryptable row must not
@@ -63,6 +67,7 @@ type ResolveRow = {
   api_key_ciphertext: string | null;
   enabled: boolean;
   last_validation_status: string | null;
+  config_revision: string; // bigint → string from pg
 };
 
 type NonSecretRow = {
@@ -119,7 +124,7 @@ export class PostgresEmbedderProviderSettingsRepo {
   public async readForResolve(): Promise<EmbedderEffectiveDbConfig | null> {
     // tenant:exempt reason=platform-config follow_up=PERMANENT-EXEMPTION-embedder-provider-settings
     const r = await sql<ResolveRow>`
-      SELECT base_url, model_name, api_key_ciphertext, enabled, last_validation_status
+      SELECT base_url, model_name, api_key_ciphertext, enabled, last_validation_status, config_revision
         FROM core.embedder_provider_settings
        WHERE singleton = true
        LIMIT 1
@@ -135,6 +140,7 @@ export class PostgresEmbedderProviderSettingsRepo {
       apiKey,
       enabled: row.enabled,
       validationStatus: row.last_validation_status as EmbedderValidationStatus | null,
+      configRevision: Number(row.config_revision),
     };
   }
 
@@ -211,27 +217,31 @@ export class PostgresEmbedderProviderSettingsRepo {
                                    ELSE core.embedder_provider_settings.last_rotated_at END,
         last_rotated_by     = CASE WHEN ${rotateKey} THEN EXCLUDED.last_rotated_by
                                    ELSE core.embedder_provider_settings.last_rotated_by END,
-        updated_at = now()
+        updated_at = now(),
+        config_revision = core.embedder_provider_settings.config_revision + 1
     `.execute(this.db);
     return { fingerprint };
   }
 
   /**
-   * Record a /test outcome on the staged row WITHOUT touching updated_at (the CAS token stays stable) or
-   * the config fields. The SUCCESS path goes through promoteValidatedEmbedderConfig (which sets 'ok' under
-   * the lock + CAS); this is the FAILED path so the admin sees WHY in the GET/config-status. Returns true
-   * iff a row existed.
+   * Record a /test outcome on the staged row WITHOUT changing config_revision (validation is not a config
+   * change). The SUCCESS path goes through promoteValidatedEmbedderConfig (CAS under the lock); this is the
+   * FAILED path, CAS-guarded the SAME way: `expectedRevision` must still match, so a concurrent PUT that
+   * re-staged a NEW config between the probe and this write does NOT get its (just-reset) validation
+   * stamped 'failed' with the OLD config's error (review finding). Returns true iff the CAS matched (the
+   * row existed AND was unchanged); false → the config moved, the caller leaves the new config untouched.
    */
   public async writeValidationResult(args: {
     status: EmbedderValidationStatus;
     error: string | null;
+    expectedRevision: number;
   }): Promise<boolean> {
     // tenant:exempt reason=platform-config follow_up=PERMANENT-EXEMPTION-embedder-provider-settings
     const r = await sql`
       UPDATE core.embedder_provider_settings
          SET last_validation_status = ${args.status}, last_validation_error = ${args.error},
              last_validated_at = now()
-       WHERE singleton = true
+       WHERE singleton = true AND config_revision = ${args.expectedRevision}
     `.execute(this.db);
     return (r.numAffectedRows ?? 0n) > 0n;
   }
@@ -245,7 +255,8 @@ export class PostgresEmbedderProviderSettingsRepo {
     // tenant:exempt reason=platform-config follow_up=PERMANENT-EXEMPTION-embedder-provider-settings
     const r = await sql`
       UPDATE core.embedder_provider_settings
-         SET enabled = ${args.enabled}, updated_at = now()
+         SET enabled = ${args.enabled}, updated_at = now(),
+             config_revision = config_revision + 1
        WHERE singleton = true
     `.execute(this.db);
     return (r.numAffectedRows ?? 0n) > 0n;

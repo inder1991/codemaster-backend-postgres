@@ -65,4 +65,42 @@ describe("probeEmbedder", () => {
     await probeEmbedder({ ...CONFIG, apiKey: null }, { http, expectedDim: 8 });
     expect(http.requests[0]!.headers).not.toHaveProperty("Authorization");
   });
+
+  // Discriminating error codes (NOT a blanket connectivity_error) so the UI can prompt the right action.
+  it("maps a 429 → code rate_limited", async () => {
+    const r = await probeEmbedder(CONFIG, {
+      http: new RecordingHttp({ status: 429, bodyText: "slow down" }),
+      expectedDim: 8,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe("rate_limited");
+  });
+
+  it("maps a 401/403 (bad key) → code auth_error", async () => {
+    const r = await probeEmbedder(CONFIG, {
+      http: new RecordingHttp({ status: 401, bodyText: "unauthorized" }),
+      expectedDim: 8,
+    });
+    expect(r.code).toBe("auth_error");
+  });
+
+  it("maps a non-auth 4xx → code validation_failed", async () => {
+    const r = await probeEmbedder(CONFIG, {
+      http: new RecordingHttp({ status: 400, bodyText: "bad request" }),
+      expectedDim: 8,
+    });
+    expect(r.code).toBe("validation_failed");
+  });
+
+  it("maps a transport/5xx failure → code connectivity_error", async () => {
+    const r = await probeEmbedder(CONFIG, { http: new RecordingHttp("transport-error"), expectedDim: 8 });
+    expect(r.code).toBe("connectivity_error");
+  });
+
+  it("a wrong dimension → code dimension_mismatch; a success → code null", async () => {
+    expect((await probeEmbedder(CONFIG, { http: new RecordingHttp(okBodyOfDim(7)), expectedDim: 8 })).code).toBe(
+      "dimension_mismatch",
+    );
+    expect((await probeEmbedder(CONFIG, { http: new RecordingHttp(okBodyOfDim(8)), expectedDim: 8 })).code).toBeNull();
+  });
 });

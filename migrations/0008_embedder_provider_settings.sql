@@ -27,6 +27,7 @@ CREATE TABLE core.embedder_provider_settings (
     last_rotated_at        timestamp with time zone DEFAULT now() NOT NULL,
     last_rotated_by        text,
     updated_at             timestamp with time zone DEFAULT now() NOT NULL,
+    config_revision        bigint                   DEFAULT 0 NOT NULL,
     CONSTRAINT eps_only_one_row     CHECK ((singleton = true)),
     CONSTRAINT eps_provider_valid   CHECK ((provider = 'openai_compat'::text)),
     CONSTRAINT eps_base_url_len     CHECK ((length(base_url) BETWEEN 1 AND 2048)),

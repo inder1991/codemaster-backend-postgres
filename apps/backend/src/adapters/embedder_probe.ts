@@ -12,9 +12,12 @@
 import {
   type EmbeddingsHttpClient,
   EmbeddingsError,
+  EmbeddingsRateLimitedError,
+  EmbeddingsValidationError,
   EMBEDDING_DIM,
 } from "#backend/adapters/embeddings_port.js";
 import { OpenAICompatibleEmbeddingsAdapter } from "#backend/integrations/openai_compat/adapter.js";
+import { type PlatformTestErrorCode } from "#contracts/admin.v1.js";
 
 /** The candidate embedder config under test (the EffectiveEmbedderConfig request triple). */
 export type EmbedderProbeConfig = {
@@ -29,6 +32,10 @@ export type EmbedderProbeResult = {
   detail: string;
   /** The dimension the embedder actually returned (null when the probe never got a vector). */
   dimension: number | null;
+  /** A discriminating error code for the UI (null on success): auth_error / rate_limited /
+   *  connectivity_error / dimension_mismatch / validation_failed — so a 401 vs a 429 vs an unreachable host
+   *  are NOT all reported as connectivity_error. The route maps this to TestPlatformCredentialsResponseV1.error. */
+  code: PlatformTestErrorCode | null;
 };
 
 const PROBE_TEXT = "codemaster embedder configuration probe";
@@ -62,16 +69,31 @@ export async function probeEmbedder(
     });
     const vec = result.vectors[0];
     if (vec === undefined) {
-      return { ok: false, detail: "embedder returned no vectors for the probe input", dimension: null };
+      return {
+        ok: false,
+        detail: "embedder returned no vectors for the probe input",
+        dimension: null,
+        code: "validation_failed",
+      };
     }
     modelEcho = result.model_name;
     dim = vec.length;
   } catch (e) {
-    // Typed adapter errors (Connectivity / RateLimited / Validation) carry their name; surface it so the
-    // operator sees WHY (unreachable vs auth rejected vs rate-limited) in the admin UI.
+    // Map the typed adapter error to a discriminating code so the UI can prompt the right action
+    // (check the API key vs back off vs the host is unreachable), not a blanket connectivity_error.
     const name = e instanceof EmbeddingsError ? e.name : "UnknownError";
     const message = e instanceof Error ? e.message : String(e);
-    return { ok: false, detail: `${name}: ${message}`, dimension: null };
+    let code: PlatformTestErrorCode;
+    if (e instanceof EmbeddingsRateLimitedError) {
+      code = "rate_limited";
+    } else if (e instanceof EmbeddingsValidationError) {
+      // The adapter folds 401/403 (bad key) AND other 4xx into EmbeddingsValidationError; the status is in
+      // the message, so a 401/403 → auth_error (actionable "check your API key"), else validation_failed.
+      code = /\b40[13]\b/.test(message) ? "auth_error" : "validation_failed";
+    } else {
+      code = "connectivity_error"; // EmbeddingsConnectivityError (timeout / 5xx / network / bad-200-shape)
+    }
+    return { ok: false, detail: `${name}: ${message}`, dimension: null, code };
   }
 
   if (dim !== expectedDim) {
@@ -82,6 +104,7 @@ export async function probeEmbedder(
         `(CODEMASTER_EMBEDDING_DIMENSION). Pick a model whose output width matches, or re-deploy with a ` +
         `matching dimension before ingest.`,
       dimension: dim,
+      code: "dimension_mismatch",
     };
   }
 
@@ -89,5 +112,6 @@ export async function probeEmbedder(
     ok: true,
     detail: `ok — model '${modelEcho}' returned ${dim}-dimension vectors`,
     dimension: dim,
+    code: null,
   };
 }

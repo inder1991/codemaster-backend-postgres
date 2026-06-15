@@ -17,6 +17,7 @@ const DB_ROW = {
   apiKey: "sk-db",
   enabled: true,
   validationStatus: "ok" as const,
+  configRevision: 1,
 };
 
 const NON_SECRET = {
@@ -58,5 +59,23 @@ describe("resolveEmbeddingsConsumer DB-backed branch", () => {
     };
     const e = resolveEmbeddingsConsumer({ embedderConfigPort: disabledPort, env: {} });
     expect(await (e as ResolvingEmbeddingsAdapter).effectiveConfig()).toBeNull();
+  });
+
+  it("NO DB row + env vars set → the wired adapter resolves the env bootstrap (source:env)", async () => {
+    const envPort: EmbedderConfigReadPort = {
+      readForResolve: async () => null,
+      readNonSecret: async () => null,
+    };
+    const e = resolveEmbeddingsConsumer({
+      embedderConfigPort: envPort,
+      env: { CODEMASTER_EMBEDDER_BASE_URL: "http://env/v1", CODEMASTER_EMBEDDER_MODEL_NAME: "env-model" },
+    });
+    expect(await (e as ResolvingEmbeddingsAdapter).effectiveConfig()).toEqual({
+      baseUrl: "http://env/v1",
+      apiKey: null,
+      modelName: "env-model",
+      provider: "openai_compat",
+      source: "env",
+    });
   });
 });

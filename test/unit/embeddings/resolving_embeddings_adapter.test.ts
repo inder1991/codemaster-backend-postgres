@@ -124,6 +124,33 @@ describe("ResolvingEmbeddingsAdapter", () => {
     expect(e).not.toBeInstanceOf(EmbeddingsConnectivityError);
   });
 
+  it("a digest-read failure with NO cache → EmbedderDisabledError (fail-closed; retrieval degrades)", async () => {
+    const adapter = new ResolvingEmbeddingsAdapter({
+      resolveConfig: async () => DB_CONFIG,
+      readDigestParts: async () => {
+        throw new Error("transient db blip");
+      },
+      buildInner: (cfg) => new FakeInner(cfg),
+    });
+    await expect(adapter.embed(REQ)).rejects.toBeInstanceOf(EmbedderDisabledError);
+  });
+
+  it("a digest-read failure WITH a warm cache → serves the cached config (no hard throw out of embed)", async () => {
+    let fail = false;
+    const adapter = new ResolvingEmbeddingsAdapter({
+      resolveConfig: async () => DB_CONFIG,
+      readDigestParts: async () => {
+        if (fail) throw new Error("transient db blip");
+        return digestParts();
+      },
+      buildInner: (cfg) => new FakeInner(cfg),
+    });
+    await adapter.embed(REQ); // warm the cache
+    fail = true;
+    const r = await adapter.embed(REQ); // digest read throws → serve cached config, no rejection
+    expect(r.model_name).toBe("configured-model");
+  });
+
   it("effectiveConfig() exposes the resolved config (for the EffectiveEmbedderConfigReader)", async () => {
     const adapter = new ResolvingEmbeddingsAdapter({
       resolveConfig: async () => DB_CONFIG,

@@ -59,7 +59,8 @@ describeDb("promoteValidatedEmbedderConfig (integration)", () => {
     await disposeAllPools();
   });
 
-  const stage = async (modelName: string): Promise<Date> => {
+  // Stage a config and return its config_revision (the CAS token) from the SAME read path the route uses.
+  const stage = async (modelName: string): Promise<number> => {
     await repo.writeSecret({
       baseUrl: "http://embedder.local:8080/v1",
       modelName,
@@ -67,13 +68,13 @@ describeDb("promoteValidatedEmbedderConfig (integration)", () => {
       key: { kind: "set", plaintext: "sk-secret" },
       rotatedBy: ACTOR,
     });
-    return (await repo.readNonSecret())!.updatedAt;
+    return (await repo.readForResolve())!.configRevision;
   };
 
   it("happy path (greenfield, contract change): validation→ok, provenance + active_model_name + config_version", async () => {
     const token = await stage("mxbai-embed-large");
     await promoteValidatedEmbedderConfig(db, {
-      expectedToken: token,
+      expectedRevision: token,
       modelName: "mxbai-embed-large",
       provider: "openai_compat",
       expectedDimension: 1024,
@@ -92,15 +93,15 @@ describeDb("promoteValidatedEmbedderConfig (integration)", () => {
     expect(Number(rt.rows[0]!.config_version)).toBe(2);
   });
 
-  it("CAS miss: a concurrent re-stage (updated_at moved) → EmbedderConfigChangedError, nothing promoted", async () => {
+  it("CAS miss: a concurrent re-stage (config_revision moved) → EmbedderConfigChangedError, nothing promoted", async () => {
     const staleToken = await stage("mxbai-embed-large");
-    // Simulate a concurrent PUT that re-staged the row between probe and promote.
+    // Simulate a concurrent PUT that re-staged the row (bumped config_revision) between probe and promote.
     await pool.query(
-      "UPDATE core.embedder_provider_settings SET updated_at = now() + interval '1 second' WHERE singleton = true",
+      "UPDATE core.embedder_provider_settings SET config_revision = config_revision + 1 WHERE singleton = true",
     );
     await expect(
       promoteValidatedEmbedderConfig(db, {
-        expectedToken: staleToken,
+        expectedRevision: staleToken,
         modelName: "mxbai-embed-large",
         provider: "openai_compat",
         expectedDimension: 1024,
@@ -128,7 +129,7 @@ describeDb("promoteValidatedEmbedderConfig (integration)", () => {
     });
     await expect(
       promoteValidatedEmbedderConfig(db, {
-        expectedToken: token,
+        expectedRevision: token,
         modelName: "mxbai-embed-large",
         provider: "openai_compat",
         expectedDimension: 1024,
@@ -141,7 +142,7 @@ describeDb("promoteValidatedEmbedderConfig (integration)", () => {
     // First promote mxbai-embed-large on the greenfield corpus.
     const t1 = await stage("mxbai-embed-large");
     await promoteValidatedEmbedderConfig(db, {
-      expectedToken: t1,
+      expectedRevision: t1,
       modelName: "mxbai-embed-large",
       provider: "openai_compat",
       expectedDimension: 1024,
@@ -159,7 +160,7 @@ describeDb("promoteValidatedEmbedderConfig (integration)", () => {
     // …but re-testing the SAME active config must still succeed (contract unchanged → no greenfield gate).
     const t2 = await stage("mxbai-embed-large");
     await promoteValidatedEmbedderConfig(db, {
-      expectedToken: t2,
+      expectedRevision: t2,
       modelName: "mxbai-embed-large",
       provider: "openai_compat",
       expectedDimension: 1024,
@@ -173,7 +174,7 @@ describeDb("promoteValidatedEmbedderConfig (integration)", () => {
     const token = await stage("mxbai-embed-large");
     await expect(
       promoteValidatedEmbedderConfig(db, {
-        expectedToken: token,
+        expectedRevision: token,
         modelName: "mxbai-embed-large",
         provider: "openai_compat",
         expectedDimension: 1024,

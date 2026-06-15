@@ -91,6 +91,13 @@ describe("PutEmbedderConfigRequestV1 (PUT body, no provider)", () => {
     ).toBe("sk-secret");
   });
 
+  it("rejects an api_key shorter than 4 chars (would violate the DB fingerprint CHECK → 500)", () => {
+    expect(
+      PutEmbedderConfigRequestV1.safeParse({ base_url: "http://e/v1", model_name: "m", api_key: "abc" })
+        .success,
+    ).toBe(false);
+  });
+
   it("rejects an empty base_url, an over-long model_name, and a server-owned provider key", () => {
     expect(PutEmbedderConfigRequestV1.safeParse({ base_url: "", model_name: "m" }).success).toBe(false);
     expect(
@@ -108,16 +115,18 @@ describe("PutEmbedderConfigRequestV1 (PUT body, no provider)", () => {
 });
 
 describe("ConfigStatusV1 (validated array; adds invalid + detail)", () => {
-  it("accepts the four states including invalid + detail", () => {
-    const arr = ConfigStatusV1.parse([
-      { key: "github.app", state: "configured", source: "db" },
-      { key: "confluence", state: "disabled", source: "db" },
-      { key: "llm.provider", state: "pending", source: "none", gates: "no reviews until configured" },
-      { key: "embedder.provider", state: "invalid", source: "db", detail: "Connectivity: unreachable" },
-    ]);
-    expect(arr).toHaveLength(4);
-    expect(arr[3]!.state).toBe("invalid");
-    expect(arr[3]!.detail).toBe("Connectivity: unreachable");
+  it("accepts the four states including invalid + detail (response is { items: [...] })", () => {
+    const parsed = ConfigStatusV1.parse({
+      items: [
+        { key: "github.app", state: "configured", source: "db" },
+        { key: "confluence", state: "disabled", source: "db" },
+        { key: "llm.provider", state: "pending", source: "none", gates: "no reviews until configured" },
+        { key: "embedder.provider", state: "invalid", source: "db", detail: "Connectivity: unreachable" },
+      ],
+    });
+    expect(parsed.items).toHaveLength(4);
+    expect(parsed.items[3]!.state).toBe("invalid");
+    expect(parsed.items[3]!.detail).toBe("Connectivity: unreachable");
   });
 
   it("accepts a lean current-style item (no detail/gates)", () => {

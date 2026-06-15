@@ -158,7 +158,7 @@ describeDb("admin config-status — DB tier (P1)", () => {
 
   it("embedder.provider reflects the saved state: validated→configured, failed→invalid+detail, disabled, staged→pending (6b)", async () => {
     const repo = new PostgresEmbedderProviderSettingsRepo({ db, registry: reg });
-    const stage = async (): Promise<void> => {
+    const stage = async (): Promise<number> => {
       await repo.writeSecret({
         baseUrl: "http://embedder.local:8080/v1",
         modelName: "mxbai-embed-large",
@@ -166,20 +166,25 @@ describeDb("admin config-status — DB tier (P1)", () => {
         key: { kind: "set", plaintext: "sk-x" },
         rotatedBy: "admin@example.com",
       });
+      return (await repo.readForResolve())!.configRevision;
     };
     const embedderItem = async (): Promise<ConfigItem & { detail?: string }> =>
       (await statusItems()).find((i) => i.key === "embedder.provider") as ConfigItem & { detail?: string };
 
     // staged but never tested → pending
-    await stage();
+    const rev = await stage();
     expect(await embedderItem()).toMatchObject({ state: "pending", source: "db" });
 
-    // validation ok → configured
-    await repo.writeValidationResult({ status: "ok", error: null });
+    // validation ok → configured (writeValidationResult is CAS-guarded on the revision)
+    await repo.writeValidationResult({ status: "ok", error: null, expectedRevision: rev });
     expect(await embedderItem()).toMatchObject({ state: "configured", source: "db" });
 
     // validation failed → invalid + the detail
-    await repo.writeValidationResult({ status: "failed", error: "EmbeddingsConnectivityError: unreachable" });
+    await repo.writeValidationResult({
+      status: "failed",
+      error: "EmbeddingsConnectivityError: unreachable",
+      expectedRevision: rev,
+    });
     expect(await embedderItem()).toMatchObject({
       state: "invalid",
       source: "db",

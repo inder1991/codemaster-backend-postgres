@@ -12,6 +12,7 @@ import { getPool, tenantKysely, disposeAllPools } from "#platform/db/database.js
 
 import { buildApp } from "#backend/api/app.js";
 import { registerAdminRoutes, type EmbedderProbePort } from "#backend/api/admin/admin_routes.js";
+import { PostgresEmbeddingGenerationsRepo } from "#backend/domain/repos/embedding_generations_repo.js";
 import {
   resetAuditKeyRegistryForTesting,
   setAuditKeyRegistry,
@@ -52,8 +53,13 @@ async function makeApp(probe?: ProbeMode) {
   const embedderProbe: EmbedderProbePort = {
     probe: async () =>
       probe === undefined || probe.ok
-        ? { ok: true, detail: "ok — 1024-dim", dimension: 1024 }
-        : { ok: false, detail: "probe failed", dimension: probe.dimension },
+        ? { ok: true, detail: "ok — 1024-dim", dimension: 1024, code: null }
+        : {
+            ok: false,
+            detail: "probe failed",
+            dimension: probe.dimension,
+            code: probe.dimension !== null ? "dimension_mismatch" : "connectivity_error",
+          },
   };
   await registerAdminRoutes(app, {
     db: db!,
@@ -220,5 +226,54 @@ describeDb("admin embedder-config (disposable)", () => {
     const wired = await makeApp({ ok: true }); // probe wired but no config staged
     expect((await wired.inject({ method: "POST", url: "/api/admin/embedder-config/test", cookies: cookie("super_admin") })).statusCode).toBe(422);
     await wired.close();
+  });
+
+  it("POST /test: a model change on a NON-greenfield corpus → 409 at the HTTP layer (not 500)", async () => {
+    // A second generation makes the corpus non-greenfield; a contract change must then 409.
+    await new PostgresEmbeddingGenerationsRepo({ db: db! }).insertNew({
+      modelName: "qwen3-embed-0.6b",
+      embeddingDimension: 1024,
+      generationLabel: null,
+      generationReason: null,
+      createdByEmail: "admin@example.com",
+      createdFromGeneration: 1,
+    });
+    const app = await makeApp({ ok: true });
+    await app.inject({
+      method: "PUT",
+      url: "/api/admin/embedder-config",
+      cookies: cookie("super_admin"),
+      payload: { base_url: "http://e/v1", model_name: "a-different-model", api_key: "sk-x" },
+    });
+    const test = await app.inject({
+      method: "POST",
+      url: "/api/admin/embedder-config/test",
+      cookies: cookie("super_admin"),
+    });
+    expect(test.statusCode).toBe(409);
+    await app.close();
+  });
+
+  it("PUT enable-only toggle preserves the prior validation (D2-val) — no forced re-test", async () => {
+    const app = await makeApp({ ok: true });
+    const payload = { base_url: "http://embedder.local:8080/v1", model_name: "mxbai-embed-large" };
+    await app.inject({
+      method: "PUT",
+      url: "/api/admin/embedder-config",
+      cookies: cookie("super_admin"),
+      payload: { ...payload, api_key: "sk-x" },
+    });
+    await app.inject({ method: "POST", url: "/api/admin/embedder-config/test", cookies: cookie("super_admin") }); // validation → ok
+    // disable WITHOUT changing base_url / model / key → validation must be PRESERVED
+    const put = await app.inject({
+      method: "PUT",
+      url: "/api/admin/embedder-config",
+      cookies: cookie("super_admin"),
+      payload: { ...payload, enabled: false },
+    });
+    expect(put.statusCode).toBe(200);
+    const get = await app.inject({ method: "GET", url: "/api/admin/embedder-config", cookies: cookie("super_admin") });
+    expect(get.json()).toMatchObject({ enabled: false, last_validation_status: "ok" });
+    await app.close();
   });
 });

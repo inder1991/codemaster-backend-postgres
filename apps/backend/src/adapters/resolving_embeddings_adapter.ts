@@ -77,13 +77,28 @@ export class ResolvingEmbeddingsAdapter implements EmbeddingsPort {
     return { ...result, model_name: config.modelName };
   }
 
-  /** Resolve with caching; returns null (does NOT throw) when disabled. */
+  /** Resolve with caching; returns null (does NOT throw) when disabled. A transient DB error on either DB
+   *  read is normalized to the documented taxonomy: serve the existing valid cache if present, else
+   *  fail-closed (null → EmbedderDisabledError → retrieval degrades to lexical-only, ingest fails-closed).
+   *  Without this, a raw pg error on the cheap digest read would escape embed() and break the retrieval
+   *  fail-soft contract (ann_retriever catches only the typed embeddings errors). */
   private async ensureCurrent(): Promise<EffectiveEmbedderConfig | null> {
-    const digest = effectiveConfigDigest(await this.readDigestParts());
+    let digest: string;
+    try {
+      digest = effectiveConfigDigest(await this.readDigestParts());
+    } catch {
+      return this.cache !== null ? this.cache.config : null;
+    }
     if (this.cache !== null && this.cache.digest === digest) {
       return this.cache.config;
     }
-    const config = await this.resolveConfig();
+    let config: EffectiveEmbedderConfig | null;
+    try {
+      config = await this.resolveConfig();
+    } catch {
+      // resolveConfig (the resolver) already fail-closes internally; guard the wiring boundary too.
+      return this.cache !== null ? this.cache.config : null;
+    }
     if (config === null) {
       this.cache = null; // a disabled config invalidates any cached adapter
       return null;

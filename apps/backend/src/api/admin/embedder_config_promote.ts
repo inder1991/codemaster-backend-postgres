@@ -82,8 +82,9 @@ async function assertEmbedderGreenfield(trx: Transaction<unknown>): Promise<void
 }
 
 export type PromoteValidatedEmbedderConfigArgs = {
-  /** The settings.updated_at captured BEFORE the probe — the CAS token. */
-  expectedToken: Date;
+  /** The config_revision captured from the SAME read that yielded the probed config — the exact-comparison
+   *  CAS token (a bigint counter, not a timestamp, so there is no same-millisecond collision window). */
+  expectedRevision: number;
   modelName: string;
   provider: "openai_compat";
   /** The validated dimension (EMBEDDING_DIM) the probe asserted; gates the generation provenance update. */
@@ -104,32 +105,32 @@ export async function promoteValidatedEmbedderConfig(
   await db.transaction().execute(async (txTyped) => {
     const trx = txTyped as unknown as Transaction<unknown>;
 
-    // 1. Lock the settings singleton (serialize concurrent promotes) + read its current token + model.
+    // 1. Lock the settings singleton (serialize concurrent promotes) + read its CAS revision.
     // tenant:exempt reason=platform-singleton-embedder-settings follow_up=PERMANENT-EXEMPTION-embedder
-    const locked = await sql<{ updated_at: Date }>`
-      SELECT updated_at FROM core.embedder_provider_settings WHERE singleton = true FOR UPDATE
+    const locked = await sql<{ config_revision: string }>`
+      SELECT config_revision FROM core.embedder_provider_settings WHERE singleton = true FOR UPDATE
     `.execute(trx);
     const settings = locked.rows[0];
     if (settings === undefined) {
       throw new EmbedderConfigChangedError("no embedder config row to promote (it was removed)");
     }
-    // 2. CAS: the row must be exactly what /test probed. The compare is against the FOR-UPDATE-locked
-    //    row's updated_at — both this and the token come back from pg as JS Dates (millisecond precision),
-    //    so they truncate identically; a concurrent re-stage moves updated_at by far more than 1ms. The
-    //    row lock held until COMMIT means no write can slip in between this check and the updates below, so
-    //    this getTime() comparison IS the compare-and-swap (the subsequent UPDATEs filter on the singleton,
-    //    NOT on updated_at — equality against the microsecond-precision column would never match a ms Date).
-    if (settings.updated_at.getTime() !== args.expectedToken.getTime()) {
+    // 2. CAS: the row must be EXACTLY what /test probed. config_revision is a bigint counter bumped on every
+    //    config write, so this is an exact equality (no millisecond-collision window a timestamp CAS has).
+    //    The FOR UPDATE lock is held to COMMIT, so no write slips between this check and the updates below.
+    if (Number(settings.config_revision) !== args.expectedRevision) {
       throw new EmbedderConfigChangedError(
         "the embedder config changed during validation — re-run /test against the current config",
       );
     }
 
-    // 3. Read the active generation's contract (model/provider/dimension) to decide contract-change.
+    // 3. LOCK the runtime-state singleton too (FOR UPDATE), then read the active generation — so a
+    //    concurrent re-embed activation cannot move active_generation between this read and the writes
+    //    below (which would otherwise stamp provenance on the old generation but active_model_name on a
+    //    different one). The guard at step 7 re-asserts the generation didn't change.
     // tenant:exempt reason=platform-singleton-embedder-runtime-state follow_up=PERMANENT-EXEMPTION-embedder
     const rt = await sql<{ active_generation: number }>`
       SELECT active_generation::int AS active_generation
-        FROM core.embedder_runtime_state WHERE singleton = true
+        FROM core.embedder_runtime_state WHERE singleton = true FOR UPDATE
     `.execute(trx);
     const activeGeneration = rt.rows[0]?.active_generation;
     if (activeGeneration === undefined || activeGeneration === null) {
@@ -182,16 +183,20 @@ export async function promoteValidatedEmbedderConfig(
       );
     }
 
-    // 7. Set runtime active_model_name + bump config_version (review/embedder workers refresh creds).
+    // 7. Set runtime active_model_name + bump config_version (review/embedder workers refresh creds). The
+    //    `active_generation = ${activeGeneration}` guard re-asserts the generation we recorded provenance on
+    //    is STILL the active one (belt-and-suspenders with the step-3 FOR UPDATE lock); a mismatch → rollback.
     // tenant:exempt reason=platform-singleton-embedder-runtime-state follow_up=PERMANENT-EXEMPTION-embedder
     const rtUpd = await sql`
       UPDATE core.embedder_runtime_state
          SET active_model_name = ${args.modelName}, config_version = config_version + 1,
              updated_at = now(), updated_by_email = ${args.actorEmail}
-       WHERE singleton = true
+       WHERE singleton = true AND active_generation = ${activeGeneration}
     `.execute(trx);
     if ((rtUpd.numAffectedRows ?? 0n) !== 1n) {
-      throw new Error("embedder runtime-state promotion affected != 1 row");
+      throw new EmbedderProvenanceError(
+        "the active embedding generation changed during promotion — re-run /test",
+      );
     }
   });
 }

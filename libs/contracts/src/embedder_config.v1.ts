@@ -51,7 +51,9 @@ export const PutEmbedderConfigRequestV1 = z
     schema_version: z.number().int().default(1),
     base_url: z.string().min(1).max(2048),
     model_name: z.string().min(1).max(256),
-    api_key: z.string().min(1).max(4096).nullable().optional(),
+    // min(4): the stored fingerprint is the last 4 plaintext chars (the eps_fingerprint_4 CHECK), so a
+    // 1-3 char key would pass Zod then violate the DB CHECK (500). A real api key is always ≥4 chars.
+    api_key: z.string().min(4).max(4096).nullable().optional(),
     enabled: z.boolean().default(true),
   })
   .strict();
@@ -80,6 +82,7 @@ export const ConfigStatusItemV1 = z
   .strict();
 export type ConfigStatusItemV1 = z.infer<typeof ConfigStatusItemV1>;
 
-/** GET /api/admin/config-status — a validated array of items (the response stays an array; non-breaking). */
-export const ConfigStatusV1 = z.array(ConfigStatusItemV1);
+/** GET /api/admin/config-status — the actual response shape is `{ items: [...] }` (the route has always
+ *  wrapped the array). The contract matches that exactly so a frontend can parse the boundary. */
+export const ConfigStatusV1 = z.object({ items: z.array(ConfigStatusItemV1) });
 export type ConfigStatusV1 = z.infer<typeof ConfigStatusV1>;

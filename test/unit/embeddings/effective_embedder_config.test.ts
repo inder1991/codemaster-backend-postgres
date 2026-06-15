@@ -26,6 +26,7 @@ const DB_OK = {
   apiKey: "sk-db",
   enabled: true,
   validationStatus: "ok" as const,
+  configRevision: 1,
 };
 
 const ENV_SET = {

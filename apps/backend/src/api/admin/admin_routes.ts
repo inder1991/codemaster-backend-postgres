@@ -767,21 +767,35 @@ export async function registerAdminRoutes(
           db: opts.db,
           registry: requireAuditKeyRegistry(),
         });
-        // api_key TRI-STATE: absent → keep; null → clear (keyless); string → set. A keyless embedder is
-        // valid, so (unlike confluence) the INITIAL config does NOT require a key.
-        const key =
-          body.api_key === undefined
-            ? ({ kind: "keep" } as const)
-            : body.api_key === null
-              ? ({ kind: "clear" } as const)
-              : ({ kind: "set", plaintext: body.api_key } as const);
-        await repo.writeSecret({
-          baseUrl: body.base_url,
-          modelName: body.model_name,
-          enabled: body.enabled,
-          key,
-          rotatedBy: actorEmail,
-        });
+        // D2-val: a pure enable/disable toggle (base_url + model unchanged, no new key) KEEPS the prior
+        // validation — disabling then re-enabling a tested config must NOT force a re-test. Any actual
+        // config change goes through writeSecret, which re-stages + resets validation.
+        const existing = await repo.readNonSecret();
+        const enableOnlyChange =
+          existing !== null &&
+          body.api_key === undefined &&
+          body.base_url === existing.baseUrl &&
+          body.model_name === existing.modelName &&
+          body.enabled !== existing.enabled;
+        if (enableOnlyChange) {
+          await repo.updateEnabled({ enabled: body.enabled });
+        } else {
+          // api_key TRI-STATE: absent → keep; null → clear (keyless); string → set. A keyless embedder is
+          // valid, so (unlike confluence) the INITIAL config does NOT require a key.
+          const key =
+            body.api_key === undefined
+              ? ({ kind: "keep" } as const)
+              : body.api_key === null
+                ? ({ kind: "clear" } as const)
+                : ({ kind: "set", plaintext: body.api_key } as const);
+          await repo.writeSecret({
+            baseUrl: body.base_url,
+            modelName: body.model_name,
+            enabled: body.enabled,
+            key,
+            rotatedBy: actorEmail,
+          });
+        }
         await opts.audit?.({
           actorUserId: principal.userId,
           installationId: principal.installationId,
@@ -815,14 +829,16 @@ export async function registerAdminRoutes(
           db: opts.db,
           registry: requireAuditKeyRegistry(),
         });
+        // ONE read yields BOTH the probed config AND its CAS revision — so a concurrent PUT between the
+        // read and the promote moves config_revision and the promotion CAS correctly fails (it can't make
+        // the probe validate config A while the CAS guards config B's revision).
         const staged = await repo.readForResolve();
-        const ns = await repo.readNonSecret();
-        if (staged === null || ns === null) {
+        if (staged === null) {
           return reply
             .code(422)
             .send({ detail: "no embedder config saved — PUT a base_url + model before testing" });
         }
-        const token = ns.updatedAt;
+        const revision = staged.configRevision;
         const result = await opts.getEmbedderProbe().probe({
           baseUrl: staged.baseUrl,
           apiKey: staged.apiKey,
@@ -830,13 +846,16 @@ export async function registerAdminRoutes(
         });
         const principal = request.authPrincipal!;
         if (!result.ok) {
-          await repo.writeValidationResult({ status: "failed", error: result.detail });
-          // A returned-but-wrong width → dimension_mismatch; no vector at all → connectivity/auth.
-          const error = result.dimension !== null ? "dimension_mismatch" : "connectivity_error";
+          // CAS-guarded so a concurrent re-stage isn't mislabeled 'failed' with this probe's stale error.
+          await repo.writeValidationResult({
+            status: "failed",
+            error: result.detail,
+            expectedRevision: revision,
+          });
           return reply.code(200).send(
             TestPlatformCredentialsResponseV1.parse({
               ok: false,
-              error,
+              error: result.code,
               error_detail: result.detail,
               latency_ms: null,
               detected_dimension: result.dimension,
@@ -849,7 +868,7 @@ export async function registerAdminRoutes(
         );
         try {
           await promoteValidatedEmbedderConfig(opts.db, {
-            expectedToken: token,
+            expectedRevision: revision,
             modelName: staged.modelName,
             provider: "openai_compat",
             expectedDimension: EMBEDDING_DIM,

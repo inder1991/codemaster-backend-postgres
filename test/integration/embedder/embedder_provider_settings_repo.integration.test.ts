@@ -172,4 +172,38 @@ describeDb("PostgresEmbedderProviderSettingsRepo (integration)", () => {
     expect(await repo.readForResolve()).toBeNull();
     expect(await repo.readNonSecret()).toBeNull();
   });
+
+  it("config_revision bumps on every write; writeValidationResult is CAS-guarded on it", async () => {
+    await repo.writeSecret({
+      baseUrl: "http://e/v1",
+      modelName: "m",
+      enabled: true,
+      key: { kind: "set", plaintext: "sk-1" },
+      rotatedBy: ACTOR,
+    });
+    const rev1 = (await repo.readForResolve())!.configRevision;
+    // a second write bumps the revision
+    await repo.writeSecret({
+      baseUrl: "http://e2/v1",
+      modelName: "m",
+      enabled: true,
+      key: { kind: "keep" },
+      rotatedBy: ACTOR,
+    });
+    const rev2 = (await repo.readForResolve())!.configRevision;
+    expect(rev2).toBeGreaterThan(rev1);
+
+    // a STALE revision → no-op (false), validation untouched
+    expect(
+      await repo.writeValidationResult({ status: "failed", error: "stale", expectedRevision: rev1 }),
+    ).toBe(false);
+    expect((await repo.readNonSecret())!.lastValidationStatus).toBeNull();
+    // the CURRENT revision → applied
+    expect(
+      await repo.writeValidationResult({ status: "failed", error: "fresh", expectedRevision: rev2 }),
+    ).toBe(true);
+    expect((await repo.readNonSecret())!.lastValidationStatus).toBe("failed");
+    // a validation write does NOT bump the revision (it is not a config change)
+    expect((await repo.readForResolve())!.configRevision).toBe(rev2);
+  });
 });
