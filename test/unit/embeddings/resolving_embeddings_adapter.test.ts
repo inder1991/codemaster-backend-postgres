@@ -124,7 +124,7 @@ describe("ResolvingEmbeddingsAdapter", () => {
     expect(e).not.toBeInstanceOf(EmbeddingsConnectivityError);
   });
 
-  it("a digest-read failure with NO cache → EmbedderDisabledError (fail-closed; retrieval degrades)", async () => {
+  it("a digest-read failure with NO cache → EmbeddingsConnectivityError (NOT disabled — outage, not no-config; rr-1)", async () => {
     const adapter = new ResolvingEmbeddingsAdapter({
       resolveConfig: async () => DB_CONFIG,
       readDigestParts: async () => {
@@ -132,7 +132,10 @@ describe("ResolvingEmbeddingsAdapter", () => {
       },
       buildInner: (cfg) => new FakeInner(cfg),
     });
-    await expect(adapter.embed(REQ)).rejects.toBeInstanceOf(EmbedderDisabledError);
+    // Connectivity (NOT EmbedderDisabledError) so the legacy-env fallback doesn't mask the outage; retrieval
+    // still catches connectivity → lexical-only, ingest fails-closed.
+    await expect(adapter.embed(REQ)).rejects.toBeInstanceOf(EmbeddingsConnectivityError);
+    await expect(adapter.embed(REQ)).rejects.not.toBeInstanceOf(EmbedderDisabledError);
   });
 
   it("a digest-read failure WITH a warm cache → serves the cached config (no hard throw out of embed)", async () => {

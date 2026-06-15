@@ -313,6 +313,31 @@ describeDb("admin embedder-config (disposable)", () => {
     await app.close();
   });
 
+  it("PUT enable-only toggle is NOT blocked by the greenfield guard even when the active generation diverges (PG-1)", async () => {
+    const app = await makeApp({ ok: true });
+    await app.inject({
+      method: "PUT",
+      url: "/api/admin/embedder-config",
+      cookies: cookie("super_admin"),
+      payload: { base_url: "http://e/v1", model_name: "model-a", api_key: "sk-a" },
+    });
+    await app.inject({ method: "POST", url: "/api/admin/embedder-config/test", cookies: cookie("super_admin") });
+    // Simulate a day-2 re-embed activation: the ACTIVE generation's model diverges from the settings row,
+    // and the corpus is non-greenfield — so the greenfield guard (which compares against the active gen)
+    // would 409 if it ran on this toggle.
+    await pool!.query("UPDATE core.embedding_generations SET model_name='model-c' WHERE generation_id = 1");
+    await insertSecondGen();
+    // An enable-only toggle (echoing the unchanged settings model) must STILL succeed.
+    const put = await app.inject({
+      method: "PUT",
+      url: "/api/admin/embedder-config",
+      cookies: cookie("super_admin"),
+      payload: { base_url: "http://e/v1", model_name: "model-a", enabled: false },
+    });
+    expect(put.statusCode).toBe(200);
+    await app.close();
+  });
+
   it("PUT enable-only toggle preserves the prior validation (D2-val) — no forced re-test", async () => {
     const app = await makeApp({ ok: true });
     const payload = { base_url: "http://embedder.local:8080/v1", model_name: "mxbai-embed-large" };

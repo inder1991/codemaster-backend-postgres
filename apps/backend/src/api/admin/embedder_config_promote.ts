@@ -200,12 +200,15 @@ export async function promoteValidatedEmbedderConfig(
       await assertEmbedderGreenfield(trx);
     }
 
-    // 5. Set validation='ok' under the row lock (the step-2 CAS already proved the token). Does NOT touch
-    //    updated_at — the token stays stable so a later re-test of the same config still matches.
+    // 5. Set validation='ok' under the row lock (the step-2 CAS already proved the revision) AND bump
+    //    config_revision (review promote-tx-1): a concurrent FAILED /test of the same revision now
+    //    CAS-misses in writeValidationResult, so it cannot clobber this just-promoted 'ok' back to 'failed'.
+    //    The next /test reads the new revision via readForResolve, so re-testing the same config still works.
     // tenant:exempt reason=platform-singleton-embedder-settings follow_up=PERMANENT-EXEMPTION-embedder
     const valUpd = await sql`
       UPDATE core.embedder_provider_settings
-         SET last_validation_status = 'ok', last_validated_at = now(), last_validation_error = NULL
+         SET last_validation_status = 'ok', last_validated_at = now(), last_validation_error = NULL,
+             config_revision = config_revision + 1
        WHERE singleton = true
     `.execute(trx);
     if ((valUpd.numAffectedRows ?? 0n) !== 1n) {

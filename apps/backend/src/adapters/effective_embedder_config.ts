@@ -52,13 +52,13 @@ function resolveEnvConfig(env: NodeJS.ProcessEnv): EffectiveEmbedderConfig | nul
 export async function resolveEffectiveEmbedderConfig(
   deps: EmbedderConfigResolveDeps,
 ): Promise<EffectiveEmbedderConfig | null> {
-  let dbCfg: EmbedderEffectiveDbConfig | null;
-  try {
-    dbCfg = await deps.readDbConfig();
-  } catch {
-    // DB error / cold start with no safe cached state → fail-closed; do NOT silently fall to env.
-    return null;
-  }
+  // A DB READ ERROR is NOT swallowed to null (review rr-1): null would be indistinguishable from "no DB
+  // config", and the Phase-5 legacy-env fallback would then mask a transient DB OUTAGE by silently
+  // embedding with the env model (wrong-model corpus on ingest). Let it THROW — the ResolvingEmbeddings
+  // Adapter maps it to a connectivity-class error that the env fallback does NOT catch, so retrieval
+  // degrades to lexical and ingest fails-closed, never to the env model. Only a clean "no row" (null) +
+  // no openai_compat env falls through to the legacy-env path below.
+  const dbCfg: EmbedderEffectiveDbConfig | null = await deps.readDbConfig();
 
   if (dbCfg !== null) {
     // A configured DB row is authoritative. Only an enabled + validated row is adopted; a

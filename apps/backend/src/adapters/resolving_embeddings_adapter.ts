@@ -11,6 +11,7 @@ import {
   type EmbedResult,
   type EmbeddingsPort,
   EmbedderDisabledError,
+  EmbeddingsConnectivityError,
 } from "#backend/adapters/embeddings_port.js";
 import {
   type EffectiveConfigDigestParts,
@@ -87,7 +88,7 @@ export class ResolvingEmbeddingsAdapter implements EmbeddingsPort {
     try {
       digest = effectiveConfigDigest(await this.readDigestParts());
     } catch {
-      return this.cache !== null ? this.cache.config : null;
+      return this.onDbReadError();
     }
     if (this.cache !== null && this.cache.digest === digest) {
       return this.cache.config;
@@ -96,8 +97,7 @@ export class ResolvingEmbeddingsAdapter implements EmbeddingsPort {
     try {
       config = await this.resolveConfig();
     } catch {
-      // resolveConfig (the resolver) already fail-closes internally; guard the wiring boundary too.
-      return this.cache !== null ? this.cache.config : null;
+      return this.onDbReadError();
     }
     if (config === null) {
       this.cache = null; // a disabled config invalidates any cached adapter
@@ -105,6 +105,19 @@ export class ResolvingEmbeddingsAdapter implements EmbeddingsPort {
     }
     this.cache = { digest, config, inner: this.buildInner(config) };
     return config;
+  }
+
+  /** A DB read failed (digest read or resolve). Serve the warm cache if present; else this is a transient
+   *  OUTAGE, NOT "no config" — throw a connectivity-class error (review rr-1) so the legacy-env fallback
+   *  (which only catches EmbedderDisabledError) does NOT mask it by embedding with the env model. Retrieval
+   *  catches connectivity → lexical-only; ingest does not catch it → fails-closed (no wrong-model corpus). */
+  private onDbReadError(): EffectiveEmbedderConfig {
+    if (this.cache !== null) {
+      return this.cache.config;
+    }
+    throw new EmbeddingsConnectivityError(
+      "embedder config DB read failed with no cached config — transient outage, not a disabled embedder",
+    );
   }
 
   /** Resolve with caching; throws EmbedderDisabledError when disabled. */
