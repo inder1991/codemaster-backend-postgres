@@ -75,6 +75,13 @@ beforeAll(async () => {
   if (!INTEGRATION_DSN) return;
   db = tenantKysely<unknown>(INTEGRATION_DSN);
 
+  // Defensive isolation (the suite runs sequence.shuffle=true): a prior file's confluence dual-write can
+  // leave core.chunk_embeddings rows under the active seed generation, which would break the cache≡legacy
+  // parity below (runPhaseA LEFT-JOINs chunk_embeddings; property 1 requires it EMPTY for the seeded
+  // chunks). Start from a clean dual-write table. This does NOT touch the seed generation 1 or the
+  // embedder_runtime_state singleton, so the file's singleton discipline holds.
+  await sql`DELETE FROM core.chunk_embeddings`.execute(db);
+
   // Snapshot the singleton retrieval_mode (we must NEVER leave it mutated). Default seed = 'fallback'.
   const snap = await sql<{ retrieval_mode: string }>`
     SELECT retrieval_mode FROM core.embedder_runtime_state WHERE singleton = true
