@@ -52,6 +52,7 @@ const RUN_ID = "77777777-6666-6666-6666-666666666666";
 const GH_USER_ID = "88888888-7777-7777-7777-777777777777";
 const EVENT_ID = "99999999-8888-8888-8888-888888888888";
 const USER_ID = "00000000-0000-0000-0000-0000000000aa";
+const TRACE_ID = "12121212-1212-1212-1212-121212121212";
 
 // github_repo_id / installation_github_id numeric identities (bigint columns)
 const GH_REPO_ID = 9001;
@@ -67,6 +68,11 @@ let db: Kysely<unknown>;
 async function cleanup(): Promise<void> {
   await sql`DELETE FROM audit.workflow_events WHERE review_id IN (${REVIEW_ID}, ${REVIEW_ID_OTHER})`.execute(db);
   await sql`DELETE FROM core.review_findings WHERE pr_id = ${PR_ID}`.execute(db);
+  await sql`DELETE FROM core.fix_prompts WHERE review_id IN (${REVIEW_ID}, ${REVIEW_ID_OTHER})`.execute(db);
+  await sql`DELETE FROM core.review_walkthroughs WHERE review_id IN (${REVIEW_ID}, ${REVIEW_ID_OTHER})`.execute(db);
+  await sql`DELETE FROM core.review_policy_bundles WHERE review_id IN (${REVIEW_ID}, ${REVIEW_ID_OTHER})`.execute(db);
+  await sql`DELETE FROM core.retrieval_traces WHERE review_id IN (${REVIEW_ID}, ${REVIEW_ID_OTHER})`.execute(db);
+  await sql`DELETE FROM core.posted_reviews WHERE pr_id = ${PR_ID}`.execute(db);
   await sql`UPDATE core.pull_request_reviews SET current_run_id = NULL WHERE review_id IN (${REVIEW_ID}, ${REVIEW_ID_OTHER})`.execute(db);
   await sql`DELETE FROM core.review_runs WHERE run_id = ${RUN_ID}`.execute(db);
   await sql`DELETE FROM core.pull_request_reviews WHERE review_id IN (${REVIEW_ID}, ${REVIEW_ID_OTHER})`.execute(db);
@@ -107,12 +113,94 @@ beforeAll(async () => {
   await sql`INSERT INTO core.pull_request_reviews (review_id, provider, repo_id, pr_number, provider_pr_id, status)
             VALUES (${REVIEW_ID}, 'github', ${GH_REPO_ID}, 42, 'gh-pr-42', 'open')`.execute(db);
 
-  // One finding (suppression_state NONE so it shows)
+  // One finding (suppression_state NONE so it shows). citations carry a policy_rule locator that
+  // matches one of the two bundle rules below → governance marks that rule 'violated'.
   await sql`INSERT INTO core.review_findings
               (review_finding_id, pr_id, installation_id, file_path, start_line, end_line,
-               severity, category, title, body, suggestion, confidence)
+               severity, category, title, body, suggestion, confidence, citations)
             VALUES (gen_random_uuid(), ${PR_ID}, ${INST}, 'src/main.ts', 10, 15,
-                    'issue', 'bug', 'Missing null check', 'Check for null', 'Add a guard', 0.9)`.execute(db);
+                    'issue', 'bug', 'Missing null check', 'Check for null', 'Add a guard', 0.9,
+                    ${sql.lit(
+                      JSON.stringify([{ kind: "policy_rule", locator: "rule-sec-1", excerpt: null }]),
+                    )}::jsonb)`.execute(db);
+
+  // fix_prompts row (review-detail fix_prompt panel)
+  await sql`INSERT INTO core.fix_prompts
+              (review_id, installation_id, prompt, generation_mode, finding_count, truncated, generated_at)
+            VALUES (${REVIEW_ID}, ${INST}, 'Apply these fixes:\n1. add a guard', 'llm', 3, false, ${NOW})`.execute(
+    db,
+  );
+
+  // review_walkthroughs row (review-detail walkthrough panel). walkthrough JSONB is a persisted
+  // WalkthroughV1; the read projects it into WalkthroughSummaryV1 (drops configuration_section_md +
+  // sanitization_event).
+  const walkthroughJson = {
+    schema_version: 1,
+    tldr: "Adds a null guard and a regression test.",
+    file_rows: [
+      { path: "src/main.ts", change_summary: "guard added", severity_max: "issue", finding_count: 1 },
+    ],
+    configuration_section_md: "operator-only detail, dropped by the summary projection",
+    degradation_note: null,
+    truncated: false,
+    suggested_reviewers: ["octocat"],
+    linked_issues: [{ issue_number: 42, linkage_kind: "closes", title: "Null deref", state: "open" }],
+    sanitization_event: null,
+  };
+  await sql`INSERT INTO core.review_walkthroughs (review_id, installation_id, walkthrough)
+            VALUES (${REVIEW_ID}, ${INST}, ${sql.lit(JSON.stringify(walkthroughJson))}::jsonb)`.execute(db);
+
+  // review_policy_bundles row (review-detail governance panel). applied_bundle is a persisted
+  // ResolvedGuidanceBundleV1; two applicable rules, the first cited by the finding above (→ violated),
+  // the second uncited (→ satisfied).
+  // ExtractedRuleV1 requires normalized_hash (64), source_file_sha256 (64), body (min 1), rule_index.
+  const rule = (
+    ruleId: string,
+    sourceFile: string,
+    title: string,
+    category: string,
+    intent: string,
+    priority: number,
+    hashChar: string,
+  ): Record<string, unknown> => ({
+    schema_version: 1,
+    rule_id: ruleId,
+    normalized_hash: hashChar.repeat(64),
+    source_file: sourceFile,
+    source_file_sha256: hashChar.repeat(64),
+    scope_dir: "",
+    heading_path: [],
+    rule_index: 0,
+    title,
+    body: `${title} — rule body`,
+    category,
+    intent,
+    priority,
+    oversized_rule_warning: false,
+  });
+  const secRule = rule("rule-sec-1", "SECURITY.md", "Validate untrusted input", "security", "require", 100, "a");
+  const styleRule = rule("rule-style-1", "STYLE.md", "Prefer const", "style", "recommend", 20, "b");
+  const appliedBundle = {
+    schema_version: 1,
+    changed_path: "src/main.ts",
+    applicable_rules: [
+      { schema_version: 1, rule: secRule, sources: [secRule] },
+      { schema_version: 1, rule: styleRule, sources: [styleRule] },
+    ],
+    resolution_explanation: ["applied SECURITY.md", "applied STYLE.md"],
+  };
+  await sql`INSERT INTO core.review_policy_bundles (review_id, installation_id, applied_bundle, rule_count)
+            VALUES (${REVIEW_ID}, ${INST}, ${sql.lit(JSON.stringify(appliedBundle))}::jsonb, 2)`.execute(db);
+
+  // posted_reviews row (review-detail publication_outcome + posted_at). inline_posted requires a
+  // non-null github_review_id per the IFF CHECK.
+  await sql`INSERT INTO core.posted_reviews (pr_id, github_review_id, marker, posted_at, publication_outcome)
+            VALUES (${PR_ID}, 314159, 'codemaster-review', ${NOW}, 'inline_posted')`.execute(db);
+
+  // retrieval_traces row (review-detail retrieval_trace_id deep-link). Most-recent by captured_at.
+  await sql`INSERT INTO core.retrieval_traces
+              (trace_id, review_id, pr_id, captured_at, taxonomy_version, pipeline_version, trace)
+            VALUES (${TRACE_ID}, ${REVIEW_ID}, ${PR_ID}, ${NOW}, 1, 1, '{}'::jsonb)`.execute(db);
 
   // A run is required so audit.workflow_events.run_id FK resolves.
   await sql`INSERT INTO core.review_runs (run_id, review_id, trigger_type, lifecycle_state)
@@ -175,9 +263,60 @@ describeDb("admin reviews detail (disposable :5439)", () => {
     expect(body.findings[0]!.severity).toBe("issue");
     expect(body.activities).toHaveLength(1);
     expect(body.activities[0]!.activity_name).toBe("ANALYSIS_STARTED");
-    expect(body.posted_at).toBeNull();
+    // posted_reviews row seeded with posted_at = NOW → no longer null.
+    expect(body.posted_at).toBe(NOW.toISOString());
     expect(body.temporal_url).toBeNull();
     expect(body.langfuse_url).toBeNull();
+
+    // ── P1-A PR meta-row + publication verdict ──
+    expect(body.pr_author).toBe("octocat");
+    expect(body.base_ref).toBe("main");
+    expect(body.head_ref).toBe("fix/tests");
+    expect(body.draft).toBe(false);
+    expect(body.pr_description).toBeNull(); // core.pull_requests.body was not seeded (NULL)
+    expect(body.publication_outcome).toBe("inline_posted");
+
+    // ── P2 governance scorecard (2 applied rules; 1 cited → violated) ──
+    expect(body.governance).not.toBeNull();
+    expect(body.governance!.applied_count).toBe(2);
+    expect(body.governance!.violated_count).toBe(1);
+    expect(body.governance!.satisfied_count).toBe(1);
+    expect(body.governance!.policy_rules).toHaveLength(2);
+    // Violated rules sort first.
+    expect(body.governance!.policy_rules[0]!.rule_id).toBe("rule-sec-1");
+    expect(body.governance!.policy_rules[0]!.status).toBe("violated");
+    expect(body.governance!.policy_rules[0]!.category).toBe("security");
+    expect(body.governance!.policy_rules[0]!.intent).toBe("require");
+    expect(body.governance!.policy_rules[0]!.source_file).toBe("SECURITY.md");
+    expect(body.governance!.policy_rules[1]!.rule_id).toBe("rule-style-1");
+    expect(body.governance!.policy_rules[1]!.status).toBe("satisfied");
+
+    // ── P3 walkthrough summary (projection of the persisted WalkthroughV1) ──
+    expect(body.walkthrough).not.toBeNull();
+    expect(body.walkthrough!.tldr).toBe("Adds a null guard and a regression test.");
+    expect(body.walkthrough!.file_rows).toHaveLength(1);
+    expect(body.walkthrough!.file_rows[0]!.path).toBe("src/main.ts");
+    expect(body.walkthrough!.file_rows[0]!.severity_max).toBe("issue");
+    expect(body.walkthrough!.degradation_note).toBeNull();
+    expect(body.walkthrough!.suggested_reviewers).toEqual(["octocat"]);
+    expect(body.walkthrough!.linked_issues).toHaveLength(1);
+    expect(body.walkthrough!.linked_issues[0]!.issue_number).toBe(42);
+    expect(body.walkthrough!.linked_issues[0]!.linkage_kind).toBe("closes");
+    expect(body.walkthrough!.linked_issues[0]!.state).toBe("open");
+    // The summary projection MUST NOT leak configuration_section_md / sanitization_event.
+    expect((body.walkthrough as Record<string, unknown>)["configuration_section_md"]).toBeUndefined();
+    expect((body.walkthrough as Record<string, unknown>)["sanitization_event"]).toBeUndefined();
+
+    // ── P4 retrieval-trace deep-link ──
+    expect(body.retrieval_trace_id).toBe(TRACE_ID);
+
+    // ── fix-prompt panel ──
+    expect(body.fix_prompt).not.toBeNull();
+    expect(body.fix_prompt!.prompt).toContain("Apply these fixes");
+    expect(body.fix_prompt!.generation_mode).toBe("llm");
+    expect(body.fix_prompt!.finding_count).toBe(3);
+    expect(body.fix_prompt!.truncated).toBe(false);
+    expect(body.fix_prompt!.generated_at).toBe(NOW.toISOString());
     await app.close();
   });
 
@@ -254,6 +393,17 @@ describeDb("admin reviews detail (disposable :5439)", () => {
     expect(detail.activities[0]!.activity_name).toBe("ANALYSIS_STARTED");
     // current_run_id is NULL in the fixture → temporal_url null (deep-link gated on a live run).
     expect(detail.temporal_url).toBeNull();
+    // Additive review-detail panels are PRESENT (never undefined) and correctly sourced.
+    expect(detail.pr_author).toBe("octocat");
+    expect(detail.base_ref).toBe("main");
+    expect(detail.head_ref).toBe("fix/tests");
+    expect(detail.draft).toBe(false);
+    expect(detail.publication_outcome).toBe("inline_posted");
+    expect(detail.governance?.applied_count).toBe(2);
+    expect(detail.governance?.violated_count).toBe(1);
+    expect(detail.walkthrough?.tldr).toBe("Adds a null guard and a regression test.");
+    expect(detail.fix_prompt?.generation_mode).toBe("llm");
+    expect(detail.retrieval_trace_id).toBe(TRACE_ID);
   });
 
   it("reviews_detail_read: throws ReviewDetailNotFoundError when in different tenant", async () => {
