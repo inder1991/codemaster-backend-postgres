@@ -7,6 +7,7 @@ import { probeEmbedder } from "#backend/adapters/embedder_probe.js";
 import { makePgAuditEmitter } from "#backend/api/admin/audit_emit_adapter.js";
 import { registerAdminRoutes } from "#backend/api/admin/admin_routes.js";
 import { OutboxPageResyncDispatcher } from "#backend/api/admin/page_resync_dispatcher.js";
+import { makeConfluencePageLister } from "#backend/integrations/confluence/confluence_page_lister.js";
 import {
   makeConfluenceValidator,
   makePlatformCredentialProbe,
@@ -186,6 +187,12 @@ export async function runServer(deps: RunServerDeps = {}): Promise<RunServerHand
       // validateSpace reads the ACTIVE decrypted creds itself (the DB tier — PostgresConfluenceSettingsRepo
       // over {coreDb, registry}), exactly as the ingest sync resolves them; it receives NO creds.
       getConfluenceValidator: () => makeConfluenceValidator({ db: coreDb, registry }),
+      // Option C: the LIVE-page lister for GET /pages — surfaces the space's pages from live Confluence so a
+      // never-approved `default` page (0 chunks → invisible to the stored query) is visible + approvable.
+      // Creds-backed (PostgresConfluenceSettingsRepo over {coreDb, registry}, same as the validator) +
+      // fast-fail (Phase 0/1: maxAttempts=1, no backoff sleep, ~4s deadline-bound abort in the read). A live
+      // failure degrades to the stored query (live_list_available:false) — never a hard dependency.
+      getConfluencePageLister: () => makeConfluencePageLister({ db: coreDb, registry }),
       // confluence-config/test connectivity probe (testConfluence builds from the BODY creds) + the
       // shared embedder /test probe (testQwen → probeEmbedder). clock measures latencyMs.
       getPlatformCredentialProbe: () => makePlatformCredentialProbe({ clock }),

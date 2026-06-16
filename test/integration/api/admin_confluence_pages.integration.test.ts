@@ -37,6 +37,7 @@ import {
   createPageApproval,
   revokePageApproval,
 } from "#backend/api/admin/confluence_pages_write.js";
+import { type ConfluencePageListerPort } from "#backend/integrations/confluence/confluence_page_lister.js";
 import { PLATFORM_SCOPE_AUDIT_INSTALLATION_ID } from "#backend/infra/sentinels.js";
 import { WORKFLOW_TYPE_TO_JOB_TYPE } from "#backend/runner/workflow_job_map.js";
 
@@ -452,6 +453,105 @@ describeDb("confluence pages admin endpoints (disposable PG)", () => {
         cookies: { [SESSION_COOKIE_NAME]: mintCookie("reader") },
       });
       expect(forbidden.statusCode).toBe(403);
+    } finally {
+      await app.close();
+    }
+  });
+
+  // ── Option C Phase 4 — the live-page lister route seam ──
+  // The GET /pages route forwards a wired lister into listPagesForIntegration. A wired lister surfaces
+  // LIVE pages (a page with NO stored chunk becomes visible + approvable); an unwired/failing lister
+  // degrades to the stored query with live_list_available:false. The lister is a stub here (no network).
+
+  function liveListerOk(): ConfluencePageListerPort {
+    return {
+      async listSpacePages({ spaceKey }) {
+        return {
+          items: [
+            // A LIVE-only page with NO stored chunk — invisible to the stored query, visible here.
+            { page_id: "live-only-9001", space_key: spaceKey, title: "Live Only", version: 1, last_modified_at: "2026-06-10T00:00:00Z" },
+            // The stored PAGE_A also appears live.
+            { page_id: PAGE_A, space_key: spaceKey, title: "Page A (live title)", version: 1, last_modified_at: "2026-06-05T00:00:00Z" },
+          ],
+          next_cursor: "opaque-next",
+        };
+      },
+    };
+  }
+
+  function liveListerFails(): ConfluencePageListerPort {
+    return {
+      async listSpacePages() {
+        throw new Error("ConfluenceRetryableError: unreachable");
+      },
+    };
+  }
+
+  async function makeAppWithLister(getLister?: () => ConfluencePageListerPort) {
+    const app = buildApp({});
+    await registerAdminRoutes(app, {
+      db,
+      signingKey: SIGNING_KEY,
+      clock: new FakeClock({ now: NOW }),
+      ...(getLister ? { getConfluencePageLister: getLister } : {}),
+    });
+    await app.ready();
+    return app;
+  }
+
+  it("GET /pages — 200 merges LIVE pages when a lister is wired (live_list_available:true, live: cursor)", async () => {
+    const app = await makeAppWithLister(liveListerOk);
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: PAGES_BASE,
+        cookies: { [SESSION_COOKIE_NAME]: mintCookie("platform_owner") },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = PagesListPageV1.parse(res.json());
+      expect(body.live_list_available).toBe(true);
+      expect(body.next_cursor).toBe("live:opaque-next");
+      const by = new Map(body.rows.map((r) => [r.page_id, r]));
+      // The LIVE-only page (no stored chunk) is surfaced as not_ingested + none — the Option C fix.
+      expect(by.get("live-only-9001")).toMatchObject({ ingest_status: "not_ingested", approval_status: "none" });
+      // The stored page A is ingested.
+      expect(by.get(PAGE_A)).toMatchObject({ ingest_status: "ingested", approval_status: "none" });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("GET /pages — 200 with live_list_available:false when the lister is UNWIRED (stored fallback)", async () => {
+    const app = await makeAppWithLister(undefined);
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: PAGES_BASE,
+        cookies: { [SESSION_COOKIE_NAME]: mintCookie("platform_owner") },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = PagesListPageV1.parse(res.json());
+      expect(body.live_list_available).toBe(false);
+      // The stored query never surfaces the live-only page.
+      expect(body.rows.find((r) => r.page_id === "live-only-9001")).toBeUndefined();
+      expect(body.rows.every((r) => r.ingest_status === "ingested")).toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("GET /pages — 200 with live_list_available:false when the lister FAILS (fast fallback, no hang)", async () => {
+    const app = await makeAppWithLister(liveListerFails);
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: PAGES_BASE,
+        cookies: { [SESSION_COOKIE_NAME]: mintCookie("platform_owner") },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = PagesListPageV1.parse(res.json());
+      expect(body.live_list_available).toBe(false);
+      expect(body.rows.find((r) => r.page_id === PAGE_A)).toBeDefined();
     } finally {
       await app.close();
     }

@@ -215,6 +215,7 @@ import {
   type PageResyncDispatcherPort,
 } from "#backend/api/admin/confluence_pages_write.js";
 import { type GetConfluenceValidator } from "#backend/integrations/confluence/confluence_validator.js";
+import { type ConfluencePageListerPort } from "#backend/integrations/confluence/confluence_page_lister.js";
 import {
   type GetPlatformCredentialProbe,
   type UserEmailResolverPort,
@@ -367,6 +368,11 @@ export type AdminRoutesOptions = {
   /** Optional Temporal dispatch seam for TriggerPageResyncWorkflow on page-approval revoke. Undefined → the
    *  resync is skipped (the retrieval LEFT JOIN excludes the page's chunks immediately regardless). */
   pageResyncDispatcher?: PageResyncDispatcherPort;
+  /** Optional LIVE-page lister (Option C). When wired, GET /pages surfaces the space's pages from LIVE
+   *  Confluence (so a never-approved `default` page with 0 chunks is still visible + approvable) and merges
+   *  the stored ingest/approval state. Undefined OR a live failure → the stored-only fallback
+   *  (live_list_available:false). server.ts wires a creds-backed, fast-fail lister. */
+  getConfluencePageLister?: () => ConfluencePageListerPort;
   /** Injected DNS resolver for the SSRF URL validator (platform-credentials base_url). Defaults to node:dns. */
   dnsResolver?: DnsResolver;
   /** Optional Temporal dispatch/signal seam for knowledge-proposal + embedder write endpoints.
@@ -2181,7 +2187,14 @@ export async function registerAdminRoutes(
         const cursor = optStr(q.cursor);
         const pageSize = clampLimit(q.page_size, 50, 200);
         try {
-          const page = await listPagesForIntegration(opts.db, integrationId, { cursor, pageSize });
+          // Option C: when a live-page lister is wired, the read surfaces LIVE Confluence pages (visible +
+          // approvable before ingest) and merges the stored state; a live failure degrades to the stored
+          // query (live_list_available:false) inside listPagesForIntegration — never a hard dependency.
+          const page = await listPagesForIntegration(opts.db, integrationId, {
+            cursor,
+            pageSize,
+            ...(opts.getConfluencePageLister ? { lister: opts.getConfluencePageLister() } : {}),
+          });
           return reply.code(200).send(PagesListPageV1.parse(page));
         } catch (err) {
           if (err instanceof ConfluenceIntegrationNotFoundError) {
