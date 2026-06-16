@@ -1469,6 +1469,7 @@ export type FindingFeedbackResponseV1 = z.infer<typeof FindingFeedbackResponseV1
 
 export {
   PageApprovalStatusV1,
+  PageIngestStatusV1,
   PageWithApprovalV1,
   PagesListPageV1,
 } from "./admin/page_approvals.v1.js";
