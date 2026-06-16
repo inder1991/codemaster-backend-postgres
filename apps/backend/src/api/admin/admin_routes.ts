@@ -215,7 +215,11 @@ import {
   type PageResyncDispatcherPort,
 } from "#backend/api/admin/confluence_pages_write.js";
 import { type GetConfluenceValidator } from "#backend/integrations/confluence/confluence_validator.js";
-import { type ConfluencePageListerPort } from "#backend/integrations/confluence/confluence_page_lister.js";
+import {
+  type ConfluencePageListerPort,
+  type LivePageExistence,
+} from "#backend/integrations/confluence/confluence_page_lister.js";
+import { recordApprovalResyncEnqueueFailed } from "#backend/observability/page_approval_metrics.js";
 import {
   type GetPlatformCredentialProbe,
   type UserEmailResolverPort,
@@ -309,6 +313,11 @@ const REVIEWS_MAX_PAGE = 500;
 
 type AdminQuery = Record<string, unknown>;
 
+/** Option C / D9 — the per-request deadline for the approval-time live existence check. On expiry the
+ *  AbortController cancels the in-flight transport and the check returns indeterminate → the handler fails
+ *  open (pre-authorization allowed). Mirrors the live-read deadline in confluence_pages_read.ts. */
+const APPROVAL_EXISTENCE_DEADLINE_MS = 4000;
+
 /** The common "any signed-in admin" read allow-set (reader through super_admin). */
 const READER_ROLES = ["reader", "platform_operator", "platform_owner", "super_admin"] as const;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -325,6 +334,29 @@ function clampLimit(raw: unknown, fallback: number, max: number): number {
 /** Read an optional string query param (undefined/empty → null). */
 function optStr(value: unknown): string | null {
   return typeof value === "string" && value !== "" ? value : null;
+}
+
+/**
+ * Run the approval-time live existence check under a ~4s deadline (D9). An AbortController cancels the
+ * in-flight transport on expiry. Returns the lister's tri-state outcome; a thrown error (the port never
+ * throws, but defensively) is treated as INDETERMINATE (null → the handler fails open). The timer is always
+ * cleared (no leaked timer keeping the event loop alive).
+ */
+async function checkPageExistsForApproval(
+  lister: ConfluencePageListerPort,
+  spaceKey: string,
+  pageId: string,
+): Promise<LivePageExistence> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), APPROVAL_EXISTENCE_DEADLINE_MS);
+  timer.unref?.();
+  try {
+    return await lister.getPageForApproval({ spaceKey, pageId, signal: controller.signal });
+  } catch {
+    return null; // indeterminate → fail open
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** The embedder /test probe seam: tests the STAGED config (decrypted) against the real embedder. Production
@@ -2243,12 +2275,80 @@ export async function registerAdminRoutes(
               },
             });
           }
+
+          // D9 — fast-fail existence check (when a lister is wired). A DEFINITIVE 404 → 422 page_not_found
+          // (block approving a typo'd / deleted page). INDETERMINATE (transport/abort/unconfigured) → fail
+          // OPEN: allow pre-authorization (§9.1) and record that labels were unobserved. The OBSERVED
+          // labels (when the page is live) are recorded in the approval AUDIT `after` only (no schema change).
+          let observedLabels: ReadonlyArray<string> | null = null;
+          if (opts.getConfluencePageLister !== undefined) {
+            const existence = await checkPageExistsForApproval(
+              opts.getConfluencePageLister(),
+              body.space_key,
+              body.page_id,
+            );
+            if (existence !== null && existence.exists === false) {
+              return reply.code(422).send({
+                detail: { code: "page_not_found", space_key: body.space_key, page_id: body.page_id },
+              });
+            }
+            if (existence !== null && existence.exists === true) {
+              observedLabels = existence.labels;
+            }
+          }
+
           const approvalId = await createPageApproval(opts.db, body, {
             actorUserId: principal.userId,
             emailResolver,
           });
           // Reconstruct the response from the request + the freshly-minted id + the resolved actor email.
           const actorEmail = await emailResolver.resolveEmail(principal.userId);
+
+          // D9 — audit the approval with the OBSERVED labels in `after` (free-form JSONB; no schema change).
+          // observed_labels is null when the existence check was indeterminate / the lister is unwired.
+          await opts.audit?.({
+            actorUserId: principal.userId,
+            installationId: principal.installationId,
+            action: "confluence_page.approval.created",
+            targetKind: "confluence_page_approval",
+            targetId: approvalId,
+            before: null,
+            after: {
+              approval_id: approvalId,
+              space_key: body.space_key,
+              page_id: body.page_id,
+              approver_email: actorEmail,
+              default_scope: body.default_scope,
+              observed_labels: observedLabels === null ? null : [...observedLabels],
+            },
+            now: opts.clock.now(),
+          });
+
+          // D9 — BEST-EFFORT page-resync dispatch: the approval has COMMITTED; surface a resync so the
+          // approved page's chunks are ingested within minutes. A dispatch failure does NOT roll back the
+          // approval (the 6h confluence_ingest cron is the safety net) — warn + a metric, like the revoke
+          // path. Skipped when no dispatcher is wired.
+          if (opts.pageResyncDispatcher !== undefined) {
+            try {
+              await opts.pageResyncDispatcher.enqueueResync({
+                spaceKey: body.space_key,
+                pageId: body.page_id,
+                triggeredByUserId: principal.userId,
+              });
+            } catch (enqueueErr) {
+              recordApprovalResyncEnqueueFailed();
+              request.log.warn(
+                {
+                  spaceKey: body.space_key,
+                  pageId: body.page_id,
+                  actorUserId: principal.userId,
+                  error: enqueueErr instanceof Error ? enqueueErr.message : String(enqueueErr),
+                },
+                "approval_page_resync_enqueue_failed",
+              );
+            }
+          }
+
           const response = ConfluencePageApprovalV1.parse({
             approval_id: approvalId,
             space_key: body.space_key,

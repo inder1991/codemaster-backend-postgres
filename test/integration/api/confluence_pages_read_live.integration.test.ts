@@ -67,6 +67,10 @@ function stubLister(
         next_cursor: behavior.next_cursor,
       };
     },
+    // These read-path tests don't exercise the approval existence check; indeterminate is benign.
+    async getPageForApproval() {
+      return null;
+    },
   };
 }
 
@@ -203,6 +207,9 @@ describeDb("listPagesForIntegration — LIVE branch merge (disposable PG)", () =
       async listSpacePages({ spaceKey, cursor }) {
         seenCursor = cursor;
         return { items: LIVE_ITEMS.map((i) => ({ space_key: spaceKey, ...i })), next_cursor: null };
+      },
+      async getPageForApproval() {
+        return null;
       },
     };
     await listPagesForIntegration(db, INTEGRATION_ID, { lister, cursor: "live:resume-here" });

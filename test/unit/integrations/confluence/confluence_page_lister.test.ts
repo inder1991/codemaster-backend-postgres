@@ -15,6 +15,7 @@ import {
   makeConfluencePageLister,
   type ConfluenceListPagesClient,
 } from "#backend/integrations/confluence/confluence_page_lister.js";
+import { ConfluenceNotFoundError } from "#backend/integrations/confluence/client.js";
 import { type ConfluenceSettings } from "#backend/integrations/confluence/confluence_settings_repo.js";
 
 const SETTINGS: ConfluenceSettings = {
@@ -39,6 +40,10 @@ function stubClient(
       calls.push({ spaceKey, cursor: cursor ?? null, signalled: signal !== undefined });
       if ("throws" in result) throw result.throws;
       return { schema_version: 1, items: result.items.map((i) => ({ schema_version: 1, space_key: spaceKey, ...i })), next_cursor: result.next_cursor };
+    },
+    // The list-pages tests don't exercise getPage; a benign default keeps the stub structurally complete.
+    async getPage() {
+      return { labels: [] };
     },
   };
   return { client, calls: () => calls };
@@ -114,6 +119,55 @@ describe("ConfluencePageLister — throws (caught upstream by the read handler)"
       makeClient: () => stubClient({ items: [], next_cursor: null }).client,
     });
     await expect(lister.listSpacePages({ spaceKey: "SEP", cursor: null })).rejects.toBe(dbErr);
+  });
+});
+
+describe("ConfluencePageLister — getPageForApproval (Phase 5 existence + labels)", () => {
+  /** A client whose getPage returns labels / throws a 404 / throws a transport error. */
+  function getPageClient(behavior: { labels: string[] } | { notFound: true } | { throws: Error }): ConfluenceListPagesClient {
+    return {
+      async listPages() {
+        return { schema_version: 1, items: [], next_cursor: null };
+      },
+      async getPage() {
+        if ("notFound" in behavior) throw new ConfluenceNotFoundError("GET /api/v2/pages/x returned 404");
+        if ("throws" in behavior) throw behavior.throws;
+        return { labels: behavior.labels };
+      },
+    };
+  }
+
+  it("a live page → { exists:true, labels } (the observed labels)", async () => {
+    const lister = makeConfluencePageLister({
+      readSettings: async () => SETTINGS,
+      makeClient: () => getPageClient({ labels: ["default", "topic:runbook"] }),
+    });
+    const res = await lister.getPageForApproval({ spaceKey: "SEP", pageId: "196626" });
+    expect(res).toEqual({ exists: true, labels: ["default", "topic:runbook"] });
+  });
+
+  it("a definitive 404 → { exists:false } (the handler 422s)", async () => {
+    const lister = makeConfluencePageLister({
+      readSettings: async () => SETTINGS,
+      makeClient: () => getPageClient({ notFound: true }),
+    });
+    expect(await lister.getPageForApproval({ spaceKey: "SEP", pageId: "nope" })).toEqual({ exists: false });
+  });
+
+  it("a transport error → null (indeterminate → the handler fails open)", async () => {
+    const lister = makeConfluencePageLister({
+      readSettings: async () => SETTINGS,
+      makeClient: () => getPageClient({ throws: new Error("ConfluenceRetryableError: unreachable") }),
+    });
+    expect(await lister.getPageForApproval({ spaceKey: "SEP", pageId: "196626" })).toBeNull();
+  });
+
+  it("unconfigured creds → null (indeterminate, never throws)", async () => {
+    const lister = makeConfluencePageLister({
+      readSettings: async () => null,
+      makeClient: () => getPageClient({ labels: [] }),
+    });
+    expect(await lister.getPageForApproval({ spaceKey: "SEP", pageId: "196626" })).toBeNull();
   });
 });
 

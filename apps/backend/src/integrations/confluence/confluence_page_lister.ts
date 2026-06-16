@@ -24,7 +24,10 @@ import { type Kysely } from "kysely";
 
 import { type KeyRegistry } from "#platform/crypto/key_registry.js";
 
-import { ConfluenceClient } from "#backend/integrations/confluence/client.js";
+import {
+  ConfluenceClient,
+  ConfluenceNotFoundError,
+} from "#backend/integrations/confluence/client.js";
 import {
   type ConfluenceSettings,
   PostgresConfluenceSettingsRepo,
@@ -48,8 +51,20 @@ export type LiveSpacePageList = {
 };
 
 /**
- * The LIVE-page list seam injected into the admin page-read handler (via the route options). Undefined at
- * the composition root → the read falls back to the stored query (`live_list_available: false`).
+ * The outcome of the approval-time live existence check (Phase 5 / D9). TRI-state so the handler decides
+ * the policy (fail-open on indeterminate):
+ *   - `{ exists: true, labels }`  — the page is live; `labels` are the OBSERVED labels (recorded in the
+ *     approval audit `after`). Confluence v2 may still return [] (the live summary carries none).
+ *   - `{ exists: false }`         — a DEFINITIVE 404: the page does not exist → the handler 422s.
+ *   - `null`                      — INDETERMINATE (unconfigured creds / transport failure / abort): the
+ *     handler fails OPEN (allows pre-authorization — §9.1) and records that labels were unobserved.
+ */
+export type LivePageExistence = { exists: true; labels: ReadonlyArray<string> } | { exists: false } | null;
+
+/**
+ * The LIVE-page seam injected into the admin page handlers (via the route options). Undefined at the
+ * composition root → the read falls back to the stored query (`live_list_available: false`) and the
+ * approval existence check is skipped (pre-authorization allowed).
  */
 export type ConfluencePageListerPort = {
   /** List one page of the space's LIVE pages. Throws on unconfigured creds / transport failure / abort —
@@ -59,12 +74,20 @@ export type ConfluencePageListerPort = {
     cursor: string | null;
     signal?: AbortSignal;
   }): Promise<LiveSpacePageList>;
+  /** Fast-fail existence + observed-labels check for the approval handler. Returns a definitive
+   *  exists:true (with labels) / exists:false (404), or null when it could not be determined (the handler
+   *  fails open). NEVER throws — the indeterminate case is `null`. */
+  getPageForApproval(args: {
+    spaceKey: string;
+    pageId: string;
+    signal?: AbortSignal;
+  }): Promise<LivePageExistence>;
 };
 
 // ─── Narrow client slice ──────────────────────────────────────────────────────────────────────────
 
-/** The narrow list-pages slice the lister drives; the real {@link ConfluenceClient} satisfies it
- *  structurally. Tests inject a stub. */
+/** The narrow client slice the lister drives (list-pages + get-page); the real {@link ConfluenceClient}
+ *  satisfies it structurally. Tests inject a stub. */
 export type ConfluenceListPagesClient = {
   listPages(args: {
     spaceKey: string;
@@ -80,6 +103,11 @@ export type ConfluenceListPagesClient = {
     }>;
     next_cursor: string | null;
   }>;
+  getPage(args: {
+    pageId: string;
+    spaceKey?: string | null;
+    signal?: AbortSignal;
+  }): Promise<{ labels: ReadonlyArray<string> }>;
 };
 
 /** The decrypted creds the client factory builds from. */
@@ -137,21 +165,26 @@ export function makeConfluencePageLister(
     });
   const makeClient = opts.makeClient ?? buildFastFailClient;
 
+  /** Resolve active creds → a fast-fail client, or throw when unconfigured. */
+  async function client(): Promise<ConfluenceListPagesClient> {
+    const settings = await readSettings();
+    if (settings === null) {
+      throw new Error(
+        "Confluence is not configured (no active platform credentials); cannot reach live pages.",
+      );
+    }
+    return makeClient({
+      baseUrl: settings.baseUrl,
+      token: settings.token,
+      authEmail: settings.authEmail,
+      fastFail: true,
+    });
+  }
+
   return {
     async listSpacePages({ spaceKey, cursor, signal }): Promise<LiveSpacePageList> {
-      const settings = await readSettings();
-      if (settings === null) {
-        throw new Error(
-          "Confluence is not configured (no active platform credentials); cannot list live pages.",
-        );
-      }
-      const client = makeClient({
-        baseUrl: settings.baseUrl,
-        token: settings.token,
-        authEmail: settings.authEmail,
-        fastFail: true,
-      });
-      const list = await client.listPages({
+      const c = await client();
+      const list = await c.listPages({
         spaceKey,
         cursor,
         ...(signal !== undefined ? { signal } : {}),
@@ -166,6 +199,26 @@ export function makeConfluencePageLister(
         })),
         next_cursor: list.next_cursor,
       };
+    },
+
+    async getPageForApproval({ spaceKey, pageId, signal }): Promise<LivePageExistence> {
+      // Fast-fail + tri-state: a definitive 404 is exists:false (→ the handler 422s); any OTHER failure
+      // (unconfigured creds / transport / abort) is `null` so the handler fails OPEN (pre-authorization).
+      try {
+        const c = await client();
+        const page = await c.getPage({
+          pageId,
+          spaceKey,
+          ...(signal !== undefined ? { signal } : {}),
+        });
+        return { exists: true, labels: page.labels };
+      } catch (err) {
+        if (err instanceof ConfluenceNotFoundError) {
+          return { exists: false };
+        }
+        // Indeterminate — could not verify. Never throw: the handler decides (fail-open).
+        return null;
+      }
     },
   };
 }
