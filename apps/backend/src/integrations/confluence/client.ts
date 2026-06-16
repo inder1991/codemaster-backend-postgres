@@ -163,7 +163,7 @@ export class ConfluenceProtocolError extends ConfluenceClientError {
  */
 export type ConfluenceFetch = (
   url: string,
-  init?: { method?: string; headers?: Record<string, string> },
+  init?: { method?: string; headers?: Record<string, string>; signal?: AbortSignal },
 ) => Promise<Response>;
 
 // ─── Client ───────────────────────────────────────────────────────────────────────────────────
@@ -184,6 +184,15 @@ export type ConfluenceClientOptions = {
   fetch?: ConfluenceFetch;
   /** Injected clock (default {@link WallClock}) — backoff sleeps + F-42 Retry-After `now`. */
   clock?: Clock;
+  /**
+   * Fast-fail mode for latency-sensitive callers (the admin live-page read, behind a per-request
+   * deadline). Caps BOTH retry budgets (429 + 5xx/transport) to a SINGLE attempt and skips every
+   * backoff `clock.sleep`, so a flaky/slow Confluence degrades to the stored fallback immediately
+   * instead of consuming the multi-minute background-ingest budget. Default `false` — background
+   * ingest keeps the full retry/backoff behavior. An aborted request signal is terminal in BOTH
+   * modes (an AbortError is never retried).
+   */
+  fastFail?: boolean;
 };
 
 export class ConfluenceClient {
@@ -193,6 +202,7 @@ export class ConfluenceClient {
   private readonly authEmail: string | null;
   private readonly fetchImpl: ConfluenceFetch;
   private readonly clock: Clock;
+  private readonly fastFail: boolean;
 
   public constructor({
     baseUrl,
@@ -201,6 +211,7 @@ export class ConfluenceClient {
     authEmail,
     fetch,
     clock,
+    fastFail,
   }: ConfluenceClientOptions) {
     if (bearerToken === undefined && tokenProvider === undefined) {
       throw new Error("ConfluenceClient requires either bearerToken or tokenProvider");
@@ -215,13 +226,15 @@ export class ConfluenceClient {
     // Default to the native global fetch (undici). NO new HTTP dependency — the GitHub clients do this too.
     this.fetchImpl = fetch ?? ((url, init) => globalThis.fetch(url, init));
     this.clock = clock ?? new WallClock();
+    this.fastFail = fastFail ?? false;
   }
 
   // ─── Public methods ──────────────────────────────────────────────────────────────────────────
 
-  /** GET /api/v2/spaces → the visible spaces (1:1 with `list_spaces`). */
-  public async listSpaces(): Promise<ReadonlyArray<ConfluenceSpaceV1>> {
-    const payload = await this.getJson("/api/v2/spaces");
+  /** GET /api/v2/spaces → the visible spaces (1:1 with `list_spaces`). `signal` (when supplied) cancels
+   *  the in-flight transport — the admin live-read seam passes a deadline-bound AbortSignal. */
+  public async listSpaces({ signal }: { signal?: AbortSignal } = {}): Promise<ReadonlyArray<ConfluenceSpaceV1>> {
+    const payload = await this.getJson("/api/v2/spaces", undefined, signal);
     const results = ConfluenceClient.requireList(payload, "results");
     return results
       .filter((row): row is Record<string, unknown> => isRecord(row))
@@ -235,13 +248,15 @@ export class ConfluenceClient {
   public async listPages({
     spaceKey,
     cursor = null,
+    signal,
   }: {
     spaceKey: string;
     cursor?: string | null;
+    signal?: AbortSignal;
   }): Promise<ConfluencePageListV1> {
     const params: Record<string, string> = { "space-key": spaceKey, limit: "25" };
     if (cursor !== null) params["cursor"] = cursor;
-    const payload = await this.getJson("/api/v2/pages", params);
+    const payload = await this.getJson("/api/v2/pages", params, signal);
     const results = ConfluenceClient.requireList(payload, "results");
     const items = results
       .filter((row): row is Record<string, unknown> => isRecord(row))
@@ -258,20 +273,26 @@ export class ConfluenceClient {
   public async getPage({
     pageId,
     spaceKey = null,
+    signal,
   }: {
     pageId: string;
     spaceKey?: string | null;
+    signal?: AbortSignal;
   }): Promise<ConfluencePageV1> {
-    const payload = await this.getJson(`/api/v2/pages/${pageId}`, {
-      "body-format": "storage",
-      "include-labels": "true",
-    });
+    const payload = await this.getJson(
+      `/api/v2/pages/${pageId}`,
+      {
+        "body-format": "storage",
+        "include-labels": "true",
+      },
+      signal,
+    );
     let page = this.parsePage(payload, spaceKey);
     // Live Atlassian Cloud v2 returns EMPTY inline labels even with include-labels=true; the real labels
     // live on the dedicated /labels resource. Fetch it when inline is empty so label-based corpus curation
     // sees them. Resilient: a fetch failure leaves the (empty) inline labels.
     if (page.labels.length === 0) {
-      const dedicated = await this.fetchPageLabels(pageId);
+      const dedicated = await this.fetchPageLabels(pageId, signal);
       if (dedicated.length > 0) {
         page = { ...page, labels: dedicated };
       }
@@ -280,10 +301,10 @@ export class ConfluenceClient {
   }
 
   /** Return label names from the dedicated v2 labels resource, or [] (1:1 with `_fetch_page_labels`). */
-  private async fetchPageLabels(pageId: string): Promise<Array<string>> {
+  private async fetchPageLabels(pageId: string, signal?: AbortSignal): Promise<Array<string>> {
     let payload: Record<string, unknown>;
     try {
-      payload = await this.getJson(`/api/v2/pages/${pageId}/labels`);
+      payload = await this.getJson(`/api/v2/pages/${pageId}/labels`, undefined, signal);
     } catch (e) {
       // Resilient: swallow the same error classes the Python catches; any other class propagates.
       if (
@@ -470,8 +491,20 @@ export class ConfluenceClient {
   /**
    * Drives the retry / rate-limit / error-taxonomy loop; returns the decoded JSON dict on 2xx or raises
    * a typed error. SEPARATE backoff indices per error class (S15.D).
+   *
+   * `signal` (when supplied) is threaded into the transport so an aborted deadline cancels the in-flight
+   * fetch (the admin live-read seam). An AbortError surfaced by the transport is TERMINAL — it is re-thrown
+   * unchanged and never counted against the transient-transport retry budget (retrying a deliberate abort
+   * would orphan the budget and defeat the caller's deadline).
+   *
+   * In `fastFail` mode BOTH retry budgets are capped to a single attempt and every backoff `clock.sleep`
+   * is skipped, so a flaky/slow Confluence degrades to the caller's fallback at once. Defaults unchanged.
    */
-  private async getJson(path: string, params?: Record<string, string>): Promise<Record<string, unknown>> {
+  private async getJson(
+    path: string,
+    params?: Record<string, string>,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> {
     const query = params !== undefined ? "?" + new URLSearchParams(params).toString() : "";
     const url = `${this.baseUrl}${path}${query}`;
     const token = await this.currentBearerToken();
@@ -479,6 +512,10 @@ export class ConfluenceClient {
       Authorization: this.authorizationHeader(token),
       Accept: "application/json",
     };
+
+    // Fast-fail caps EACH budget to a single attempt (the loop throws after the first failed attempt).
+    const budget5xx = this.fastFail ? 1 : RETRY_BUDGET_FOR_5XX;
+    const budget429 = this.fastFail ? 1 : RETRY_BUDGET_FOR_429;
 
     let attempts5xx = 0;
     let attempts429 = 0;
@@ -488,11 +525,20 @@ export class ConfluenceClient {
     for (;;) {
       let resp: Response;
       try {
-        resp = await this.fetchImpl(url, { method: "GET", headers });
+        resp = await this.fetchImpl(url, {
+          method: "GET",
+          headers,
+          ...(signal !== undefined ? { signal } : {}),
+        });
       } catch (err) {
+        // A deliberate abort (the caller's deadline fired / the request was cancelled) is TERMINAL — surface
+        // it unchanged so the AbortError propagates promptly. Never retry it as a transient transport error.
+        if (isAbortError(err)) {
+          throw err;
+        }
         // A THROWN transport/network error — retry per the 5xx budget (1:1 with the httpx.RequestError branch).
         attempts5xx += 1;
-        if (attempts5xx >= RETRY_BUDGET_FOR_5XX) {
+        if (attempts5xx >= budget5xx) {
           throw new ConfluenceRetryableError(
             `GET ${path} unreachable after ${attempts5xx} attempts: ${formatErr(err)}`,
           );
@@ -517,7 +563,7 @@ export class ConfluenceClient {
       }
       if (status === HTTP_TOO_MANY_REQUESTS) {
         attempts429 += 1;
-        if (attempts429 >= RETRY_BUDGET_FOR_429) {
+        if (attempts429 >= budget429) {
           throw new ConfluenceRateLimitedError(
             `GET ${path} rate-limited beyond ${attempts429} attempts`,
           );
@@ -533,7 +579,7 @@ export class ConfluenceClient {
       }
       if (status >= HTTP_SERVER_ERROR_MIN) {
         attempts5xx += 1;
-        if (attempts5xx >= RETRY_BUDGET_FOR_5XX) {
+        if (attempts5xx >= budget5xx) {
           throw new ConfluenceRetryableError(
             `GET ${path} server-errored after ${attempts5xx} attempts: ${status}`,
           );
@@ -570,6 +616,15 @@ export class ConfluenceClient {
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+/**
+ * True for the abort signal a cancelled fetch raises. The native `fetch`/undici rejects with a
+ * `DOMException` whose `name` is `"AbortError"` when the passed `AbortSignal` aborts; some transports
+ * surface a plain `Error` of the same name. Match on the name (the stable contract across both).
+ */
+function isAbortError(e: unknown): boolean {
+  return e instanceof Error && e.name === "AbortError";
 }
 
 /** Read a required field, coercing to string. Throws (→ ConfluenceProtocolError upstream) when absent. */

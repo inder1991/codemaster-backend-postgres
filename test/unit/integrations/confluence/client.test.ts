@@ -345,3 +345,105 @@ describe("ConfluenceClient — tokenProvider", () => {
     expect(seenAuth).toEqual(["Bearer tok-a", "Bearer tok-b"]);
   });
 });
+
+describe("ConfluenceClient — fast-fail mode (admin live-read seam)", () => {
+  it("caps the 5xx budget to ONE attempt and never sleeps", async () => {
+    // A persistent 5xx normally consumes the 3-attempt budget (2 sleeps). In fast-fail mode the
+    // client must give up after a SINGLE attempt and never touch the clock.
+    const clock = new FakeClock();
+    let calls = 0;
+    const fetch: ConfluenceFetch = async () => {
+      calls += 1;
+      return jsonResponse({}, { status: 503 });
+    };
+    const c = new ConfluenceClient({ baseUrl: BASE_URL, bearerToken: TOKEN, fetch, clock, fastFail: true });
+    await expect(c.listSpaces()).rejects.toBeInstanceOf(ConfluenceRetryableError);
+    expect(calls).toBe(1);
+    expect(clock.recordedSleeps()).toEqual([]);
+  });
+
+  it("caps the 429 budget to ONE attempt and never sleeps (ignores Retry-After)", async () => {
+    const clock = new FakeClock();
+    let calls = 0;
+    const fetch: ConfluenceFetch = async () => {
+      calls += 1;
+      return jsonResponse({}, { status: 429, headers: { "Retry-After": "120" } });
+    };
+    const c = new ConfluenceClient({ baseUrl: BASE_URL, bearerToken: TOKEN, fetch, clock, fastFail: true });
+    await expect(c.listSpaces()).rejects.toBeInstanceOf(ConfluenceRateLimitedError);
+    expect(calls).toBe(1);
+    expect(clock.recordedSleeps()).toEqual([]);
+  });
+
+  it("caps a THROWN transport error to ONE attempt and never sleeps", async () => {
+    const clock = new FakeClock();
+    let calls = 0;
+    const fetch: ConfluenceFetch = async () => {
+      calls += 1;
+      throw new TypeError("network down");
+    };
+    const c = new ConfluenceClient({ baseUrl: BASE_URL, bearerToken: TOKEN, fetch, clock, fastFail: true });
+    await expect(c.listSpaces()).rejects.toBeInstanceOf(ConfluenceRetryableError);
+    expect(calls).toBe(1);
+    expect(clock.recordedSleeps()).toEqual([]);
+  });
+
+  it("a single 200 still succeeds in fast-fail mode (the happy path is unaffected)", async () => {
+    const { fetch } = scriptedFetch([jsonResponse(cassette("list_spaces_happy"))]);
+    const c = new ConfluenceClient({ baseUrl: BASE_URL, bearerToken: TOKEN, fetch, clock: new FakeClock(), fastFail: true });
+    const spaces = await c.listSpaces();
+    expect(spaces).toHaveLength(2);
+  });
+
+  it("default (no fastFail) preserves the full 3-attempt 5xx budget", async () => {
+    // Regression guard: the default budget MUST be unchanged by the new option.
+    const clock = new FakeClock();
+    let calls = 0;
+    const fetch: ConfluenceFetch = async () => {
+      calls += 1;
+      return jsonResponse({}, { status: 500 });
+    };
+    const c = new ConfluenceClient({ baseUrl: BASE_URL, bearerToken: TOKEN, fetch, clock });
+    await expect(c.listSpaces()).rejects.toBeInstanceOf(ConfluenceRetryableError);
+    expect(calls).toBe(3);
+    expect(clock.recordedSleeps()).toEqual([1, 2]);
+  });
+});
+
+describe("ConfluenceClient — AbortSignal cancellation (real transport abort)", () => {
+  it("threads the request signal into the fetch init", async () => {
+    let seenSignal: AbortSignal | undefined;
+    const fetch: ConfluenceFetch = async (_url, init) => {
+      seenSignal = init?.signal;
+      return jsonResponse(cassette("list_spaces_happy"));
+    };
+    const controller = new AbortController();
+    const c = new ConfluenceClient({ baseUrl: BASE_URL, bearerToken: TOKEN, fetch, clock: new FakeClock() });
+    await c.listSpaces({ signal: controller.signal });
+    expect(seenSignal).toBe(controller.signal);
+  });
+
+  it("an aborted signal surfaces promptly as the transport's AbortError (no retry, no sleep)", async () => {
+    // The real undici fetch rejects with an AbortError DOMException when the passed signal aborts. A
+    // thrown abort must NOT be retried as a transient transport error (that would orphan the budget and
+    // defeat the deadline) — it surfaces at once. We model undici: a fetch that rejects with an
+    // AbortError when the signal is already aborted.
+    const clock = new FakeClock();
+    let calls = 0;
+    const fetch: ConfluenceFetch = async (_url, init) => {
+      calls += 1;
+      if (init?.signal?.aborted === true) {
+        const e = new DOMException("The operation was aborted.", "AbortError");
+        return Promise.reject(e);
+      }
+      return jsonResponse(cassette("list_spaces_happy"));
+    };
+    const controller = new AbortController();
+    controller.abort();
+    const c = new ConfluenceClient({ baseUrl: BASE_URL, bearerToken: TOKEN, fetch, clock });
+    await expect(c.listSpaces({ signal: controller.signal })).rejects.toMatchObject({ name: "AbortError" });
+    // ONE transport call, no retry budget consumed, no sleep — the abort is terminal.
+    expect(calls).toBe(1);
+    expect(clock.recordedSleeps()).toEqual([]);
+  });
+});
