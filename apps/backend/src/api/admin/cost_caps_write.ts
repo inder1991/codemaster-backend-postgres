@@ -72,6 +72,14 @@ export class CostCapInvalidRequestError extends Error {
     this.name = "CostCapInvalidRequestError";
   }
 }
+/** Raised when initializeCostCapSettings is called but both scope rows already exist (→ 409). The first-time
+ *  bootstrap is a direct write; once configured, modifications must go through the two-person change flow. */
+export class CostCapAlreadyConfiguredError extends Error {
+  public constructor() {
+    super("cost caps are already configured; use the change-request flow to modify them");
+    this.name = "CostCapAlreadyConfiguredError";
+  }
+}
 // (CostCapSettingsMissingError is imported from cost_caps_read + re-exported above — one shared class.)
 
 // ─── Lowering-grace (pure) ──────────────────────────────────────────────────────────────────────────
@@ -265,12 +273,72 @@ async function rejectChange(
   return row;
 }
 
-// ─── Orchestration (request / approve / reject) ──────────────────────────────────────────────────────
+// ─── Orchestration (initialize / request / approve / reject) ─────────────────────────────────────────
 
 const AUDIT_REQUEST = "cost_cap.change.requested";
 const AUDIT_APPLY = "cost_cap.change.applied";
 const AUDIT_REJECT = "cost_cap.change.rejected";
 const AUDIT_TARGET_KIND = "cost_cap_pending_change";
+const AUDIT_INIT = "cost_cap.settings.initialized";
+const AUDIT_SETTINGS_TARGET_KIND = "cost_cap_settings";
+// Fixed key for pg_advisory_xact_lock — serialises first-time cost-cap initialization cluster-wide. FOR
+// UPDATE can't lock rows that don't exist yet, so on an EMPTY table two concurrent bootstraps would both
+// pass the existence check and the loser's INSERT would silently no-op (ON CONFLICT DO NOTHING) while still
+// returning 200 with the winner's values. The advisory lock makes init mutually exclusive: the loser blocks
+// until the winner commits, then sees both rows and gets a clean 409.
+const COST_CAP_INIT_LOCK_KEY = 4_270_010_001;
+
+/**
+ * First-time (bootstrap) configuration of the global + per_org_default caps. A DIRECT write — the two-person
+ * change flow cannot run until these rows exist (approveCostCapChange reads the current cap and throws
+ * CostCapSettingsMissingError when it is absent). EMPTY-TABLE ONLY: refused with CostCapAlreadyConfiguredError
+ * if ANY scope row already exists (so a success always inserts BOTH requested values fresh — the audit event
+ * can never claim a value that wasn't written, and an existing cap is never partial-filled/overwritten).
+ * Thereafter all modifications go through requestCostCapChange (two-person). NOT idempotent (a second call is
+ * a 409, by design). Concurrent calls are serialised by an advisory lock so exactly one bootstraps.
+ */
+export async function initializeCostCapSettings(args: {
+  db: Kysely<unknown>;
+  globalCapCents: number;
+  perOrgDefaultCapCents: number;
+  installationId: string;
+  actorUserId: string;
+  now: Date;
+  audit?: CostCapAuditEmitter | undefined;
+}): Promise<void> {
+  await args.db.transaction().execute(async (tx) => {
+    // Serialise ALL concurrent init attempts (see COST_CAP_INIT_LOCK_KEY) — released at tx commit/rollback.
+    await sql`SELECT pg_advisory_xact_lock(${COST_CAP_INIT_LOCK_KEY})`.execute(tx);
+    const existing = await sql<{ scope: string }>`
+      SELECT scope FROM core.cost_cap_settings WHERE scope IN ('global', 'per_org_default')
+    `.execute(tx);
+    // Bootstrap is empty-table only: ANY existing scope row → 409 (don't partial-fill, don't overwrite). This
+    // keeps the audit below honest — a success always wrote both requested values fresh. Partial state (one
+    // row) is unreachable in normal operation (approve only UPDATEs; nothing deletes a single row).
+    if (existing.rows.length > 0) {
+      throw new CostCapAlreadyConfiguredError();
+    }
+    await sql`
+      INSERT INTO core.cost_cap_settings (scope, cap_cents, updated_at, updated_by_user_id)
+      VALUES ('global', ${args.globalCapCents}, ${args.now}, ${args.actorUserId}),
+             ('per_org_default', ${args.perOrgDefaultCapCents}, ${args.now}, ${args.actorUserId})
+      ON CONFLICT (scope) DO NOTHING
+    `.execute(tx);
+  });
+  await args.audit?.({
+    actorUserId: args.actorUserId,
+    installationId: args.installationId,
+    action: AUDIT_INIT,
+    targetKind: AUDIT_SETTINGS_TARGET_KIND,
+    targetId: "settings",
+    before: null,
+    after: {
+      global_cap_cents: args.globalCapCents,
+      per_org_default_cap_cents: args.perOrgDefaultCapCents,
+    },
+    now: args.now,
+  });
+}
 
 export async function requestCostCapChange(args: {
   db: Kysely<unknown>;
@@ -286,6 +354,13 @@ export async function requestCostCapChange(args: {
   }
   if (b.target_kind !== "per_org_override" && b.target_id !== null) {
     throw new CostCapInvalidRequestError(`target_kind='${b.target_kind}' does not accept a target_id`);
+  }
+  // A change can only be APPROVED once the settings rows exist (approveCostCapChange reads the current cap
+  // and throws when it's absent). Refuse a request on an UNCONFIGURED platform so we never create an
+  // un-approvable orphan pending change — bootstrap via initializeCostCapSettings first.
+  const caps = await getCurrentCaps(args.db);
+  if (caps.global === null || caps.perOrgDefault === null) {
+    throw new CostCapSettingsMissingError();
   }
   const expiresAt = b.expires_at === null ? null : new Date(b.expires_at);
   if (expiresAt !== null && expiresAt.getTime() <= args.now.getTime()) {

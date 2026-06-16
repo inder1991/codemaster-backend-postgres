@@ -21,6 +21,7 @@ import {
   CostCapChangeRequestV1,
   CostCapPageV1,
   CostCapPendingChangeV1,
+  CostCapSettingsInitV1,
   DashboardSummaryV1,
   DefaultCorpusHealthV1,
   EmbedderCoverageV1,
@@ -101,10 +102,12 @@ import { CostCapSettingsMissingError, buildCostCapsPage } from "#backend/api/adm
 import {
   CostCapConcurrentPendingChangeError,
   CostCapInvalidRequestError,
+  CostCapAlreadyConfiguredError,
   CostCapPendingChangeNotFoundError,
   CostCapPendingChangeStaleError,
   CostCapSelfApprovalError,
   approveCostCapChange,
+  initializeCostCapSettings,
   rejectCostCapChange,
   requestCostCapChange,
 } from "#backend/api/admin/cost_caps_write.js";
@@ -1699,21 +1702,48 @@ export async function registerAdminRoutes(
     scope.get(
       "/api/admin/cost-caps",
       { preHandler: requireRole(["super_admin", "platform_owner"]) },
-      async (_request, reply) => {
+      async (_request, reply) =>
+        // settings is null when unconfigured (200 "needs setup") — buildCostCapsPage no longer throws
+        // CostCapSettingsMissingError on the read path; first-time config goes through PUT .../settings.
+        reply.code(200).send(CostCapPageV1.parse(await buildCostCapsPage(opts.db, opts.clock.now()))),
+    );
+
+    // ── cost-caps WRITE (two-person; super_admin / platform_owner) ──
+    const CC_MUTATION_ROLES = ["super_admin", "platform_owner"] as const;
+
+    // First-time bootstrap of the two scope caps — a DIRECT write (the two-person flow can't run until the
+    // rows exist). Refused 409 once configured; thereafter use the change-request flow.
+    scope.put(
+      "/api/admin/cost-caps/settings",
+      { preHandler: requireRole([...CC_MUTATION_ROLES]) },
+      async (request, reply) => {
+        const principal = request.authPrincipal!;
+        const parsed = CostCapSettingsInitV1.safeParse(request.body);
+        if (!parsed.success) {
+          // caps outside [0, HARD_CEILING] etc.
+          return reply.code(422).send({ detail: "request body failed schema validation" });
+        }
         try {
-          const page = await buildCostCapsPage(opts.db, opts.clock.now());
-          return reply.code(200).send(CostCapPageV1.parse(page));
+          await initializeCostCapSettings({
+            db: opts.db,
+            globalCapCents: parsed.data.global_cap_cents,
+            perOrgDefaultCapCents: parsed.data.per_org_default_cap_cents,
+            installationId: principal.installationId,
+            actorUserId: principal.userId,
+            now: opts.clock.now(),
+            audit: opts.audit,
+          });
+          return reply
+            .code(200)
+            .send(CostCapPageV1.parse(await buildCostCapsPage(opts.db, opts.clock.now())));
         } catch (e) {
-          if (e instanceof CostCapSettingsMissingError) {
-            return reply.code(500).send({ detail: e.message });
+          if (e instanceof CostCapAlreadyConfiguredError) {
+            return reply.code(409).send({ detail: e.message });
           }
           throw e;
         }
       },
     );
-
-    // ── cost-caps WRITE (two-person; super_admin / platform_owner) ──
-    const CC_MUTATION_ROLES = ["super_admin", "platform_owner"] as const;
 
     // approve + reject share this error→HTTP mapping.
     function costCapPendingErrorReply(e: unknown, reply: FastifyReply): boolean {
@@ -1759,6 +1789,10 @@ export async function registerAdminRoutes(
         } catch (e) {
           if (e instanceof CostCapInvalidRequestError) {
             return reply.code(400).send({ detail: e.message });
+          }
+          if (e instanceof CostCapSettingsMissingError) {
+            // Platform not configured yet — bootstrap via PUT /api/admin/cost-caps/settings first.
+            return reply.code(409).send({ detail: e.message });
           }
           if (e instanceof CostCapConcurrentPendingChangeError) {
             return reply.code(409).send({ detail: { existing_pending_change_id: e.existingPendingChangeId } });

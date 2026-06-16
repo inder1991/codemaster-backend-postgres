@@ -84,10 +84,12 @@ async function makeApp() {
 describeDb("admin cost-caps (disposable :5434)", () => {
   it("buildCostCapsPage: settings (more-recent updated_at), overrides, pending, spend + projection", async () => {
     const page = await buildCostCapsPage(db, NOW);
-    expect(page.settings.global_cap_cents).toBe(1000000);
-    expect(page.settings.per_org_default_cap_cents).toBe(500000);
-    expect(page.settings.hard_ceiling_cents).toBe(5000000);
-    expect(page.settings.updated_at).toBe("2026-06-02T00:00:00.000Z"); // per_org row is newer
+    const settings = page.settings;
+    expect(settings).not.toBeNull(); // configured in beforeAll
+    expect(settings!.global_cap_cents).toBe(1000000);
+    expect(settings!.per_org_default_cap_cents).toBe(500000);
+    expect(settings!.hard_ceiling_cents).toBe(5000000);
+    expect(settings!.updated_at).toBe("2026-06-02T00:00:00.000Z"); // per_org row is newer
     expect(page.overrides.find((o) => o.installation_id === OV_INST)?.cap_cents).toBe(300000);
     expect(page.overrides.find((o) => o.installation_id === OV_INST)?.installation_name).toContain("installation:");
     expect(page.pending_changes.some((c) => c.new_cap_cents === 1200000)).toBe(true);
