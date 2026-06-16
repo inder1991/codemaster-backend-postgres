@@ -229,10 +229,10 @@ export function makePlatformCredentialProbe(
   const embedderModelName = opts.embedderModelName ?? DEFAULT_EMBEDDER_MODEL_NAME;
 
   return {
-    async testConfluence({ baseUrl, token }): Promise<PlatformTestResult> {
+    async testConfluence({ baseUrl, token, authEmail }): Promise<PlatformTestResult> {
       const startedAt = clock.monotonic();
-      // No email in the /test body → Bearer (see the divergence note above).
-      const client = makeConfluenceClient({ baseUrl, token, authEmail: null });
+      // authEmail present (Atlassian Cloud) → Basic email:token; absent (Server/DC PAT) → Bearer.
+      const client = makeConfluenceClient({ baseUrl, token, authEmail: authEmail ?? null });
       try {
         await client.listSpaces();
         return {

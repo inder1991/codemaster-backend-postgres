@@ -21,7 +21,7 @@ export type PlatformTestResult = {
 /** Pre-write credential validator. confluence → Bearer-token space smoke test; qwen → embed-ping (the
  *  caller passes the qwen token as `apiKey`). */
 export type PlatformCredentialProbePort = {
-  testConfluence(args: { baseUrl: string; token: string }): Promise<PlatformTestResult>;
+  testConfluence(args: { baseUrl: string; token: string; authEmail?: string | null }): Promise<PlatformTestResult>;
   testQwen(args: { baseUrl: string; apiKey: string }): Promise<PlatformTestResult>;
 };
 
