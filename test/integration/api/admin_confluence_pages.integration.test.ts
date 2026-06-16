@@ -37,6 +37,7 @@ import {
   createPageApproval,
   revokePageApproval,
 } from "#backend/api/admin/confluence_pages_write.js";
+import { type ConfluencePageListerPort } from "#backend/integrations/confluence/confluence_page_lister.js";
 import { PLATFORM_SCOPE_AUDIT_INSTALLATION_ID } from "#backend/infra/sentinels.js";
 import { WORKFLOW_TYPE_TO_JOB_TYPE } from "#backend/runner/workflow_job_map.js";
 
@@ -357,12 +358,13 @@ describeDb("confluence pages admin endpoints (disposable PG)", () => {
     }
   });
 
-  it("DELETE /approval — enqueues the trigger_page_resync outbox row via the concrete dispatcher (W4c.2 #5)", async () => {
-    // The PRODUCER WIRING test: with the concrete OutboxPageResyncDispatcher threaded (the same
-    // wiring server.ts now performs), revoking an approval appends a `temporal_workflow_start`
-    // outbox row carrying workflow_type='triggerPageResyncWorkflow' + the TriggerPageResyncInputV1
-    // args[0] — so revocation → outbox → (cutover) → background job → the trigger_page_resync
-    // handler. Pre-fix server.ts passed NO dispatcher and revocation skipped the enqueue entirely.
+  it("approve + revoke both enqueue the trigger_page_resync outbox row via the concrete dispatcher (W4c.2 #5 + Option C Phase 5)", async () => {
+    // The PRODUCER WIRING test: with the concrete OutboxPageResyncDispatcher threaded (the same wiring
+    // server.ts performs), BOTH approval (Option C Phase 5 — approve-then-ingest) AND revocation append a
+    // `temporal_workflow_start` outbox row carrying workflow_type='triggerPageResyncWorkflow' + the
+    // TriggerPageResyncInputV1 args[0] — so each → outbox → (cutover) → background job → the
+    // trigger_page_resync handler. (Pre-Phase-5 only revocation enqueued; the approval now does too.) Both
+    // use the SAME deterministic workflow_id, so the rows coalesce on the Temporal/job side (USE_EXISTING).
     const app = buildApp({});
     await registerAdminRoutes(app, {
       db,
@@ -380,11 +382,11 @@ describeDb("confluence pages admin endpoints (disposable PG)", () => {
       });
       expect(post.statusCode).toBe(201);
 
-      // No outbox row yet — approval creation does not resync.
+      // Option C Phase 5: the APPROVAL itself enqueues a resync (approve-then-ingest) — one row now.
       // tenant:exempt reason=test-assertion-scoped-by-workflow-id follow_up=PERMANENT-EXEMPTION-confluence-corpus
-      const before = await sql<{ n: string }>`SELECT count(*) AS n FROM core.outbox
+      const afterApprove = await sql<{ n: string }>`SELECT count(*) AS n FROM core.outbox
         WHERE payload->>'workflow_id' = ${`trigger-page-resync/${SPACE_KEY}/${PAGE_A}`}`.execute(db);
-      expect(Number(before.rows[0]!.n)).toBe(0);
+      expect(Number(afterApprove.rows[0]!.n)).toBe(1);
 
       const del = await app.inject({
         method: "DELETE",
@@ -393,8 +395,7 @@ describeDb("confluence pages admin endpoints (disposable PG)", () => {
       });
       expect(del.statusCode).toBe(204);
 
-      // THE row exists: sink + state + the platform-sentinel installation (Confluence is
-      // platform-scoped; ck_outbox_installation_id_required forbids NULL on this sink).
+      // The revoke appends a SECOND row (same deterministic workflow_id → coalesced downstream).
       // tenant:exempt reason=test-assertion-scoped-by-workflow-id follow_up=PERMANENT-EXEMPTION-confluence-corpus
       const rows = await sql<{
         sink: string;
@@ -404,28 +405,31 @@ describeDb("confluence pages admin endpoints (disposable PG)", () => {
         payload: Record<string, unknown>;
       }>`SELECT sink, state, installation_id, run_id, payload FROM core.outbox
           WHERE payload->>'workflow_id' = ${`trigger-page-resync/${SPACE_KEY}/${PAGE_A}`}`.execute(db);
-      expect(rows.rows).toHaveLength(1);
-      const row = rows.rows[0]!;
-      expect(row.sink).toBe("temporal_workflow_start");
-      expect(row.state).toBe("pending");
-      expect(row.installation_id).toBe(PLATFORM_SCOPE_AUDIT_INSTALLATION_ID);
-      expect(row.run_id).toBeNull(); // bootstrap-sink dispatch — no review-run causality
+      expect(rows.rows).toHaveLength(2);
+      // Every row carries the same sink + platform-sentinel installation (Confluence is platform-scoped;
+      // ck_outbox_installation_id_required forbids NULL on this sink) + the correct envelope.
+      for (const row of rows.rows) {
+        expect(row.sink).toBe("temporal_workflow_start");
+        expect(row.state).toBe("pending");
+        expect(row.installation_id).toBe(PLATFORM_SCOPE_AUDIT_INSTALLATION_ID);
+        expect(row.run_id).toBeNull(); // bootstrap-sink dispatch — no review-run causality
 
-      // The envelope parses with the SINK's contract (dispatchable by both the Temporal sink and
-      // the cutover BackgroundJobsTemporalPort) and routes through WORKFLOW_TYPE_TO_JOB_TYPE onto
-      // the registered trigger_page_resync handler.
-      const envelope = TemporalWorkflowStartPayloadV1.parse(row.payload);
-      expect(envelope.workflow_type).toBe("triggerPageResyncWorkflow");
-      expect(WORKFLOW_TYPE_TO_JOB_TYPE[envelope.workflow_type]).toBe("trigger_page_resync");
-      expect(envelope.args).toHaveLength(1);
-      // args[0] IS the TriggerPageResyncInputV1 the handler parses; triggered_by_user_id is the
-      // session-derived revoking admin (audit P0-1 — never body-supplied).
-      expect(envelope.args[0]).toMatchObject({
-        schema_version: 1,
-        space_key: SPACE_KEY,
-        page_id: PAGE_A,
-        triggered_by_user_id: USER,
-      });
+        // The envelope parses with the SINK's contract (dispatchable by both the Temporal sink and the
+        // cutover BackgroundJobsTemporalPort) and routes through WORKFLOW_TYPE_TO_JOB_TYPE onto the
+        // registered trigger_page_resync handler.
+        const envelope = TemporalWorkflowStartPayloadV1.parse(row.payload);
+        expect(envelope.workflow_type).toBe("triggerPageResyncWorkflow");
+        expect(WORKFLOW_TYPE_TO_JOB_TYPE[envelope.workflow_type]).toBe("trigger_page_resync");
+        expect(envelope.args).toHaveLength(1);
+        // args[0] IS the TriggerPageResyncInputV1 the handler parses; triggered_by_user_id is the
+        // session-derived admin (audit P0-1 — never body-supplied).
+        expect(envelope.args[0]).toMatchObject({
+          schema_version: 1,
+          space_key: SPACE_KEY,
+          page_id: PAGE_A,
+          triggered_by_user_id: USER,
+        });
+      }
     } finally {
       await app.close();
     }
@@ -452,6 +456,272 @@ describeDb("confluence pages admin endpoints (disposable PG)", () => {
         cookies: { [SESSION_COOKIE_NAME]: mintCookie("reader") },
       });
       expect(forbidden.statusCode).toBe(403);
+    } finally {
+      await app.close();
+    }
+  });
+
+  // ── Option C Phase 4 — the live-page lister route seam ──
+  // The GET /pages route forwards a wired lister into listPagesForIntegration. A wired lister surfaces
+  // LIVE pages (a page with NO stored chunk becomes visible + approvable); an unwired/failing lister
+  // degrades to the stored query with live_list_available:false. The lister is a stub here (no network).
+
+  function liveListerOk(): ConfluencePageListerPort {
+    return {
+      async listSpacePages({ spaceKey }) {
+        return {
+          items: [
+            // A LIVE-only page with NO stored chunk — invisible to the stored query, visible here.
+            { page_id: "live-only-9001", space_key: spaceKey, title: "Live Only", version: 1, last_modified_at: "2026-06-10T00:00:00Z" },
+            // The stored PAGE_A also appears live.
+            { page_id: PAGE_A, space_key: spaceKey, title: "Page A (live title)", version: 1, last_modified_at: "2026-06-05T00:00:00Z" },
+          ],
+          next_cursor: "opaque-next",
+        };
+      },
+      // The GET /pages tests don't exercise the approval existence check; indeterminate is benign.
+      async getPageForApproval() {
+        return null;
+      },
+    };
+  }
+
+  function liveListerFails(): ConfluencePageListerPort {
+    return {
+      async listSpacePages() {
+        throw new Error("ConfluenceRetryableError: unreachable");
+      },
+      async getPageForApproval() {
+        return null;
+      },
+    };
+  }
+
+  async function makeAppWithLister(getLister?: () => ConfluencePageListerPort) {
+    const app = buildApp({});
+    await registerAdminRoutes(app, {
+      db,
+      signingKey: SIGNING_KEY,
+      clock: new FakeClock({ now: NOW }),
+      ...(getLister ? { getConfluencePageLister: getLister } : {}),
+    });
+    await app.ready();
+    return app;
+  }
+
+  it("GET /pages — 200 merges LIVE pages when a lister is wired (live_list_available:true, live: cursor)", async () => {
+    const app = await makeAppWithLister(liveListerOk);
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: PAGES_BASE,
+        cookies: { [SESSION_COOKIE_NAME]: mintCookie("platform_owner") },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = PagesListPageV1.parse(res.json());
+      expect(body.live_list_available).toBe(true);
+      expect(body.next_cursor).toBe("live:opaque-next");
+      const by = new Map(body.rows.map((r) => [r.page_id, r]));
+      // The LIVE-only page (no stored chunk) is surfaced as not_ingested + none — the Option C fix.
+      expect(by.get("live-only-9001")).toMatchObject({ ingest_status: "not_ingested", approval_status: "none" });
+      // The stored page A is ingested.
+      expect(by.get(PAGE_A)).toMatchObject({ ingest_status: "ingested", approval_status: "none" });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("GET /pages — 200 with live_list_available:false when the lister is UNWIRED (stored fallback)", async () => {
+    const app = await makeAppWithLister(undefined);
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: PAGES_BASE,
+        cookies: { [SESSION_COOKIE_NAME]: mintCookie("platform_owner") },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = PagesListPageV1.parse(res.json());
+      expect(body.live_list_available).toBe(false);
+      // The stored query never surfaces the live-only page.
+      expect(body.rows.find((r) => r.page_id === "live-only-9001")).toBeUndefined();
+      expect(body.rows.every((r) => r.ingest_status === "ingested")).toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("GET /pages — 200 with live_list_available:false when the lister FAILS (fast fallback, no hang)", async () => {
+    const app = await makeAppWithLister(liveListerFails);
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: PAGES_BASE,
+        cookies: { [SESSION_COOKIE_NAME]: mintCookie("platform_owner") },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = PagesListPageV1.parse(res.json());
+      expect(body.live_list_available).toBe(false);
+      expect(body.rows.find((r) => r.page_id === PAGE_A)).toBeDefined();
+    } finally {
+      await app.close();
+    }
+  });
+
+  // ── Option C Phase 5 — approve: live existence check + audit(labels) + best-effort resync (D9) ──
+
+  type ListerBehavior =
+    | { exists: false }
+    | { exists: true; labels: string[] }
+    | { indeterminate: true };
+
+  function approvalLister(b: ListerBehavior): ConfluencePageListerPort {
+    return {
+      // These approval-POST tests never hit the list path; an empty list keeps the stub complete.
+      async listSpacePages() {
+        return { items: [], next_cursor: null };
+      },
+      async getPageForApproval() {
+        if ("indeterminate" in b) return null;
+        if (b.exists === false) return { exists: false };
+        return { exists: true, labels: b.labels };
+      },
+    };
+  }
+
+  type CapturedAudit = {
+    action: string;
+    targetKind: string;
+    targetId: string;
+    after: Record<string, unknown> | null;
+  };
+
+  async function makeApprovalApp(args: {
+    getLister?: () => ConfluencePageListerPort;
+    dispatcher?: { enqueueResync: (a: { spaceKey: string; pageId: string; triggeredByUserId: string }) => Promise<void> };
+    audits?: CapturedAudit[];
+  }) {
+    const app = buildApp({});
+    await registerAdminRoutes(app, {
+      db,
+      signingKey: SIGNING_KEY,
+      clock: new FakeClock({ now: NOW }),
+      ...(args.getLister ? { getConfluencePageLister: args.getLister } : {}),
+      ...(args.dispatcher ? { pageResyncDispatcher: args.dispatcher } : {}),
+      ...(args.audits
+        ? {
+            audit: async (e) => {
+              args.audits!.push({ action: e.action, targetKind: e.targetKind, targetId: e.targetId, after: e.after });
+            },
+          }
+        : {}),
+    });
+    await app.ready();
+    return app;
+  }
+
+  it("POST /approval — 422 page_not_found when the live existence check returns a definitive 404", async () => {
+    const app = await makeApprovalApp({ getLister: () => approvalLister({ exists: false }) });
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: `${PAGES_BASE}/${PAGE_A}/approval`,
+        cookies: { [SESSION_COOKIE_NAME]: mintCookie("platform_owner") },
+        payload: approvalBody(),
+      });
+      expect(res.statusCode).toBe(422);
+      expect(res.json<{ detail: { code: string } }>().detail.code).toBe("page_not_found");
+      // No approval row was written.
+      // tenant:exempt reason=test-assertion follow_up=PERMANENT-EXEMPTION-confluence-corpus
+      const n = await sql<{ n: string }>`SELECT count(*) AS n FROM core.confluence_page_approvals
+        WHERE space_key = ${SPACE_KEY} AND page_id = ${PAGE_A}`.execute(db);
+      expect(Number(n.rows[0]!.n)).toBe(0);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("POST /approval — 201 + audit carries observed_labels + resync dispatched (live page exists)", async () => {
+    const audits: CapturedAudit[] = [];
+    const dispatched: Array<{ spaceKey: string; pageId: string; triggeredByUserId: string }> = [];
+    const app = await makeApprovalApp({
+      getLister: () => approvalLister({ exists: true, labels: ["default", "topic:runbook"] }),
+      dispatcher: { enqueueResync: async (a) => { dispatched.push(a); } },
+      audits,
+    });
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: `${PAGES_BASE}/${PAGE_A}/approval`,
+        cookies: { [SESSION_COOKIE_NAME]: mintCookie("platform_owner") },
+        payload: approvalBody(),
+      });
+      expect(res.statusCode).toBe(201);
+
+      const audit = audits.find((a) => a.action === "confluence_page.approval.created");
+      expect(audit).toBeDefined();
+      expect(audit!.targetKind).toBe("confluence_page_approval");
+      expect(audit!.after?.observed_labels).toEqual(["default", "topic:runbook"]);
+      expect(audit!.after?.page_id).toBe(PAGE_A);
+
+      // The approval dispatched a page-resync (the approve-then-ingest flow).
+      expect(dispatched).toEqual([{ spaceKey: SPACE_KEY, pageId: PAGE_A, triggeredByUserId: USER }]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("POST /approval — indeterminate existence (transport down) → 201 + observed_labels:null (pre-authorization)", async () => {
+    const audits: CapturedAudit[] = [];
+    const app = await makeApprovalApp({ getLister: () => approvalLister({ indeterminate: true }), audits });
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: `${PAGES_BASE}/${PAGE_A}/approval`,
+        cookies: { [SESSION_COOKIE_NAME]: mintCookie("platform_owner") },
+        payload: approvalBody(),
+      });
+      expect(res.statusCode).toBe(201); // fail-open: pre-authorization allowed
+      const audit = audits.find((a) => a.action === "confluence_page.approval.created");
+      expect(audit!.after?.observed_labels).toBeNull();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("POST /approval — enqueue FAILURE → approval still 201 (no rollback); the row persists", async () => {
+    const app = await makeApprovalApp({
+      getLister: () => approvalLister({ exists: true, labels: [] }),
+      dispatcher: { enqueueResync: async () => { throw new Error("outbox down"); } },
+    });
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: `${PAGES_BASE}/${PAGE_A}/approval`,
+        cookies: { [SESSION_COOKIE_NAME]: mintCookie("platform_owner") },
+        payload: approvalBody(),
+      });
+      // The enqueue threw, but the approval committed — best-effort dispatch never rolls back.
+      expect(res.statusCode).toBe(201);
+      // The approval row persists despite the resync failure.
+      // tenant:exempt reason=test-assertion follow_up=PERMANENT-EXEMPTION-confluence-corpus
+      const n = await sql<{ n: string }>`SELECT count(*) AS n FROM core.confluence_page_approvals
+        WHERE space_key = ${SPACE_KEY} AND page_id = ${PAGE_A} AND revoked_at IS NULL`.execute(db);
+      expect(Number(n.rows[0]!.n)).toBe(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("POST /approval — no lister wired → 201 with NO existence check (legacy path unchanged)", async () => {
+    const app = await makeApprovalApp({});
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: `${PAGES_BASE}/${PAGE_A}/approval`,
+        cookies: { [SESSION_COOKIE_NAME]: mintCookie("platform_owner") },
+        payload: approvalBody(),
+      });
+      expect(res.statusCode).toBe(201);
     } finally {
       await app.close();
     }
