@@ -701,7 +701,7 @@ export async function registerAdminRoutes(
       "/api/admin/confluence-config/test",
       { preHandler: requireRole(["super_admin"]) },
       async (request, reply) => {
-        const body = request.body as { base_url?: unknown; token?: unknown };
+        const body = request.body as { base_url?: unknown; token?: unknown; auth_email?: unknown };
         if (typeof body.base_url !== "string" || typeof body.token !== "string" || body.token === "") {
           return reply.code(422).send({ detail: "base_url + token are required to test connectivity" });
         }
@@ -713,6 +713,9 @@ export async function registerAdminRoutes(
         const result = await opts.getPlatformCredentialProbe().testConfluence({
           baseUrl: body.base_url,
           token: body.token,
+          // Atlassian Cloud needs Basic email:token; forward the form's email when present so the test
+          // uses the same scheme as the saved-config validator (Server/DC omits it → Bearer PAT).
+          authEmail: typeof body.auth_email === "string" && body.auth_email !== "" ? body.auth_email : null,
         });
         return reply.code(200).send({
           ok: result.ok,

@@ -793,6 +793,91 @@ export const ReviewFindingItemV1 = z
   .strict();
 export type ReviewFindingItemV1 = z.infer<typeof ReviewFindingItemV1>;
 
+// ─── Review-detail panels (P2 governance, P3 walkthrough, fix-prompt) ──────────────────────────────
+// Additive sub-schemas the frontend review page renders. Field names/types mirror
+// /tmp/fe-main/src/lib/api/admin.ts (GovernanceRuleV1, GovernancePanelV1, WalkthroughFileRowV1,
+// WalkthroughLinkedIssueV1, WalkthroughSummaryV1, FixPromptSummaryV1) EXACTLY so the SPA parses the
+// response. Sourced 1:1 from postgres_review_detail_repo.py's _build_* helpers.
+
+/** One policy rule in the governance scorecard. Mirrors GovernanceRuleV1 (admin.ts); built from the
+ *  applied policy bundle's rules cross-referenced against findings' policy_rule citations. category +
+ *  intent reuse the extracted-rules vocabulary; status is derived (cited-by-a-finding ⇒ violated). */
+export const GovernanceRuleV1 = z
+  .object({
+    rule_id: z.string(),
+    title: z.string(),
+    source_file: z.string(),
+    category: z.enum(["security", "architecture", "testing", "performance", "style"]),
+    intent: z.enum(["require", "recommend", "forbid"]),
+    status: z.enum(["violated", "satisfied"]),
+  })
+  .strict();
+export type GovernanceRuleV1 = z.infer<typeof GovernanceRuleV1>;
+
+/** P2 governance compliance scorecard. Mirrors GovernancePanelV1 (admin.ts). null at the ReviewDetail
+ *  level when no policy bundle was persisted for the review. */
+export const GovernancePanelV1 = z
+  .object({
+    policy_rules: z.array(GovernanceRuleV1),
+    applied_count: z.number().int().min(0),
+    violated_count: z.number().int().min(0),
+    satisfied_count: z.number().int().min(0),
+  })
+  .strict();
+export type GovernancePanelV1 = z.infer<typeof GovernancePanelV1>;
+
+/** One per-file row in the walkthrough summary. Mirrors WalkthroughFileRowV1 (admin.ts) + the
+ *  persisted WalkthroughV1.file_rows shape (walkthrough.v1.ts FileRowV1). */
+export const WalkthroughFileRowV1 = z
+  .object({
+    path: z.string(),
+    change_summary: z.string(),
+    severity_max: z.enum(["nit", "suggestion", "issue", "blocker"]),
+    finding_count: z.number().int().min(0),
+  })
+  .strict();
+export type WalkthroughFileRowV1 = z.infer<typeof WalkthroughFileRowV1>;
+
+/** One linked issue in the walkthrough summary. Mirrors WalkthroughLinkedIssueV1 (admin.ts) + the
+ *  persisted WalkthroughV1.linked_issues shape (walkthrough.v1.ts LinkedIssueV1). */
+export const WalkthroughLinkedIssueV1 = z
+  .object({
+    issue_number: z.number().int(),
+    linkage_kind: z.enum(["closes", "fixes", "resolves", "mentioned"]),
+    title: z.string().nullable().default(null),
+    state: z.enum(["open", "closed"]).nullable().default(null),
+  })
+  .strict();
+export type WalkthroughLinkedIssueV1 = z.infer<typeof WalkthroughLinkedIssueV1>;
+
+/** P3 slim walkthrough projection rendered on the review page. Mirrors WalkthroughSummaryV1 (admin.ts).
+ *  Projection of the persisted WalkthroughV1 (configuration_section_md + sanitization_event dropped —
+ *  operator detail). null at the ReviewDetail level when no walkthrough was persisted. */
+export const WalkthroughSummaryV1 = z
+  .object({
+    tldr: z.string(),
+    file_rows: z.array(WalkthroughFileRowV1),
+    degradation_note: z.string().nullable().default(null),
+    suggested_reviewers: z.array(z.string()),
+    linked_issues: z.array(WalkthroughLinkedIssueV1),
+  })
+  .strict();
+export type WalkthroughSummaryV1 = z.infer<typeof WalkthroughSummaryV1>;
+
+/** fix-prompt slim projection rendered on the review page. Mirrors FixPromptSummaryV1 (admin.ts).
+ *  Projection of the persisted core.fix_prompts row. null at the ReviewDetail level when no fix prompt
+ *  was generated (reviews before the feature, or zero-finding reviews). */
+export const FixPromptSummaryV1 = z
+  .object({
+    prompt: z.string(),
+    generation_mode: z.enum(["llm", "deterministic_fallback"]),
+    finding_count: z.number().int().min(0),
+    truncated: z.boolean(),
+    generated_at: z.string().datetime({ offset: true }),
+  })
+  .strict();
+export type FixPromptSummaryV1 = z.infer<typeof FixPromptSummaryV1>;
+
 /** GET /api/admin/reviews/{review_id} — full review detail with findings and activities. */
 export const ReviewDetailV1 = z
   .object({
@@ -807,6 +892,25 @@ export const ReviewDetailV1 = z
     langfuse_url: z.string().nullable().default(null),
     temporal_url: z.string().nullable().default(null),
     posted_at: z.string().datetime({ offset: true }).nullable().default(null),
+    // P1-A PR meta-row + publication verdict (additive). Sourced from core.pull_requests (joined via
+    // repository_id+pr_number) + core.gh_users (author login) + core.posted_reviews.publication_outcome.
+    pr_author: z.string().nullable().default(null),
+    base_ref: z.string().nullable().default(null),
+    head_ref: z.string().nullable().default(null),
+    draft: z.boolean().default(false),
+    pr_description: z.string().nullable().default(null),
+    publication_outcome: z
+      .enum(["inline_posted", "body_only_posted", "degraded_unposted"])
+      .nullable()
+      .default(null),
+    // P2 governance compliance scorecard (null when no policy bundle persisted for the review).
+    governance: GovernancePanelV1.nullable().default(null),
+    // P3 the bot's structured walkthrough (null when not persisted).
+    walkthrough: WalkthroughSummaryV1.nullable().default(null),
+    // P4 operator deep-link to the review's retrieval trace (null when none captured).
+    retrieval_trace_id: z.string().nullable().default(null),
+    // fix-prompt the aggregated Claude Code fix prompt (null when not generated).
+    fix_prompt: FixPromptSummaryV1.nullable().default(null),
   })
   .strict();
 export type ReviewDetailV1 = z.infer<typeof ReviewDetailV1>;
